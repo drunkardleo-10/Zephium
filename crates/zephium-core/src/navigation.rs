@@ -31,6 +31,11 @@ pub fn is_allowed(url: &Url) -> bool {
     ALLOWED_SCHEMES.contains(&url.scheme())
 }
 
+/// Gate for page-initiated navigations (the engine hands us a resolved URL).
+pub fn is_allowed_str(url: &str) -> bool {
+    Url::parse(url).map(|u| is_allowed(&u)).unwrap_or(false)
+}
+
 fn looks_like_host(s: &str) -> bool {
     if s.contains(char::is_whitespace) {
         return false;
@@ -73,6 +78,9 @@ mod tests {
         assert!(!is_allowed(&Url::parse("file:///etc/passwd").unwrap()));
         assert!(is_allowed(&Url::parse("https://example.com").unwrap()));
         assert!(is_allowed(&Url::parse("about:blank").unwrap()));
+        assert!(is_allowed_str("https://x.com/"));
+        assert!(!is_allowed_str("javascript:1"));
+        assert!(!is_allowed_str("not a url"));
     }
 
     #[test]

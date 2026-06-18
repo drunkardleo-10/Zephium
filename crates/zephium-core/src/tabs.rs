@@ -87,6 +87,7 @@ impl Tabs {
         if !navigation::is_allowed(&url) {
             return Vec::new();
         }
+        let is_active = self.active == Some(id);
         let Some(tab) = self.tabs.get_mut(&id) else {
             return Vec::new();
         };
@@ -96,6 +97,8 @@ impl Tabs {
         let url = url.to_string();
         if had_view {
             vec![Effect::Navigate { id, url }]
+        } else if is_active {
+            vec![Effect::CreateView { id, url }, Effect::Show { id }]
         } else {
             vec![Effect::CreateView { id, url }]
         }
@@ -145,6 +148,12 @@ impl Tabs {
         }
     }
 
+    pub fn set_committed_url_str(&mut self, id: TabId, url: &str) {
+        if let Ok(parsed) = Url::parse(url) {
+            self.set_committed_url(id, parsed);
+        }
+    }
+
     pub fn set_nav_flags(&mut self, id: TabId, can_go_back: bool, can_go_forward: bool) {
         if let Some(tab) = self.tabs.get_mut(&id) {
             tab.can_go_back = can_go_back;
@@ -183,7 +192,13 @@ mod tests {
         assert!(!tabs.get(id).unwrap().has_view());
 
         let fx = tabs.navigate(id, "example.com");
-        assert_eq!(fx, vec![Effect::CreateView { id, url: "https://example.com/".into() }]);
+        assert_eq!(
+            fx,
+            vec![
+                Effect::CreateView { id, url: "https://example.com/".into() },
+                Effect::Show { id },
+            ]
+        );
         assert!(tabs.get(id).unwrap().has_view());
 
         let fx = tabs.navigate(id, "github.com");
