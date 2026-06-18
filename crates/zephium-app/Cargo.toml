@@ -7,5 +7,3 @@ license.workspace = true
 [dependencies]
 zephium-core.workspace = true
 zephium-ipc.workspace = true
-zephium-engine.workspace = true
-zephium-store.workspace = true
