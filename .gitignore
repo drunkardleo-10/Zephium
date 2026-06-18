@@ -1,4 +1,6 @@
 node_modules
 dist
+/target
+gen/schemas
 .DS_Store
 *.log

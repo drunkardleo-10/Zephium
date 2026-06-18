@@ -1,0 +1,18 @@
+[package]
+name = "zephium-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "zephium_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+zephium-app.workspace = true
+serde.workspace = true
+serde_json.workspace = true

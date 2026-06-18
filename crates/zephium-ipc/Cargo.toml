@@ -1,0 +1,9 @@
+[package]
+name = "zephium-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zephium-core.workspace = true
+serde.workspace = true

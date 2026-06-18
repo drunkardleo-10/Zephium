@@ -1,0 +1,11 @@
+[package]
+name = "zephium-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zephium-core.workspace = true
+zephium-ipc.workspace = true
+zephium-engine.workspace = true
+zephium-store.workspace = true

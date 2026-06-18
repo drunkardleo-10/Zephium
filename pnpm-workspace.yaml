@@ -1,2 +1,6 @@
+packages:
+  - frame
+  - desktop
+
 allowBuilds:
-  esbuild: false
+  esbuild: true
