@@ -4489,9 +4489,7 @@ name = "zephium-app"
 version = "0.1.0"
 dependencies = [
  "zephium-core",
- "zephium-engine",
  "zephium-ipc",
- "zephium-store",
 ]
 
 [[package]]
@@ -4507,17 +4505,20 @@ dependencies = [
 name = "zephium-desktop"
 version = "0.1.0"
 dependencies = [
- "serde",
- "serde_json",
+ "raw-window-handle",
  "tauri",
  "tauri-build",
  "zephium-app",
+ "zephium-core",
+ "zephium-engine",
 ]
 
 [[package]]
 name = "zephium-engine"
 version = "0.1.0"
 dependencies = [
+ "raw-window-handle",
+ "wry",
  "zephium-core",
 ]
 
@@ -4526,7 +4527,6 @@ name = "zephium-ipc"
 version = "0.1.0"
 dependencies = [
  "serde",
- "zephium-core",
 ]
 
 [[package]]
