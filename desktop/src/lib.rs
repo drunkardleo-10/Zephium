@@ -274,6 +274,20 @@ pub fn run() {
                 }
             });
 
+            let _spotlight = tauri::WebviewWindowBuilder::new(
+                app,
+                "spotlight",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("Spotlight")
+            .inner_size(720.0, 480.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .build()?;
+
             app.manage(coordinator);
             Ok(())
         })
