@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use url::Url;
 
 use crate::navigation;
+use crate::session::{PersistedTab, SessionState};
 use crate::tab::{Lifecycle, Tab, TabId};
 
-/// Side-effects the aggregate asks the shell to perform after a pure mutation.
-/// The core never touches the engine; it returns what should happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     CreateView { id: TabId, url: String },
@@ -66,7 +65,7 @@ impl Tabs {
             if prev != id {
                 if let Some(tab) = self.tabs.get_mut(&prev) {
                     tab.lifecycle = Lifecycle::Inactive;
-                    if tab.has_view() {
+                    if tab.view {
                         fx.push(Effect::Hide { id: prev });
                     }
                 }
@@ -75,7 +74,11 @@ impl Tabs {
         self.active = Some(id);
         if let Some(tab) = self.tabs.get_mut(&id) {
             tab.lifecycle = Lifecycle::Active;
-            if tab.has_view() {
+            if tab.view {
+                fx.push(Effect::Show { id });
+            } else if let Some(url) = tab.url.clone() {
+                tab.view = true;
+                fx.push(Effect::CreateView { id, url: url.to_string() });
                 fx.push(Effect::Show { id });
             }
         }
@@ -91,16 +94,18 @@ impl Tabs {
         let Some(tab) = self.tabs.get_mut(&id) else {
             return Vec::new();
         };
-        let had_view = tab.has_view();
         tab.url = Some(url.clone());
         tab.loading = true;
         let url = url.to_string();
-        if had_view {
+        if tab.view {
             vec![Effect::Navigate { id, url }]
-        } else if is_active {
-            vec![Effect::CreateView { id, url }, Effect::Show { id }]
         } else {
-            vec![Effect::CreateView { id, url }]
+            tab.view = true;
+            if is_active {
+                vec![Effect::CreateView { id, url }, Effect::Show { id }]
+            } else {
+                vec![Effect::CreateView { id, url }]
+            }
         }
     }
 
@@ -108,7 +113,7 @@ impl Tabs {
         let Some(pos) = self.order.iter().position(|x| *x == id) else {
             return Vec::new();
         };
-        let had_view = self.tabs.get(&id).is_some_and(Tab::has_view);
+        let had_view = self.tabs.get(&id).is_some_and(|t| t.view);
         self.tabs.remove(&id);
         self.order.remove(pos);
 
@@ -160,32 +165,62 @@ impl Tabs {
             tab.can_go_forward = can_go_forward;
         }
     }
+
+    pub fn session(&self) -> SessionState {
+        let mut tabs = Vec::new();
+        let mut active = 0;
+        for tab in self.iter().filter(|t| t.url.is_some()) {
+            if Some(tab.id) == self.active {
+                active = tabs.len();
+            }
+            tabs.push(PersistedTab {
+                url: tab.url.as_ref().map(ToString::to_string).unwrap_or_default(),
+                title: tab.title.clone(),
+            });
+        }
+        SessionState { tabs, active }
+    }
+
+    pub fn restore(&mut self, session: SessionState) {
+        self.order.clear();
+        self.tabs.clear();
+        self.active = None;
+        for persisted in session.tabs {
+            self.next_id += 1;
+            let id = self.next_id;
+            let mut tab = Tab::new(id);
+            tab.url = Url::parse(&persisted.url).ok();
+            tab.title = persisted.title;
+            self.tabs.insert(id, tab);
+            self.order.push(id);
+        }
+        self.active = self.order.get(session.active).copied();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tab::Lifecycle;
     use proptest::prelude::*;
 
     fn check_invariants(tabs: &Tabs) {
         let ids = tabs.ids();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "no duplicate ids in order");
+        assert_eq!(unique.len(), ids.len());
         for id in ids {
-            assert!(tabs.get(*id).is_some(), "every ordered id has a tab");
+            assert!(tabs.get(*id).is_some());
         }
         match tabs.active() {
             Some(a) => {
-                assert!(ids.contains(&a), "active is in order");
+                assert!(ids.contains(&a));
                 assert_eq!(tabs.get(a).unwrap().lifecycle, Lifecycle::Active);
             }
-            None => assert!(tabs.is_empty(), "no active only when empty"),
+            None => assert!(tabs.is_empty()),
         }
     }
 
     #[test]
-    fn open_activates_and_navigate_creates_view() {
+    fn navigate_creates_and_shows_active_tab() {
         let mut tabs = Tabs::default();
         tabs.open();
         let id = tabs.active().unwrap();
@@ -214,6 +249,33 @@ mod tests {
         tabs.close(second);
         assert!(tabs.active().is_some());
         assert_eq!(tabs.len(), 1);
+    }
+
+    #[test]
+    fn session_restores_tabs_with_lazy_views() {
+        let mut tabs = Tabs::default();
+        tabs.open();
+        let a = tabs.active().unwrap();
+        tabs.navigate(a, "example.com");
+        tabs.open();
+        let b = tabs.active().unwrap();
+        tabs.navigate(b, "github.com");
+        tabs.activate(a);
+
+        let session = tabs.session();
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.tabs[session.active].url, "https://example.com/");
+
+        let mut restored = Tabs::default();
+        restored.restore(session);
+        assert_eq!(restored.len(), 2);
+        let active = restored.active().unwrap();
+        assert!(restored.get(active).unwrap().url.is_some());
+        assert!(!restored.get(active).unwrap().has_view());
+
+        let fx = restored.activate(active);
+        assert!(fx.iter().any(|e| matches!(e, Effect::CreateView { .. })));
+        assert!(restored.get(active).unwrap().has_view());
     }
 
     #[derive(Clone, Debug)]

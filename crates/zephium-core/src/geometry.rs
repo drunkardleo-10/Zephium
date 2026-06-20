@@ -18,3 +18,16 @@ impl Rect {
         }
     }
 }
+
+/// Logical-pixel size of the window's inner area.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Size {
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Size {
+    pub fn new(width: f64, height: f64) -> Self {
+        Self { width, height }
+    }
+}
