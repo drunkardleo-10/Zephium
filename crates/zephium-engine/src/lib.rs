@@ -1,4 +1,5 @@
 mod host;
+mod native;
 
 use std::sync::Arc;
 

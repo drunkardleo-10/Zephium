@@ -15,6 +15,10 @@ thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
 }
 
+// Cosmetic user stylesheet injected into every page: a slim, neat scrollbar.
+// Non-privileged (no IPC), so it does not weaken the content/chrome wall.
+const SCROLLBAR_JS: &str = r#"(function(){var s=document.createElement('style');s.textContent='::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}';(document.head||document.documentElement).appendChild(s);})()"#;
+
 pub(crate) fn install(parent: RawWindowHandle, sink: Box<dyn Fn(EngineEvent)>) {
     HOST.with(|cell| {
         *cell.borrow_mut() = Some(EngineHost {
@@ -76,6 +80,7 @@ impl EngineHost {
             .with_url(url)
             .with_bounds(to_wry(bounds))
             .with_devtools(true)
+            .with_initialization_script(SCROLLBAR_JS)
             .with_navigation_handler(|target| navigation::is_allowed_str(&target))
             .with_document_title_changed_handler(move |title| {
                 on_title.emit(EngineEvent::TitleChanged { id, title });
@@ -93,6 +98,7 @@ impl EngineHost {
 
         match built {
             Ok(view) => {
+                crate::native::configure(&view, 12.0);
                 let _ = view.set_visible(false);
                 self.views.insert(id, view);
             }
