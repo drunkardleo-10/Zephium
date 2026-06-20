@@ -17,3 +17,8 @@ raw-window-handle.workspace = true
 zephium-core.workspace = true
 zephium-app.workspace = true
 zephium-engine.workspace = true
+zephium-store.workspace = true
+window-vibrancy = "0.7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

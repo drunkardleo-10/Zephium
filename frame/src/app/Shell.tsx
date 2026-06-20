@@ -1,11 +1,17 @@
+import { Show } from "solid-js";
+import * as tabs from "../state/tabs";
 import { Sidebar } from "../features/sidebar/Sidebar";
-import { Workspace } from "../features/workspace/Workspace";
+import { NewTab } from "../features/newtab/NewTab";
 
 export function Shell() {
   return (
-    <div class="flex h-screen w-screen overflow-hidden bg-bg text-text">
+    <div class="flex h-screen w-screen">
       <Sidebar />
-      <Workspace />
+      <Show when={!tabs.activeTab()?.url}>
+        <div class="min-w-0 flex-1">
+          <NewTab />
+        </div>
+      </Show>
     </div>
   );
 }

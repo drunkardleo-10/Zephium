@@ -10,13 +10,17 @@
     "frontendDist": "../frame/dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Zephium",
         "width": 1200,
         "height": 800,
         "minWidth": 680,
-        "minHeight": 480
+        "minHeight": 480,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "transparent": true
       }
     ],
     "security": {

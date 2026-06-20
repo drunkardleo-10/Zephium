@@ -16,7 +16,7 @@ zephium-engine = { path = "crates/zephium-engine" }
 zephium-store = { path = "crates/zephium-store" }
 zephium-app = { path = "crates/zephium-app" }
 
-tauri = "2"
+tauri = { version = "2", features = ["macos-private-api", "devtools"] }
 tauri-build = "2"
 wry = "0.55"
 raw-window-handle = "0.6"

@@ -1,6 +1,6 @@
 import { createStore, reconcile } from "solid-js/store";
 import * as ipc from "../ipc/commands";
-import type { Rect, TabView, TabsSnapshot } from "../ipc/types";
+import type { TabView, TabsSnapshot } from "../ipc/types";
 
 const [state, setState] = createStore<TabsSnapshot>({ tabs: [], active: null });
 
@@ -25,7 +25,6 @@ export const open = () => void ipc.openTab();
 export const activate = (id: number) => void ipc.activateTab(id);
 export const close = (id: number) => void ipc.closeTab(id);
 export const navigate = (id: number, input: string) => void ipc.navigate(id, input);
-export const setContentBounds = (r: Rect) => void ipc.setContentBounds(r);
 
 const onActive = (fn: (id: number) => void) => () => {
   const id = state.active;

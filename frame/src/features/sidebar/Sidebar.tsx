@@ -1,12 +1,57 @@
-import { For } from "solid-js";
+import { For, createEffect, createSignal, type JSX } from "solid-js";
 import * as tabs from "../../state/tabs";
 
+function host(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 export function Sidebar() {
+  let input!: HTMLInputElement;
+  const [value, setValue] = createSignal("");
+  const [editing, setEditing] = createSignal(false);
+
+  createEffect(() => {
+    const h = host(tabs.activeTab()?.url);
+    if (!editing()) setValue(h);
+  });
+
+  const submit = (e: SubmitEvent) => {
+    e.preventDefault();
+    const id = tabs.activeId();
+    if (id != null) tabs.navigate(id, value());
+    input.blur();
+  };
+
   return (
-    <aside class="flex w-[248px] shrink-0 select-none flex-col border-r border-border bg-sidebar">
-      <div class="flex h-11 items-center px-4 text-[13px] font-semibold tracking-tight text-muted">
-        Zephium
+    <aside class="flex w-60 shrink-0 select-none flex-col">
+      <div data-tauri-drag-region class="h-8 shrink-0" />
+
+      <div class="flex items-center gap-0.5 px-2.5">
+        <NavButton label="Back" onClick={tabs.backActive}>‹</NavButton>
+        <NavButton label="Forward" onClick={tabs.forwardActive}>›</NavButton>
+        <NavButton label="Reload" onClick={tabs.reloadActive}>⟳</NavButton>
       </div>
+
+      <form class="px-2.5 pb-2 pt-1" onSubmit={submit}>
+        <input
+          ref={input}
+          value={value()}
+          onInput={(e) => setValue(e.currentTarget.value)}
+          onFocus={(e) => {
+            setEditing(true);
+            e.currentTarget.select();
+          }}
+          onBlur={() => setEditing(false)}
+          placeholder="Search or enter site"
+          spellcheck={false}
+          class="h-8 w-full rounded-lg bg-elevated/60 px-3 text-[12.5px] text-text outline-none placeholder:text-faint focus:bg-elevated"
+        />
+      </form>
 
       <nav class="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2.5 py-1">
         <For each={tabs.tabs()}>
@@ -47,5 +92,17 @@ export function Sidebar() {
         </button>
       </div>
     </aside>
+  );
+}
+
+function NavButton(props: { label: string; onClick: () => void; children: JSX.Element }) {
+  return (
+    <button
+      aria-label={props.label}
+      onClick={props.onClick}
+      class="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-text"
+    >
+      {props.children}
+    </button>
   );
 }

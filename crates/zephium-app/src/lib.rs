@@ -1,70 +1,94 @@
-//! Coordinator: the imperative shell around the pure core. Applies the
-//! aggregate's effects to the engine port, folds engine events back into core,
-//! and projects state to the frame. Knows no framework (no tauri, no wry).
+//! Coordinator: the imperative shell around the pure core. Applies effects to
+//! the engine, drives the window layout, folds engine events back, persists,
+//! and projects.
 
 use std::sync::{Arc, Mutex};
 
-use zephium_core::geometry::Rect;
+use zephium_core::geometry::{Rect, Size};
+use zephium_core::layout::{self, Metrics, Mode};
+use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{Engine, EngineEvent};
+use zephium_core::ports::store::Store;
 use zephium_core::tab::{Tab, TabId};
 use zephium_core::tabs::{Effect, Tabs};
 use zephium_ipc::{TabView, TabsSnapshot};
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
+pub type SharedStore = Arc<dyn Store + Send + Sync>;
+pub type SharedChrome = Arc<dyn Chrome + Send + Sync>;
 pub type EmitFn = Box<dyn Fn(TabsSnapshot) + Send + Sync>;
 
 pub struct Coordinator {
     state: Mutex<Tabs>,
-    content: Mutex<Rect>,
+    window: Mutex<Size>,
     engine: SharedEngine,
+    store: SharedStore,
+    chrome: SharedChrome,
     emit: EmitFn,
+    metrics: Metrics,
+    mode: Mode,
 }
 
 impl Coordinator {
-    pub fn new(engine: SharedEngine, emit: EmitFn) -> Self {
+    pub fn new(
+        engine: SharedEngine,
+        store: SharedStore,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
         Self {
             state: Mutex::new(Tabs::default()),
-            content: Mutex::new(Rect::default()),
+            window: Mutex::new(Size::default()),
             engine,
+            store,
+            chrome,
             emit,
+            metrics: Metrics::default(),
+            mode: Mode::Sidebar,
         }
+    }
+
+    pub fn set_window_size(&self, size: Size) {
+        *self.window.lock().unwrap() = size;
     }
 
     pub fn bootstrap(&self) {
         let effects = {
             let mut state = self.state.lock().unwrap();
-            if state.is_empty() {
-                state.open()
-            } else {
-                Vec::new()
+            match self.store.load_session() {
+                Some(session) if !session.tabs.is_empty() => {
+                    state.restore(session);
+                    match state.active() {
+                        Some(active) => state.activate(active),
+                        None => state.open(),
+                    }
+                }
+                _ => state.open(),
             }
         };
         self.apply(effects);
+        self.relayout();
         self.project();
     }
 
     pub fn open(&self) {
         let effects = self.state.lock().unwrap().open();
-        self.apply(effects);
-        self.project();
+        self.commit(effects);
     }
 
     pub fn activate(&self, id: TabId) {
         let effects = self.state.lock().unwrap().activate(id);
-        self.apply(effects);
-        self.project();
+        self.commit(effects);
     }
 
     pub fn close(&self, id: TabId) {
         let effects = self.state.lock().unwrap().close(id);
-        self.apply(effects);
-        self.project();
+        self.commit(effects);
     }
 
     pub fn navigate(&self, id: TabId, input: &str) {
         let effects = self.state.lock().unwrap().navigate(id, input);
-        self.apply(effects);
-        self.project();
+        self.commit(effects);
     }
 
     pub fn reload(&self, id: TabId) {
@@ -79,20 +103,31 @@ impl Coordinator {
         self.engine.go_forward(id);
     }
 
-    pub fn set_content_bounds(&self, bounds: Rect) {
-        *self.content.lock().unwrap() = bounds;
-        self.engine.set_content_bounds(bounds);
-    }
-
     pub fn on_engine_event(&self, event: EngineEvent) {
+        let mut visit = None;
         {
             let mut state = self.state.lock().unwrap();
             match event {
                 EngineEvent::TitleChanged { id, title } => state.set_title(id, title),
                 EngineEvent::LoadingChanged { id, loading } => state.set_loading(id, loading),
-                EngineEvent::UrlChanged { id, url } => state.set_committed_url_str(id, &url),
+                EngineEvent::UrlChanged { id, url } => {
+                    state.set_committed_url_str(id, &url);
+                    let title = state.get(id).map(|t| t.title.clone()).unwrap_or_default();
+                    visit = Some((url, title));
+                }
             }
         }
+        if let Some((url, title)) = visit {
+            self.store.record_visit(url, title);
+            self.persist();
+        }
+        self.project();
+    }
+
+    fn commit(&self, effects: Vec<Effect>) {
+        self.apply(effects);
+        self.persist();
+        self.relayout();
         self.project();
     }
 
@@ -100,7 +135,7 @@ impl Coordinator {
         if effects.is_empty() {
             return;
         }
-        let bounds = *self.content.lock().unwrap();
+        let bounds = self.content_region();
         for effect in effects {
             match effect {
                 Effect::CreateView { id, url } => self.engine.create_view(id, &url, bounds),
@@ -110,6 +145,39 @@ impl Coordinator {
                 Effect::Close { id } => self.engine.close(id),
             }
         }
+    }
+
+    fn relayout(&self) {
+        let size = *self.window.lock().unwrap();
+        let content_present = self.content_present();
+        let l = layout::compute(size, self.mode, self.metrics, content_present);
+        self.chrome.position(ChromeFrame {
+            rect: l.chrome,
+            fill_width: l.content.is_none(),
+        });
+        if let Some(content) = l.content {
+            self.engine.set_content_bounds(content);
+        }
+    }
+
+    fn content_region(&self) -> Rect {
+        let size = *self.window.lock().unwrap();
+        layout::compute(size, self.mode, self.metrics, true)
+            .content
+            .unwrap_or_default()
+    }
+
+    fn content_present(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .active()
+            .and_then(|id| state.get(id))
+            .is_some_and(Tab::has_view)
+    }
+
+    fn persist(&self) {
+        let session = self.state.lock().unwrap().session();
+        self.store.save_session(session);
     }
 
     fn project(&self) {
@@ -138,6 +206,7 @@ fn tab_view(tab: &Tab) -> TabView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zephium_core::session::{PersistedTab, SessionState};
 
     #[derive(Default)]
     struct FakeEngine {
@@ -175,18 +244,47 @@ mod tests {
         fn set_content_bounds(&self, _bounds: Rect) {}
     }
 
-    fn setup() -> (Coordinator, Arc<FakeEngine>, Arc<Mutex<Vec<TabsSnapshot>>>) {
+    #[derive(Default)]
+    struct FakeStore {
+        saved: Mutex<Option<SessionState>>,
+    }
+
+    impl Store for FakeStore {
+        fn save_session(&self, session: SessionState) {
+            *self.saved.lock().unwrap() = Some(session);
+        }
+        fn load_session(&self) -> Option<SessionState> {
+            self.saved.lock().unwrap().clone()
+        }
+        fn record_visit(&self, _url: String, _title: String) {}
+    }
+
+    struct FakeChrome;
+    impl Chrome for FakeChrome {
+        fn position(&self, _frame: ChromeFrame) {}
+    }
+
+    type Snaps = Arc<Mutex<Vec<TabsSnapshot>>>;
+
+    fn setup_with(store: Arc<FakeStore>) -> (Coordinator, Arc<FakeEngine>, Snaps) {
         let engine = Arc::new(FakeEngine::default());
-        let snaps = Arc::new(Mutex::new(Vec::new()));
+        let snaps: Snaps = Arc::new(Mutex::new(Vec::new()));
         let sink = snaps.clone();
         let coord = Coordinator::new(
             engine.clone(),
+            store,
+            Arc::new(FakeChrome),
             Box::new(move |s| sink.lock().unwrap().push(s)),
         );
+        coord.set_window_size(zephium_core::geometry::Size::new(1200.0, 800.0));
         (coord, engine, snaps)
     }
 
-    fn last(snaps: &Arc<Mutex<Vec<TabsSnapshot>>>) -> TabsSnapshot {
+    fn setup() -> (Coordinator, Arc<FakeEngine>, Snaps) {
+        setup_with(Arc::new(FakeStore::default()))
+    }
+
+    fn last(snaps: &Snaps) -> TabsSnapshot {
         snaps.lock().unwrap().last().unwrap().clone()
     }
 
@@ -236,6 +334,26 @@ mod tests {
 
         let calls = engine.calls();
         assert!(calls.contains(&format!("hide {second}")));
-        assert!(calls.iter().filter(|c| *c == &format!("show {first}")).count() >= 1);
+        assert!(calls.contains(&format!("show {first}")));
+    }
+
+    #[test]
+    fn bootstrap_restores_persisted_session() {
+        let store = Arc::new(FakeStore::default());
+        store.save_session(SessionState {
+            tabs: vec![PersistedTab {
+                url: "https://example.com/".into(),
+                title: "Example".into(),
+            }],
+            active: 0,
+        });
+        let (coord, engine, snaps) = setup_with(store);
+
+        coord.bootstrap();
+
+        let snap = last(&snaps);
+        assert_eq!(snap.tabs.len(), 1);
+        assert_eq!(snap.tabs[0].url.as_deref(), Some("https://example.com/"));
+        assert!(engine.calls().iter().any(|c| c.starts_with("create")));
     }
 }
