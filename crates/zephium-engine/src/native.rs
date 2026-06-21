@@ -1,23 +1,21 @@
 #[cfg(target_os = "macos")]
 pub(crate) fn configure(webview: &wry::WebView, radius: f64) {
-    use objc2::msg_send;
-    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
+    use objc2_web_kit::WKWebView;
     use wry::WebViewExtMacOS;
 
-    // NSViewWidthSizable | NSViewHeightSizable: the content fills its region and
-    // follows window resize in AppKit's layout pass.
-    const FLEXIBLE: usize = 2 | 16;
-
     let wk = webview.webview();
-    unsafe {
-        let _: () = msg_send![&*wk, setInspectable: true];
-        let _: () = msg_send![&*wk, setTranslatesAutoresizingMaskIntoConstraints: true];
-        let _: () = msg_send![&*wk, setAutoresizingMask: FLEXIBLE];
-        let layer: *mut AnyObject = msg_send![&*wk, layer];
-        if !layer.is_null() {
-            let _: () = msg_send![layer, setCornerRadius: radius];
-            let _: () = msg_send![layer, setMasksToBounds: true];
-        }
+    let ptr = objc2::rc::Retained::as_ptr(&wk);
+    let view: &NSView = unsafe { &*ptr.cast::<NSView>() };
+    let webkit: &WKWebView = unsafe { &*ptr.cast::<WKWebView>() };
+
+    unsafe { webkit.setInspectable(true) };
+    // Fill the assigned region and follow window resize in AppKit's layout pass.
+    view.setTranslatesAutoresizingMaskIntoConstraints(true);
+    view.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
+    if let Some(layer) = view.layer() {
+        layer.setCornerRadius(radius);
+        layer.setMasksToBounds(true);
     }
 }
 

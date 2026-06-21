@@ -84,52 +84,10 @@ impl Chrome for ChromeAdapter {
 }
 
 #[cfg(target_os = "macos")]
-mod cg {
-    use objc2::{Encode, Encoding};
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct Point {
-        pub x: f64,
-        pub y: f64,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct CgSize {
-        pub width: f64,
-        pub height: f64,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct CgRect {
-        pub origin: Point,
-        pub size: CgSize,
-    }
-    unsafe impl Encode for Point {
-        const ENCODING: Encoding =
-            Encoding::Struct("CGPoint", &[Encoding::Double, Encoding::Double]);
-    }
-    unsafe impl Encode for CgSize {
-        const ENCODING: Encoding =
-            Encoding::Struct("CGSize", &[Encoding::Double, Encoding::Double]);
-    }
-    unsafe impl Encode for CgRect {
-        const ENCODING: Encoding = Encoding::Struct("CGRect", &[Point::ENCODING, CgSize::ENCODING]);
-    }
-}
-
-// inner_size() reflects the (resized) chrome webview once we shrink it, so the
-// window's real content area is read from the webview's superview instead.
-#[cfg(target_os = "macos")]
-fn superview_bounds(wk: *mut objc2::runtime::AnyObject) -> Option<cg::CgRect> {
-    use objc2::{msg_send, runtime::AnyObject};
-    unsafe {
-        let sv: *mut AnyObject = msg_send![wk, superview];
-        if sv.is_null() {
-            return None;
-        }
-        Some(msg_send![sv, bounds])
-    }
+fn chrome_view(wk: *mut objc2::runtime::AnyObject) -> &'static objc2_app_kit::NSView {
+    // The chrome WKWebView is an NSView subclass owned by Tauri; borrow it on the
+    // main thread to position it. Caller guarantees a live pointer.
+    unsafe { &*wk.cast::<objc2_app_kit::NSView>() }
 }
 
 #[cfg(target_os = "macos")]
@@ -137,37 +95,39 @@ fn content_view_size(wk_addr: usize) -> Option<Size> {
     if wk_addr == 0 {
         return None;
     }
-    let b = superview_bounds(wk_addr as *mut objc2::runtime::AnyObject)?;
+    // inner_size() reflects the shrunk chrome webview, so the window's real content
+    // area is read from the webview's superview instead.
+    let view = chrome_view(wk_addr as *mut objc2::runtime::AnyObject);
+    let sv = unsafe { view.superview() }?;
+    let b = sv.bounds();
     Some(Size::new(b.size.width, b.size.height))
 }
 
 #[cfg(target_os = "macos")]
 fn set_chrome_frame(wk: *mut objc2::runtime::AnyObject, frame: ChromeFrame) {
-    use cg::{CgRect, CgSize, Point};
-    use objc2::msg_send;
+    use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-    let Some(bounds) = superview_bounds(wk) else {
+    let view = chrome_view(wk);
+    let Some(sv) = (unsafe { view.superview() }) else {
         return;
     };
+    let h = sv.bounds().size.height;
     let r = frame.rect;
-    // NSViewHeightSizable, plus NSViewWidthSizable (fill) or NSViewMaxXMargin
-    // (fixed width, pinned left): AppKit follows window resize in its own pass.
-    let mask: usize = if frame.fill_width { 2 | 16 } else { 4 | 16 };
-    unsafe {
-        let _: () = msg_send![wk, setTranslatesAutoresizingMaskIntoConstraints: true];
-        let _: () = msg_send![wk, setAutoresizingMask: mask];
-        let f = CgRect {
-            origin: Point {
-                x: r.x,
-                y: bounds.size.height - r.y - r.height,
-            },
-            size: CgSize {
-                width: r.width,
-                height: r.height,
-            },
-        };
-        let _: () = msg_send![wk, setFrame: f];
-    }
+    // Height follows the window; width either follows (fill) or stays fixed and
+    // pinned left. AppKit applies this in the window's own layout pass.
+    let mask = if frame.fill_width {
+        Mask::ViewWidthSizable | Mask::ViewHeightSizable
+    } else {
+        Mask::ViewMaxXMargin | Mask::ViewHeightSizable
+    };
+    let f = NSRect::new(
+        NSPoint::new(r.x, h - r.y - r.height),
+        NSSize::new(r.width, r.height),
+    );
+    view.setTranslatesAutoresizingMaskIntoConstraints(true);
+    view.setAutoresizingMask(mask);
+    view.setFrame(f);
 }
 
 fn inner_logical(window: &tauri::WebviewWindow) -> Size {
@@ -216,11 +176,9 @@ pub fn run() {
                 let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, Some(12.0));
                 let slot = chrome_wk.clone();
                 let _ = window.with_webview(move |webview| {
-                    use objc2::msg_send;
                     let wk = webview.inner() as *mut AnyObject;
-                    unsafe {
-                        let _: () = msg_send![wk, setInspectable: false];
-                    }
+                    let webkit: &objc2_web_kit::WKWebView = unsafe { &*wk.cast() };
+                    unsafe { webkit.setInspectable(false) };
                     slot.store(wk.cast(), Ordering::SeqCst);
                 });
             }
