@@ -64,6 +64,11 @@ fn tabs_unsplit(coord: State<'_, Coord>) {
     coord.unsplit();
 }
 
+#[tauri::command]
+fn sidebar_set_width(coord: State<'_, Coord>, width: f64) {
+    coord.set_sidebar_width(width);
+}
+
 #[cfg(target_os = "macos")]
 struct ChromeAdapter {
     dispatch: MainThreadDispatch,
@@ -160,6 +165,7 @@ pub fn run() {
             tabs_forward,
             tabs_split,
             tabs_unsplit,
+            sidebar_set_width,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");

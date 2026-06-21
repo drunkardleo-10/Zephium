@@ -12,6 +12,7 @@ export const back = (id: number) => invoke<void>("tabs_back", { id });
 export const forward = (id: number) => invoke<void>("tabs_forward", { id });
 export const split = (other: number) => invoke<void>("tabs_split", { other });
 export const unsplit = () => invoke<void>("tabs_unsplit");
+export const setSidebarWidth = (width: number) => invoke<void>("sidebar_set_width", { width });
 
 export const onTabsState = (cb: (s: TabsSnapshot) => void): Promise<UnlistenFn> =>
   listen<TabsSnapshot>("tabs:state", (e) => cb(e.payload));

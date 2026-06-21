@@ -27,7 +27,7 @@ pub struct Coordinator {
     store: SharedStore,
     chrome: SharedChrome,
     emit: EmitFn,
-    metrics: Metrics,
+    metrics: Mutex<Metrics>,
     mode: Mode,
 }
 
@@ -46,13 +46,18 @@ impl Coordinator {
             store,
             chrome,
             emit,
-            metrics: Metrics::default(),
+            metrics: Mutex::new(Metrics::default()),
             mode: Mode::Sidebar,
         }
     }
 
     pub fn set_window_size(&self, size: Size) {
         *self.window.lock().unwrap() = size;
+    }
+
+    pub fn set_sidebar_width(&self, width: f64) {
+        self.metrics.lock().unwrap().sidebar_width = width.clamp(180.0, 420.0);
+        self.relayout();
     }
 
     pub fn bootstrap(&self) {
@@ -205,7 +210,8 @@ impl Coordinator {
                 .any(|id| state.get(*id).is_some_and(Tab::has_view))
         };
         let size = *self.window.lock().unwrap();
-        layout::compute(size, self.mode, self.metrics, present)
+        let metrics = *self.metrics.lock().unwrap();
+        layout::compute(size, self.mode, metrics, present)
     }
 
     fn pane_tree(&self) -> Pane {
@@ -218,7 +224,8 @@ impl Coordinator {
 
     fn content_region(&self) -> Rect {
         let size = *self.window.lock().unwrap();
-        layout::compute(size, self.mode, self.metrics, true)
+        let metrics = *self.metrics.lock().unwrap();
+        layout::compute(size, self.mode, metrics, true)
             .content
             .unwrap_or_default()
     }

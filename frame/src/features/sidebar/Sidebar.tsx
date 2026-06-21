@@ -15,6 +15,7 @@ export function Sidebar() {
   const [value, setValue] = createSignal("");
   const [editing, setEditing] = createSignal(false);
   const [splitting, setSplitting] = createSignal(false);
+  const [width, setWidth] = createSignal(240);
 
   const onTab = (id: number) => {
     if (splitting()) {
@@ -23,6 +24,33 @@ export function Sidebar() {
     } else {
       tabs.activate(id);
     }
+  };
+
+  let resizing = false;
+  let frame = 0;
+  const onResizeDown = (e: PointerEvent & { currentTarget: HTMLElement }) => {
+    resizing = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onResizeMove = (e: PointerEvent) => {
+    if (!resizing) return;
+    const w = Math.max(180, Math.min(420, e.clientX));
+    setWidth(w);
+    if (!frame) {
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        tabs.setSidebarWidth(width());
+      });
+    }
+  };
+  const onResizeUp = (e: PointerEvent & { currentTarget: HTMLElement }) => {
+    resizing = false;
+    if (frame) {
+      cancelAnimationFrame(frame);
+      frame = 0;
+    }
+    tabs.setSidebarWidth(width());
+    e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
   createEffect(() => {
@@ -38,7 +66,16 @@ export function Sidebar() {
   };
 
   return (
-    <aside class="flex w-60 shrink-0 select-none flex-col">
+    <aside
+      style={{ width: `${width()}px` }}
+      class="relative flex shrink-0 select-none flex-col"
+    >
+      <div
+        onPointerDown={onResizeDown}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeUp}
+        class="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/20"
+      />
       <div data-tauri-drag-region class="h-8 shrink-0" />
 
       <div class="flex items-center gap-0.5 px-2.5">
