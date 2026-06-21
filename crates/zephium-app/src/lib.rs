@@ -9,7 +9,7 @@ use zephium_core::layout::{self, Metrics, Mode};
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{Engine, EngineEvent};
 use zephium_core::ports::store::Store;
-use zephium_core::split::{self, Axis, Pane};
+use zephium_core::split::{Axis, Pane};
 use zephium_core::tab::{Tab, TabId};
 use zephium_core::tabs::{Effect, Tabs};
 use zephium_ipc::{TabView, TabsSnapshot};
@@ -53,9 +53,6 @@ impl Coordinator {
 
     pub fn set_window_size(&self, size: Size) {
         *self.window.lock().unwrap() = size;
-        if self.splits.lock().unwrap().is_some() {
-            self.reflow_content();
-        }
     }
 
     pub fn bootstrap(&self) {
@@ -196,13 +193,7 @@ impl Coordinator {
             rect: l.chrome,
             fill_width: l.content.is_none(),
         });
-        self.apply_content(&tree, l.content);
-    }
-
-    fn reflow_content(&self) {
-        let tree = self.pane_tree();
-        let content = self.compute(&tree).content;
-        self.apply_content(&tree, content);
+        self.engine.set_content(Some(tree), l.content);
     }
 
     fn compute(&self, tree: &Pane) -> layout::Layout {
@@ -214,14 +205,6 @@ impl Coordinator {
         };
         let size = *self.window.lock().unwrap();
         layout::compute(size, self.mode, self.metrics, present)
-    }
-
-    fn apply_content(&self, tree: &Pane, region: Option<Rect>) {
-        let panes = match region {
-            Some(r) => split::layout(tree, r, self.metrics.gap),
-            None => Vec::new(),
-        };
-        self.engine.set_content_layout(panes);
     }
 
     fn pane_tree(&self) -> Pane {
@@ -299,8 +282,11 @@ mod tests {
         fn close(&self, id: TabId) {
             self.log(format!("close {id}"));
         }
-        fn set_content_layout(&self, panes: Vec<(TabId, Rect)>) {
-            let ids: Vec<String> = panes.iter().map(|(id, _)| id.to_string()).collect();
+        fn set_content(&self, tree: Option<Pane>, region: Option<Rect>) {
+            let ids: Vec<String> = match (tree, region) {
+                (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
+                _ => Vec::new(),
+            };
             self.log(format!("layout {}", ids.join(",")));
         }
     }

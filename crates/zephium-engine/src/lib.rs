@@ -1,11 +1,14 @@
 mod host;
 mod native;
+#[cfg(target_os = "macos")]
+mod stage;
 
 use std::sync::Arc;
 
 use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
 use zephium_core::ports::engine::{Engine, EngineEvent};
+use zephium_core::split::Pane;
 use zephium_core::tab::TabId;
 
 /// Runs a closure on the main thread (where the webviews live). Provided by the
@@ -60,7 +63,7 @@ impl Engine for WebviewEngine {
         self.run(move || host::with(|h| h.close(id)));
     }
 
-    fn set_content_layout(&self, panes: Vec<(TabId, Rect)>) {
-        self.run(move || host::with(|h| h.set_content_layout(&panes)));
+    fn set_content(&self, tree: Option<Pane>, region: Option<Rect>) {
+        self.run(move || host::with(|h| h.set_content(tree, region)));
     }
 }
