@@ -75,6 +75,7 @@ impl Coordinator {
     }
 
     pub fn open(&self) {
+        *self.splits.lock().unwrap() = None;
         let effects = self.state.lock().unwrap().open();
         self.commit(effects);
     }

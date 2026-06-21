@@ -152,8 +152,9 @@ impl EngineHost {
             return;
         };
         match region {
-            None => stage.set_visible(&[]),
+            None => stage.setHidden(true),
             Some(r) => {
+                stage.setHidden(false);
                 stage_set_frame(&stage, &self.parent, r);
                 let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
                 stage.set_tree(tree);

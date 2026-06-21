@@ -60,6 +60,19 @@ impl Pane {
         }
     }
 
+    pub fn set_ratio(&mut self, path: &[usize], ratio: f64) {
+        let mut node = self;
+        for &step in path {
+            match node {
+                Pane::Branch { a, b, .. } => node = if step == 0 { a } else { b },
+                Pane::Leaf(_) => return,
+            }
+        }
+        if let Pane::Branch { ratio: r, .. } = node {
+            *r = ratio.clamp(0.05, 0.95);
+        }
+    }
+
     pub fn remove(self, tab: TabId) -> Option<Pane> {
         match self {
             Pane::Leaf(id) if id == tab => None,
@@ -92,6 +105,56 @@ pub fn layout(root: &Pane, region: Rect, gap: f64) -> Vec<(TabId, Rect)> {
     let mut out = Vec::new();
     place(root, region, gap, &mut out);
     out
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Divider {
+    pub path: Vec<usize>,
+    pub axis: Axis,
+    pub rect: Rect,
+}
+
+pub fn divider_at(tree: &Pane, region: Rect, gap: f64, px: f64, py: f64) -> Option<Divider> {
+    fn walk(pane: &Pane, rect: Rect, gap: f64, p: (f64, f64), path: &mut Vec<usize>) -> Option<Divider> {
+        let Pane::Branch { axis, ratio, a, b } = pane else {
+            return None;
+        };
+        let (ra, rb) = divide(rect, *axis, *ratio, gap);
+        let (px, py) = p;
+        let on_divider = match axis {
+            Axis::Row => {
+                px >= ra.x + ra.width && px <= rb.x && py >= rect.y && py <= rect.y + rect.height
+            }
+            Axis::Col => {
+                py >= ra.y + ra.height && py <= rb.y && px >= rect.x && px <= rect.x + rect.width
+            }
+        };
+        if on_divider {
+            return Some(Divider {
+                path: path.clone(),
+                axis: *axis,
+                rect,
+            });
+        }
+        path.push(0);
+        if let Some(d) = walk(a, ra, gap, p, path) {
+            return Some(d);
+        }
+        path.pop();
+        path.push(1);
+        let d = walk(b, rb, gap, p, path);
+        path.pop();
+        d
+    }
+    walk(tree, region, gap, (px, py), &mut Vec::new())
+}
+
+pub fn ratio_for(axis: Axis, rect: Rect, gap: f64, px: f64, py: f64) -> f64 {
+    let raw = match axis {
+        Axis::Row => (px - rect.x) / (rect.width - gap),
+        Axis::Col => (py - rect.y) / (rect.height - gap),
+    };
+    raw.clamp(0.05, 0.95)
 }
 
 fn place(pane: &Pane, rect: Rect, gap: f64, out: &mut Vec<(TabId, Rect)>) {
@@ -227,6 +290,55 @@ mod tests {
         let tree = tree.remove(1).unwrap();
         assert_eq!(tree, Pane::leaf(3));
         assert!(tree.remove(3).is_none());
+    }
+
+    fn nested() -> Pane {
+        Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.5,
+            a: Box::new(Pane::leaf(1)),
+            b: Box::new(Pane::Branch {
+                axis: Axis::Col,
+                ratio: 0.5,
+                a: Box::new(Pane::leaf(2)),
+                b: Box::new(Pane::leaf(3)),
+            }),
+        }
+    }
+
+    #[test]
+    fn divider_at_finds_row_split_and_descends() {
+        let region = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let outer = divider_at(&nested(), region, 8.0, 500.0, 400.0).unwrap();
+        assert_eq!(outer.path, Vec::<usize>::new());
+        assert_eq!(outer.axis, Axis::Row);
+
+        let inner = divider_at(&nested(), region, 8.0, 700.0, 400.0).unwrap();
+        assert_eq!(inner.path, vec![1]);
+        assert_eq!(inner.axis, Axis::Col);
+
+        assert!(divider_at(&nested(), region, 8.0, 100.0, 400.0).is_none());
+    }
+
+    #[test]
+    fn ratio_for_maps_position_and_clamps() {
+        let rect = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        assert!((ratio_for(Axis::Row, rect, 8.0, 300.0, 0.0) - 300.0 / 992.0).abs() < 1e-9);
+        assert_eq!(ratio_for(Axis::Row, rect, 8.0, -50.0, 0.0), 0.05);
+        assert_eq!(ratio_for(Axis::Row, rect, 8.0, 9999.0, 0.0), 0.95);
+    }
+
+    #[test]
+    fn set_ratio_updates_branch_at_path() {
+        let mut tree = nested();
+        tree.set_ratio(&[1], 0.3);
+        let Pane::Branch { b, .. } = &tree else {
+            panic!()
+        };
+        let Pane::Branch { ratio, .. } = b.as_ref() else {
+            panic!()
+        };
+        assert!((*ratio - 0.3).abs() < 1e-9);
     }
 
     #[test]
