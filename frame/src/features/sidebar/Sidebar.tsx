@@ -35,6 +35,7 @@ export function Sidebar() {
         <NavButton label="Back" onClick={tabs.backActive}>‹</NavButton>
         <NavButton label="Forward" onClick={tabs.forwardActive}>›</NavButton>
         <NavButton label="Reload" onClick={tabs.reloadActive}>⟳</NavButton>
+        <NavButton label="Split" onClick={tabs.split}>⊟</NavButton>
       </div>
 
       <form class="px-2.5 pb-2 pt-1" onSubmit={submit}>

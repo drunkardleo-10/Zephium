@@ -56,19 +56,11 @@ impl Engine for WebviewEngine {
         self.run(move || host::with(|h| h.history(id, "history.forward()")));
     }
 
-    fn show(&self, id: TabId, bounds: Rect) {
-        self.run(move || host::with(|h| h.show(id, bounds)));
-    }
-
-    fn hide(&self, id: TabId) {
-        self.run(move || host::with(|h| h.hide(id)));
-    }
-
     fn close(&self, id: TabId) {
         self.run(move || host::with(|h| h.close(id)));
     }
 
-    fn set_content_bounds(&self, bounds: Rect) {
-        self.run(move || host::with(|h| h.set_content_bounds(bounds)));
+    fn set_content_layout(&self, panes: Vec<(TabId, Rect)>) {
+        self.run(move || host::with(|h| h.set_content_layout(&panes)));
     }
 }

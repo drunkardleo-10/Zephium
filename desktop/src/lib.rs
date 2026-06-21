@@ -54,6 +54,16 @@ fn tabs_forward(coord: State<'_, Coord>, id: u64) {
     coord.go_forward(id);
 }
 
+#[tauri::command]
+fn tabs_split(coord: State<'_, Coord>) {
+    coord.split(zephium_core::split::Axis::Row);
+}
+
+#[tauri::command]
+fn tabs_unsplit(coord: State<'_, Coord>) {
+    coord.unsplit();
+}
+
 #[cfg(target_os = "macos")]
 struct ChromeAdapter {
     dispatch: MainThreadDispatch,
@@ -188,6 +198,8 @@ pub fn run() {
             tabs_reload,
             tabs_back,
             tabs_forward,
+            tabs_split,
+            tabs_unsplit,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");

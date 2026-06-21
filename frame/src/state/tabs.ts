@@ -33,3 +33,5 @@ const onActive = (fn: (id: number) => void) => () => {
 export const reloadActive = onActive(ipc.reload);
 export const backActive = onActive(ipc.back);
 export const forwardActive = onActive(ipc.forward);
+export const split = () => void ipc.split();
+export const unsplit = () => void ipc.unsplit();

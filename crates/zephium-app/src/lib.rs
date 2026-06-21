@@ -9,6 +9,7 @@ use zephium_core::layout::{self, Metrics, Mode};
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{Engine, EngineEvent};
 use zephium_core::ports::store::Store;
+use zephium_core::split::{self, Axis, Pane};
 use zephium_core::tab::{Tab, TabId};
 use zephium_core::tabs::{Effect, Tabs};
 use zephium_ipc::{TabView, TabsSnapshot};
@@ -21,6 +22,7 @@ pub type EmitFn = Box<dyn Fn(TabsSnapshot) + Send + Sync>;
 pub struct Coordinator {
     state: Mutex<Tabs>,
     window: Mutex<Size>,
+    splits: Mutex<Option<Pane>>,
     engine: SharedEngine,
     store: SharedStore,
     chrome: SharedChrome,
@@ -39,6 +41,7 @@ impl Coordinator {
         Self {
             state: Mutex::new(Tabs::default()),
             window: Mutex::new(Size::default()),
+            splits: Mutex::new(None),
             engine,
             store,
             chrome,
@@ -77,13 +80,54 @@ impl Coordinator {
     }
 
     pub fn activate(&self, id: TabId) {
+        *self.splits.lock().unwrap() = None;
         let effects = self.state.lock().unwrap().activate(id);
         self.commit(effects);
     }
 
     pub fn close(&self, id: TabId) {
+        *self.splits.lock().unwrap() = None;
         let effects = self.state.lock().unwrap().close(id);
         self.commit(effects);
+    }
+
+    pub fn split(&self, axis: Axis) {
+        let plan = {
+            let mut state = self.state.lock().unwrap();
+            let Some(active) = state.active() else {
+                return;
+            };
+            let ids = state.ids().to_vec();
+            let Some(pos) = ids.iter().position(|x| *x == active) else {
+                return;
+            };
+            let other = ids
+                .iter()
+                .cycle()
+                .skip(pos + 1)
+                .take(ids.len().saturating_sub(1))
+                .find(|id| state.get(**id).is_some_and(|t| t.url.is_some()))
+                .copied();
+            other.map(|other| (active, other, state.ensure_view(other)))
+        };
+        let Some((active, other, fx)) = plan else {
+            return;
+        };
+        self.apply(fx);
+        *self.splits.lock().unwrap() = Some(Pane::Branch {
+            axis,
+            ratio: 0.5,
+            a: Box::new(Pane::Leaf(active)),
+            b: Box::new(Pane::Leaf(other)),
+        });
+        self.persist();
+        self.relayout();
+        self.project();
+    }
+
+    pub fn unsplit(&self) {
+        *self.splits.lock().unwrap() = None;
+        self.relayout();
     }
 
     pub fn navigate(&self, id: TabId, input: &str) {
@@ -140,24 +184,38 @@ impl Coordinator {
             match effect {
                 Effect::CreateView { id, url } => self.engine.create_view(id, &url, bounds),
                 Effect::Navigate { id, url } => self.engine.navigate(id, &url),
-                Effect::Show { id } => self.engine.show(id, bounds),
-                Effect::Hide { id } => self.engine.hide(id),
                 Effect::Close { id } => self.engine.close(id),
             }
         }
     }
 
     fn relayout(&self) {
+        let tree = self.pane_tree();
+        let present = {
+            let state = self.state.lock().unwrap();
+            tree.tabs()
+                .iter()
+                .any(|id| state.get(*id).is_some_and(Tab::has_view))
+        };
         let size = *self.window.lock().unwrap();
-        let content_present = self.content_present();
-        let l = layout::compute(size, self.mode, self.metrics, content_present);
+        let l = layout::compute(size, self.mode, self.metrics, present);
         self.chrome.position(ChromeFrame {
             rect: l.chrome,
             fill_width: l.content.is_none(),
         });
-        if let Some(content) = l.content {
-            self.engine.set_content_bounds(content);
+        let panes = match l.content {
+            Some(region) => split::layout(&tree, region, self.metrics.gap),
+            None => Vec::new(),
+        };
+        self.engine.set_content_layout(panes);
+    }
+
+    fn pane_tree(&self) -> Pane {
+        if let Some(tree) = self.splits.lock().unwrap().clone() {
+            return tree;
         }
+        let active = self.state.lock().unwrap().active();
+        Pane::Leaf(active.unwrap_or(0))
     }
 
     fn content_region(&self) -> Rect {
@@ -165,14 +223,6 @@ impl Coordinator {
         layout::compute(size, self.mode, self.metrics, true)
             .content
             .unwrap_or_default()
-    }
-
-    fn content_present(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        state
-            .active()
-            .and_then(|id| state.get(id))
-            .is_some_and(Tab::has_view)
     }
 
     fn persist(&self) {
@@ -232,16 +282,26 @@ mod tests {
         fn reload(&self, _id: TabId) {}
         fn go_back(&self, _id: TabId) {}
         fn go_forward(&self, _id: TabId) {}
-        fn show(&self, id: TabId, _bounds: Rect) {
-            self.log(format!("show {id}"));
-        }
-        fn hide(&self, id: TabId) {
-            self.log(format!("hide {id}"));
-        }
         fn close(&self, id: TabId) {
             self.log(format!("close {id}"));
         }
-        fn set_content_bounds(&self, _bounds: Rect) {}
+        fn set_content_layout(&self, panes: Vec<(TabId, Rect)>) {
+            let ids: Vec<String> = panes.iter().map(|(id, _)| id.to_string()).collect();
+            self.log(format!("layout {}", ids.join(",")));
+        }
+    }
+
+    impl FakeEngine {
+        fn last_layout(&self) -> Vec<u64> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|c| c.strip_prefix("layout "))
+                .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
+                .unwrap_or_default()
+        }
     }
 
     #[derive(Default)]
@@ -296,9 +356,10 @@ mod tests {
 
         coord.navigate(id, "example.com");
 
-        let calls = engine.calls();
-        assert!(calls.contains(&format!("create {id} https://example.com/")));
-        assert!(calls.contains(&format!("show {id}")));
+        assert!(engine
+            .calls()
+            .contains(&format!("create {id} https://example.com/")));
+        assert_eq!(engine.last_layout(), vec![id]);
 
         let tab = last(&snaps).tabs.into_iter().find(|t| t.id == id).unwrap();
         assert_eq!(tab.url.as_deref(), Some("https://example.com/"));
@@ -321,7 +382,22 @@ mod tests {
     }
 
     #[test]
-    fn switching_tabs_hides_previous() {
+    fn switching_tabs_shows_only_active() {
+        let (coord, engine, snaps) = setup();
+        coord.bootstrap();
+        let first = last(&snaps).active.unwrap();
+        coord.navigate(first, "example.com");
+        coord.open();
+        let second = last(&snaps).active.unwrap();
+        coord.navigate(second, "github.com");
+        assert_eq!(engine.last_layout(), vec![second]);
+
+        coord.activate(first);
+        assert_eq!(engine.last_layout(), vec![first]);
+    }
+
+    #[test]
+    fn split_shows_both_panes_unsplit_restores_active() {
         let (coord, engine, snaps) = setup();
         coord.bootstrap();
         let first = last(&snaps).active.unwrap();
@@ -330,11 +406,13 @@ mod tests {
         let second = last(&snaps).active.unwrap();
         coord.navigate(second, "github.com");
 
-        coord.activate(first);
+        coord.split(Axis::Row);
+        let panes = engine.last_layout();
+        assert_eq!(panes.len(), 2);
+        assert!(panes.contains(&first) && panes.contains(&second));
 
-        let calls = engine.calls();
-        assert!(calls.contains(&format!("hide {second}")));
-        assert!(calls.contains(&format!("show {first}")));
+        coord.unsplit();
+        assert_eq!(engine.last_layout(), vec![second]);
     }
 
     #[test]

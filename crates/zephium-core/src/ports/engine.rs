@@ -9,10 +9,9 @@ pub trait Engine {
     fn reload(&self, id: TabId);
     fn go_back(&self, id: TabId);
     fn go_forward(&self, id: TabId);
-    fn show(&self, id: TabId, bounds: Rect);
-    fn hide(&self, id: TabId);
     fn close(&self, id: TabId);
-    fn set_content_bounds(&self, bounds: Rect);
+    /// Show exactly these panes at their rects; hide every other view.
+    fn set_content_layout(&self, panes: Vec<(TabId, Rect)>);
 }
 
 /// What the engine reports back as a page loads.

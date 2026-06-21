@@ -10,6 +10,8 @@ export const navigate = (id: number, input: string) => invoke<void>("tabs_naviga
 export const reload = (id: number) => invoke<void>("tabs_reload", { id });
 export const back = (id: number) => invoke<void>("tabs_back", { id });
 export const forward = (id: number) => invoke<void>("tabs_forward", { id });
+export const split = () => invoke<void>("tabs_split");
+export const unsplit = () => invoke<void>("tabs_unsplit");
 
 export const onTabsState = (cb: (s: TabsSnapshot) => void): Promise<UnlistenFn> =>
   listen<TabsSnapshot>("tabs:state", (e) => cb(e.payload));

@@ -24,8 +24,6 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Box<dyn Fn(EngineEvent)>) {
         *cell.borrow_mut() = Some(EngineHost {
             parent: ParentHandle(parent),
             views: HashMap::new(),
-            active: None,
-            content: Rect::default(),
             sink: Sink(Rc::from(sink)),
         });
     });
@@ -62,8 +60,6 @@ impl HasWindowHandle for ParentHandle {
 pub(crate) struct EngineHost {
     parent: ParentHandle,
     views: HashMap<TabId, WebView>,
-    active: Option<TabId>,
-    content: Rect,
     sink: Sink,
 }
 
@@ -72,7 +68,6 @@ impl EngineHost {
         if self.views.contains_key(&id) {
             return;
         }
-        self.content = bounds;
         let on_title = self.sink.clone();
         let on_load = self.sink.clone();
 
@@ -124,37 +119,25 @@ impl EngineHost {
         }
     }
 
-    pub(crate) fn show(&mut self, id: TabId, bounds: Rect) {
-        self.content = bounds;
-        self.active = Some(id);
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.set_bounds(to_wry(bounds));
-            let _ = view.set_visible(true);
-            let _ = view.focus();
-        }
-    }
-
-    pub(crate) fn hide(&mut self, id: TabId) {
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.set_visible(false);
-        }
-        if self.active == Some(id) {
-            self.active = None;
-        }
-    }
-
     pub(crate) fn close(&mut self, id: TabId) {
         self.views.remove(&id);
-        if self.active == Some(id) {
-            self.active = None;
-        }
     }
 
-    pub(crate) fn set_content_bounds(&mut self, bounds: Rect) {
-        self.content = bounds;
-        if let Some(active) = self.active {
-            if let Some(view) = self.views.get(&active) {
-                let _ = view.set_bounds(to_wry(bounds));
+    pub(crate) fn set_content_layout(&mut self, panes: &[(TabId, Rect)]) {
+        for (id, view) in &self.views {
+            if !panes.iter().any(|(pid, _)| pid == id) {
+                let _ = view.set_visible(false);
+            }
+        }
+        for (id, rect) in panes {
+            if let Some(view) = self.views.get(id) {
+                let _ = view.set_bounds(to_wry(*rect));
+                let _ = view.set_visible(true);
+            }
+        }
+        if let Some((first, _)) = panes.first() {
+            if let Some(view) = self.views.get(first) {
+                let _ = view.focus();
             }
         }
     }

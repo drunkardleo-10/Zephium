@@ -10,8 +10,6 @@ use crate::tab::{Lifecycle, Tab, TabId};
 pub enum Effect {
     CreateView { id: TabId, url: String },
     Navigate { id: TabId, url: String },
-    Show { id: TabId },
-    Hide { id: TabId },
     Close { id: TabId },
 }
 
@@ -60,26 +58,20 @@ impl Tabs {
         if !self.tabs.contains_key(&id) {
             return Vec::new();
         }
-        let mut fx = Vec::new();
-        if let Some(prev) = self.active {
-            if prev != id {
-                if let Some(tab) = self.tabs.get_mut(&prev) {
-                    tab.lifecycle = Lifecycle::Inactive;
-                    if tab.view {
-                        fx.push(Effect::Hide { id: prev });
-                    }
-                }
+        if let Some(prev) = self.active.filter(|p| *p != id) {
+            if let Some(tab) = self.tabs.get_mut(&prev) {
+                tab.lifecycle = Lifecycle::Inactive;
             }
         }
         self.active = Some(id);
+        let mut fx = Vec::new();
         if let Some(tab) = self.tabs.get_mut(&id) {
             tab.lifecycle = Lifecycle::Active;
-            if tab.view {
-                fx.push(Effect::Show { id });
-            } else if let Some(url) = tab.url.clone() {
-                tab.view = true;
-                fx.push(Effect::CreateView { id, url: url.to_string() });
-                fx.push(Effect::Show { id });
+            if !tab.view {
+                if let Some(url) = tab.url.clone() {
+                    tab.view = true;
+                    fx.push(Effect::CreateView { id, url: url.to_string() });
+                }
             }
         }
         fx
@@ -90,7 +82,6 @@ impl Tabs {
         if !navigation::is_allowed(&url) {
             return Vec::new();
         }
-        let is_active = self.active == Some(id);
         let Some(tab) = self.tabs.get_mut(&id) else {
             return Vec::new();
         };
@@ -101,12 +92,20 @@ impl Tabs {
             vec![Effect::Navigate { id, url }]
         } else {
             tab.view = true;
-            if is_active {
-                vec![Effect::CreateView { id, url }, Effect::Show { id }]
-            } else {
-                vec![Effect::CreateView { id, url }]
+            vec![Effect::CreateView { id, url }]
+        }
+    }
+
+    pub fn ensure_view(&mut self, id: TabId) -> Vec<Effect> {
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            if !tab.view {
+                if let Some(url) = tab.url.clone() {
+                    tab.view = true;
+                    return vec![Effect::CreateView { id, url: url.to_string() }];
+                }
             }
         }
+        Vec::new()
     }
 
     pub fn close(&mut self, id: TabId) -> Vec<Effect> {
@@ -220,20 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn navigate_creates_and_shows_active_tab() {
+    fn navigate_creates_view_for_active_tab() {
         let mut tabs = Tabs::default();
         tabs.open();
         let id = tabs.active().unwrap();
         assert!(!tabs.get(id).unwrap().has_view());
 
         let fx = tabs.navigate(id, "example.com");
-        assert_eq!(
-            fx,
-            vec![
-                Effect::CreateView { id, url: "https://example.com/".into() },
-                Effect::Show { id },
-            ]
-        );
+        assert_eq!(fx, vec![Effect::CreateView { id, url: "https://example.com/".into() }]);
         assert!(tabs.get(id).unwrap().has_view());
 
         let fx = tabs.navigate(id, "github.com");

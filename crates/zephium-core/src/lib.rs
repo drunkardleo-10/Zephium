@@ -4,6 +4,7 @@ pub mod geometry;
 pub mod ids;
 pub mod layout;
 pub mod navigation;
+pub mod split;
 pub mod ports;
 pub mod session;
 pub mod tab;
