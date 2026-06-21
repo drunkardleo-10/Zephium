@@ -32,6 +32,51 @@ impl Pane {
         out
     }
 
+    pub fn contains(&self, tab: TabId) -> bool {
+        match self {
+            Pane::Leaf(id) => *id == tab,
+            Pane::Branch { a, b, .. } => a.contains(tab) || b.contains(tab),
+        }
+    }
+
+    pub fn split(&mut self, target: TabId, new: TabId, axis: Axis, before: bool) -> bool {
+        match self {
+            Pane::Leaf(id) if *id == target => {
+                let kept = Pane::Leaf(*id);
+                let added = Pane::Leaf(new);
+                let (a, b) = if before { (added, kept) } else { (kept, added) };
+                *self = Pane::Branch {
+                    axis,
+                    ratio: 0.5,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                };
+                true
+            }
+            Pane::Leaf(_) => false,
+            Pane::Branch { a, b, .. } => {
+                a.split(target, new, axis, before) || b.split(target, new, axis, before)
+            }
+        }
+    }
+
+    pub fn remove(self, tab: TabId) -> Option<Pane> {
+        match self {
+            Pane::Leaf(id) if id == tab => None,
+            leaf @ Pane::Leaf(_) => Some(leaf),
+            Pane::Branch { axis, ratio, a, b } => match (a.remove(tab), b.remove(tab)) {
+                (Some(a), Some(b)) => Some(Pane::Branch {
+                    axis,
+                    ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            },
+        }
+    }
+
     fn collect(&self, out: &mut Vec<TabId>) {
         match self {
             Pane::Leaf(id) => out.push(*id),
@@ -152,6 +197,36 @@ mod tests {
         assert_eq!(right.x, bottom.x);
         assert_eq!(right.width, bottom.width);
         assert_eq!(right.y + right.height + 8.0, bottom.y);
+    }
+
+    #[test]
+    fn split_replaces_target_leaf_with_branch() {
+        let mut tree = Pane::leaf(1);
+        assert!(tree.split(1, 2, Axis::Row, false));
+        assert_eq!(tree.tabs(), vec![1, 2]);
+
+        // split pane 2 vertically, new tab above it
+        assert!(tree.split(2, 3, Axis::Col, true));
+        assert_eq!(tree.tabs(), vec![1, 3, 2]);
+
+        // unknown target leaves the tree untouched
+        let before = tree.clone();
+        assert!(!tree.split(99, 4, Axis::Row, false));
+        assert_eq!(tree, before);
+    }
+
+    #[test]
+    fn remove_collapses_branch_into_sibling() {
+        let mut tree = Pane::leaf(1);
+        tree.split(1, 2, Axis::Row, false);
+        tree.split(2, 3, Axis::Col, false);
+        assert_eq!(tree.tabs(), vec![1, 2, 3]);
+
+        let tree = tree.remove(2).unwrap();
+        assert_eq!(tree.tabs(), vec![1, 3]);
+        let tree = tree.remove(1).unwrap();
+        assert_eq!(tree, Pane::leaf(3));
+        assert!(tree.remove(3).is_none());
     }
 
     #[test]

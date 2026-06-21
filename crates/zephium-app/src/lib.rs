@@ -53,6 +53,9 @@ impl Coordinator {
 
     pub fn set_window_size(&self, size: Size) {
         *self.window.lock().unwrap() = size;
+        if self.splits.lock().unwrap().is_some() {
+            self.reflow_content();
+        }
     }
 
     pub fn bootstrap(&self) {
@@ -80,46 +83,43 @@ impl Coordinator {
     }
 
     pub fn activate(&self, id: TabId) {
-        *self.splits.lock().unwrap() = None;
+        {
+            let mut splits = self.splits.lock().unwrap();
+            if splits.as_ref().is_some_and(|t| !t.contains(id)) {
+                *splits = None;
+            }
+        }
         let effects = self.state.lock().unwrap().activate(id);
         self.commit(effects);
     }
 
     pub fn close(&self, id: TabId) {
-        *self.splits.lock().unwrap() = None;
+        {
+            let mut splits = self.splits.lock().unwrap();
+            if let Some(tree) = splits.take() {
+                *splits = tree.remove(id);
+            }
+        }
         let effects = self.state.lock().unwrap().close(id);
         self.commit(effects);
     }
 
-    pub fn split(&self, axis: Axis) {
-        let plan = {
+    pub fn split_with(&self, other: TabId, axis: Axis) {
+        let (active, fx) = {
             let mut state = self.state.lock().unwrap();
             let Some(active) = state.active() else {
                 return;
             };
-            let ids = state.ids().to_vec();
-            let Some(pos) = ids.iter().position(|x| *x == active) else {
+            if active == other || state.get(other).is_none() {
                 return;
-            };
-            let other = ids
-                .iter()
-                .cycle()
-                .skip(pos + 1)
-                .take(ids.len().saturating_sub(1))
-                .find(|id| state.get(**id).is_some_and(|t| t.url.is_some()))
-                .copied();
-            other.map(|other| (active, other, state.ensure_view(other)))
-        };
-        let Some((active, other, fx)) = plan else {
-            return;
+            }
+            (active, state.ensure_view(other))
         };
         self.apply(fx);
-        *self.splits.lock().unwrap() = Some(Pane::Branch {
-            axis,
-            ratio: 0.5,
-            a: Box::new(Pane::Leaf(active)),
-            b: Box::new(Pane::Leaf(other)),
-        });
+        let mut tree = self.pane_tree();
+        if tree.split(active, other, axis, false) {
+            *self.splits.lock().unwrap() = Some(tree);
+        }
         self.persist();
         self.relayout();
         self.project();
@@ -191,6 +191,21 @@ impl Coordinator {
 
     fn relayout(&self) {
         let tree = self.pane_tree();
+        let l = self.compute(&tree);
+        self.chrome.position(ChromeFrame {
+            rect: l.chrome,
+            fill_width: l.content.is_none(),
+        });
+        self.apply_content(&tree, l.content);
+    }
+
+    fn reflow_content(&self) {
+        let tree = self.pane_tree();
+        let content = self.compute(&tree).content;
+        self.apply_content(&tree, content);
+    }
+
+    fn compute(&self, tree: &Pane) -> layout::Layout {
         let present = {
             let state = self.state.lock().unwrap();
             tree.tabs()
@@ -198,13 +213,12 @@ impl Coordinator {
                 .any(|id| state.get(*id).is_some_and(Tab::has_view))
         };
         let size = *self.window.lock().unwrap();
-        let l = layout::compute(size, self.mode, self.metrics, present);
-        self.chrome.position(ChromeFrame {
-            rect: l.chrome,
-            fill_width: l.content.is_none(),
-        });
-        let panes = match l.content {
-            Some(region) => split::layout(&tree, region, self.metrics.gap),
+        layout::compute(size, self.mode, self.metrics, present)
+    }
+
+    fn apply_content(&self, tree: &Pane, region: Option<Rect>) {
+        let panes = match region {
+            Some(r) => split::layout(tree, r, self.metrics.gap),
             None => Vec::new(),
         };
         self.engine.set_content_layout(panes);
@@ -397,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn split_shows_both_panes_unsplit_restores_active() {
+    fn split_shows_both_panes_close_collapses() {
         let (coord, engine, snaps) = setup();
         coord.bootstrap();
         let first = last(&snaps).active.unwrap();
@@ -406,12 +420,13 @@ mod tests {
         let second = last(&snaps).active.unwrap();
         coord.navigate(second, "github.com");
 
-        coord.split(Axis::Row);
+        coord.split_with(first, Axis::Row);
         let panes = engine.last_layout();
         assert_eq!(panes.len(), 2);
         assert!(panes.contains(&first) && panes.contains(&second));
 
-        coord.unsplit();
+        // closing one pane collapses the split onto the other
+        coord.close(first);
         assert_eq!(engine.last_layout(), vec![second]);
     }
 

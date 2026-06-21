@@ -55,8 +55,8 @@ fn tabs_forward(coord: State<'_, Coord>, id: u64) {
 }
 
 #[tauri::command]
-fn tabs_split(coord: State<'_, Coord>) {
-    coord.split(zephium_core::split::Axis::Row);
+fn tabs_split(coord: State<'_, Coord>, other: u64) {
+    coord.split_with(other, zephium_core::split::Axis::Row);
 }
 
 #[tauri::command]

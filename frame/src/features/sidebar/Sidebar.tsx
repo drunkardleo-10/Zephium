@@ -1,4 +1,4 @@
-import { For, createEffect, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, type JSX } from "solid-js";
 import * as tabs from "../../state/tabs";
 
 function host(url: string | null | undefined): string {
@@ -14,6 +14,16 @@ export function Sidebar() {
   let input!: HTMLInputElement;
   const [value, setValue] = createSignal("");
   const [editing, setEditing] = createSignal(false);
+  const [splitting, setSplitting] = createSignal(false);
+
+  const onTab = (id: number) => {
+    if (splitting()) {
+      tabs.split(id);
+      setSplitting(false);
+    } else {
+      tabs.activate(id);
+    }
+  };
 
   createEffect(() => {
     const h = host(tabs.activeTab()?.url);
@@ -35,7 +45,13 @@ export function Sidebar() {
         <NavButton label="Back" onClick={tabs.backActive}>‹</NavButton>
         <NavButton label="Forward" onClick={tabs.forwardActive}>›</NavButton>
         <NavButton label="Reload" onClick={tabs.reloadActive}>⟳</NavButton>
-        <NavButton label="Split" onClick={tabs.split}>⊟</NavButton>
+        <NavButton
+          label="Split"
+          active={splitting()}
+          onClick={() => setSplitting((s) => !s)}
+        >
+          ⊟
+        </NavButton>
       </div>
 
       <form class="px-2.5 pb-2 pt-1" onSubmit={submit}>
@@ -54,13 +70,18 @@ export function Sidebar() {
         />
       </form>
 
+      <Show when={splitting()}>
+        <div class="px-3 pb-1 text-[11px] text-faint">Pick a tab to split with</div>
+      </Show>
+
       <nav class="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2.5 py-1">
         <For each={tabs.tabs()}>
           {(tab) => (
             <button
-              onClick={() => tabs.activate(tab.id)}
+              onClick={() => onTab(tab.id)}
               class="group flex h-9 items-center gap-2.5 rounded-md px-3 text-[13px]"
               classList={{
+                "ring-1 ring-accent/40": splitting() && tab.id !== tabs.activeId(),
                 "bg-elevated text-text": tab.id === tabs.activeId(),
                 "text-muted hover:bg-hover hover:text-text": tab.id !== tabs.activeId(),
               }}
@@ -96,12 +117,21 @@ export function Sidebar() {
   );
 }
 
-function NavButton(props: { label: string; onClick: () => void; children: JSX.Element }) {
+function NavButton(props: {
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  children: JSX.Element;
+}) {
   return (
     <button
       aria-label={props.label}
       onClick={props.onClick}
-      class="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-text"
+      class="flex h-7 w-7 items-center justify-center rounded-md"
+      classList={{
+        "bg-accent/20 text-text": props.active,
+        "text-muted hover:bg-hover hover:text-text": !props.active,
+      }}
     >
       {props.children}
     </button>
