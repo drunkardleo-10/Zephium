@@ -14,12 +14,14 @@ pub trait Engine {
     /// Lay the split `tree` into `region`, or hide all content when `region` is
     /// `None`. The engine owns pane geometry so resize stays in the native pass.
     fn set_content(&self, tree: Option<Pane>, region: Option<Rect>);
+    /// Highlight a drop zone (content-region-local rect) during a tab drag.
+    fn set_drop_indicator(&self, zone: Option<Rect>);
 }
 
-/// What the engine reports back as a page loads.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     TitleChanged { id: TabId, title: String },
     UrlChanged { id: TabId, url: String },
     LoadingChanged { id: TabId, loading: bool },
+    SplitChanged(Pane),
 }

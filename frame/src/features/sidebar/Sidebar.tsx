@@ -53,6 +53,61 @@ export function Sidebar() {
     e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
+  const [ghost, setGhost] = createSignal<{ title: string; x: number; y: number } | null>(null);
+  let down: { x: number; y: number } | null = null;
+  let dragId = 0;
+  let dragTitle = "";
+  let dragging = false;
+  let dragFrame = 0;
+  let suppressClick = false;
+  const onTabDown = (e: PointerEvent, id: number, title: string) => {
+    down = { x: e.clientX, y: e.clientY };
+    dragId = id;
+    dragTitle = title;
+    dragging = false;
+  };
+  const onTabMove = (e: PointerEvent & { currentTarget: HTMLElement }) => {
+    if (!down) return;
+    if (!dragging && Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y) > 4) {
+      dragging = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      document.body.style.cursor = "grabbing";
+    }
+    if (dragging) {
+      setGhost({ title: dragTitle, x: e.clientX, y: e.clientY });
+      if (!dragFrame) {
+        const x = e.clientX;
+        const y = e.clientY;
+        dragFrame = requestAnimationFrame(() => {
+          dragFrame = 0;
+          tabs.dragOver(x, y);
+        });
+      }
+    }
+  };
+  const onTabUp = (e: PointerEvent & { currentTarget: HTMLElement }) => {
+    if (dragFrame) {
+      cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+    }
+    if (dragging) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+      tabs.dropTab(dragId, e.clientX, e.clientY);
+      suppressClick = true;
+    }
+    setGhost(null);
+    document.body.style.cursor = "";
+    down = null;
+    dragging = false;
+  };
+  const onTabClick = (id: number) => {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
+    onTab(id);
+  };
+
   createEffect(() => {
     const h = host(tabs.activeTab()?.url);
     if (!editing()) setValue(h);
@@ -115,8 +170,11 @@ export function Sidebar() {
         <For each={tabs.tabs()}>
           {(tab) => (
             <button
-              onClick={() => onTab(tab.id)}
-              class="group flex h-9 items-center gap-2.5 rounded-md px-3 text-[13px]"
+              onPointerDown={(e) => onTabDown(e, tab.id, tab.title)}
+              onPointerMove={onTabMove}
+              onPointerUp={onTabUp}
+              onClick={() => onTabClick(tab.id)}
+              class="group flex h-9 cursor-grab items-center gap-2.5 rounded-md px-3 text-[13px]"
               classList={{
                 "ring-1 ring-accent/40": splitting() && tab.id !== tabs.activeId(),
                 "bg-elevated text-text": tab.id === tabs.activeId(),
@@ -150,6 +208,17 @@ export function Sidebar() {
           <span class="text-base leading-none">+</span> New Tab
         </button>
       </div>
+
+      <Show when={ghost()}>
+        {(g) => (
+          <div
+            class="pointer-events-none fixed z-50 max-w-44 truncate rounded-md bg-elevated px-3 py-1.5 text-[13px] text-text shadow-lg"
+            style={{ left: `${g().x + 12}px`, top: `${g().y + 6}px` }}
+          >
+            {g().title}
+          </div>
+        )}
+      </Show>
     </aside>
   );
 }

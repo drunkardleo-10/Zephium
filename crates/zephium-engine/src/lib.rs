@@ -66,4 +66,8 @@ impl Engine for WebviewEngine {
     fn set_content(&self, tree: Option<Pane>, region: Option<Rect>) {
         self.run(move || host::with(|h| h.set_content(tree, region)));
     }
+
+    fn set_drop_indicator(&self, zone: Option<Rect>) {
+        self.run(move || host::with(|h| h.set_drop_indicator(zone)));
+    }
 }

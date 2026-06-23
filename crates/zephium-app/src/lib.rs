@@ -9,7 +9,7 @@ use zephium_core::layout::{self, Metrics, Mode};
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{Engine, EngineEvent};
 use zephium_core::ports::store::Store;
-use zephium_core::split::{Axis, Pane};
+use zephium_core::split::{self, Axis, Edge, Pane};
 use zephium_core::tab::{Tab, TabId};
 use zephium_core::tabs::{Effect, Tabs};
 use zephium_ipc::{TabView, TabsSnapshot};
@@ -150,24 +150,64 @@ impl Coordinator {
         self.engine.go_forward(id);
     }
 
+    pub fn drag_over(&self, client_x: f64, client_y: f64) {
+        let zone = self.resolve_drop(client_x, client_y).map(|d| d.zone);
+        self.engine.set_drop_indicator(zone);
+    }
+
+    pub fn drop_tab(&self, other: TabId, client_x: f64, client_y: f64) {
+        if let Some(d) = self.resolve_drop(client_x, client_y) {
+            self.apply_drop(d.tab, other, d.edge);
+        }
+        self.engine.set_drop_indicator(None);
+    }
+
+    fn resolve_drop(&self, client_x: f64, client_y: f64) -> Option<split::Drop> {
+        let tree = self.pane_tree();
+        let region = self.compute(&tree).content?;
+        let m = *self.metrics.lock().unwrap();
+        let local = Rect::new(0.0, 0.0, region.width, region.height);
+        split::drop_target(&tree, local, m.gap, client_x - m.sidebar_width - m.gap, client_y)
+    }
+
     pub fn on_engine_event(&self, event: EngineEvent) {
-        let mut visit = None;
-        {
-            let mut state = self.state.lock().unwrap();
-            match event {
-                EngineEvent::TitleChanged { id, title } => state.set_title(id, title),
-                EngineEvent::LoadingChanged { id, loading } => state.set_loading(id, loading),
-                EngineEvent::UrlChanged { id, url } => {
+        match event {
+            EngineEvent::SplitChanged(tree) => {
+                *self.splits.lock().unwrap() = Some(tree);
+            }
+            EngineEvent::TitleChanged { id, title } => {
+                self.state.lock().unwrap().set_title(id, title);
+                self.project();
+            }
+            EngineEvent::LoadingChanged { id, loading } => {
+                self.state.lock().unwrap().set_loading(id, loading);
+                self.project();
+            }
+            EngineEvent::UrlChanged { id, url } => {
+                let title = {
+                    let mut state = self.state.lock().unwrap();
                     state.set_committed_url_str(id, &url);
-                    let title = state.get(id).map(|t| t.title.clone()).unwrap_or_default();
-                    visit = Some((url, title));
-                }
+                    state.get(id).map(|t| t.title.clone()).unwrap_or_default()
+                };
+                self.store.record_visit(url, title);
+                self.persist();
+                self.project();
             }
         }
-        if let Some((url, title)) = visit {
-            self.store.record_visit(url, title);
-            self.persist();
+    }
+
+    fn apply_drop(&self, target: TabId, dropped: TabId, edge: Edge) {
+        if target == dropped {
+            return;
         }
+        let fx = self.state.lock().unwrap().ensure_view(dropped);
+        self.apply(fx);
+        let mut tree = self.pane_tree();
+        if tree.split(target, dropped, edge.axis(), edge.before()) {
+            *self.splits.lock().unwrap() = Some(tree);
+        }
+        self.persist();
+        self.relayout();
         self.project();
     }
 
@@ -297,6 +337,7 @@ mod tests {
             };
             self.log(format!("layout {}", ids.join(",")));
         }
+        fn set_drop_indicator(&self, _zone: Option<Rect>) {}
     }
 
     impl FakeEngine {

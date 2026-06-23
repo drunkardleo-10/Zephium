@@ -13,6 +13,8 @@ export const forward = (id: number) => invoke<void>("tabs_forward", { id });
 export const split = (other: number) => invoke<void>("tabs_split", { other });
 export const unsplit = () => invoke<void>("tabs_unsplit");
 export const setSidebarWidth = (width: number) => invoke<void>("sidebar_set_width", { width });
+export const dragOver = (x: number, y: number) => invoke<void>("tab_drag_over", { x, y });
+export const dropTab = (id: number, x: number, y: number) => invoke<void>("tab_drop", { id, x, y });
 
 export const onTabsState = (cb: (s: TabsSnapshot) => void): Promise<UnlistenFn> =>
   listen<TabsSnapshot>("tabs:state", (e) => cb(e.payload));

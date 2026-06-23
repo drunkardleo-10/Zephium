@@ -149,6 +149,60 @@ pub fn divider_at(tree: &Pane, region: Rect, gap: f64, px: f64, py: f64) -> Opti
     walk(tree, region, gap, (px, py), &mut Vec::new())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    pub fn axis(self) -> Axis {
+        match self {
+            Edge::Left | Edge::Right => Axis::Row,
+            Edge::Top | Edge::Bottom => Axis::Col,
+        }
+    }
+
+    pub fn before(self) -> bool {
+        matches!(self, Edge::Left | Edge::Top)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drop {
+    pub tab: TabId,
+    pub edge: Edge,
+    pub zone: Rect,
+}
+
+pub fn drop_target(tree: &Pane, region: Rect, gap: f64, x: f64, y: f64) -> Option<Drop> {
+    let (tab, r) = layout(tree, region, gap)
+        .into_iter()
+        .find(|(_, r)| x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height)?;
+    if r.width <= 0.0 || r.height <= 0.0 {
+        return None;
+    }
+    let candidates = [
+        ((x - r.x) / r.width, Edge::Left),
+        ((r.x + r.width - x) / r.width, Edge::Right),
+        ((y - r.y) / r.height, Edge::Top),
+        ((r.y + r.height - y) / r.height, Edge::Bottom),
+    ];
+    let edge = candidates
+        .iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, e)| *e)?;
+    let zone = match edge {
+        Edge::Left => Rect::new(r.x, r.y, r.width / 2.0, r.height),
+        Edge::Right => Rect::new(r.x + r.width / 2.0, r.y, r.width / 2.0, r.height),
+        Edge::Top => Rect::new(r.x, r.y, r.width, r.height / 2.0),
+        Edge::Bottom => Rect::new(r.x, r.y + r.height / 2.0, r.width, r.height / 2.0),
+    };
+    Some(Drop { tab, edge, zone })
+}
+
 pub fn ratio_for(axis: Axis, rect: Rect, gap: f64, px: f64, py: f64) -> f64 {
     let raw = match axis {
         Axis::Row => (px - rect.x) / (rect.width - gap),
@@ -318,6 +372,34 @@ mod tests {
         assert_eq!(inner.axis, Axis::Col);
 
         assert!(divider_at(&nested(), region, 8.0, 100.0, 400.0).is_none());
+    }
+
+    #[test]
+    fn drop_target_picks_nearest_edge_with_zone() {
+        let region = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let leaf = Pane::leaf(5);
+        let left = drop_target(&leaf, region, 8.0, 50.0, 400.0).unwrap();
+        assert_eq!(left.tab, 5);
+        assert_eq!(left.edge, Edge::Left);
+        assert_eq!(left.zone, Rect::new(0.0, 0.0, 500.0, 800.0));
+        assert_eq!(drop_target(&leaf, region, 8.0, 950.0, 400.0).unwrap().edge, Edge::Right);
+        assert_eq!(drop_target(&leaf, region, 8.0, 500.0, 40.0).unwrap().edge, Edge::Top);
+        assert_eq!(drop_target(&leaf, region, 8.0, 500.0, 760.0).unwrap().edge, Edge::Bottom);
+    }
+
+    #[test]
+    fn drop_target_resolves_pane_in_split() {
+        let tree = Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.5,
+            a: Box::new(Pane::leaf(1)),
+            b: Box::new(Pane::leaf(2)),
+        };
+        let region = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let d = drop_target(&tree, region, 8.0, 980.0, 400.0).unwrap();
+        assert_eq!(d.tab, 2);
+        assert_eq!(d.edge, Edge::Right);
+        assert!(!d.edge.before());
     }
 
     #[test]

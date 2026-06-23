@@ -163,6 +163,16 @@ impl EngineHost {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_drop_indicator(&mut self, zone: Option<Rect>) {
+        if let Some(stage) = self.ensure_stage() {
+            stage.set_drop_indicator(zone);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn set_drop_indicator(&mut self, _zone: Option<Rect>) {}
+
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn set_content(&mut self, tree: Option<Pane>, region: Option<Rect>) {
         let panes = match (tree, region) {
@@ -190,6 +200,8 @@ impl EngineHost {
         let mtm = MainThreadMarker::new()?;
         let content = content_view(&self.parent)?;
         let stage = ContentStage::new(mtm, GAP);
+        let sink = self.sink.clone();
+        stage.set_on_ratio(Box::new(move |tree| sink.emit(EngineEvent::SplitChanged(tree))));
         content.addSubview(&stage);
         self.stage = Some(stage.clone());
         Some(stage)

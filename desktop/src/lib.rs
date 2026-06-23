@@ -69,6 +69,16 @@ fn sidebar_set_width(coord: State<'_, Coord>, width: f64) {
     coord.set_sidebar_width(width);
 }
 
+#[tauri::command]
+fn tab_drag_over(coord: State<'_, Coord>, x: f64, y: f64) {
+    coord.drag_over(x, y);
+}
+
+#[tauri::command]
+fn tab_drop(coord: State<'_, Coord>, id: u64, x: f64, y: f64) {
+    coord.drop_tab(id, x, y);
+}
+
 #[cfg(target_os = "macos")]
 struct ChromeAdapter {
     dispatch: MainThreadDispatch,
@@ -166,6 +176,8 @@ pub fn run() {
             tabs_split,
             tabs_unsplit,
             sidebar_set_width,
+            tab_drag_over,
+            tab_drop,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");

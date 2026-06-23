@@ -36,3 +36,5 @@ export const forwardActive = onActive(ipc.forward);
 export const split = (other: number) => void ipc.split(other);
 export const unsplit = () => void ipc.unsplit();
 export const setSidebarWidth = (width: number) => void ipc.setSidebarWidth(width);
+export const dragOver = (x: number, y: number) => void ipc.dragOver(x, y);
+export const dropTab = (id: number, x: number, y: number) => void ipc.dropTab(id, x, y);

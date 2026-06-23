@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSView};
+use objc2_app_kit::{NSColor, NSEvent, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
 use zephium_core::geometry::Rect;
@@ -16,6 +16,8 @@ pub struct StageIvars {
     views: RefCell<HashMap<TabId, Retained<NSView>>>,
     gap: Cell<f64>,
     drag: RefCell<Option<Divider>>,
+    indicator: RefCell<Option<Retained<NSView>>>,
+    on_ratio: RefCell<Option<Box<dyn Fn(Pane)>>>,
 }
 
 define_class!(
@@ -26,11 +28,6 @@ define_class!(
     pub struct ContentStage;
 
     impl ContentStage {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool {
-            true
-        }
-
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
             self.position_panes();
@@ -64,7 +61,13 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            *self.ivars().drag.borrow_mut() = None;
+            if self.ivars().drag.borrow_mut().take().is_none() {
+                return;
+            }
+            let tree = self.ivars().tree.borrow().clone();
+            if let (Some(cb), Some(tree)) = (self.ivars().on_ratio.borrow().as_ref(), tree) {
+                cb(tree);
+            }
         }
     }
 );
@@ -83,6 +86,10 @@ impl ContentStage {
         self.position_panes();
     }
 
+    pub fn set_on_ratio(&self, f: Box<dyn Fn(Pane)>) {
+        *self.ivars().on_ratio.borrow_mut() = Some(f);
+    }
+
     pub fn insert_view(&self, id: TabId, view: Retained<NSView>) {
         self.addSubview(&view);
         self.ivars().views.borrow_mut().insert(id, view);
@@ -98,6 +105,43 @@ impl ContentStage {
         for (id, view) in self.ivars().views.borrow().iter() {
             view.setHidden(!visible.contains(id));
         }
+    }
+
+    pub fn set_drop_indicator(&self, zone: Option<Rect>) {
+        let mut indicator = self.ivars().indicator.borrow_mut();
+        match zone {
+            None => {
+                if let Some(view) = indicator.take() {
+                    view.removeFromSuperview();
+                }
+            }
+            Some(z) => {
+                let view = indicator.get_or_insert_with(|| {
+                    let v = self.make_indicator();
+                    self.addSubview(&v);
+                    v
+                });
+                let h = self.bounds().size.height;
+                view.setFrame(NSRect::new(
+                    NSPoint::new(z.x, h - z.y - z.height),
+                    NSSize::new(z.width, z.height),
+                ));
+            }
+        }
+    }
+
+    fn make_indicator(&self) -> Retained<NSView> {
+        let v = NSView::new(self.mtm());
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let fill = NSColor::colorWithWhite_alpha(1.0, 0.12);
+            let border = NSColor::colorWithWhite_alpha(1.0, 0.42);
+            layer.setBackgroundColor(Some(&fill.CGColor()));
+            layer.setBorderColor(Some(&border.CGColor()));
+            layer.setBorderWidth(1.5);
+            layer.setCornerRadius(10.0);
+        }
+        v
     }
 
     fn region(&self) -> Rect {
@@ -123,7 +167,7 @@ impl ContentStage {
         for (id, r) in split::layout(tree, region, ivars.gap.get()) {
             if let Some(view) = views.get(&id) {
                 view.setFrame(NSRect::new(
-                    NSPoint::new(r.x, r.y),
+                    NSPoint::new(r.x, bounds.size.height - r.y - r.height),
                     NSSize::new(r.width, r.height),
                 ));
             }
