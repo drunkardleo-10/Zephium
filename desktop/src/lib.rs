@@ -43,6 +43,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_forward,
             tabs_split,
             tabs_unsplit,
+            run_command,
             sidebar_set_width,
             tab_drag_over,
             tab_drop
@@ -119,6 +120,14 @@ fn tabs_split(shell: State<'_, Handle>, other: String) {
 #[specta::specta]
 fn tabs_unsplit(shell: State<'_, Handle>) {
     shell.dispatch(Command::Unsplit);
+}
+
+#[tauri::command]
+#[specta::specta]
+fn run_command(shell: State<'_, Handle>, id: String) {
+    if zephium_core::commands::get(&id).is_some() {
+        shell.dispatch(Command::Run(id));
+    }
 }
 
 #[tauri::command]
