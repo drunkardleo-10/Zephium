@@ -26,7 +26,7 @@ thread_local! {
 
 const GAP: f64 = 8.0;
 
-const FAVICON_JS: &str = r#"(function(){var links=document.querySelectorAll('link[rel~="icon"]');var best=null,bestSize=0;for(var i=0;i<links.length;i++){var l=links[i];var s=parseInt((l.getAttribute('sizes')||'').split('x')[0],10)||16;if(s>=bestSize){best=l;bestSize=s;}}try{return best?new URL(best.getAttribute('href'),location.href).href:new URL('/favicon.ico',location.origin).href;}catch(e){return ''}})()"#;
+const FAVICON_JS: &str = r#"(function(){var out=[];var links=document.querySelectorAll('link[rel~="icon"]');for(var i=0;i<links.length;i++){var l=links[i];var size=parseInt((l.getAttribute('sizes')||'').split('x')[0],10)||32;try{out.push([Math.abs(size-64),new URL(l.getAttribute('href'),location.href).href])}catch(e){}}out.sort(function(a,b){return a[0]-b[0]});var urls=[];for(var j=0;j<out.length&&urls.length<3;j++){if(urls.indexOf(out[j][1])<0)urls.push(out[j][1])}try{var ico=new URL('/favicon.ico',location.origin).href;if(urls.indexOf(ico)<0)urls.push(ico)}catch(e){}return urls})()"#;
 
 pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + Send + Sync>) {
     HOST.with(|cell| {
@@ -262,18 +262,22 @@ impl EngineHost {
         if let Some(view) = self.views.get(&id) {
             let sink = self.sink.clone();
             let _ = view.evaluate_script_with_callback(FAVICON_JS, move |result| {
-                let Ok(url) = serde_json::from_str::<String>(&result) else {
+                let Ok(urls) = serde_json::from_str::<Vec<String>>(&result) else {
                     return;
                 };
-                // Page-derived string: cap it and require a real http(s) URL.
-                if url.len() > 2048 {
-                    return;
-                }
-                let ok = url::Url::parse(&url)
-                    .map(|u| matches!(u.scheme(), "http" | "https"))
-                    .unwrap_or(false);
-                if ok {
-                    sink.emit(EngineEvent::FaviconChanged { id, url });
+                // Page-derived strings: cap and require real http(s) URLs.
+                let urls: Vec<String> = urls
+                    .into_iter()
+                    .take(4)
+                    .filter(|u| u.len() <= 2048)
+                    .filter(|u| {
+                        url::Url::parse(u)
+                            .map(|u| matches!(u.scheme(), "http" | "https"))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if !urls.is_empty() {
+                    sink.emit(EngineEvent::FaviconChanged { id, urls });
                 }
             });
         }

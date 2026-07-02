@@ -103,7 +103,7 @@ pub enum EngineEvent {
     },
     FaviconChanged {
         id: ItemId,
-        url: String,
+        urls: Vec<String>,
     },
     NavState {
         id: ItemId,

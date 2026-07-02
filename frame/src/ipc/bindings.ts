@@ -48,6 +48,7 @@ export type SearchResult = {
 	kind: string,
 	title: string,
 	detail: string,
+	favicon: string | null,
 	action: SearchAction,
 };
 

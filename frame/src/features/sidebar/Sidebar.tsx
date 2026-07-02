@@ -1,6 +1,7 @@
-import { For, Show, createEffect, createSignal, on, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, type JSX } from "solid-js";
 import * as tabs from "../../state/tabs";
 import * as ui from "../../state/ui";
+import { FavIcon } from "../../ui/FavIcon";
 
 function host(url: string | null | undefined): string {
   if (!url) return "";
@@ -226,39 +227,6 @@ export function Sidebar() {
         )}
       </Show>
     </aside>
-  );
-}
-
-function iconUrl(key: string): string {
-  const hash = key.lastIndexOf("#");
-  const version = hash === -1 ? "" : `?v=${key.slice(hash + 1)}`;
-  const base = hash === -1 ? key : key.slice(0, hash);
-  const slash = base.indexOf("/");
-  const profile = base.slice(0, slash);
-  const origin = encodeURIComponent(base.slice(slash + 1));
-  return `zicon://localhost/${profile}/${origin}${version}`;
-}
-
-function FavIcon(props: { favicon: string | null; loading: boolean }) {
-  const [failed, setFailed] = createSignal(false);
-  createEffect(on(() => props.favicon, () => setFailed(false)));
-  return (
-    <Show
-      when={props.favicon && !failed() && !props.loading}
-      fallback={
-        <span
-          class="h-3.5 w-3.5 shrink-0 rounded-full bg-faint/40"
-          classList={{ "animate-pulse bg-accent/70": props.loading }}
-        />
-      }
-    >
-      <img
-        src={iconUrl(props.favicon!)}
-        onError={() => setFailed(true)}
-        class="h-3.5 w-3.5 shrink-0 rounded"
-        alt=""
-      />
-    </Show>
   );
 }
 

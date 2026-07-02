@@ -35,6 +35,7 @@ pub struct SearchResult {
     pub kind: String,
     pub title: String,
     pub detail: String,
+    pub favicon: Option<String>,
     pub action: SearchAction,
 }
 

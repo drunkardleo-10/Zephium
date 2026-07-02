@@ -2,6 +2,7 @@ import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { commands, events } from "../../ipc/bindings";
 import type { SearchResult } from "../../ipc/bindings";
+import { FavIcon } from "../../ui/FavIcon";
 
 const KIND_LABEL: Record<string, string> = {
   tab: "Tab",
@@ -9,6 +10,12 @@ const KIND_LABEL: Record<string, string> = {
   search: "Search",
   command: "Command",
   history: "History",
+};
+
+const KIND_GLYPH: Record<string, string> = {
+  search: "?",
+  command: ">",
+  url: "@",
 };
 
 function accel(detail: string): string {
@@ -98,7 +105,19 @@ export function Launcher() {
               class="flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left"
               classList={{ "bg-white/10": index() === selected() }}
             >
-              <span class="w-16 shrink-0 text-[10px] uppercase tracking-wide text-faint">
+              <span class="flex h-5 w-5 shrink-0 items-center justify-center">
+                <Show
+                  when={result.favicon}
+                  fallback={
+                    <span class="text-[12px] text-faint">
+                      {KIND_GLYPH[result.kind] ?? ""}
+                    </span>
+                  }
+                >
+                  <FavIcon favicon={result.favicon} />
+                </Show>
+              </span>
+              <span class="w-14 shrink-0 text-[10px] uppercase tracking-wide text-faint">
                 {KIND_LABEL[result.kind] ?? result.kind}
               </span>
               <span class="min-w-0 flex-1 truncate text-[13.5px] text-text">
