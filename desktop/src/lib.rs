@@ -304,7 +304,7 @@ fn zicon_response(
     let not_found = || {
         Response::builder()
             .status(404)
-            .header("Cache-Control", "max-age=3600")
+            .header("Cache-Control", "no-store")
             .body(std::borrow::Cow::Borrowed(&[][..]))
             .expect("static response")
     };

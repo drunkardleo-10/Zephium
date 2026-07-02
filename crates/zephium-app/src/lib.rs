@@ -108,6 +108,8 @@ pub struct Shell {
     windows: Windows,
     pending_size: Size,
     icons_checked: std::collections::HashSet<(ProfileId, String)>,
+    icon_versions: std::collections::HashMap<(ProfileId, String), u32>,
+    icon_epoch: u32,
     self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
@@ -131,6 +133,8 @@ impl Shell {
             windows: Windows::default(),
             pending_size: Size::default(),
             icons_checked: std::collections::HashSet::new(),
+            icon_versions: std::collections::HashMap::new(),
+            icon_epoch: 0,
             self_tx: None,
             engine,
             store,
@@ -199,6 +203,13 @@ impl Shell {
     }
 
     fn bootstrap(&mut self) {
+        // The chrome re-invokes bootstrap whenever its webview reloads (dev
+        // HMR, crash recovery); state and native surfaces must not be rebuilt.
+        if self.windows.focused().is_some() {
+            self.relayout();
+            self.project_items();
+            return;
+        }
         let mut active_item = None;
         let mut active_space = None;
         let mut splits = None;
@@ -685,7 +696,10 @@ impl Shell {
             return;
         }
         self.store
-            .save_favicon(profile, origin, content_type, bytes);
+            .save_favicon(profile, origin.clone(), content_type, bytes);
+        self.icon_epoch += 1;
+        self.icon_versions
+            .insert((profile, origin), self.icon_epoch);
         self.project_items();
     }
 
@@ -835,7 +849,11 @@ impl Shell {
         let tabs = self
             .today_tabs(win.space)
             .into_iter()
-            .filter_map(|id| self.items.tab(id).map(|t| tab_view(id, t, Some(profile))))
+            .filter_map(|id| {
+                self.items
+                    .tab(id)
+                    .map(|t| tab_view(id, t, self.favicon_key(t, Some(profile))))
+            })
             .collect();
         (self.emit)(Projection::Items(ItemsState {
             tabs,
@@ -846,7 +864,22 @@ impl Shell {
     fn project_tab(&self, id: ItemId) {
         let profile = self.profile_of_item(id);
         if let Some(tab) = self.items.tab(id) {
-            (self.emit)(Projection::Tab(tab_view(id, tab, profile)));
+            (self.emit)(Projection::Tab(tab_view(
+                id,
+                tab,
+                self.favicon_key(tab, profile),
+            )));
+        }
+    }
+
+    // Versioned per session-fetch so a cached 404 in the chrome never masks a
+    // freshly stored icon.
+    fn favicon_key(&self, tab: &TabState, profile: Option<ProfileId>) -> Option<String> {
+        let profile = profile?;
+        let origin = tab.url.as_ref().and_then(origin_of)?;
+        match self.icon_versions.get(&(profile, origin.clone())) {
+            Some(v) => Some(format!("{profile}/{origin}#{v}")),
+            None => Some(format!("{profile}/{origin}")),
         }
     }
 }
@@ -865,11 +898,7 @@ fn tab_result(id: ItemId, tab: &TabState) -> SearchResult {
     }
 }
 
-fn tab_view(id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
-    let favicon = match (profile, tab.url.as_ref().and_then(origin_of)) {
-        (Some(p), Some(origin)) => Some(format!("{p}/{origin}")),
-        _ => None,
-    };
+fn tab_view(id: ItemId, tab: &TabState, favicon: Option<String>) -> TabView {
     TabView {
         id: id.to_string(),
         title: tab.title.clone(),
@@ -927,7 +956,11 @@ mod tests {
                 .unwrap()
                 .iter()
                 .rev()
-                .find_map(|c| c.strip_prefix("layout "))
+                .find_map(|c| {
+                    c.split_once(' ')
+                        .filter(|(head, _)| head.starts_with("layout@"))
+                        .map(|(_, rest)| rest)
+                })
                 .map(|s| {
                     s.split(',')
                         .filter(|x| !x.is_empty())
@@ -957,12 +990,12 @@ mod tests {
         fn close(&self, id: ItemId) {
             self.log(format!("close {id}"));
         }
-        fn set_content(&self, _window: WindowId, tree: Option<Pane>, region: Option<Rect>) {
+        fn set_content(&self, window: WindowId, tree: Option<Pane>, region: Option<Rect>) {
             let ids: Vec<String> = match (tree, region) {
                 (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
                 _ => Vec::new(),
             };
-            self.log(format!("layout {}", ids.join(",")));
+            self.log(format!("layout@{window} {}", ids.join(",")));
         }
         fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) {}
         fn zoom(&self, id: ItemId, scale: f64) {
@@ -1378,6 +1411,29 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_is_idempotent_across_chrome_reloads() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+
+        // chrome webview reloaded (dev HMR): same window, same stage, state kept
+        shell.handle(Command::Bootstrap);
+        assert_eq!(active_id(&screen), first);
+        let windows: std::collections::HashSet<String> = engine
+            .calls()
+            .iter()
+            .filter_map(|c| c.split(' ').next().map(String::from))
+            .filter(|c| c.starts_with("layout@"))
+            .collect();
+        assert_eq!(windows.len(), 1, "one window, one stage: {windows:?}");
+        assert_eq!(last(&screen).tabs.len(), 1);
+    }
+
+    #[test]
     fn favicon_pipeline_discovers_fetches_and_caches_once() {
         let engine = Arc::new(FakeEngine::default());
         let store = Arc::new(FakeStore::default());
@@ -1444,8 +1500,14 @@ mod tests {
             1
         );
 
+        // stored icon bumps the key so the chrome reloads the img url
         let tab = last(&screen).tabs.into_iter().next().unwrap();
-        assert!(tab.favicon.unwrap().ends_with("/https://example.com"));
+        let favicon = tab.favicon.unwrap();
+        assert!(
+            favicon.ends_with("/https://example.com#1"),
+            "got {favicon}; versions={:?}",
+            shell.icon_versions
+        );
     }
 
     #[test]
