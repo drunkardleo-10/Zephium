@@ -1,6 +1,13 @@
 use crate::ids::ProfileId;
 use crate::session::SessionState;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryHit {
+    pub url: String,
+    pub title: String,
+    pub last_visit: i64,
+}
+
 pub trait Store {
     fn save_session(&self, session: SessionState);
     fn load_session(&self) -> Option<SessionState>;
@@ -10,4 +17,7 @@ pub trait Store {
     /// App-level settings (keymap, launcher prefs) live outside profiles.
     fn app_setting(&self, key: &str) -> Option<String>;
     fn set_app_setting(&self, key: String, value: String);
+    /// Prefix search over the profile's history FTS index, deduped by url,
+    /// most recent first.
+    fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
 }

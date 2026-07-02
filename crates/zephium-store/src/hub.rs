@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_core::item::{Placement, SpaceSection};
+use zephium_core::ports::store::HistoryHit;
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
     PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
@@ -434,6 +435,42 @@ impl Hub {
         }
     }
 
+    pub fn search_history(
+        &mut self,
+        profile: ProfileId,
+        query: &str,
+        limit: u32,
+    ) -> Vec<HistoryHit> {
+        if !self.registry.contains(&profile) {
+            return Vec::new();
+        }
+        let Some(fts) = fts_query(query) else {
+            return Vec::new();
+        };
+        let Ok(conn) = self.profile_conn(profile) else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT h.url, h.title, MAX(h.visited_at) AS last
+             FROM history_fts f JOIN history h ON h.id = f.rowid
+             WHERE history_fts MATCH ?1
+             GROUP BY h.url
+             ORDER BY last DESC
+             LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![fts, limit], |r| {
+            Ok(HistoryHit {
+                url: r.get(0)?,
+                title: r.get(1)?,
+                last_visit: r.get(2)?,
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+    }
+
     pub fn app_setting(&mut self, key: &str) -> Option<String> {
         self.meta
             .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
@@ -537,6 +574,22 @@ fn kind_from_str(s: &str) -> Option<ProfileKind> {
         "default" => Some(ProfileKind::Default),
         "named" => Some(ProfileKind::Named),
         _ => None,
+    }
+}
+
+/// Tokenized prefix query; every token is quoted so user input can never be
+/// FTS5 syntax.
+fn fts_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .take(8)
+        .map(|t| format!("\"{}\"*", t.replace('"', "")))
+        .filter(|t| t.len() > 3)
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
     }
 }
 

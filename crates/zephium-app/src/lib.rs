@@ -745,6 +745,14 @@ mod tests {
             None
         }
         fn set_app_setting(&self, _key: String, _value: String) {}
+        fn search_history(
+            &self,
+            _profile: ProfileId,
+            _query: &str,
+            _limit: u32,
+        ) -> Vec<zephium_core::ports::store::HistoryHit> {
+            Vec::new()
+        }
     }
 
     struct FakeChrome;

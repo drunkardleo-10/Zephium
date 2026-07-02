@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use zephium_core::ids::ProfileId;
-use zephium_core::ports::store::Store;
+use zephium_core::ports::store::{HistoryHit, Store};
 use zephium_core::session::SessionState;
 
 use hub::Hub;
@@ -33,6 +33,7 @@ enum Cmd {
     },
     GetSetting(String, Sender<Option<String>>),
     SetSetting(String, String),
+    SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     Flush(Sender<()>),
 }
 
@@ -89,6 +90,18 @@ impl Store for SqliteStore {
     fn set_app_setting(&self, key: String, value: String) {
         let _ = self.tx.send(Cmd::SetSetting(key, value));
     }
+
+    fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit> {
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .send(Cmd::SearchHistory(profile, query.into(), limit, tx))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.recv().unwrap_or_default()
+    }
 }
 
 impl Drop for SqliteStore {
@@ -138,6 +151,9 @@ fn actor(mut hub: Hub, rx: Receiver<Cmd>) {
                 let _ = reply.send(hub.app_setting(&key));
             }
             Some(Cmd::SetSetting(key, value)) => hub.set_app_setting(&key, &value),
+            Some(Cmd::SearchHistory(profile, query, limit, reply)) => {
+                let _ = reply.send(hub.search_history(profile, &query, limit));
+            }
             Some(Cmd::Flush(ack)) => {
                 flush(&mut hub, &mut pending);
                 let _ = ack.send(());
@@ -284,6 +300,30 @@ mod tests {
         assert_eq!(hub.history_count(known), 1);
         assert_eq!(hub.history_matches(known, "hacker"), 1);
         assert_eq!(hub.history_count(unknown), 0);
+    }
+
+    #[test]
+    fn history_search_prefix_dedupes_and_ranks_recent() {
+        let mut hub = Hub::in_memory().unwrap();
+        hub.save(&sample()).unwrap();
+        let profile = ProfileId::from(1);
+        hub.record_visit(profile, "https://news.ycombinator.com/", "Hacker News");
+        hub.record_visit(profile, "https://news.ycombinator.com/", "Hacker News");
+        hub.record_visit(profile, "https://example.com/", "Example");
+
+        let hits = hub.search_history(profile, "hack", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://news.ycombinator.com/");
+
+        assert!(hub.search_history(profile, "zzz", 10).is_empty());
+        assert!(hub.search_history(profile, "  ", 10).is_empty());
+        assert!(hub
+            .search_history(ProfileId::from(99), "hack", 10)
+            .is_empty());
+        // FTS5 syntax in user input must not error
+        assert!(hub
+            .search_history(profile, "\"unbalanced OR (", 10)
+            .is_empty());
     }
 
     #[test]
