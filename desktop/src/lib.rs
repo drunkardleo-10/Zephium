@@ -230,7 +230,7 @@ pub fn run() {
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let store = SqliteStore::open(data_dir.join("default.sqlite"))?;
+            let store = SqliteStore::open(&data_dir)?;
 
             let emit_handle = handle.clone();
             let emit: EmitFn = Box::new(move |snapshot| {

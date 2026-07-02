@@ -365,15 +365,31 @@ impl Shell {
             }
             EngineEvent::UrlChanged { id, url } => {
                 self.items.set_committed_url_str(id, &url);
-                let title = self
-                    .items
-                    .tab(id)
-                    .map(|t| t.title.clone())
-                    .unwrap_or_default();
-                self.store.record_visit(url, title);
+                // History is attributed to the profile that owns the item,
+                // not the focused window; incognito profiles never record.
+                let recording = self.profile_of_item(id).filter(|p| {
+                    self.profiles
+                        .get(*p)
+                        .is_some_and(|x| x.kind != ProfileKind::Incognito)
+                });
+                if let Some(profile) = recording {
+                    let title = self
+                        .items
+                        .tab(id)
+                        .map(|t| t.title.clone())
+                        .unwrap_or_default();
+                    self.store.record_visit(profile, url, title);
+                }
                 self.persist();
                 self.project();
             }
+        }
+    }
+
+    fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
+        match self.items.get(id)?.placement {
+            Placement::Favorites { profile } => Some(profile),
+            Placement::Space { space, .. } => self.spaces.get(space).map(|s| s.profile),
         }
     }
 
@@ -557,7 +573,7 @@ mod tests {
         fn load_session(&self) -> Option<SessionState> {
             self.saved.lock().unwrap().clone()
         }
-        fn record_visit(&self, _url: String, _title: String) {}
+        fn record_visit(&self, _profile: ProfileId, _url: String, _title: String) {}
     }
 
     struct FakeChrome;

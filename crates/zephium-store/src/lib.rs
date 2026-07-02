@@ -1,28 +1,37 @@
-//! Per-profile SQLite behind a storage actor: `rusqlite` is blocking, so a
-//! dedicated thread owns the connection and serializes access. Writes are
-//! fire-and-forget; reads block on a reply channel.
+//! Storage actor over the per-profile SQLite hub. `rusqlite` is blocking, so
+//! one dedicated thread owns every connection and serializes access. Session
+//! saves are coalesced (latest wins) so navigation bursts cost one write, not
+//! one per event; visits and loads are immediate. Loads and shutdown flush
+//! pending state first.
+
+mod hub;
+mod legacy;
+mod migrations;
+mod pane;
 
 use std::path::Path;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
-
-use zephium_core::ids::{ItemId, ProfileId, SpaceId};
-use zephium_core::item::{Placement, SpaceSection};
+use zephium_core::ids::ProfileId;
 use zephium_core::ports::store::Store;
-use zephium_core::profiles::ProfileKind;
-use zephium_core::session::{
-    PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
-};
-use zephium_core::split::{Axis, Pane};
+use zephium_core::session::SessionState;
+
+use hub::Hub;
+
+const DEBOUNCE: Duration = Duration::from_millis(400);
+const MAX_PENDING_AGE: Duration = Duration::from_secs(2);
 
 enum Cmd {
-    SaveSession(SessionState),
-    LoadSession(Sender<Option<SessionState>>),
-    RecordVisit { url: String, title: String },
+    Save(SessionState),
+    Load(Sender<Option<SessionState>>),
+    Visit {
+        profile: ProfileId,
+        url: String,
+        title: String,
+    },
+    Flush(Sender<()>),
 }
 
 pub struct SqliteStore {
@@ -30,391 +39,135 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Self::spawn(Connection::open(path)?)
+    /// `dir` is the app data directory; the hub lays out `meta.sqlite` plus
+    /// one `profile-<ulid>.sqlite` per profile inside it.
+    pub fn open(dir: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        Self::spawn(Hub::open(dir.as_ref().to_path_buf())?)
     }
 
     pub fn in_memory() -> rusqlite::Result<Self> {
-        Self::spawn(Connection::open_in_memory()?)
+        Self::spawn(Hub::in_memory()?)
     }
 
-    fn spawn(conn: Connection) -> rusqlite::Result<Self> {
-        init(&conn)?;
+    fn spawn(hub: Hub) -> rusqlite::Result<Self> {
         let (tx, rx) = mpsc::channel::<Cmd>();
-        thread::spawn(move || {
-            for cmd in rx {
-                let _ = match cmd {
-                    Cmd::SaveSession(session) => save_session(&conn, &session),
-                    Cmd::LoadSession(reply) => {
-                        let _ = reply.send(load_session(&conn).ok().flatten());
-                        Ok(())
-                    }
-                    Cmd::RecordVisit { url, title } => record_visit(&conn, &url, &title),
-                };
-            }
-        });
+        thread::Builder::new()
+            .name("zephium-store".into())
+            .spawn(move || actor(hub, rx))
+            .expect("spawn store thread");
         Ok(Self { tx })
     }
 }
 
 impl Store for SqliteStore {
     fn save_session(&self, session: SessionState) {
-        let _ = self.tx.send(Cmd::SaveSession(session));
+        let _ = self.tx.send(Cmd::Save(session));
     }
 
     fn load_session(&self) -> Option<SessionState> {
         let (tx, rx) = mpsc::channel();
-        self.tx.send(Cmd::LoadSession(tx)).ok()?;
+        self.tx.send(Cmd::Load(tx)).ok()?;
         rx.recv().ok().flatten()
     }
 
-    fn record_visit(&self, url: String, title: String) {
-        let _ = self.tx.send(Cmd::RecordVisit { url, title });
-    }
-}
-
-fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
-    )?;
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version < 1 {
-        conn.execute_batch(
-            "CREATE TABLE session (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL);
-             CREATE TABLE history (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 url TEXT NOT NULL,
-                 title TEXT NOT NULL,
-                 visited_at INTEGER NOT NULL
-             );
-             CREATE INDEX idx_history_visited_at ON history(visited_at);
-             PRAGMA user_version = 1;",
-        )?;
-    }
-    Ok(())
-}
-
-// The stored mirror of `SessionState`: ids as ULID strings, enums as tags.
-// The core stays serde-free; validation happens on decode (store data is
-// semi-trusted input).
-
-#[derive(Serialize, Deserialize)]
-struct StoredSession {
-    v: u32,
-    profiles: Vec<StoredProfile>,
-    spaces: Vec<StoredSpace>,
-    items: Vec<StoredItem>,
-    active_space: Option<String>,
-    active_item: Option<String>,
-    splits: Option<StoredPane>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredProfile {
-    id: String,
-    name: String,
-    kind: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredSpace {
-    id: String,
-    profile: String,
-    name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredItem {
-    id: String,
-    parent: Option<String>,
-    profile: Option<String>,
-    space: Option<String>,
-    section: Option<String>,
-    folder: Option<String>,
-    url: Option<String>,
-    title: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum StoredPane {
-    Leaf {
-        leaf: String,
-    },
-    Branch {
-        axis: String,
-        ratio: f64,
-        a: Box<StoredPane>,
-        b: Box<StoredPane>,
-    },
-}
-
-#[derive(Deserialize)]
-struct LegacySession {
-    tabs: Vec<LegacyTab>,
-    active: usize,
-}
-
-#[derive(Deserialize)]
-struct LegacyTab {
-    url: String,
-    title: String,
-}
-
-fn encode(session: &SessionState) -> StoredSession {
-    StoredSession {
-        v: 2,
-        profiles: session
-            .profiles
-            .iter()
-            .map(|p| StoredProfile {
-                id: p.id.to_string(),
-                name: p.name.clone(),
-                kind: match p.kind {
-                    ProfileKind::Default => "default".into(),
-                    ProfileKind::Named => "named".into(),
-                    ProfileKind::Incognito => "incognito".into(),
-                },
-            })
-            .collect(),
-        spaces: session
-            .spaces
-            .iter()
-            .map(|s| StoredSpace {
-                id: s.id.to_string(),
-                profile: s.profile.to_string(),
-                name: s.name.clone(),
-            })
-            .collect(),
-        items: session.items.iter().map(encode_item).collect(),
-        active_space: session.active_space.map(|s| s.to_string()),
-        active_item: session.active_item.map(|i| i.to_string()),
-        splits: session.splits.as_ref().map(encode_pane),
-    }
-}
-
-fn encode_item(item: &PersistedItem) -> StoredItem {
-    let (profile, space, section) = match item.placement {
-        Placement::Favorites { profile } => (Some(profile.to_string()), None, None),
-        Placement::Space { space, section } => (
-            None,
-            Some(space.to_string()),
-            Some(
-                match section {
-                    SpaceSection::Pinned => "pinned",
-                    SpaceSection::Today => "today",
-                }
-                .into(),
-            ),
-        ),
-    };
-    let (folder, url, title) = match &item.kind {
-        PersistedKind::Folder { name } => (Some(name.clone()), None, None),
-        PersistedKind::Tab { url, title } => (None, Some(url.clone()), Some(title.clone())),
-    };
-    StoredItem {
-        id: item.id.to_string(),
-        parent: item.parent.map(|p| p.to_string()),
-        profile,
-        space,
-        section,
-        folder,
-        url,
-        title,
-    }
-}
-
-fn encode_pane(pane: &Pane) -> StoredPane {
-    match pane {
-        Pane::Leaf(id) => StoredPane::Leaf {
-            leaf: id.to_string(),
-        },
-        Pane::Branch { axis, ratio, a, b } => StoredPane::Branch {
-            axis: match axis {
-                Axis::Row => "row".into(),
-                Axis::Col => "col".into(),
-            },
-            ratio: *ratio,
-            a: Box::new(encode_pane(a)),
-            b: Box::new(encode_pane(b)),
-        },
-    }
-}
-
-fn decode(json: &str) -> Option<SessionState> {
-    if let Ok(stored) = serde_json::from_str::<StoredSession>(json) {
-        return Some(decode_stored(stored));
-    }
-    serde_json::from_str::<LegacySession>(json)
-        .ok()
-        .map(decode_legacy)
-}
-
-fn decode_stored(stored: StoredSession) -> SessionState {
-    let profiles = stored
-        .profiles
-        .into_iter()
-        .filter_map(|p| {
-            Some(PersistedProfile {
-                id: ProfileId::parse(&p.id)?,
-                name: p.name,
-                kind: match p.kind.as_str() {
-                    "default" => ProfileKind::Default,
-                    "named" => ProfileKind::Named,
-                    _ => return None,
-                },
-            })
-        })
-        .collect();
-    let spaces = stored
-        .spaces
-        .into_iter()
-        .filter_map(|s| {
-            Some(PersistedSpace {
-                id: SpaceId::parse(&s.id)?,
-                profile: ProfileId::parse(&s.profile)?,
-                name: s.name,
-            })
-        })
-        .collect();
-    let items = stored.items.into_iter().filter_map(decode_item).collect();
-    SessionState {
-        profiles,
-        spaces,
-        items,
-        active_space: stored.active_space.and_then(|s| SpaceId::parse(&s)),
-        active_item: stored.active_item.and_then(|s| ItemId::parse(&s)),
-        splits: stored.splits.and_then(|p| decode_pane(&p)),
-    }
-}
-
-fn decode_item(item: StoredItem) -> Option<PersistedItem> {
-    let placement = match (&item.profile, &item.space, &item.section) {
-        (Some(profile), None, None) => Placement::Favorites {
-            profile: ProfileId::parse(profile)?,
-        },
-        (None, Some(space), Some(section)) => Placement::Space {
-            space: SpaceId::parse(space)?,
-            section: match section.as_str() {
-                "pinned" => SpaceSection::Pinned,
-                "today" => SpaceSection::Today,
-                _ => return None,
-            },
-        },
-        _ => return None,
-    };
-    let kind = match (item.folder, item.url) {
-        (Some(name), None) => PersistedKind::Folder { name },
-        (None, Some(url)) => PersistedKind::Tab {
+    fn record_visit(&self, profile: ProfileId, url: String, title: String) {
+        let _ = self.tx.send(Cmd::Visit {
+            profile,
             url,
-            title: item.title.unwrap_or_default(),
-        },
-        _ => return None,
-    };
-    let parent = match item.parent {
-        Some(p) => Some(ItemId::parse(&p)?),
-        None => None,
-    };
-    Some(PersistedItem {
-        id: ItemId::parse(&item.id)?,
-        parent,
-        placement,
-        kind,
-    })
-}
-
-fn decode_pane(pane: &StoredPane) -> Option<Pane> {
-    match pane {
-        StoredPane::Leaf { leaf } => ItemId::parse(leaf).map(Pane::Leaf),
-        StoredPane::Branch { axis, ratio, a, b } => Some(Pane::Branch {
-            axis: match axis.as_str() {
-                "row" => Axis::Row,
-                "col" => Axis::Col,
-                _ => return None,
-            },
-            ratio: *ratio,
-            a: Box::new(decode_pane(a)?),
-            b: Box::new(decode_pane(b)?),
-        }),
+            title,
+        });
     }
 }
 
-/// Pre-item-tree sessions (v1 blob) get a minted default profile/space and
-/// their flat tabs become Today items, so existing sessions survive.
-fn decode_legacy(legacy: LegacySession) -> SessionState {
-    let profile = ProfileId::generate();
-    let space = SpaceId::generate();
-    let items: Vec<PersistedItem> = legacy
-        .tabs
-        .into_iter()
-        .map(|t| PersistedItem {
-            id: ItemId::generate(),
+impl Drop for SqliteStore {
+    fn drop(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.send(Cmd::Flush(tx)).is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(1));
+        }
+    }
+}
+
+fn actor(mut hub: Hub, rx: Receiver<Cmd>) {
+    let mut pending: Option<(SessionState, Instant)> = None;
+    loop {
+        let cmd = if pending.is_some() {
+            match rx.recv_timeout(DEBOUNCE) {
+                Ok(cmd) => Some(cmd),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(cmd) => Some(cmd),
+                Err(_) => break,
+            }
+        };
+        match cmd {
+            None => flush(&mut hub, &mut pending),
+            Some(Cmd::Save(state)) => {
+                let since = pending.take().map(|(_, t)| t).unwrap_or_else(Instant::now);
+                pending = Some((state, since));
+                // A steady save stream must not starve persistence forever.
+                if since.elapsed() >= MAX_PENDING_AGE {
+                    flush(&mut hub, &mut pending);
+                }
+            }
+            Some(Cmd::Load(reply)) => {
+                flush(&mut hub, &mut pending);
+                let _ = reply.send(hub.load());
+            }
+            Some(Cmd::Visit {
+                profile,
+                url,
+                title,
+            }) => hub.record_visit(profile, &url, &title),
+            Some(Cmd::Flush(ack)) => {
+                flush(&mut hub, &mut pending);
+                let _ = ack.send(());
+            }
+        }
+    }
+    flush(&mut hub, &mut pending);
+}
+
+fn flush(hub: &mut Hub, pending: &mut Option<(SessionState, Instant)>) {
+    if let Some((state, _)) = pending.take() {
+        if let Err(e) = hub.save(&state) {
+            eprintln!("store: save failed: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use zephium_core::ids::{ItemId, SpaceId};
+    use zephium_core::item::{Placement, SpaceSection};
+    use zephium_core::profiles::ProfileKind;
+    use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
+    use zephium_core::split::{Axis, Pane};
+
+    fn tab(id: u128, space: SpaceId, url: &str) -> PersistedItem {
+        PersistedItem {
+            id: ItemId::from(id),
             parent: None,
             placement: Placement::Space {
                 space,
                 section: SpaceSection::Today,
             },
             kind: PersistedKind::Tab {
-                url: t.url,
-                title: t.title,
+                url: url.into(),
+                title: "T".into(),
             },
-        })
-        .collect();
-    let active_item = items.get(legacy.active).or(items.first()).map(|i| i.id);
-    SessionState {
-        profiles: vec![PersistedProfile {
-            id: profile,
-            name: "Personal".into(),
-            kind: ProfileKind::Default,
-        }],
-        spaces: vec![PersistedSpace {
-            id: space,
-            profile,
-            name: "Space".into(),
-        }],
-        items,
-        active_space: Some(space),
-        active_item,
-        splits: None,
+        }
     }
-}
-
-fn save_session(conn: &Connection, session: &SessionState) -> rusqlite::Result<()> {
-    let json = serde_json::to_string(&encode(session)).unwrap_or_default();
-    conn.execute(
-        "INSERT INTO session(id, data) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET data = ?1",
-        [json],
-    )?;
-    Ok(())
-}
-
-fn load_session(conn: &Connection) -> rusqlite::Result<Option<SessionState>> {
-    let json: Option<String> = conn
-        .query_row("SELECT data FROM session WHERE id = 1", [], |r| r.get(0))
-        .optional()?;
-    Ok(json.and_then(|j| decode(&j)))
-}
-
-fn record_visit(conn: &Connection, url: &str, title: &str) -> rusqlite::Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    conn.execute(
-        "INSERT INTO history(url, title, visited_at) VALUES(?1, ?2, ?3)",
-        params![url, title, now],
-    )?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     fn sample() -> SessionState {
         let profile = ProfileId::from(1);
         let space = SpaceId::from(2);
-        let (a, b) = (ItemId::from(10), ItemId::from(11));
+        let folder = ItemId::from(20);
         SessionState {
             profiles: vec![PersistedProfile {
                 id: profile,
@@ -428,82 +181,139 @@ mod tests {
             }],
             items: vec![
                 PersistedItem {
-                    id: a,
+                    id: folder,
                     parent: None,
                     placement: Placement::Space {
                         space,
-                        section: SpaceSection::Today,
+                        section: SpaceSection::Pinned,
                     },
-                    kind: PersistedKind::Tab {
-                        url: "https://example.com/".into(),
-                        title: "Example".into(),
+                    kind: PersistedKind::Folder {
+                        name: "Work".into(),
                     },
                 },
                 PersistedItem {
-                    id: b,
-                    parent: None,
+                    id: ItemId::from(21),
+                    parent: Some(folder),
                     placement: Placement::Space {
                         space,
-                        section: SpaceSection::Today,
+                        section: SpaceSection::Pinned,
                     },
                     kind: PersistedKind::Tab {
-                        url: "https://github.com/".into(),
-                        title: "GitHub".into(),
+                        url: "https://docs.rs/".into(),
+                        title: "Docs".into(),
                     },
                 },
+                tab(10, space, "https://example.com/"),
+                tab(11, space, "https://github.com/"),
             ],
             active_space: Some(space),
-            active_item: Some(b),
+            active_item: Some(ItemId::from(11)),
             splits: Some(Pane::Branch {
                 axis: Axis::Row,
-                ratio: 0.5,
-                a: Box::new(Pane::Leaf(a)),
-                b: Box::new(Pane::Leaf(b)),
+                ratio: 0.4,
+                a: Box::new(Pane::Leaf(ItemId::from(10))),
+                b: Box::new(Pane::Leaf(ItemId::from(11))),
             }),
         }
     }
 
     #[test]
-    fn session_roundtrips_with_tree_and_splits() {
+    fn roundtrip_tree_folders_focus_and_splits() {
         let store = SqliteStore::in_memory().unwrap();
         assert!(store.load_session().is_none());
-
         let session = sample();
         store.save_session(session.clone());
-
-        let loaded = store.load_session().unwrap();
-        assert_eq!(loaded, session);
+        assert_eq!(store.load_session().unwrap(), session);
     }
 
     #[test]
-    fn legacy_v1_blob_converts_to_item_tree() {
-        let json = r#"{"tabs":[{"url":"https://example.com/","title":"Example"},
-                       {"url":"https://github.com/","title":"GitHub"}],"active":1}"#;
-        let session = decode(json).unwrap();
-        assert_eq!(session.profiles.len(), 1);
-        assert_eq!(session.spaces.len(), 1);
-        assert_eq!(session.items.len(), 2);
-        assert_eq!(session.active_item, Some(session.items[1].id));
-        match &session.items[1].kind {
-            PersistedKind::Tab { url, .. } => assert_eq!(url, "https://github.com/"),
-            _ => panic!("expected tab"),
-        }
-    }
-
-    #[test]
-    fn corrupt_rows_are_dropped_not_fatal() {
-        let json = r#"{"v":2,
-            "profiles":[{"id":"not-a-ulid","name":"X","kind":"default"}],
-            "spaces":[],"items":[],"active_space":null,"active_item":null,"splits":null}"#;
-        let session = decode(json).unwrap();
-        assert!(session.profiles.is_empty());
-    }
-
-    #[test]
-    fn record_visit_does_not_error() {
+    fn debounce_coalesces_latest_wins() {
         let store = SqliteStore::in_memory().unwrap();
-        store.record_visit("https://x.com/".into(), "X".into());
-        store.save_session(SessionState::default());
-        assert!(store.load_session().is_some());
+        let mut second = sample();
+        second.active_item = Some(ItemId::from(10));
+        store.save_session(sample());
+        store.save_session(second.clone());
+        // load flushes the pending write, so it must observe the LAST save
+        assert_eq!(store.load_session().unwrap(), second);
+    }
+
+    #[test]
+    fn reopen_from_disk_survives_process_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = sample();
+        {
+            let store = SqliteStore::open(dir.path()).unwrap();
+            store.save_session(session.clone());
+            // Drop flushes pending state before the thread goes away.
+        }
+        let store = SqliteStore::open(dir.path()).unwrap();
+        assert_eq!(store.load_session().unwrap(), session);
+        assert!(dir.path().join("meta.sqlite").exists());
+        assert!(dir
+            .path()
+            .join(format!("profile-{}.sqlite", ProfileId::from(1)))
+            .exists());
+    }
+
+    #[test]
+    fn visits_index_into_fts_and_unknown_profiles_are_ignored() {
+        let mut hub = Hub::in_memory().unwrap();
+        hub.save(&sample()).unwrap();
+        let known = ProfileId::from(1);
+        let unknown = ProfileId::from(99);
+
+        hub.record_visit(known, "https://news.ycombinator.com/", "Hacker News");
+        hub.record_visit(unknown, "https://example.com/", "Nope");
+
+        assert_eq!(hub.history_count(known), 1);
+        assert_eq!(hub.history_matches(known, "hacker"), 1);
+        assert_eq!(hub.history_count(unknown), 0);
+    }
+
+    #[test]
+    fn legacy_single_file_imports_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("default.sqlite");
+        {
+            let conn = Connection::open(&legacy_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL);
+                 CREATE TABLE history (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     url TEXT NOT NULL,
+                     title TEXT NOT NULL,
+                     visited_at INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session(id, data) VALUES (1, ?1)",
+                [
+                    r#"{"tabs":[{"url":"https://example.com/","title":"Example"},
+                     {"url":"https://github.com/","title":"GitHub"}],"active":1}"#,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO history(url, title, visited_at) VALUES ('https://example.com/', 'Example', 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let session = store.load_session().unwrap();
+        assert_eq!(session.profiles.len(), 1);
+        assert_eq!(session.items.len(), 2);
+        assert!(session.active_item.is_some());
+        // old file is retired, not deleted
+        assert!(!legacy_path.exists());
+        assert!(dir.path().join("default.sqlite.bak").exists());
+        drop(store);
+
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(hub.history_count(session.profiles[0].id), 1);
+        assert_eq!(hub.history_matches(session.profiles[0].id, "example"), 1);
     }
 }
