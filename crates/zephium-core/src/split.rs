@@ -115,7 +115,13 @@ pub struct Divider {
 }
 
 pub fn divider_at(tree: &Pane, region: Rect, gap: f64, px: f64, py: f64) -> Option<Divider> {
-    fn walk(pane: &Pane, rect: Rect, gap: f64, p: (f64, f64), path: &mut Vec<usize>) -> Option<Divider> {
+    fn walk(
+        pane: &Pane,
+        rect: Rect,
+        gap: f64,
+        p: (f64, f64),
+        path: &mut Vec<usize>,
+    ) -> Option<Divider> {
         let Pane::Branch { axis, ratio, a, b } = pane else {
             return None;
         };
@@ -382,9 +388,18 @@ mod tests {
         assert_eq!(left.tab, 5);
         assert_eq!(left.edge, Edge::Left);
         assert_eq!(left.zone, Rect::new(0.0, 0.0, 500.0, 800.0));
-        assert_eq!(drop_target(&leaf, region, 8.0, 950.0, 400.0).unwrap().edge, Edge::Right);
-        assert_eq!(drop_target(&leaf, region, 8.0, 500.0, 40.0).unwrap().edge, Edge::Top);
-        assert_eq!(drop_target(&leaf, region, 8.0, 500.0, 760.0).unwrap().edge, Edge::Bottom);
+        assert_eq!(
+            drop_target(&leaf, region, 8.0, 950.0, 400.0).unwrap().edge,
+            Edge::Right
+        );
+        assert_eq!(
+            drop_target(&leaf, region, 8.0, 500.0, 40.0).unwrap().edge,
+            Edge::Top
+        );
+        assert_eq!(
+            drop_target(&leaf, region, 8.0, 500.0, 760.0).unwrap().edge,
+            Edge::Bottom
+        );
     }
 
     #[test]

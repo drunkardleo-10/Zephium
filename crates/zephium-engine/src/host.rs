@@ -201,7 +201,9 @@ impl EngineHost {
         let content = content_view(&self.parent)?;
         let stage = ContentStage::new(mtm, GAP);
         let sink = self.sink.clone();
-        stage.set_on_ratio(Box::new(move |tree| sink.emit(EngineEvent::SplitChanged(tree))));
+        stage.set_on_ratio(Box::new(move |tree| {
+            sink.emit(EngineEvent::SplitChanged(tree))
+        }));
         content.addSubview(&stage);
         self.stage = Some(stage.clone());
         Some(stage)

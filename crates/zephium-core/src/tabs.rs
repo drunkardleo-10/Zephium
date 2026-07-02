@@ -70,7 +70,10 @@ impl Tabs {
             if !tab.view {
                 if let Some(url) = tab.url.clone() {
                     tab.view = true;
-                    fx.push(Effect::CreateView { id, url: url.to_string() });
+                    fx.push(Effect::CreateView {
+                        id,
+                        url: url.to_string(),
+                    });
                 }
             }
         }
@@ -101,7 +104,10 @@ impl Tabs {
             if !tab.view {
                 if let Some(url) = tab.url.clone() {
                     tab.view = true;
-                    return vec![Effect::CreateView { id, url: url.to_string() }];
+                    return vec![Effect::CreateView {
+                        id,
+                        url: url.to_string(),
+                    }];
                 }
             }
         }
@@ -173,7 +179,11 @@ impl Tabs {
                 active = tabs.len();
             }
             tabs.push(PersistedTab {
-                url: tab.url.as_ref().map(ToString::to_string).unwrap_or_default(),
+                url: tab
+                    .url
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 title: tab.title.clone(),
             });
         }
@@ -226,11 +236,23 @@ mod tests {
         assert!(!tabs.get(id).unwrap().has_view());
 
         let fx = tabs.navigate(id, "example.com");
-        assert_eq!(fx, vec![Effect::CreateView { id, url: "https://example.com/".into() }]);
+        assert_eq!(
+            fx,
+            vec![Effect::CreateView {
+                id,
+                url: "https://example.com/".into()
+            }]
+        );
         assert!(tabs.get(id).unwrap().has_view());
 
         let fx = tabs.navigate(id, "github.com");
-        assert_eq!(fx, vec![Effect::Navigate { id, url: "https://github.com/".into() }]);
+        assert_eq!(
+            fx,
+            vec![Effect::Navigate {
+                id,
+                url: "https://github.com/".into()
+            }]
+        );
     }
 
     #[test]

@@ -105,7 +105,10 @@ fn save_session(conn: &Connection, session: &SessionState) -> rusqlite::Result<(
         tabs: session
             .tabs
             .iter()
-            .map(|t| StoredTab { url: t.url.clone(), title: t.title.clone() })
+            .map(|t| StoredTab {
+                url: t.url.clone(),
+                title: t.title.clone(),
+            })
             .collect(),
         active: session.active,
     };
@@ -127,7 +130,10 @@ fn load_session(conn: &Connection) -> rusqlite::Result<Option<SessionState>> {
             tabs: s
                 .tabs
                 .into_iter()
-                .map(|t| PersistedTab { url: t.url, title: t.title })
+                .map(|t| PersistedTab {
+                    url: t.url,
+                    title: t.title,
+                })
                 .collect(),
             active: s.active,
         }))
@@ -156,8 +162,14 @@ mod tests {
 
         store.save_session(SessionState {
             tabs: vec![
-                PersistedTab { url: "https://example.com/".into(), title: "Example".into() },
-                PersistedTab { url: "https://github.com/".into(), title: "GitHub".into() },
+                PersistedTab {
+                    url: "https://example.com/".into(),
+                    title: "Example".into(),
+                },
+                PersistedTab {
+                    url: "https://github.com/".into(),
+                    title: "GitHub".into(),
+                },
             ],
             active: 1,
         });
