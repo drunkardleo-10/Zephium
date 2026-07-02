@@ -50,10 +50,11 @@ pub const META: &[Migration] = &[
     },
 ];
 
-pub const PROFILE: &[Migration] = &[Migration {
-    version: 1,
-    up: |tx| {
-        tx.execute_batch(
+pub const PROFILE: &[Migration] = &[
+    Migration {
+        version: 1,
+        up: |tx| {
+            tx.execute_batch(
             "CREATE TABLE spaces (
                  id TEXT PRIMARY KEY,
                  name TEXT NOT NULL,
@@ -102,9 +103,23 @@ pub const PROFILE: &[Migration] = &[Migration {
                  VALUES ('delete', old.id, old.url, old.title);
                  INSERT INTO history_fts(rowid, url, title) VALUES (new.id, new.url, new.title);
              END;",
-        )
+            )
+        },
     },
-}];
+    Migration {
+        version: 2,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE favicons (
+                     origin TEXT PRIMARY KEY,
+                     content_type TEXT,
+                     icon BLOB NOT NULL,
+                     fetched_at INTEGER NOT NULL
+                 ) STRICT;",
+            )
+        },
+    },
+];
 
 #[cfg(test)]
 mod tests {

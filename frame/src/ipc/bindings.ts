@@ -65,6 +65,7 @@ export type TabView = {
 	loading: boolean,
 	can_go_back: boolean,
 	can_go_forward: boolean,
+	favicon: string | null,
 };
 
 export type UiCommand = string;

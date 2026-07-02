@@ -25,6 +25,8 @@ use zephium_ipc::Projection;
 const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}";
 use zephium_store::SqliteStore;
 
+static ICON_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
+
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ItemsChanged(zephium_ipc::ItemsState);
 
@@ -292,6 +294,47 @@ impl Chrome for ChromeAdapter {
     fn position(&self, _frame: ChromeFrame) {}
 }
 
+fn zicon_response(
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<std::borrow::Cow<'static, [u8]>> {
+    use percent_encoding::percent_decode_str;
+    use tauri::http::Response;
+    use zephium_core::ids::ProfileId;
+
+    let not_found = || {
+        Response::builder()
+            .status(404)
+            .header("Cache-Control", "max-age=3600")
+            .body(std::borrow::Cow::Borrowed(&[][..]))
+            .expect("static response")
+    };
+    let path = request.uri().path();
+    let Some((profile, origin)) = path.trim_start_matches('/').split_once('/') else {
+        return not_found();
+    };
+    let Some(profile) = ProfileId::parse(profile) else {
+        return not_found();
+    };
+    let Ok(origin) = percent_decode_str(origin).decode_utf8() else {
+        return not_found();
+    };
+    let Some(store) = ICON_STORE.get() else {
+        return not_found();
+    };
+    match store.favicon_bytes(profile, &origin) {
+        Some((content_type, bytes)) => Response::builder()
+            .status(200)
+            .header(
+                "Content-Type",
+                content_type.unwrap_or_else(|| "image/png".into()),
+            )
+            .header("Cache-Control", "max-age=86400")
+            .body(std::borrow::Cow::Owned(bytes))
+            .expect("icon response"),
+        None => not_found(),
+    }
+}
+
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
@@ -366,6 +409,7 @@ pub fn run() {
     let specta = specta_builder();
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .register_uri_scheme_protocol("zicon", |_ctx, request| zicon_response(request))
         .invoke_handler(specta.invoke_handler())
         .setup(move |app| {
             specta.mount_events(app);
@@ -415,7 +459,8 @@ pub fn run() {
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let store = SqliteStore::open(&data_dir)?;
+            let store = Arc::new(SqliteStore::open(&data_dir)?);
+            let _ = ICON_STORE.set(store.clone());
 
             let keymap: std::collections::HashMap<String, String> = store
                 .app_setting("keymap")
@@ -442,7 +487,8 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let chrome: SharedChrome = Arc::new(ChromeAdapter);
 
-            let shell = zephium_app::spawn(Arc::new(engine), Arc::new(store), chrome, emit);
+            let net = Arc::new(zephium_net::HttpNet::new());
+            let shell = zephium_app::spawn(Arc::new(engine), store, chrome, net, emit);
             let _ = slot.set(shell.clone());
 
             #[cfg(target_os = "macos")]

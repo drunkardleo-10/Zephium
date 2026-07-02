@@ -96,6 +96,10 @@ impl Engine for WebviewEngine {
         self.run(move || host::with(|h| h.extract_html(id)));
     }
 
+    fn discover_favicon(&self, id: ItemId) {
+        self.run(move || host::with(|h| h.discover_favicon(id)));
+    }
+
     fn print(&self, id: ItemId) {
         self.run(move || host::with(|h| h.print(id)));
     }

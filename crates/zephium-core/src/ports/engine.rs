@@ -68,6 +68,9 @@ pub trait Engine {
     fn capture(&self, id: ItemId);
     /// Result arrives as `EngineEvent::HtmlExtracted`.
     fn extract_html(&self, id: ItemId);
+    /// Asks the page for its best icon link; result arrives as
+    /// `EngineEvent::FaviconChanged` after validation.
+    fn discover_favicon(&self, id: ItemId);
     fn print(&self, id: ItemId);
     fn set_user_content(&self, scope: ContentScope, content: UserContent);
     /// Compiled rule payload; format is engine-specific (WebKit JSON,

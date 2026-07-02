@@ -13,6 +13,7 @@ use zephium_core::items::{Effect, Items};
 use zephium_core::layout;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{Engine, EngineEvent, Partition};
+use zephium_core::ports::net::Net;
 use zephium_core::ports::store::Store;
 use zephium_core::profiles::{Profile, ProfileKind, Profiles};
 use zephium_core::session;
@@ -24,6 +25,7 @@ use zephium_ipc::{ItemsState, Projection, SearchAction, SearchResult, SearchResu
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
+pub type SharedNet = Arc<dyn Net + Send + Sync>;
 pub type SharedChrome = Arc<dyn Chrome + Send + Sync>;
 pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
 
@@ -33,19 +35,37 @@ pub enum Command {
     Open,
     Activate(ItemId),
     Close(ItemId),
-    Navigate { id: ItemId, input: String },
+    Navigate {
+        id: ItemId,
+        input: String,
+    },
     Reload(ItemId),
     GoBack(ItemId),
     GoForward(ItemId),
-    SplitWith { other: ItemId, axis: Axis },
+    SplitWith {
+        other: ItemId,
+        axis: Axis,
+    },
     Unsplit,
     SetWindowSize(Size),
     SetSidebarWidth(f64),
-    DragOver { x: f64, y: f64 },
-    DropTab { id: ItemId, x: f64, y: f64 },
+    DragOver {
+        x: f64,
+        y: f64,
+    },
+    DropTab {
+        id: ItemId,
+        x: f64,
+        y: f64,
+    },
     Run(String),
     Search(String),
     OpenUrl(String),
+    FaviconFetched {
+        profile: ProfileId,
+        origin: String,
+        fetched: Option<(Option<String>, Vec<u8>)>,
+    },
     Engine(EngineEvent),
 }
 
@@ -64,10 +84,12 @@ pub fn spawn(
     engine: SharedEngine,
     store: SharedStore,
     chrome: SharedChrome,
+    net: SharedNet,
     emit: EmitFn,
 ) -> Handle {
     let (tx, rx) = channel();
-    let mut shell = Shell::new(engine, store, chrome, emit);
+    let mut shell = Shell::new(engine, store, chrome, net, emit);
+    shell.self_tx = Some(tx.clone());
     thread::Builder::new()
         .name("zephium-shell".into())
         .spawn(move || {
@@ -85,9 +107,12 @@ pub struct Shell {
     items: Items,
     windows: Windows,
     pending_size: Size,
+    icons_checked: std::collections::HashSet<(ProfileId, String)>,
+    self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
     chrome: SharedChrome,
+    net: SharedNet,
     emit: EmitFn,
 }
 
@@ -96,6 +121,7 @@ impl Shell {
         engine: SharedEngine,
         store: SharedStore,
         chrome: SharedChrome,
+        net: SharedNet,
         emit: EmitFn,
     ) -> Self {
         Self {
@@ -104,9 +130,12 @@ impl Shell {
             items: Items::default(),
             windows: Windows::default(),
             pending_size: Size::default(),
+            icons_checked: std::collections::HashSet::new(),
+            self_tx: None,
             engine,
             store,
             chrome,
+            net,
             emit,
         }
     }
@@ -160,6 +189,11 @@ impl Shell {
                 }
                 self.commit(fx);
             }
+            Command::FaviconFetched {
+                profile,
+                origin,
+                fetched,
+            } => self.favicon_fetched(profile, origin, fetched),
             Command::Engine(event) => self.on_engine_event(event),
         }
     }
@@ -382,7 +416,7 @@ impl Shell {
                 self.project_tab(id);
             }
             EngineEvent::NewWindowRequested { id, url } => self.open_linked_tab(id, &url),
-            EngineEvent::FaviconChanged { .. } => {}
+            EngineEvent::FaviconChanged { id, url } => self.favicon_found(id, &url),
             EngineEvent::PermissionRequested { .. } => {}
             EngineEvent::DownloadRequested { .. } => {}
             EngineEvent::Crashed { .. } => {}
@@ -398,6 +432,7 @@ impl Shell {
             }
             EngineEvent::UrlChanged { id, url } => {
                 self.items.set_committed_url_str(id, &url);
+                self.maybe_discover_favicon(id);
                 // History is attributed to the profile that owns the item,
                 // not the focused window; incognito profiles never record.
                 let recording = self.profile_of_item(id).filter(|p| {
@@ -585,6 +620,75 @@ impl Shell {
         }));
     }
 
+    fn item_origin(&self, id: ItemId) -> Option<(ProfileId, String)> {
+        let profile = self.profile_of_item(id)?;
+        let origin = self
+            .items
+            .tab(id)
+            .and_then(|t| t.url.as_ref())
+            .and_then(origin_of)?;
+        Some((profile, origin))
+    }
+
+    fn maybe_discover_favicon(&mut self, id: ItemId) {
+        let Some((profile, origin)) = self.item_origin(id) else {
+            return;
+        };
+        if self.icons_checked.contains(&(profile, origin.clone())) {
+            return;
+        }
+        const WEEK: i64 = 7 * 24 * 3600;
+        if self
+            .store
+            .favicon_age(profile, &origin)
+            .is_some_and(|age| age < WEEK)
+        {
+            self.icons_checked.insert((profile, origin));
+            return;
+        }
+        self.engine.discover_favicon(id);
+    }
+
+    fn favicon_found(&mut self, id: ItemId, icon_url: &str) {
+        let Some((profile, origin)) = self.item_origin(id) else {
+            return;
+        };
+        if !self.icons_checked.insert((profile, origin.clone())) {
+            return;
+        }
+        let Some(tx) = self.self_tx.clone() else {
+            return;
+        };
+        self.net.fetch(
+            icon_url.to_string(),
+            256 * 1024,
+            Box::new(move |fetched| {
+                let _ = tx.send(Command::FaviconFetched {
+                    profile,
+                    origin,
+                    fetched: fetched.map(|f| (f.content_type, f.bytes)),
+                });
+            }),
+        );
+    }
+
+    fn favicon_fetched(
+        &mut self,
+        profile: ProfileId,
+        origin: String,
+        fetched: Option<(Option<String>, Vec<u8>)>,
+    ) {
+        let Some((content_type, bytes)) = fetched else {
+            return;
+        };
+        if !looks_like_image(&content_type, &bytes) {
+            return;
+        }
+        self.store
+            .save_favicon(profile, origin, content_type, bytes);
+        self.project_items();
+    }
+
     fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
         match self.items.get(id)?.placement {
             Placement::Favorites { profile } => Some(profile),
@@ -727,10 +831,11 @@ impl Shell {
         let Some(win) = self.windows.focused() else {
             return;
         };
+        let profile = win.profile;
         let tabs = self
             .today_tabs(win.space)
             .into_iter()
-            .filter_map(|id| self.items.tab(id).map(|t| tab_view(id, t)))
+            .filter_map(|id| self.items.tab(id).map(|t| tab_view(id, t, Some(profile))))
             .collect();
         (self.emit)(Projection::Items(ItemsState {
             tabs,
@@ -739,8 +844,9 @@ impl Shell {
     }
 
     fn project_tab(&self, id: ItemId) {
+        let profile = self.profile_of_item(id);
         if let Some(tab) = self.items.tab(id) {
-            (self.emit)(Projection::Tab(tab_view(id, tab)));
+            (self.emit)(Projection::Tab(tab_view(id, tab, profile)));
         }
     }
 }
@@ -759,7 +865,11 @@ fn tab_result(id: ItemId, tab: &TabState) -> SearchResult {
     }
 }
 
-fn tab_view(id: ItemId, tab: &TabState) -> TabView {
+fn tab_view(id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
+    let favicon = match (profile, tab.url.as_ref().and_then(origin_of)) {
+        (Some(p), Some(origin)) => Some(format!("{p}/{origin}")),
+        _ => None,
+    };
     TabView {
         id: id.to_string(),
         title: tab.title.clone(),
@@ -767,7 +877,28 @@ fn tab_view(id: ItemId, tab: &TabState) -> TabView {
         loading: tab.loading,
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
+        favicon,
     }
+}
+
+fn origin_of(url: &url::Url) -> Option<String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    match url.origin() {
+        url::Origin::Tuple(..) => Some(url.origin().ascii_serialization()),
+        url::Origin::Opaque(_) => None,
+    }
+}
+
+fn looks_like_image(content_type: &Option<String>, bytes: &[u8]) -> bool {
+    if content_type
+        .as_deref()
+        .is_some_and(|ct| ct.starts_with("image/"))
+    {
+        return true;
+    }
+    bytes.starts_with(&[0x89, b'P', b'N', b'G']) || bytes.starts_with(&[0x00, 0x00, 0x01, 0x00])
 }
 
 #[cfg(test)]
@@ -841,6 +972,9 @@ mod tests {
         fn find(&self, _id: ItemId, _query: Option<&str>) {}
         fn capture(&self, _id: ItemId) {}
         fn extract_html(&self, _id: ItemId) {}
+        fn discover_favicon(&self, id: ItemId) {
+            self.log(format!("discover {id}"));
+        }
         fn print(&self, _id: ItemId) {}
         fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
         fn set_content_rules(&self, _profile: ProfileId, _compiled: String) {}
@@ -850,6 +984,8 @@ mod tests {
     struct FakeStore {
         saved: Mutex<Option<SessionState>>,
         history: Vec<zephium_core::ports::store::HistoryHit>,
+        icon_ages: Mutex<std::collections::HashMap<String, i64>>,
+        icons: Mutex<Vec<(String, Vec<u8>)>>,
     }
 
     impl Store for FakeStore {
@@ -872,11 +1008,51 @@ mod tests {
         ) -> Vec<zephium_core::ports::store::HistoryHit> {
             self.history.clone()
         }
+        fn favicon_age(&self, _profile: ProfileId, origin: &str) -> Option<i64> {
+            self.icon_ages.lock().unwrap().get(origin).copied()
+        }
+        fn save_favicon(
+            &self,
+            _profile: ProfileId,
+            origin: String,
+            _content_type: Option<String>,
+            bytes: Vec<u8>,
+        ) {
+            self.icons.lock().unwrap().push((origin, bytes));
+        }
+        fn favicon_bytes(
+            &self,
+            _profile: ProfileId,
+            _origin: &str,
+        ) -> Option<(Option<String>, Vec<u8>)> {
+            None
+        }
     }
 
     struct FakeChrome;
     impl Chrome for FakeChrome {
         fn position(&self, _frame: ChromeFrame) {}
+    }
+
+    #[derive(Default)]
+    struct FakeNet {
+        reply: Option<(Option<String>, Vec<u8>)>,
+    }
+
+    impl Net for FakeNet {
+        fn fetch(
+            &self,
+            _url: String,
+            _max_bytes: usize,
+            done: Box<dyn FnOnce(Option<zephium_core::ports::net::Fetched>) + Send>,
+        ) {
+            done(self.reply.clone().map(|(content_type, bytes)| {
+                zephium_core::ports::net::Fetched {
+                    content_type,
+                    bytes,
+                }
+            }));
+        }
     }
 
     // Materializes projections the way the frontend store does: snapshots
@@ -907,6 +1083,7 @@ mod tests {
             engine.clone(),
             store,
             Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
             Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -1110,6 +1287,7 @@ mod tests {
             engine,
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
             Box::new(move |p| {
                 if let Projection::UiCommand(id) = p {
                     sink.lock().unwrap().push(id);
@@ -1135,17 +1313,18 @@ mod tests {
     fn search_ranks_tabs_primary_action_commands_and_history() {
         let (seen, emit) = search_sink();
         let store = Arc::new(FakeStore {
-            saved: Mutex::new(None),
             history: vec![zephium_core::ports::store::HistoryHit {
                 url: "https://blog.example.com/".into(),
                 title: "Example Blog".into(),
                 last_visit: 1,
             }],
+            ..Default::default()
         });
         let mut shell = Shell::new(
             Arc::new(FakeEngine::default()),
             store,
             Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
             emit,
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -1199,12 +1378,84 @@ mod tests {
     }
 
     #[test]
+    fn favicon_pipeline_discovers_fetches_and_caches_once() {
+        let engine = Arc::new(FakeEngine::default());
+        let store = Arc::new(FakeStore::default());
+        let net = Arc::new(FakeNet {
+            reply: Some((Some("image/png".into()), vec![0x89, b'P', b'N', b'G'])),
+        });
+        let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            tabs: Vec::new(),
+            active: None,
+        }));
+        let sink = screen.clone();
+        let mut shell = Shell::new(
+            engine.clone(),
+            store.clone(),
+            Arc::new(FakeChrome),
+            net,
+            Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
+        );
+        let (tx, rx) = channel();
+        shell.self_tx = Some(tx);
+        shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "example.com".into(),
+        });
+
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://example.com/".into(),
+        }));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|c| c.starts_with("discover"))
+                .count(),
+            1
+        );
+
+        shell.handle(Command::Engine(EngineEvent::FaviconChanged {
+            id,
+            url: "https://example.com/favicon.ico".into(),
+        }));
+        while let Ok(cmd) = rx.try_recv() {
+            shell.handle(cmd);
+        }
+        let icons = store.icons.lock().unwrap().clone();
+        assert_eq!(icons.len(), 1);
+        assert_eq!(icons[0].0, "https://example.com");
+
+        // same origin again: session-checked, no second discover or fetch
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://example.com/page2".into(),
+        }));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|c| c.starts_with("discover"))
+                .count(),
+            1
+        );
+
+        let tab = last(&screen).tabs.into_iter().next().unwrap();
+        assert!(tab.favicon.unwrap().ends_with("/https://example.com"));
+    }
+
+    #[test]
     fn spawned_actor_processes_dispatched_commands() {
         let (tx, rx) = channel();
         let handle = spawn(
             Arc::new(FakeEngine::default()),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
             Box::new(move |s| {
                 let _ = tx.send(s);
             }),

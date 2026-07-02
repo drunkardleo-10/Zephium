@@ -471,6 +471,67 @@ impl Hub {
         .unwrap_or_default()
     }
 
+    pub fn favicon_age(&mut self, profile: ProfileId, origin: &str) -> Option<i64> {
+        if !self.registry.contains(&profile) {
+            return None;
+        }
+        let now = now_secs();
+        self.profile_conn(profile)
+            .ok()?
+            .query_row(
+                "SELECT fetched_at FROM favicons WHERE origin = ?1",
+                [origin],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(|at| now.saturating_sub(at))
+    }
+
+    pub fn save_favicon(
+        &mut self,
+        profile: ProfileId,
+        origin: &str,
+        content_type: Option<&str>,
+        bytes: &[u8],
+    ) {
+        if !self.registry.contains(&profile) {
+            return;
+        }
+        let now = now_secs();
+        let result = self.profile_conn(profile).and_then(|conn| {
+            conn.prepare_cached(
+                "INSERT INTO favicons(origin, content_type, icon, fetched_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(origin) DO UPDATE SET content_type = ?2, icon = ?3, fetched_at = ?4",
+            )?
+            .execute(params![origin, content_type, bytes, now])
+        });
+        if let Err(e) = result {
+            eprintln!("store: save_favicon failed: {e}");
+        }
+    }
+
+    pub fn favicon_bytes(
+        &mut self,
+        profile: ProfileId,
+        origin: &str,
+    ) -> Option<(Option<String>, Vec<u8>)> {
+        if !self.registry.contains(&profile) {
+            return None;
+        }
+        self.profile_conn(profile)
+            .ok()?
+            .query_row(
+                "SELECT content_type, icon FROM favicons WHERE origin = ?1",
+                [origin],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
     pub fn app_setting(&mut self, key: &str) -> Option<String> {
         self.meta
             .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
@@ -540,6 +601,13 @@ impl Hub {
             .and_then(|conn| conn.query_row("SELECT count(*) FROM history", [], |r| r.get(0)))
             .unwrap_or(-1)
     }
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn configure(conn: &Connection) -> rusqlite::Result<()> {

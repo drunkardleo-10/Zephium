@@ -20,4 +20,14 @@ pub trait Store {
     /// Prefix search over the profile's history FTS index, deduped by url,
     /// most recent first.
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
+    /// Age in seconds of the cached icon for a page origin, None when absent.
+    fn favicon_age(&self, profile: ProfileId, origin: &str) -> Option<i64>;
+    fn save_favicon(
+        &self,
+        profile: ProfileId,
+        origin: String,
+        content_type: Option<String>,
+        bytes: Vec<u8>,
+    );
+    fn favicon_bytes(&self, profile: ProfileId, origin: &str) -> Option<(Option<String>, Vec<u8>)>;
 }

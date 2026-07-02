@@ -34,6 +34,9 @@ enum Cmd {
     GetSetting(String, Sender<Option<String>>),
     SetSetting(String, String),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
+    FaviconAge(ProfileId, String, Sender<Option<i64>>),
+    SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
+    FaviconBytes(ProfileId, String, Sender<Option<(Option<String>, Vec<u8>)>>),
     Flush(Sender<()>),
 }
 
@@ -89,6 +92,34 @@ impl Store for SqliteStore {
 
     fn set_app_setting(&self, key: String, value: String) {
         let _ = self.tx.send(Cmd::SetSetting(key, value));
+    }
+
+    fn favicon_age(&self, profile: ProfileId, origin: &str) -> Option<i64> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(Cmd::FaviconAge(profile, origin.into(), tx))
+            .ok()?;
+        rx.recv().ok().flatten()
+    }
+
+    fn save_favicon(
+        &self,
+        profile: ProfileId,
+        origin: String,
+        content_type: Option<String>,
+        bytes: Vec<u8>,
+    ) {
+        let _ = self
+            .tx
+            .send(Cmd::SaveFavicon(profile, origin, content_type, bytes));
+    }
+
+    fn favicon_bytes(&self, profile: ProfileId, origin: &str) -> Option<(Option<String>, Vec<u8>)> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(Cmd::FaviconBytes(profile, origin.into(), tx))
+            .ok()?;
+        rx.recv().ok().flatten()
     }
 
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit> {
@@ -153,6 +184,15 @@ fn actor(mut hub: Hub, rx: Receiver<Cmd>) {
             Some(Cmd::SetSetting(key, value)) => hub.set_app_setting(&key, &value),
             Some(Cmd::SearchHistory(profile, query, limit, reply)) => {
                 let _ = reply.send(hub.search_history(profile, &query, limit));
+            }
+            Some(Cmd::FaviconAge(profile, origin, reply)) => {
+                let _ = reply.send(hub.favicon_age(profile, &origin));
+            }
+            Some(Cmd::SaveFavicon(profile, origin, content_type, bytes)) => {
+                hub.save_favicon(profile, &origin, content_type.as_deref(), &bytes);
+            }
+            Some(Cmd::FaviconBytes(profile, origin, reply)) => {
+                let _ = reply.send(hub.favicon_bytes(profile, &origin));
             }
             Some(Cmd::Flush(ack)) => {
                 flush(&mut hub, &mut pending);
@@ -324,6 +364,23 @@ mod tests {
         assert!(hub
             .search_history(profile, "\"unbalanced OR (", 10)
             .is_empty());
+    }
+
+    #[test]
+    fn favicons_roundtrip_with_age() {
+        let mut hub = Hub::in_memory().unwrap();
+        hub.save(&sample()).unwrap();
+        let profile = ProfileId::from(1);
+        let origin = "https://example.com";
+
+        assert_eq!(hub.favicon_age(profile, origin), None);
+        hub.save_favicon(profile, origin, Some("image/png"), &[1, 2, 3]);
+        assert!(hub.favicon_age(profile, origin).unwrap() < 5);
+        let (ct, bytes) = hub.favicon_bytes(profile, origin).unwrap();
+        assert_eq!(ct.as_deref(), Some("image/png"));
+        assert_eq!(bytes, vec![1, 2, 3]);
+
+        assert_eq!(hub.favicon_bytes(ProfileId::from(99), origin), None);
     }
 
     #[test]

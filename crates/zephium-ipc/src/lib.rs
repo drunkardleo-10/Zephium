@@ -13,6 +13,7 @@ pub struct TabView {
     pub loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    pub favicon: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]

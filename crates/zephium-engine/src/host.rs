@@ -26,6 +26,8 @@ thread_local! {
 
 const GAP: f64 = 8.0;
 
+const FAVICON_JS: &str = r#"(function(){var links=document.querySelectorAll('link[rel~="icon"]');var best=null,bestSize=0;for(var i=0;i<links.length;i++){var l=links[i];var s=parseInt((l.getAttribute('sizes')||'').split('x')[0],10)||16;if(s>=bestSize){best=l;bestSize=s;}}try{return best?new URL(best.getAttribute('href'),location.href).href:new URL('/favicon.ico',location.origin).href;}catch(e){return ''}})()"#;
+
 pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + Send + Sync>) {
     HOST.with(|cell| {
         *cell.borrow_mut() = Some(EngineHost {
@@ -253,6 +255,27 @@ impl EngineHost {
                     }
                 },
             );
+        }
+    }
+
+    pub(crate) fn discover_favicon(&self, id: ItemId) {
+        if let Some(view) = self.views.get(&id) {
+            let sink = self.sink.clone();
+            let _ = view.evaluate_script_with_callback(FAVICON_JS, move |result| {
+                let Ok(url) = serde_json::from_str::<String>(&result) else {
+                    return;
+                };
+                // Page-derived string: cap it and require a real http(s) URL.
+                if url.len() > 2048 {
+                    return;
+                }
+                let ok = url::Url::parse(&url)
+                    .map(|u| matches!(u.scheme(), "http" | "https"))
+                    .unwrap_or(false);
+                if ok {
+                    sink.emit(EngineEvent::FaviconChanged { id, url });
+                }
+            });
         }
     }
 
