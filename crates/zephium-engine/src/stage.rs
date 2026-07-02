@@ -14,7 +14,9 @@ type RatioCallback = Box<dyn Fn(Pane)>;
 
 #[derive(Default)]
 pub struct StageIvars {
-    tree: RefCell<Option<Pane>>,
+    // Boxed: ItemId is a u128 (align 16) and the ObjC runtime caps ivar
+    // alignment at 8, so the tree must live behind a pointer.
+    tree: RefCell<Option<Box<Pane>>>,
     views: RefCell<HashMap<ItemId, Retained<NSView>>>,
     gap: Cell<f64>,
     drag: RefCell<Option<Divider>>,
@@ -66,7 +68,7 @@ define_class!(
             if self.ivars().drag.borrow_mut().take().is_none() {
                 return;
             }
-            let tree = self.ivars().tree.borrow().clone();
+            let tree = self.ivars().tree.borrow().as_deref().cloned();
             if let (Some(cb), Some(tree)) = (self.ivars().on_ratio.borrow().as_ref(), tree) {
                 cb(tree);
             }
@@ -84,7 +86,7 @@ impl ContentStage {
     }
 
     pub fn set_tree(&self, tree: Option<Pane>) {
-        *self.ivars().tree.borrow_mut() = tree;
+        *self.ivars().tree.borrow_mut() = tree.map(Box::new);
         self.position_panes();
     }
 
@@ -174,5 +176,17 @@ impl ContentStage {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Class registration validates ivar layout with the ObjC runtime; this
+    // catches alignment regressions without launching the app.
+    #[test]
+    fn stage_class_registers() {
+        let _ = <ContentStage as objc2::ClassType>::class();
     }
 }
