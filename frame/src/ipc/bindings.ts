@@ -17,6 +17,8 @@ export const commands = {
 	tabsUnsplit: () => __TAURI_INVOKE<void>("tabs_unsplit"),
 	runCommand: (id: string) => __TAURI_INVOKE<void>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
+	launcherSearch: (query: string) => __TAURI_INVOKE<void>("launcher_search", { query }),
+	launcherRun: (action: SearchAction) => __TAURI_INVOKE<void>("launcher_run", { action }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drop", { id, x, y }),
@@ -25,6 +27,7 @@ export const commands = {
 /** Events */
 export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
+	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
 };
@@ -35,6 +38,22 @@ export type ItemsChanged = ItemsState;
 export type ItemsState = {
 	tabs: TabView[],
 	active: string | null,
+};
+
+export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
+
+export type SearchChanged = SearchResults;
+
+export type SearchResult = {
+	kind: string,
+	title: string,
+	detail: string,
+	action: SearchAction,
+};
+
+export type SearchResults = {
+	query: string,
+	results: SearchResult[],
 };
 
 export type TabChanged = TabView;

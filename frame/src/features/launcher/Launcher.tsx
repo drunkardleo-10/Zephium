@@ -1,26 +1,81 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { commands } from "../../ipc/bindings";
+import { commands, events } from "../../ipc/bindings";
+import type { SearchResult } from "../../ipc/bindings";
+
+const KIND_LABEL: Record<string, string> = {
+  tab: "Tab",
+  url: "Open",
+  search: "Search",
+  command: "Command",
+  history: "History",
+};
+
+function accel(detail: string): string {
+  if (!detail) return "";
+  return detail
+    .replace("CmdOrCtrl+", "⌘")
+    .replace("Ctrl+", "⌃")
+    .replace("Shift+", "⇧")
+    .replace("Space", "␣");
+}
 
 export function Launcher() {
   let input!: HTMLInputElement;
   const [value, setValue] = createSignal("");
+  const [results, setResults] = createSignal<SearchResult[]>([]);
+  const [selected, setSelected] = createSignal(0);
+
+  const search = (q: string) => {
+    setValue(q);
+    void commands.launcherSearch(q);
+  };
 
   onMount(() => {
     input.focus();
-    const unlisten = getCurrentWindow().onFocusChanged(({ payload }) => {
+    search("");
+    const unlistenResults = events.searchChanged.listen((e) => {
+      if (e.payload.query === value()) {
+        setResults(e.payload.results);
+        setSelected(0);
+      }
+    });
+    const unlistenFocus = getCurrentWindow().onFocusChanged(({ payload }) => {
       if (payload) {
         input.focus();
         input.select();
+        search(input.value);
       }
     });
-    onCleanup(() => void unlisten.then((f) => f()));
+    onCleanup(() => {
+      void unlistenResults.then((f) => f());
+      void unlistenFocus.then((f) => f());
+    });
   });
 
+  const run = (result: SearchResult | undefined) => {
+    if (result) void commands.launcherRun(result.action);
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      void commands.panelHide();
+    const len = results().length;
+    switch (e.key) {
+      case "Escape":
+        e.preventDefault();
+        void commands.panelHide();
+        break;
+      case "ArrowDown":
+        e.preventDefault();
+        if (len) setSelected((selected() + 1) % len);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        if (len) setSelected((selected() + len - 1) % len);
+        break;
+      case "Enter":
+        e.preventDefault();
+        run(results()[selected()]);
+        break;
     }
   };
 
@@ -29,15 +84,35 @@ export function Launcher() {
       <input
         ref={input}
         value={value()}
-        onInput={(e) => setValue(e.currentTarget.value)}
+        onInput={(e) => search(e.currentTarget.value)}
         placeholder="Search or enter address"
         spellcheck={false}
         class="h-14 w-full shrink-0 border-b border-white/10 bg-transparent px-5 text-[15px] text-text outline-none placeholder:text-faint"
       />
-      <div class="flex-1 overflow-y-auto px-2 py-2">
-        <div class="px-3 py-2 text-[12px] text-faint">
-          Tabs, history and commands land here next.
-        </div>
+      <div class="flex-1 overflow-y-auto p-2">
+        <For each={results()}>
+          {(result, index) => (
+            <button
+              onMouseMove={() => setSelected(index())}
+              onClick={() => run(result)}
+              class="flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left"
+              classList={{ "bg-white/10": index() === selected() }}
+            >
+              <span class="w-16 shrink-0 text-[10px] uppercase tracking-wide text-faint">
+                {KIND_LABEL[result.kind] ?? result.kind}
+              </span>
+              <span class="min-w-0 flex-1 truncate text-[13.5px] text-text">
+                {result.title}
+              </span>
+              <span class="max-w-56 shrink-0 truncate text-[12px] text-faint">
+                {result.kind === "command" ? accel(result.detail) : result.detail}
+              </span>
+            </button>
+          )}
+        </For>
+        <Show when={results().length === 0 && value().trim() !== ""}>
+          <div class="px-3 py-2 text-[12px] text-faint">No results</div>
+        </Show>
       </div>
     </div>
   );

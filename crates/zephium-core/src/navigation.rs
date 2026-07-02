@@ -25,6 +25,12 @@ pub fn classify(input: &str) -> Url {
     url
 }
 
+/// Whether the omnibox input will be treated as a web search rather than a URL.
+pub fn is_query(input: &str) -> bool {
+    let s = input.trim();
+    !s.is_empty() && !s.contains("://") && !looks_like_host(s)
+}
+
 /// Whether a URL may commit. Blocks file, javascript, internal and external app
 /// schemes; only http/https/about pass.
 pub fn is_allowed(url: &Url) -> bool {
@@ -63,6 +69,14 @@ mod tests {
     #[test]
     fn explicit_url_passes_through() {
         assert_eq!(classify("https://x.com/a").as_str(), "https://x.com/a");
+    }
+
+    #[test]
+    fn is_query_splits_urls_from_text() {
+        assert!(is_query("hello world"));
+        assert!(!is_query("example.com"));
+        assert!(!is_query("https://x.com/a"));
+        assert!(!is_query(""));
     }
 
     #[test]

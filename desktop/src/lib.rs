@@ -34,6 +34,9 @@ struct TabChanged(zephium_ipc::TabView);
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct UiCommand(String);
 
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct SearchChanged(zephium_ipc::SearchResults);
+
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(collect_commands![
@@ -49,11 +52,18 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_unsplit,
             run_command,
             panel_hide,
+            launcher_search,
+            launcher_run,
             sidebar_set_width,
             tab_drag_over,
             tab_drop
         ])
-        .events(collect_events![ItemsChanged, TabChanged, UiCommand])
+        .events(collect_events![
+            ItemsChanged,
+            TabChanged,
+            UiCommand,
+            SearchChanged
+        ])
 }
 
 // Ids arrive as ULID strings from a semi-trusted webview; anything that does
@@ -145,6 +155,33 @@ fn execute_command(app: &tauri::AppHandle, id: &str) {
 #[specta::specta]
 fn run_command(app: tauri::AppHandle, id: String) {
     execute_command(&app, &id);
+}
+
+#[tauri::command]
+#[specta::specta]
+fn launcher_search(shell: State<'_, Handle>, query: String) {
+    shell.dispatch(Command::Search(query));
+}
+
+#[tauri::command]
+#[specta::specta]
+fn launcher_run(app: tauri::AppHandle, action: zephium_ipc::SearchAction) {
+    use zephium_ipc::SearchAction;
+
+    if let Some(overlay) = app.try_state::<overlay::Overlay>() {
+        overlay.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.set_focus();
+    }
+    let Some(shell) = app.try_state::<Handle>() else {
+        return;
+    };
+    match action {
+        SearchAction::ActivateTab { id } => dispatch_with_id(&shell, &id, Command::Activate),
+        SearchAction::OpenUrl { url } => shell.dispatch(Command::OpenUrl(url)),
+        SearchAction::RunCommand { id } => execute_command(&app, &id),
+    }
 }
 
 #[tauri::command]
@@ -393,6 +430,7 @@ pub fn run() {
                     Projection::Items(state) => ItemsChanged(state).emit(&emit_handle),
                     Projection::Tab(tab) => TabChanged(tab).emit(&emit_handle),
                     Projection::UiCommand(id) => UiCommand(id).emit(&emit_handle),
+                    Projection::Search(results) => SearchChanged(results).emit(&emit_handle),
                 };
             });
 

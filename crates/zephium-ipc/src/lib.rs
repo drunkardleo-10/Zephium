@@ -21,10 +21,33 @@ pub struct ItemsState {
     pub active: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "type")]
+pub enum SearchAction {
+    ActivateTab { id: String },
+    OpenUrl { url: String },
+    RunCommand { id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct SearchResult {
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub action: SearchAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct SearchResults {
+    pub query: String,
+    pub results: Vec<SearchResult>,
+}
+
 /// Snapshots for structural changes, single-row deltas for per-tab churn.
 #[derive(Clone, Debug)]
 pub enum Projection {
     Items(ItemsState),
     Tab(TabView),
     UiCommand(String),
+    Search(SearchResults),
 }

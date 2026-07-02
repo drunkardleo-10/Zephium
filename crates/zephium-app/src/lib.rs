@@ -19,7 +19,8 @@ use zephium_core::session;
 use zephium_core::spaces::{Space, Spaces};
 use zephium_core::split::{self, Axis, Edge, Pane};
 use zephium_core::windows::{WindowKind, Windows};
-use zephium_ipc::{ItemsState, Projection, TabView};
+use zephium_core::{commands, navigation};
+use zephium_ipc::{ItemsState, Projection, SearchAction, SearchResult, SearchResults, TabView};
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
@@ -43,6 +44,8 @@ pub enum Command {
     DragOver { x: f64, y: f64 },
     DropTab { id: ItemId, x: f64, y: f64 },
     Run(String),
+    Search(String),
+    OpenUrl(String),
     Engine(EngineEvent),
 }
 
@@ -149,6 +152,14 @@ impl Shell {
             }
             Command::DropTab { id, x, y } => self.drop_tab(id, x, y),
             Command::Run(id) => self.run_command(&id),
+            Command::Search(query) => self.search(&query),
+            Command::OpenUrl(input) => {
+                let mut fx = self.open_tab();
+                if let Some(id) = self.windows.focused().and_then(|w| w.active) {
+                    fx.extend(self.items.navigate(id, &input));
+                }
+                self.commit(fx);
+            }
             Command::Engine(event) => self.on_engine_event(event),
         }
     }
@@ -481,6 +492,99 @@ impl Shell {
         self.engine.zoom(active, zoom);
     }
 
+    fn search(&self, query: &str) {
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
+        let q = query.trim();
+        let needle = q.to_lowercase();
+        let tabs = self.today_tabs(win.space);
+        let mut results = Vec::new();
+
+        if q.is_empty() {
+            results.extend(
+                tabs.iter()
+                    .filter_map(|id| self.items.tab(*id).map(|t| tab_result(*id, t)))
+                    .take(8),
+            );
+        } else {
+            let matched: Vec<(ItemId, &TabState)> = tabs
+                .iter()
+                .filter_map(|id| self.items.tab(*id).map(|t| (*id, t)))
+                .filter(|(_, t)| {
+                    t.title.to_lowercase().contains(&needle)
+                        || t.url
+                            .as_ref()
+                            .is_some_and(|u| u.as_str().to_lowercase().contains(&needle))
+                })
+                .take(4)
+                .collect();
+            let open_urls: std::collections::HashSet<String> = matched
+                .iter()
+                .filter_map(|(_, t)| t.url.as_ref().map(ToString::to_string))
+                .collect();
+            results.extend(matched.iter().map(|(id, t)| tab_result(*id, t)));
+
+            let url = navigation::classify(q);
+            if navigation::is_query(q) {
+                results.push(SearchResult {
+                    kind: "search".into(),
+                    title: format!("Search for \"{q}\""),
+                    detail: "DuckDuckGo".into(),
+                    action: SearchAction::OpenUrl {
+                        url: url.to_string(),
+                    },
+                });
+            } else {
+                results.push(SearchResult {
+                    kind: "url".into(),
+                    title: format!("Open {url}"),
+                    detail: "New Tab".into(),
+                    action: SearchAction::OpenUrl {
+                        url: url.to_string(),
+                    },
+                });
+            }
+
+            results.extend(
+                commands::REGISTRY
+                    .iter()
+                    .filter(|c| c.id != "launcher.toggle")
+                    .filter(|c| c.title.to_lowercase().contains(&needle))
+                    .take(3)
+                    .map(|c| SearchResult {
+                        kind: "command".into(),
+                        title: c.title.into(),
+                        detail: c.accelerator.unwrap_or_default().into(),
+                        action: SearchAction::RunCommand { id: c.id.into() },
+                    }),
+            );
+
+            results.extend(
+                self.store
+                    .search_history(win.profile, q, 6)
+                    .into_iter()
+                    .filter(|hit| !open_urls.contains(&hit.url))
+                    .map(|hit| SearchResult {
+                        kind: "history".into(),
+                        title: if hit.title.is_empty() {
+                            hit.url.clone()
+                        } else {
+                            hit.title
+                        },
+                        detail: hit.url.clone(),
+                        action: SearchAction::OpenUrl { url: hit.url },
+                    }),
+            );
+            results.truncate(10);
+        }
+
+        (self.emit)(Projection::Search(SearchResults {
+            query: query.into(),
+            results,
+        }));
+    }
+
     fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
         match self.items.get(id)?.placement {
             Placement::Favorites { profile } => Some(profile),
@@ -641,6 +745,20 @@ impl Shell {
     }
 }
 
+fn tab_result(id: ItemId, tab: &TabState) -> SearchResult {
+    let detail = tab
+        .url
+        .as_ref()
+        .and_then(|u| u.host_str().map(ToString::to_string))
+        .unwrap_or_default();
+    SearchResult {
+        kind: "tab".into(),
+        title: tab.title.clone(),
+        detail,
+        action: SearchAction::ActivateTab { id: id.to_string() },
+    }
+}
+
 fn tab_view(id: ItemId, tab: &TabState) -> TabView {
     TabView {
         id: id.to_string(),
@@ -731,6 +849,7 @@ mod tests {
     #[derive(Default)]
     struct FakeStore {
         saved: Mutex<Option<SessionState>>,
+        history: Vec<zephium_core::ports::store::HistoryHit>,
     }
 
     impl Store for FakeStore {
@@ -751,7 +870,7 @@ mod tests {
             _query: &str,
             _limit: u32,
         ) -> Vec<zephium_core::ports::store::HistoryHit> {
-            Vec::new()
+            self.history.clone()
         }
     }
 
@@ -773,6 +892,7 @@ mod tests {
                 }
             }
             Projection::UiCommand(_) => {}
+            Projection::Search(_) => {}
         }
     }
 
@@ -998,6 +1118,84 @@ mod tests {
         );
         shell.handle(Command::Run("url.focus".into()));
         assert_eq!(seen.lock().unwrap().as_slice(), ["url.focus"]);
+    }
+
+    fn search_sink() -> (Arc<Mutex<Vec<SearchResults>>>, EmitFn) {
+        let seen: Arc<Mutex<Vec<SearchResults>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let emit: EmitFn = Box::new(move |p| {
+            if let Projection::Search(r) = p {
+                sink.lock().unwrap().push(r);
+            }
+        });
+        (seen, emit)
+    }
+
+    #[test]
+    fn search_ranks_tabs_primary_action_commands_and_history() {
+        let (seen, emit) = search_sink();
+        let store = Arc::new(FakeStore {
+            saved: Mutex::new(None),
+            history: vec![zephium_core::ports::store::HistoryHit {
+                url: "https://blog.example.com/".into(),
+                title: "Example Blog".into(),
+                last_visit: 1,
+            }],
+        });
+        let mut shell = Shell::new(
+            Arc::new(FakeEngine::default()),
+            store,
+            Arc::new(FakeChrome),
+            emit,
+        );
+        shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+        shell.handle(Command::Bootstrap);
+        let id = shell.windows.focused().and_then(|w| w.active).unwrap();
+        shell.handle(Command::Navigate {
+            id,
+            input: "example.com".into(),
+        });
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "Example Site".into(),
+        }));
+
+        shell.handle(Command::Search("example".into()));
+        let last = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last.query, "example");
+        let kinds: Vec<&str> = last.results.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, ["tab", "search", "history"]);
+        assert!(matches!(
+            &last.results[0].action,
+            SearchAction::ActivateTab { id: tab } if *tab == id.to_string()
+        ));
+
+        shell.handle(Command::Search("reload".into()));
+        let last = seen.lock().unwrap().last().unwrap().clone();
+        assert!(last.results.iter().any(|r| r.kind == "command"
+            && matches!(&r.action, SearchAction::RunCommand { id } if id == "nav.reload")));
+
+        shell.handle(Command::Search("example.com".into()));
+        let last = seen.lock().unwrap().last().unwrap().clone();
+        assert!(last.results.iter().any(|r| r.kind == "url"));
+
+        shell.handle(Command::Search("".into()));
+        let last = seen.lock().unwrap().last().unwrap().clone();
+        assert!(last.results.iter().all(|r| r.kind == "tab"));
+    }
+
+    #[test]
+    fn open_url_lands_in_a_new_tab() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::OpenUrl("github.com".into()));
+        let second = active_id(&screen);
+        assert_ne!(first, second);
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("create {second} https://github.com/ [default]")));
     }
 
     #[test]
