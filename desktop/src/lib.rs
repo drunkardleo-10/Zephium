@@ -8,10 +8,19 @@ use tauri::{Emitter, Manager, State};
 
 use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
+use zephium_core::ids::ItemId;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
 use zephium_store::SqliteStore;
+
+// Ids arrive as ULID strings from a semi-trusted webview; anything that does
+// not parse is dropped here, before it reaches the shell.
+fn dispatch_with_id(shell: &Handle, id: &str, cmd: impl FnOnce(ItemId) -> Command) {
+    if let Some(id) = ItemId::parse(id) {
+        shell.dispatch(cmd(id));
+    }
+}
 
 #[tauri::command]
 fn tabs_bootstrap(shell: State<'_, Handle>) {
@@ -24,38 +33,38 @@ fn tabs_open(shell: State<'_, Handle>) {
 }
 
 #[tauri::command]
-fn tabs_activate(shell: State<'_, Handle>, id: u64) {
-    shell.dispatch(Command::Activate(id));
+fn tabs_activate(shell: State<'_, Handle>, id: String) {
+    dispatch_with_id(&shell, &id, Command::Activate);
 }
 
 #[tauri::command]
-fn tabs_close(shell: State<'_, Handle>, id: u64) {
-    shell.dispatch(Command::Close(id));
+fn tabs_close(shell: State<'_, Handle>, id: String) {
+    dispatch_with_id(&shell, &id, Command::Close);
 }
 
 #[tauri::command]
-fn tabs_navigate(shell: State<'_, Handle>, id: u64, input: String) {
-    shell.dispatch(Command::Navigate { id, input });
+fn tabs_navigate(shell: State<'_, Handle>, id: String, input: String) {
+    dispatch_with_id(&shell, &id, |id| Command::Navigate { id, input });
 }
 
 #[tauri::command]
-fn tabs_reload(shell: State<'_, Handle>, id: u64) {
-    shell.dispatch(Command::Reload(id));
+fn tabs_reload(shell: State<'_, Handle>, id: String) {
+    dispatch_with_id(&shell, &id, Command::Reload);
 }
 
 #[tauri::command]
-fn tabs_back(shell: State<'_, Handle>, id: u64) {
-    shell.dispatch(Command::GoBack(id));
+fn tabs_back(shell: State<'_, Handle>, id: String) {
+    dispatch_with_id(&shell, &id, Command::GoBack);
 }
 
 #[tauri::command]
-fn tabs_forward(shell: State<'_, Handle>, id: u64) {
-    shell.dispatch(Command::GoForward(id));
+fn tabs_forward(shell: State<'_, Handle>, id: String) {
+    dispatch_with_id(&shell, &id, Command::GoForward);
 }
 
 #[tauri::command]
-fn tabs_split(shell: State<'_, Handle>, other: u64) {
-    shell.dispatch(Command::SplitWith {
+fn tabs_split(shell: State<'_, Handle>, other: String) {
+    dispatch_with_id(&shell, &other, |other| Command::SplitWith {
         other,
         axis: Axis::Row,
     });
@@ -77,8 +86,8 @@ fn tab_drag_over(shell: State<'_, Handle>, x: f64, y: f64) {
 }
 
 #[tauri::command]
-fn tab_drop(shell: State<'_, Handle>, id: u64, x: f64, y: f64) {
-    shell.dispatch(Command::DropTab { id, x, y });
+fn tab_drop(shell: State<'_, Handle>, id: String, x: f64, y: f64) {
+    dispatch_with_id(&shell, &id, |id| Command::DropTab { id, x, y });
 }
 
 #[cfg(target_os = "macos")]

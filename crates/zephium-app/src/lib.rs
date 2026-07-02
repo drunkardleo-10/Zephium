@@ -7,13 +7,18 @@ use std::sync::Arc;
 use std::thread;
 
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::layout::{self, Metrics, Mode};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId};
+use zephium_core::item::{Lifecycle, Placement, SpaceSection, TabState};
+use zephium_core::items::{Effect, Items};
+use zephium_core::layout;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{Engine, EngineEvent};
 use zephium_core::ports::store::Store;
+use zephium_core::profiles::{Profile, ProfileKind, Profiles};
+use zephium_core::session;
+use zephium_core::spaces::{Space, Spaces};
 use zephium_core::split::{self, Axis, Edge, Pane};
-use zephium_core::tab::{Tab, TabId};
-use zephium_core::tabs::{Effect, Tabs};
+use zephium_core::windows::{WindowKind, Windows};
 use zephium_ipc::{TabView, TabsSnapshot};
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
@@ -25,18 +30,18 @@ pub type EmitFn = Box<dyn Fn(TabsSnapshot) + Send + Sync>;
 pub enum Command {
     Bootstrap,
     Open,
-    Activate(TabId),
-    Close(TabId),
-    Navigate { id: TabId, input: String },
-    Reload(TabId),
-    GoBack(TabId),
-    GoForward(TabId),
-    SplitWith { other: TabId, axis: Axis },
+    Activate(ItemId),
+    Close(ItemId),
+    Navigate { id: ItemId, input: String },
+    Reload(ItemId),
+    GoBack(ItemId),
+    GoForward(ItemId),
+    SplitWith { other: ItemId, axis: Axis },
     Unsplit,
     SetWindowSize(Size),
     SetSidebarWidth(f64),
     DragOver { x: f64, y: f64 },
-    DropTab { id: TabId, x: f64, y: f64 },
+    DropTab { id: ItemId, x: f64, y: f64 },
     Engine(EngineEvent),
 }
 
@@ -71,11 +76,11 @@ pub fn spawn(
 }
 
 pub struct Shell {
-    tabs: Tabs,
-    window: Size,
-    splits: Option<Pane>,
-    metrics: Metrics,
-    mode: Mode,
+    profiles: Profiles,
+    spaces: Spaces,
+    items: Items,
+    windows: Windows,
+    pending_size: Size,
     engine: SharedEngine,
     store: SharedStore,
     chrome: SharedChrome,
@@ -90,11 +95,11 @@ impl Shell {
         emit: EmitFn,
     ) -> Self {
         Self {
-            tabs: Tabs::default(),
-            window: Size::default(),
-            splits: None,
-            metrics: Metrics::default(),
-            mode: Mode::Sidebar,
+            profiles: Profiles::default(),
+            spaces: Spaces::default(),
+            items: Items::default(),
+            windows: Windows::default(),
+            pending_size: Size::default(),
             engine,
             store,
             chrome,
@@ -105,110 +110,234 @@ impl Shell {
     pub fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::Bootstrap => self.bootstrap(),
-            Command::Open => self.open(),
+            Command::Open => {
+                let fx = self.open_tab();
+                self.commit(fx);
+            }
             Command::Activate(id) => self.activate(id),
             Command::Close(id) => self.close(id),
-            Command::Navigate { id, input } => self.navigate(id, &input),
+            Command::Navigate { id, input } => {
+                let fx = self.items.navigate(id, &input);
+                self.commit(fx);
+            }
             Command::Reload(id) => self.engine.reload(id),
             Command::GoBack(id) => self.engine.go_back(id),
             Command::GoForward(id) => self.engine.go_forward(id),
             Command::SplitWith { other, axis } => self.split_with(other, axis),
-            Command::Unsplit => self.unsplit(),
-            Command::SetWindowSize(size) => self.window = size,
-            Command::SetSidebarWidth(width) => self.set_sidebar_width(width),
-            Command::DragOver { x, y } => self.drag_over(x, y),
+            Command::Unsplit => {
+                if let Some(win) = self.windows.focused_mut() {
+                    win.splits = None;
+                }
+                self.relayout();
+            }
+            Command::SetWindowSize(size) => match self.windows.focused_mut() {
+                Some(win) => win.size = size,
+                None => self.pending_size = size,
+            },
+            Command::SetSidebarWidth(width) => {
+                if let Some(win) = self.windows.focused_mut() {
+                    win.metrics.sidebar_width = width.clamp(180.0, 420.0);
+                }
+                self.relayout();
+            }
+            Command::DragOver { x, y } => {
+                let zone = self.resolve_drop(x, y).map(|d| d.zone);
+                self.engine.set_drop_indicator(zone);
+            }
             Command::DropTab { id, x, y } => self.drop_tab(id, x, y),
             Command::Engine(event) => self.on_engine_event(event),
         }
     }
 
     fn bootstrap(&mut self) {
-        let effects = match self.store.load_session() {
-            Some(session) if !session.tabs.is_empty() => {
-                self.tabs.restore(session);
-                match self.tabs.active() {
-                    Some(active) => self.tabs.activate(active),
-                    None => self.tabs.open(),
-                }
+        let mut active_item = None;
+        let mut active_space = None;
+        let mut splits = None;
+        if let Some(state) = self.store.load_session().filter(|s| !s.items.is_empty()) {
+            let restored = session::restore(state);
+            self.profiles = restored.profiles;
+            self.spaces = restored.spaces;
+            self.items = restored.items;
+            active_item = restored.active_item;
+            active_space = restored.active_space;
+            splits = restored.splits;
+        }
+
+        let space = active_space
+            .or_else(|| {
+                self.profiles
+                    .default_profile()
+                    .and_then(|p| self.spaces.first_for(p))
+            })
+            .unwrap_or_else(|| self.create_default_space());
+        let profile = self
+            .spaces
+            .get(space)
+            .map(|s| s.profile)
+            .expect("space belongs to a profile");
+
+        let window = self
+            .windows
+            .create(WindowKind::Main, profile, space, self.pending_size);
+
+        let mut fx = Vec::new();
+        if let Some(tree) = splits {
+            for leaf in tree.tabs() {
+                fx.extend(self.items.ensure_view(leaf));
             }
-            _ => self.tabs.open(),
-        };
-        self.apply(effects);
+            if let Some(win) = self.windows.get_mut(window) {
+                win.splits = Some(tree);
+            }
+        }
+        match active_item.or_else(|| self.today_tabs(space).first().copied()) {
+            Some(item) => fx.extend(self.focus_tab(item)),
+            None => fx.extend(self.open_tab()),
+        }
+        self.apply(fx);
         self.relayout();
         self.project();
     }
 
-    fn open(&mut self) {
-        self.splits = None;
-        let effects = self.tabs.open();
-        self.commit(effects);
+    fn create_default_space(&mut self) -> SpaceId {
+        let profile = self.profiles.default_profile().unwrap_or_else(|| {
+            let id = ProfileId::generate();
+            self.profiles.insert(Profile {
+                id,
+                name: "Personal".into(),
+                kind: ProfileKind::Default,
+            });
+            id
+        });
+        let id = SpaceId::generate();
+        self.spaces.insert(Space {
+            id,
+            profile,
+            name: "Space".into(),
+        });
+        id
     }
 
-    fn activate(&mut self, id: TabId) {
-        if self.splits.as_ref().is_some_and(|t| !t.contains(id)) {
-            self.splits = None;
+    fn open_tab(&mut self) -> Vec<Effect> {
+        let Some(win) = self.windows.focused_mut() else {
+            return Vec::new();
+        };
+        win.splits = None;
+        let space = win.space;
+        let id = ItemId::generate();
+        self.items.insert_tab(
+            id,
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        );
+        self.focus_tab(id)
+    }
+
+    /// Moves window focus to `id`: lifecycle bookkeeping plus a lazy view.
+    fn focus_tab(&mut self, id: ItemId) -> Vec<Effect> {
+        let Some(win) = self.windows.focused_mut() else {
+            return Vec::new();
+        };
+        let prev = win.active.replace(id).filter(|p| *p != id);
+        if let Some(prev) = prev {
+            self.items.set_lifecycle(prev, Lifecycle::Inactive);
         }
-        let effects = self.tabs.activate(id);
-        self.commit(effects);
+        self.items.set_lifecycle(id, Lifecycle::Active);
+        self.items.ensure_view(id)
     }
 
-    fn close(&mut self, id: TabId) {
-        if let Some(tree) = self.splits.take() {
-            self.splits = tree.remove(id);
+    fn activate(&mut self, id: ItemId) {
+        if self.items.tab(id).is_none() {
+            return;
         }
-        let effects = self.tabs.close(id);
-        self.commit(effects);
+        if let Some(win) = self.windows.focused_mut() {
+            if win.splits.as_ref().is_some_and(|t| !t.contains(id)) {
+                win.splits = None;
+            }
+        }
+        let fx = self.focus_tab(id);
+        self.commit(fx);
     }
 
-    fn split_with(&mut self, other: TabId, axis: Axis) {
-        let Some(active) = self.tabs.active() else {
+    fn close(&mut self, id: ItemId) {
+        let Some(win) = self.windows.focused_mut() else {
             return;
         };
-        if active == other || self.tabs.get(other).is_none() {
+        if let Some(tree) = win.splits.take() {
+            win.splits = tree.remove(id);
+        }
+        let space = win.space;
+        let was_active = win.active == Some(id);
+        if was_active {
+            win.active = None;
+        }
+        let tabs_before = self.today_tabs(space);
+        let pos = tabs_before.iter().position(|x| *x == id);
+        let mut fx = self.items.remove(id);
+        if was_active {
+            let tabs = self.today_tabs(space);
+            if let (Some(pos), false) = (pos, tabs.is_empty()) {
+                fx.extend(self.focus_tab(tabs[pos.min(tabs.len() - 1)]));
+            }
+        }
+        self.commit(fx);
+    }
+
+    fn split_with(&mut self, other: ItemId, axis: Axis) {
+        let Some(active) = self.windows.focused().and_then(|w| w.active) else {
+            return;
+        };
+        if active == other || self.items.tab(other).is_none() {
             return;
         }
-        let fx = self.tabs.ensure_view(other);
+        let fx = self.items.ensure_view(other);
         self.apply(fx);
-        let mut tree = self.pane_tree();
+        let Some(mut tree) = self.pane_tree() else {
+            return;
+        };
         if tree.split(active, other, axis, false) {
-            self.splits = Some(tree);
+            if let Some(win) = self.windows.focused_mut() {
+                win.splits = Some(tree);
+            }
         }
         self.persist();
         self.relayout();
         self.project();
     }
 
-    fn unsplit(&mut self) {
-        self.splits = None;
-        self.relayout();
-    }
-
-    fn navigate(&mut self, id: TabId, input: &str) {
-        let effects = self.tabs.navigate(id, input);
-        self.commit(effects);
-    }
-
-    fn set_sidebar_width(&mut self, width: f64) {
-        self.metrics.sidebar_width = width.clamp(180.0, 420.0);
-        self.relayout();
-    }
-
-    fn drag_over(&mut self, client_x: f64, client_y: f64) {
-        let zone = self.resolve_drop(client_x, client_y).map(|d| d.zone);
-        self.engine.set_drop_indicator(zone);
-    }
-
-    fn drop_tab(&mut self, other: TabId, client_x: f64, client_y: f64) {
+    fn drop_tab(&mut self, dropped: ItemId, client_x: f64, client_y: f64) {
         if let Some(d) = self.resolve_drop(client_x, client_y) {
-            self.apply_drop(d.tab, other, d.edge);
+            self.apply_drop(d.tab, dropped, d.edge);
         }
         self.engine.set_drop_indicator(None);
     }
 
+    fn apply_drop(&mut self, target: ItemId, dropped: ItemId, edge: Edge) {
+        if target == dropped || self.items.tab(dropped).is_none() {
+            return;
+        }
+        let fx = self.items.ensure_view(dropped);
+        self.apply(fx);
+        let Some(mut tree) = self.pane_tree() else {
+            return;
+        };
+        if tree.split(target, dropped, edge.axis(), edge.before()) {
+            if let Some(win) = self.windows.focused_mut() {
+                win.splits = Some(tree);
+            }
+        }
+        self.persist();
+        self.relayout();
+        self.project();
+    }
+
     fn resolve_drop(&self, client_x: f64, client_y: f64) -> Option<split::Drop> {
-        let tree = self.pane_tree();
-        let region = self.compute(&tree).content?;
-        let m = self.metrics;
+        let win = self.windows.focused()?;
+        let tree = self.pane_tree()?;
+        let region =
+            layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
+        let m = win.metrics;
         let local = Rect::new(0.0, 0.0, region.width, region.height);
         split::drop_target(
             &tree,
@@ -222,21 +351,23 @@ impl Shell {
     fn on_engine_event(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::SplitChanged(tree) => {
-                self.splits = Some(tree);
+                if let Some(win) = self.windows.focused_mut() {
+                    win.splits = Some(tree);
+                }
             }
             EngineEvent::TitleChanged { id, title } => {
-                self.tabs.set_title(id, title);
+                self.items.set_title(id, title);
                 self.project();
             }
             EngineEvent::LoadingChanged { id, loading } => {
-                self.tabs.set_loading(id, loading);
+                self.items.set_loading(id, loading);
                 self.project();
             }
             EngineEvent::UrlChanged { id, url } => {
-                self.tabs.set_committed_url_str(id, &url);
+                self.items.set_committed_url_str(id, &url);
                 let title = self
-                    .tabs
-                    .get(id)
+                    .items
+                    .tab(id)
                     .map(|t| t.title.clone())
                     .unwrap_or_default();
                 self.store.record_visit(url, title);
@@ -244,21 +375,6 @@ impl Shell {
                 self.project();
             }
         }
-    }
-
-    fn apply_drop(&mut self, target: TabId, dropped: TabId, edge: Edge) {
-        if target == dropped {
-            return;
-        }
-        let fx = self.tabs.ensure_view(dropped);
-        self.apply(fx);
-        let mut tree = self.pane_tree();
-        if tree.split(target, dropped, edge.axis(), edge.before()) {
-            self.splits = Some(tree);
-        }
-        self.persist();
-        self.relayout();
-        self.project();
     }
 
     fn commit(&mut self, effects: Vec<Effect>) {
@@ -283,52 +399,86 @@ impl Shell {
     }
 
     fn relayout(&self) {
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
         let tree = self.pane_tree();
-        let l = self.compute(&tree);
+        let present = tree.as_ref().is_some_and(|t| self.present(t));
+        let l = layout::compute(win.size, win.mode, win.metrics, present);
         self.chrome.position(ChromeFrame {
             rect: l.chrome,
             fill_width: l.content.is_none(),
         });
-        self.engine.set_content(Some(tree), l.content);
+        self.engine.set_content(tree, l.content);
     }
 
-    fn compute(&self, tree: &Pane) -> layout::Layout {
-        let present = tree
-            .tabs()
+    fn present(&self, tree: &Pane) -> bool {
+        tree.tabs()
             .iter()
-            .any(|id| self.tabs.get(*id).is_some_and(Tab::has_view));
-        layout::compute(self.window, self.mode, self.metrics, present)
+            .any(|id| self.items.tab(*id).is_some_and(TabState::has_view))
     }
 
-    fn pane_tree(&self) -> Pane {
-        if let Some(tree) = self.splits.clone() {
-            return tree;
+    fn pane_tree(&self) -> Option<Pane> {
+        let win = self.windows.focused()?;
+        if let Some(tree) = win.splits.clone() {
+            return Some(tree);
         }
-        Pane::Leaf(self.tabs.active().unwrap_or(0))
+        win.active.map(Pane::Leaf)
     }
 
     fn content_region(&self) -> Rect {
-        layout::compute(self.window, self.mode, self.metrics, true)
+        let Some(win) = self.windows.focused() else {
+            return Rect::default();
+        };
+        layout::compute(win.size, win.mode, win.metrics, true)
             .content
             .unwrap_or_default()
     }
 
+    fn today_tabs(&self, space: SpaceId) -> Vec<ItemId> {
+        self.items
+            .roots(Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            })
+            .iter()
+            .copied()
+            .filter(|id| self.items.tab(*id).is_some())
+            .collect()
+    }
+
     fn persist(&self) {
-        self.store.save_session(self.tabs.session());
+        let win = self.windows.focused();
+        let state = session::snapshot(
+            &self.profiles,
+            &self.spaces,
+            &self.items,
+            win.map(|w| w.space),
+            win.and_then(|w| w.active),
+            win.and_then(|w| w.splits.as_ref()),
+        );
+        self.store.save_session(state);
     }
 
     fn project(&self) {
-        let snapshot = TabsSnapshot {
-            tabs: self.tabs.iter().map(tab_view).collect(),
-            active: self.tabs.active(),
+        let Some(win) = self.windows.focused() else {
+            return;
         };
-        (self.emit)(snapshot);
+        let tabs = self
+            .today_tabs(win.space)
+            .into_iter()
+            .filter_map(|id| self.items.tab(id).map(|t| tab_view(id, t)))
+            .collect();
+        (self.emit)(TabsSnapshot {
+            tabs,
+            active: win.active.map(|i| i.to_string()),
+        });
     }
 }
 
-fn tab_view(tab: &Tab) -> TabView {
+fn tab_view(id: ItemId, tab: &TabState) -> TabView {
     TabView {
-        id: tab.id,
+        id: id.to_string(),
         title: tab.title.clone(),
         url: tab.url.as_ref().map(ToString::to_string),
         loading: tab.loading,
@@ -341,7 +491,7 @@ fn tab_view(tab: &Tab) -> TabView {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use zephium_core::session::{PersistedTab, SessionState};
+    use zephium_core::session::SessionState;
 
     #[derive(Default)]
     struct FakeEngine {
@@ -355,29 +505,34 @@ mod tests {
         fn log(&self, s: String) {
             self.calls.lock().unwrap().push(s);
         }
-        fn last_layout(&self) -> Vec<u64> {
+        fn last_layout(&self) -> Vec<String> {
             self.calls
                 .lock()
                 .unwrap()
                 .iter()
                 .rev()
                 .find_map(|c| c.strip_prefix("layout "))
-                .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
+                .map(|s| {
+                    s.split(',')
+                        .filter(|x| !x.is_empty())
+                        .map(Into::into)
+                        .collect()
+                })
                 .unwrap_or_default()
         }
     }
 
     impl Engine for FakeEngine {
-        fn create_view(&self, id: TabId, url: &str, _bounds: Rect) {
+        fn create_view(&self, id: ItemId, url: &str, _bounds: Rect) {
             self.log(format!("create {id} {url}"));
         }
-        fn navigate(&self, id: TabId, url: &str) {
+        fn navigate(&self, id: ItemId, url: &str) {
             self.log(format!("navigate {id} {url}"));
         }
-        fn reload(&self, _id: TabId) {}
-        fn go_back(&self, _id: TabId) {}
-        fn go_forward(&self, _id: TabId) {}
-        fn close(&self, id: TabId) {
+        fn reload(&self, _id: ItemId) {}
+        fn go_back(&self, _id: ItemId) {}
+        fn go_forward(&self, _id: ItemId) {}
+        fn close(&self, id: ItemId) {
             self.log(format!("close {id}"));
         }
         fn set_content(&self, tree: Option<Pane>, region: Option<Rect>) {
@@ -434,11 +589,15 @@ mod tests {
         snaps.lock().unwrap().last().unwrap().clone()
     }
 
+    fn active_id(snaps: &Snaps) -> ItemId {
+        ItemId::parse(&last(snaps).active.unwrap()).unwrap()
+    }
+
     #[test]
     fn navigate_creates_and_shows_active_tab() {
         let (mut shell, engine, snaps) = setup();
         shell.handle(Command::Bootstrap);
-        let id = last(&snaps).active.unwrap();
+        let id = active_id(&snaps);
 
         shell.handle(Command::Navigate {
             id,
@@ -448,9 +607,14 @@ mod tests {
         assert!(engine
             .calls()
             .contains(&format!("create {id} https://example.com/")));
-        assert_eq!(engine.last_layout(), vec![id]);
+        assert_eq!(engine.last_layout(), vec![id.to_string()]);
 
-        let tab = last(&snaps).tabs.into_iter().find(|t| t.id == id).unwrap();
+        let active = id.to_string();
+        let tab = last(&snaps)
+            .tabs
+            .into_iter()
+            .find(|t| t.id == active)
+            .unwrap();
         assert_eq!(tab.url.as_deref(), Some("https://example.com/"));
         assert!(tab.loading);
     }
@@ -459,7 +623,7 @@ mod tests {
     fn engine_events_fold_into_projection() {
         let (mut shell, _engine, snaps) = setup();
         shell.handle(Command::Bootstrap);
-        let id = last(&snaps).active.unwrap();
+        let id = active_id(&snaps);
         shell.handle(Command::Navigate {
             id,
             input: "example.com".into(),
@@ -474,7 +638,8 @@ mod tests {
             loading: false,
         }));
 
-        let tab = last(&snaps).tabs.into_iter().find(|t| t.id == id).unwrap();
+        let key = id.to_string();
+        let tab = last(&snaps).tabs.into_iter().find(|t| t.id == key).unwrap();
         assert_eq!(tab.title, "Example");
         assert!(!tab.loading);
     }
@@ -483,34 +648,34 @@ mod tests {
     fn switching_tabs_shows_only_active() {
         let (mut shell, engine, snaps) = setup();
         shell.handle(Command::Bootstrap);
-        let first = last(&snaps).active.unwrap();
+        let first = active_id(&snaps);
         shell.handle(Command::Navigate {
             id: first,
             input: "example.com".into(),
         });
         shell.handle(Command::Open);
-        let second = last(&snaps).active.unwrap();
+        let second = active_id(&snaps);
         shell.handle(Command::Navigate {
             id: second,
             input: "github.com".into(),
         });
-        assert_eq!(engine.last_layout(), vec![second]);
+        assert_eq!(engine.last_layout(), vec![second.to_string()]);
 
         shell.handle(Command::Activate(first));
-        assert_eq!(engine.last_layout(), vec![first]);
+        assert_eq!(engine.last_layout(), vec![first.to_string()]);
     }
 
     #[test]
     fn split_shows_both_panes_close_collapses() {
         let (mut shell, engine, snaps) = setup();
         shell.handle(Command::Bootstrap);
-        let first = last(&snaps).active.unwrap();
+        let first = active_id(&snaps);
         shell.handle(Command::Navigate {
             id: first,
             input: "example.com".into(),
         });
         shell.handle(Command::Open);
-        let second = last(&snaps).active.unwrap();
+        let second = active_id(&snaps);
         shell.handle(Command::Navigate {
             id: second,
             input: "github.com".into(),
@@ -522,31 +687,48 @@ mod tests {
         });
         let panes = engine.last_layout();
         assert_eq!(panes.len(), 2);
-        assert!(panes.contains(&first) && panes.contains(&second));
+        assert!(panes.contains(&first.to_string()) && panes.contains(&second.to_string()));
 
         // closing one pane collapses the split onto the other
         shell.handle(Command::Close(first));
-        assert_eq!(engine.last_layout(), vec![second]);
+        assert_eq!(engine.last_layout(), vec![second.to_string()]);
     }
 
     #[test]
-    fn bootstrap_restores_persisted_session() {
+    fn restart_preserves_ids_actives_and_splits() {
         let store = Arc::new(FakeStore::default());
-        store.save_session(SessionState {
-            tabs: vec![PersistedTab {
-                url: "https://example.com/".into(),
-                title: "Example".into(),
-            }],
-            active: 0,
-        });
-        let (mut shell, engine, snaps) = setup_with(store);
-
+        let (mut shell, _engine, snaps) = setup_with(store.clone());
         shell.handle(Command::Bootstrap);
+        let first = active_id(&snaps);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+        shell.handle(Command::Open);
+        let second = active_id(&snaps);
+        shell.handle(Command::Navigate {
+            id: second,
+            input: "github.com".into(),
+        });
+        shell.handle(Command::SplitWith {
+            other: first,
+            axis: Axis::Row,
+        });
 
-        let snap = last(&snaps);
-        assert_eq!(snap.tabs.len(), 1);
-        assert_eq!(snap.tabs[0].url.as_deref(), Some("https://example.com/"));
-        assert!(engine.calls().iter().any(|c| c.starts_with("create")));
+        let before = last(&snaps);
+
+        let (mut shell2, engine2, snaps2) = setup_with(store);
+        shell2.handle(Command::Bootstrap);
+        let after = last(&snaps2);
+
+        // same ULIDs, same order, same active tab survive the restart
+        let ids = |s: &TabsSnapshot| s.tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&after), ids(&before));
+        assert_eq!(after.active, before.active);
+        // the split tree is restored and both panes get views again
+        let panes = engine2.last_layout();
+        assert_eq!(panes.len(), 2);
+        assert!(panes.contains(&first.to_string()) && panes.contains(&second.to_string()));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 export interface TabView {
-  id: number;
+  id: string;
   title: string;
   url: string | null;
   loading: boolean;
@@ -9,7 +9,7 @@ export interface TabView {
 
 export interface TabsSnapshot {
   tabs: TabView[];
-  active: number | null;
+  active: string | null;
 }
 
 export interface Rect {

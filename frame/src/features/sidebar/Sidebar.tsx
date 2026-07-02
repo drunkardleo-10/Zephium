@@ -17,7 +17,7 @@ export function Sidebar() {
   const [splitting, setSplitting] = createSignal(false);
   const [width, setWidth] = createSignal(240);
 
-  const onTab = (id: number) => {
+  const onTab = (id: string) => {
     if (splitting()) {
       tabs.split(id);
       setSplitting(false);
@@ -55,12 +55,12 @@ export function Sidebar() {
 
   const [ghost, setGhost] = createSignal<{ title: string; x: number; y: number } | null>(null);
   let down: { x: number; y: number } | null = null;
-  let dragId = 0;
+  let dragId = "";
   let dragTitle = "";
   let dragging = false;
   let dragFrame = 0;
   let suppressClick = false;
-  const onTabDown = (e: PointerEvent, id: number, title: string) => {
+  const onTabDown = (e: PointerEvent, id: string, title: string) => {
     down = { x: e.clientX, y: e.clientY };
     dragId = id;
     dragTitle = title;
@@ -100,7 +100,7 @@ export function Sidebar() {
     down = null;
     dragging = false;
   };
-  const onTabClick = (id: number) => {
+  const onTabClick = (id: string) => {
     if (suppressClick) {
       suppressClick = false;
       return;

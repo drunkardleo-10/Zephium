@@ -7,10 +7,10 @@ use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{PageLoadEvent, WebView, WebViewBuilder};
 
 use zephium_core::geometry::Rect;
+use zephium_core::ids::ItemId;
 use zephium_core::navigation;
 use zephium_core::ports::engine::EngineEvent;
 use zephium_core::split::Pane;
-use zephium_core::tab::TabId;
 
 #[cfg(target_os = "macos")]
 use {
@@ -70,14 +70,14 @@ impl HasWindowHandle for ParentHandle {
 
 pub(crate) struct EngineHost {
     parent: ParentHandle,
-    views: HashMap<TabId, WebView>,
+    views: HashMap<ItemId, WebView>,
     #[cfg(target_os = "macos")]
     stage: Option<Retained<ContentStage>>,
     sink: Sink,
 }
 
 impl EngineHost {
-    pub(crate) fn create_view(&mut self, id: TabId, url: &str, bounds: Rect) {
+    pub(crate) fn create_view(&mut self, id: ItemId, url: &str, bounds: Rect) {
         if self.views.contains_key(&id) {
             return;
         }
@@ -120,25 +120,25 @@ impl EngineHost {
         self.views.insert(id, view);
     }
 
-    pub(crate) fn navigate(&self, id: TabId, url: &str) {
+    pub(crate) fn navigate(&self, id: ItemId, url: &str) {
         if let Some(view) = self.views.get(&id) {
             let _ = view.load_url(url);
         }
     }
 
-    pub(crate) fn reload(&self, id: TabId) {
+    pub(crate) fn reload(&self, id: ItemId) {
         if let Some(view) = self.views.get(&id) {
             let _ = view.reload();
         }
     }
 
-    pub(crate) fn history(&self, id: TabId, js: &str) {
+    pub(crate) fn history(&self, id: ItemId, js: &str) {
         if let Some(view) = self.views.get(&id) {
             let _ = view.evaluate_script(js);
         }
     }
 
-    pub(crate) fn close(&mut self, id: TabId) {
+    pub(crate) fn close(&mut self, id: ItemId) {
         self.views.remove(&id);
         #[cfg(target_os = "macos")]
         if let Some(stage) = &self.stage {

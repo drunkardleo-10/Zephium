@@ -22,19 +22,19 @@ export function dispose() {
 }
 
 export const open = () => void ipc.openTab();
-export const activate = (id: number) => void ipc.activateTab(id);
-export const close = (id: number) => void ipc.closeTab(id);
-export const navigate = (id: number, input: string) => void ipc.navigate(id, input);
+export const activate = (id: string) => void ipc.activateTab(id);
+export const close = (id: string) => void ipc.closeTab(id);
+export const navigate = (id: string, input: string) => void ipc.navigate(id, input);
 
-const onActive = (fn: (id: number) => void) => () => {
+const onActive = (fn: (id: string) => void) => () => {
   const id = state.active;
   if (id != null) fn(id);
 };
 export const reloadActive = onActive(ipc.reload);
 export const backActive = onActive(ipc.back);
 export const forwardActive = onActive(ipc.forward);
-export const split = (other: number) => void ipc.split(other);
+export const split = (other: string) => void ipc.split(other);
 export const unsplit = () => void ipc.unsplit();
 export const setSidebarWidth = (width: number) => void ipc.setSidebarWidth(width);
 export const dragOver = (x: number, y: number) => void ipc.dragOver(x, y);
-export const dropTab = (id: number, x: number, y: number) => void ipc.dropTab(id, x, y);
+export const dropTab = (id: string, x: number, y: number) => void ipc.dropTab(id, x, y);

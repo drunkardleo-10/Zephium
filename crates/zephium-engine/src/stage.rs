@@ -7,15 +7,15 @@ use objc2_app_kit::{NSColor, NSEvent, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
 use zephium_core::geometry::Rect;
+use zephium_core::ids::ItemId;
 use zephium_core::split::{self, Divider, Pane};
-use zephium_core::tab::TabId;
 
 type RatioCallback = Box<dyn Fn(Pane)>;
 
 #[derive(Default)]
 pub struct StageIvars {
     tree: RefCell<Option<Pane>>,
-    views: RefCell<HashMap<TabId, Retained<NSView>>>,
+    views: RefCell<HashMap<ItemId, Retained<NSView>>>,
     gap: Cell<f64>,
     drag: RefCell<Option<Divider>>,
     indicator: RefCell<Option<Retained<NSView>>>,
@@ -92,18 +92,18 @@ impl ContentStage {
         *self.ivars().on_ratio.borrow_mut() = Some(f);
     }
 
-    pub fn insert_view(&self, id: TabId, view: Retained<NSView>) {
+    pub fn insert_view(&self, id: ItemId, view: Retained<NSView>) {
         self.addSubview(&view);
         self.ivars().views.borrow_mut().insert(id, view);
     }
 
-    pub fn remove_view(&self, id: TabId) {
+    pub fn remove_view(&self, id: ItemId) {
         if let Some(view) = self.ivars().views.borrow_mut().remove(&id) {
             view.removeFromSuperview();
         }
     }
 
-    pub fn set_visible(&self, visible: &[TabId]) {
+    pub fn set_visible(&self, visible: &[ItemId]) {
         for (id, view) in self.ivars().views.borrow().iter() {
             view.setHidden(!visible.contains(id));
         }

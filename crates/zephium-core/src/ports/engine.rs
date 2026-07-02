@@ -1,16 +1,16 @@
 use crate::geometry::Rect;
+use crate::ids::ItemId;
 use crate::split::Pane;
-use crate::tab::TabId;
 
-/// Executes the side-effects the `Tabs` aggregate emits. Implemented by the
+/// Executes the side-effects the item aggregate emits. Implemented by the
 /// engine adapter (Wry); the core depends only on this trait, never on wry.
 pub trait Engine {
-    fn create_view(&self, id: TabId, url: &str, bounds: Rect);
-    fn navigate(&self, id: TabId, url: &str);
-    fn reload(&self, id: TabId);
-    fn go_back(&self, id: TabId);
-    fn go_forward(&self, id: TabId);
-    fn close(&self, id: TabId);
+    fn create_view(&self, id: ItemId, url: &str, bounds: Rect);
+    fn navigate(&self, id: ItemId, url: &str);
+    fn reload(&self, id: ItemId);
+    fn go_back(&self, id: ItemId);
+    fn go_forward(&self, id: ItemId);
+    fn close(&self, id: ItemId);
     /// Lay the split `tree` into `region`, or hide all content when `region` is
     /// `None`. The engine owns pane geometry so resize stays in the native pass.
     fn set_content(&self, tree: Option<Pane>, region: Option<Rect>);
@@ -20,8 +20,8 @@ pub trait Engine {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
-    TitleChanged { id: TabId, title: String },
-    UrlChanged { id: TabId, url: String },
-    LoadingChanged { id: TabId, loading: bool },
+    TitleChanged { id: ItemId, title: String },
+    UrlChanged { id: ItemId, url: String },
+    LoadingChanged { id: ItemId, loading: bool },
     SplitChanged(Pane),
 }

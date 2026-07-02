@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
+use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::{Engine, EngineEvent};
 use zephium_core::split::Pane;
-use zephium_core::tab::TabId;
 
 /// Runs a closure on the main thread (where the webviews live). Provided by the
 /// composition root over the event loop, so this crate stays Tauri-free.
@@ -37,29 +37,29 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
-    fn create_view(&self, id: TabId, url: &str, bounds: Rect) {
+    fn create_view(&self, id: ItemId, url: &str, bounds: Rect) {
         let url = url.to_owned();
         self.run(move || host::with(|h| h.create_view(id, &url, bounds)));
     }
 
-    fn navigate(&self, id: TabId, url: &str) {
+    fn navigate(&self, id: ItemId, url: &str) {
         let url = url.to_owned();
         self.run(move || host::with(|h| h.navigate(id, &url)));
     }
 
-    fn reload(&self, id: TabId) {
+    fn reload(&self, id: ItemId) {
         self.run(move || host::with(|h| h.reload(id)));
     }
 
-    fn go_back(&self, id: TabId) {
+    fn go_back(&self, id: ItemId) {
         self.run(move || host::with(|h| h.history(id, "history.back()")));
     }
 
-    fn go_forward(&self, id: TabId) {
+    fn go_forward(&self, id: ItemId) {
         self.run(move || host::with(|h| h.history(id, "history.forward()")));
     }
 
-    fn close(&self, id: TabId) {
+    fn close(&self, id: ItemId) {
         self.run(move || host::with(|h| h.close(id)));
     }
 
