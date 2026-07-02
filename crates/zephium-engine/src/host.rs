@@ -16,7 +16,7 @@ use zephium_core::split::Pane;
 
 #[cfg(target_os = "macos")]
 use {
-    crate::stage::ContentStage, objc2::rc::Retained, objc2_app_kit::NSView,
+    crate::platform::imp::ContentStage, objc2::rc::Retained, objc2_app_kit::NSView,
     objc2_foundation::MainThreadMarker, std::cell::OnceCell, std::rc::Rc,
 };
 
@@ -160,15 +160,15 @@ impl EngineHost {
                 return;
             }
         };
-        crate::native::configure(&view, 12.0);
+        crate::platform::imp::configure(&view, 12.0);
         #[cfg(target_os = "macos")]
         {
-            let _ = wk_cell.set(crate::native::webkit(&view));
+            let _ = wk_cell.set(crate::platform::imp::webkit(&view));
             for script in scripts
                 .iter()
                 .filter(|s| !(s.world == World::Page && s.at_start))
             {
-                crate::native::add_user_script(&view, script);
+                crate::platform::imp::add_user_script(&view, script);
             }
         }
         let _ = view.set_visible(false);
@@ -214,7 +214,7 @@ impl EngineHost {
     pub(crate) fn stop(&self, id: ItemId) {
         if let Some(view) = self.views.get(&id) {
             #[cfg(target_os = "macos")]
-            crate::native::stop_loading(view);
+            crate::platform::imp::stop_loading(view);
             #[cfg(not(target_os = "macos"))]
             let _ = view.evaluate_script("window.stop()");
         }

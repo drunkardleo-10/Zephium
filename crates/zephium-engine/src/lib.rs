@@ -1,7 +1,5 @@
 mod host;
-mod native;
-#[cfg(target_os = "macos")]
-mod stage;
+mod platform;
 
 use std::sync::Arc;
 

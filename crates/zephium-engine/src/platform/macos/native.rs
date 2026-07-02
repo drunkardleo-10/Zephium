@@ -1,12 +1,10 @@
-#[cfg(target_os = "macos")]
-pub(crate) fn webkit(view: &wry::WebView) -> objc2::rc::Retained<objc2_web_kit::WKWebView> {
+pub fn webkit(view: &wry::WebView) -> objc2::rc::Retained<objc2_web_kit::WKWebView> {
     use wry::WebViewExtMacOS;
     // SAFETY: WryWebView is a WKWebView subclass; this is a plain upcast.
     unsafe { objc2::rc::Retained::cast_unchecked(view.webview()) }
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn configure(webview: &wry::WebView, radius: f64) {
+pub fn configure(webview: &wry::WebView, radius: f64) {
     use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
 
     let wk = webkit(webview);
@@ -21,16 +19,11 @@ pub(crate) fn configure(webview: &wry::WebView, radius: f64) {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn stop_loading(view: &wry::WebView) {
+pub fn stop_loading(view: &wry::WebView) {
     unsafe { webkit(view).stopLoading() };
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn add_user_script(
-    view: &wry::WebView,
-    script: &zephium_core::ports::engine::UserScript,
-) {
+pub fn add_user_script(view: &wry::WebView, script: &zephium_core::ports::engine::UserScript) {
     use objc2::MainThreadOnly;
     use objc2_foundation::{MainThreadMarker, NSString};
     use objc2_web_kit::{WKContentWorld, WKUserScript, WKUserScriptInjectionTime};
@@ -72,6 +65,3 @@ pub(crate) fn add_user_script(
             .addUserScript(&user_script)
     };
 }
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn configure(_webview: &wry::WebView, _radius: f64) {}
