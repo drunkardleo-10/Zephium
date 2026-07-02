@@ -9,6 +9,8 @@ pub enum Group {
     View,
     History,
     Window,
+    /// Not placed in any menu; bound to a system-wide shortcut.
+    Global,
 }
 
 pub struct CommandSpec {
@@ -90,6 +92,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         title: "Previous Tab",
         accelerator: Some("Ctrl+Shift+Tab"),
         group: Group::Window,
+    },
+    CommandSpec {
+        id: "launcher.toggle",
+        title: "Toggle Launcher",
+        accelerator: Some("CmdOrCtrl+Shift+Space"),
+        group: Group::Global,
     },
 ];
 

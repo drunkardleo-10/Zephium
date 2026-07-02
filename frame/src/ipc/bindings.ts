@@ -16,6 +16,7 @@ export const commands = {
 	tabsSplit: (other: string) => __TAURI_INVOKE<void>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<void>("tabs_unsplit"),
 	runCommand: (id: string) => __TAURI_INVOKE<void>("run_command", { id }),
+	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drop", { id, x, y }),

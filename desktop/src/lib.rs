@@ -1,5 +1,9 @@
 //! Composition root: the only crate that knows Tauri. Wires the dependency graph
-//! (window -> chrome positioning, engine, coordinator) and the command surface.
+//! (window -> chrome positioning, engine, shell) and the command surface.
+
+mod overlay;
+#[cfg(target_os = "macos")]
+mod panel;
 
 use std::sync::{Arc, OnceLock};
 
@@ -44,6 +48,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_split,
             tabs_unsplit,
             run_command,
+            panel_hide,
             sidebar_set_width,
             tab_drag_over,
             tab_drop
@@ -122,11 +127,31 @@ fn tabs_unsplit(shell: State<'_, Handle>) {
     shell.dispatch(Command::Unsplit);
 }
 
+fn execute_command(app: &tauri::AppHandle, id: &str) {
+    if id == "launcher.toggle" {
+        if let Some(overlay) = app.try_state::<overlay::Overlay>() {
+            overlay.toggle();
+        }
+        return;
+    }
+    if zephium_core::commands::get(id).is_some() {
+        if let Some(shell) = app.try_state::<Handle>() {
+            shell.dispatch(Command::Run(id.to_string()));
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
-fn run_command(shell: State<'_, Handle>, id: String) {
-    if zephium_core::commands::get(&id).is_some() {
-        shell.dispatch(Command::Run(id));
+fn run_command(app: tauri::AppHandle, id: String) {
+    execute_command(&app, &id);
+}
+
+#[tauri::command]
+#[specta::specta]
+fn panel_hide(app: tauri::AppHandle) {
+    if let Some(overlay) = app.try_state::<overlay::Overlay>() {
+        overlay.hide();
     }
 }
 
@@ -303,6 +328,7 @@ fn build_menu(
 pub fn run() {
     let specta = specta_builder();
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(specta.invoke_handler())
         .setup(move |app| {
             specta.mount_events(app);
@@ -359,14 +385,7 @@ pub fn run() {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             app.set_menu(build_menu(&handle, &keymap)?)?;
-            app.on_menu_event(|app, event| {
-                let id = event.id().0.as_str();
-                if zephium_core::commands::get(id).is_some() {
-                    if let Some(shell) = app.try_state::<Handle>() {
-                        shell.dispatch(Command::Run(id.to_string()));
-                    }
-                }
-            });
+            app.on_menu_event(|app, event| execute_command(app, event.id().0.as_str()));
 
             let emit_handle = handle.clone();
             let emit: EmitFn = Box::new(move |projection| {
@@ -413,19 +432,62 @@ pub fn run() {
                 }
             });
 
-            let _spotlight = tauri::WebviewWindowBuilder::new(
+            let panel_window = tauri::WebviewWindowBuilder::new(
                 app,
-                "spotlight",
+                overlay::PANEL_LABEL,
                 tauri::WebviewUrl::App("index.html".into()),
             )
-            .title("Spotlight")
-            .inner_size(720.0, 480.0)
+            .title("Zephium")
+            .inner_size(overlay::PANEL_SIZE.0, overlay::PANEL_SIZE.1)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
+            .resizable(false)
             .visible(false)
             .build()?;
+
+            #[cfg(target_os = "macos")]
+            {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                let _ = apply_vibrancy(
+                    &panel_window,
+                    NSVisualEffectMaterial::HudWindow,
+                    None,
+                    Some(16.0),
+                );
+            }
+
+            let overlay = overlay::Overlay::new(panel_window.clone());
+            let blur_overlay = overlay.clone();
+            panel_window.on_window_event(move |event| {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    blur_overlay.hide();
+                }
+            });
+            app.manage(overlay);
+
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                let resolved = zephium_core::commands::resolve(&keymap);
+                let accel = resolved
+                    .iter()
+                    .find(|c| c.id == "launcher.toggle")
+                    .and_then(|c| c.accelerator.clone());
+                if let Some(accel) = accel {
+                    let registered = app.global_shortcut().on_shortcut(
+                        accel.as_str(),
+                        |app, _shortcut, event| {
+                            if event.state() == ShortcutState::Pressed {
+                                execute_command(app, "launcher.toggle");
+                            }
+                        },
+                    );
+                    if let Err(e) = registered {
+                        eprintln!("global shortcut {accel} unavailable: {e}");
+                    }
+                }
+            }
 
             app.manage(shell);
             Ok(())

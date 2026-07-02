@@ -1,7 +1,7 @@
 import { onCleanup, onMount } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Shell } from "./Shell";
-import { Spotlight } from "../features/spotlight/Spotlight";
+import { Launcher } from "../features/launcher/Launcher";
 import { commands } from "../ipc/bindings";
 import * as tabs from "../state/tabs";
 import * as ui from "../state/ui";
@@ -24,8 +24,8 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 export default function App() {
-  if (getCurrentWindow().label === "spotlight") {
-    return <Spotlight />;
+  if (getCurrentWindow().label === "panel") {
+    return <Launcher />;
   }
 
   onMount(() => {
