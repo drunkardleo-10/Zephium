@@ -12,7 +12,7 @@ use zephium_core::item::{Lifecycle, Placement, SpaceSection, TabState};
 use zephium_core::items::{Effect, Items};
 use zephium_core::layout;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
-use zephium_core::ports::engine::{Engine, EngineEvent};
+use zephium_core::ports::engine::{Engine, EngineEvent, Partition};
 use zephium_core::ports::store::Store;
 use zephium_core::profiles::{Profile, ProfileKind, Profiles};
 use zephium_core::session;
@@ -141,8 +141,10 @@ impl Shell {
                 self.relayout();
             }
             Command::DragOver { x, y } => {
-                let zone = self.resolve_drop(x, y).map(|d| d.zone);
-                self.engine.set_drop_indicator(zone);
+                if let Some(win) = self.windows.focused().map(|w| w.id) {
+                    let zone = self.resolve_drop(x, y).map(|d| d.zone);
+                    self.engine.set_drop_indicator(win, zone);
+                }
             }
             Command::DropTab { id, x, y } => self.drop_tab(id, x, y),
             Command::Engine(event) => self.on_engine_event(event),
@@ -307,10 +309,13 @@ impl Shell {
     }
 
     fn drop_tab(&mut self, dropped: ItemId, client_x: f64, client_y: f64) {
+        let Some(win) = self.windows.focused().map(|w| w.id) else {
+            return;
+        };
         if let Some(d) = self.resolve_drop(client_x, client_y) {
             self.apply_drop(d.tab, dropped, d.edge);
         }
-        self.engine.set_drop_indicator(None);
+        self.engine.set_drop_indicator(win, None);
     }
 
     fn apply_drop(&mut self, target: ItemId, dropped: ItemId, edge: Edge) {
@@ -350,11 +355,26 @@ impl Shell {
 
     fn on_engine_event(&mut self, event: EngineEvent) {
         match event {
-            EngineEvent::SplitChanged(tree) => {
-                if let Some(win) = self.windows.focused_mut() {
+            EngineEvent::SplitChanged { window, tree } => {
+                if let Some(win) = self.windows.get_mut(window) {
                     win.splits = Some(tree);
                 }
             }
+            EngineEvent::NavState {
+                id,
+                can_go_back,
+                can_go_forward,
+            } => {
+                self.items.set_nav_flags(id, can_go_back, can_go_forward);
+                self.project_tab(id);
+            }
+            EngineEvent::NewWindowRequested { id, url } => self.open_linked_tab(id, &url),
+            EngineEvent::FaviconChanged { .. } => {}
+            EngineEvent::PermissionRequested { .. } => {}
+            EngineEvent::DownloadRequested { .. } => {}
+            EngineEvent::Crashed { .. } => {}
+            EngineEvent::Captured { .. } => {}
+            EngineEvent::HtmlExtracted { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.items.set_title(id, title);
                 self.project_tab(id);
@@ -393,6 +413,51 @@ impl Shell {
         }
     }
 
+    fn space_of_item(&self, id: ItemId) -> Option<SpaceId> {
+        match self.items.get(id)?.placement {
+            Placement::Space { space, .. } => Some(space),
+            Placement::Favorites { .. } => self.windows.focused().map(|w| w.space),
+        }
+    }
+
+    fn partition_of(&self, id: ItemId) -> Partition {
+        let profile = self
+            .profile_of_item(id)
+            .or_else(|| self.windows.focused().map(|w| w.profile))
+            .unwrap_or_else(|| {
+                self.profiles
+                    .default_profile()
+                    .unwrap_or(ProfileId::from(0))
+            });
+        match self.profiles.get(profile).map(|p| p.kind) {
+            Some(ProfileKind::Named) => Partition::Persistent(profile),
+            Some(ProfileKind::Incognito) => Partition::Ephemeral(profile),
+            Some(ProfileKind::Default) | None => Partition::Default(profile),
+        }
+    }
+
+    /// window.open / target=_blank lands as a new Today tab next to its
+    /// source, routed through the same navigation policy.
+    fn open_linked_tab(&mut self, source: ItemId, url: &str) {
+        let Some(space) = self.space_of_item(source) else {
+            return;
+        };
+        if let Some(win) = self.windows.focused_mut() {
+            win.splits = None;
+        }
+        let id = ItemId::generate();
+        self.items.insert_tab(
+            id,
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        );
+        let mut fx = self.focus_tab(id);
+        fx.extend(self.items.navigate(id, url));
+        self.commit(fx);
+    }
+
     fn commit(&mut self, effects: Vec<Effect>) {
         self.apply(effects);
         self.persist();
@@ -407,7 +472,10 @@ impl Shell {
         let bounds = self.content_region();
         for effect in effects {
             match effect {
-                Effect::CreateView { id, url } => self.engine.create_view(id, &url, bounds),
+                Effect::CreateView { id, url } => {
+                    self.engine
+                        .create_view(id, self.partition_of(id), &url, bounds)
+                }
                 Effect::Navigate { id, url } => self.engine.navigate(id, &url),
                 Effect::Close { id } => self.engine.close(id),
             }
@@ -425,7 +493,7 @@ impl Shell {
             rect: l.chrome,
             fill_width: l.content.is_none(),
         });
-        self.engine.set_content(tree, l.content);
+        self.engine.set_content(win.id, tree, l.content);
     }
 
     fn present(&self, tree: &Pane) -> bool {
@@ -513,6 +581,8 @@ fn tab_view(id: ItemId, tab: &TabState) -> TabView {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use zephium_core::ids::WindowId;
+    use zephium_core::ports::engine::{ContentScope, UserContent};
     use zephium_core::session::SessionState;
 
     #[derive(Default)]
@@ -545,26 +615,40 @@ mod tests {
     }
 
     impl Engine for FakeEngine {
-        fn create_view(&self, id: ItemId, url: &str, _bounds: Rect) {
-            self.log(format!("create {id} {url}"));
+        fn create_view(&self, id: ItemId, partition: Partition, url: &str, _bounds: Rect) {
+            let kind = match partition {
+                Partition::Default(_) => "default",
+                Partition::Persistent(_) => "persistent",
+                Partition::Ephemeral(_) => "ephemeral",
+            };
+            self.log(format!("create {id} {url} [{kind}]"));
         }
         fn navigate(&self, id: ItemId, url: &str) {
             self.log(format!("navigate {id} {url}"));
         }
         fn reload(&self, _id: ItemId) {}
+        fn stop(&self, _id: ItemId) {}
         fn go_back(&self, _id: ItemId) {}
         fn go_forward(&self, _id: ItemId) {}
         fn close(&self, id: ItemId) {
             self.log(format!("close {id}"));
         }
-        fn set_content(&self, tree: Option<Pane>, region: Option<Rect>) {
+        fn set_content(&self, _window: WindowId, tree: Option<Pane>, region: Option<Rect>) {
             let ids: Vec<String> = match (tree, region) {
                 (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
                 _ => Vec::new(),
             };
             self.log(format!("layout {}", ids.join(",")));
         }
-        fn set_drop_indicator(&self, _zone: Option<Rect>) {}
+        fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) {}
+        fn zoom(&self, _id: ItemId, _scale: f64) {}
+        fn set_muted(&self, _id: ItemId, _muted: bool) {}
+        fn find(&self, _id: ItemId, _query: Option<&str>) {}
+        fn capture(&self, _id: ItemId) {}
+        fn extract_html(&self, _id: ItemId) {}
+        fn print(&self, _id: ItemId) {}
+        fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
+        fn set_content_rules(&self, _profile: ProfileId, _compiled: String) {}
     }
 
     #[derive(Default)]
@@ -644,7 +728,7 @@ mod tests {
 
         assert!(engine
             .calls()
-            .contains(&format!("create {id} https://example.com/")));
+            .contains(&format!("create {id} https://example.com/ [default]")));
         assert_eq!(engine.last_layout(), vec![id.to_string()]);
 
         let active = id.to_string();

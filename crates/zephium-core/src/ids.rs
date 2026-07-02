@@ -19,6 +19,10 @@ macro_rules! ulid_id {
             pub fn parse(s: &str) -> Option<Self> {
                 Ulid::from_string(s).ok().map(Self)
             }
+
+            pub fn bytes(self) -> [u8; 16] {
+                self.0 .0.to_be_bytes()
+            }
         }
 
         impl fmt::Display for $name {

@@ -94,6 +94,10 @@ impl ContentStage {
         *self.ivars().on_ratio.borrow_mut() = Some(f);
     }
 
+    pub fn has_view(&self, id: ItemId) -> bool {
+        self.ivars().views.borrow().contains_key(&id)
+    }
+
     pub fn insert_view(&self, id: ItemId, view: Retained<NSView>) {
         self.addSubview(&view);
         self.ivars().views.borrow_mut().insert(id, view);

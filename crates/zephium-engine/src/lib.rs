@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
-use zephium_core::ids::ItemId;
-use zephium_core::ports::engine::{Engine, EngineEvent};
+use zephium_core::ids::{ItemId, ProfileId, WindowId};
+use zephium_core::ports::engine::{ContentScope, Engine, EngineEvent, Partition, UserContent};
 use zephium_core::split::Pane;
 
 /// Runs a closure on the main thread (where the webviews live). Provided by the
@@ -24,9 +24,9 @@ pub struct WebviewEngine {
 pub fn install(
     parent: RawWindowHandle,
     dispatch: MainThreadDispatch,
-    sink: impl Fn(EngineEvent) + 'static,
+    sink: impl Fn(EngineEvent) + Send + Sync + 'static,
 ) -> WebviewEngine {
-    host::install(parent, Box::new(sink));
+    host::install(parent, Arc::new(sink));
     WebviewEngine { dispatch }
 }
 
@@ -37,9 +37,9 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
-    fn create_view(&self, id: ItemId, url: &str, bounds: Rect) {
+    fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) {
         let url = url.to_owned();
-        self.run(move || host::with(|h| h.create_view(id, &url, bounds)));
+        self.run(move || host::with(|h| h.create_view(id, partition, &url, bounds)));
     }
 
     fn navigate(&self, id: ItemId, url: &str) {
@@ -49,6 +49,10 @@ impl Engine for WebviewEngine {
 
     fn reload(&self, id: ItemId) {
         self.run(move || host::with(|h| h.reload(id)));
+    }
+
+    fn stop(&self, id: ItemId) {
+        self.run(move || host::with(|h| h.stop(id)));
     }
 
     fn go_back(&self, id: ItemId) {
@@ -63,11 +67,44 @@ impl Engine for WebviewEngine {
         self.run(move || host::with(|h| h.close(id)));
     }
 
-    fn set_content(&self, tree: Option<Pane>, region: Option<Rect>) {
-        self.run(move || host::with(|h| h.set_content(tree, region)));
+    fn set_content(&self, window: WindowId, tree: Option<Pane>, region: Option<Rect>) {
+        self.run(move || host::with(|h| h.set_content(window, tree, region)));
     }
 
-    fn set_drop_indicator(&self, zone: Option<Rect>) {
-        self.run(move || host::with(|h| h.set_drop_indicator(zone)));
+    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) {
+        self.run(move || host::with(|h| h.set_drop_indicator(window, zone)));
+    }
+
+    fn zoom(&self, id: ItemId, scale: f64) {
+        self.run(move || host::with(|h| h.zoom(id, scale)));
+    }
+
+    fn set_muted(&self, id: ItemId, muted: bool) {
+        self.run(move || host::with(|h| h.set_muted(id, muted)));
+    }
+
+    fn find(&self, id: ItemId, query: Option<&str>) {
+        let query = query.map(ToOwned::to_owned);
+        self.run(move || host::with(|h| h.find(id, query.as_deref())));
+    }
+
+    fn capture(&self, id: ItemId) {
+        self.run(move || host::with(|h| h.capture(id)));
+    }
+
+    fn extract_html(&self, id: ItemId) {
+        self.run(move || host::with(|h| h.extract_html(id)));
+    }
+
+    fn print(&self, id: ItemId) {
+        self.run(move || host::with(|h| h.print(id)));
+    }
+
+    fn set_user_content(&self, scope: ContentScope, content: UserContent) {
+        self.run(move || host::with(|h| h.set_user_content(scope, content)));
+    }
+
+    fn set_content_rules(&self, profile: ProfileId, compiled: String) {
+        self.run(move || host::with(|h| h.set_content_rules(profile, compiled)));
     }
 }

@@ -12,9 +12,12 @@ use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
 use zephium_core::ids::ItemId;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
+use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
 use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
 use zephium_ipc::Projection;
+
+const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}";
 use zephium_store::SqliteStore;
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -257,6 +260,13 @@ pub fn run() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
+            engine.set_user_content(
+                ContentScope::Global,
+                UserContent {
+                    scripts: Vec::new(),
+                    styles: vec![SCROLLBAR_CSS.into()],
+                },
+            );
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;

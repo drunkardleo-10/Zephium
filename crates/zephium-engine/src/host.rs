@@ -1,41 +1,40 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
-use wry::{PageLoadEvent, WebView, WebViewBuilder};
+use wry::{NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder};
 
 use zephium_core::geometry::Rect;
-use zephium_core::ids::ItemId;
+use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::navigation;
-use zephium_core::ports::engine::EngineEvent;
+use zephium_core::ports::engine::{
+    ContentScope, EngineEvent, Partition, UserContent, UserScript, World,
+};
 use zephium_core::split::Pane;
 
 #[cfg(target_os = "macos")]
 use {
     crate::stage::ContentStage, objc2::rc::Retained, objc2_app_kit::NSView,
-    objc2_foundation::MainThreadMarker,
+    objc2_foundation::MainThreadMarker, std::cell::OnceCell, std::rc::Rc,
 };
 
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
 }
 
-// Cosmetic user stylesheet injected into every page: a slim, neat scrollbar.
-// Non-privileged (no IPC), so it does not weaken the content/chrome wall.
-const SCROLLBAR_JS: &str = r#"(function(){var s=document.createElement('style');s.textContent='::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}';(document.head||document.documentElement).appendChild(s);})()"#;
-
 const GAP: f64 = 8.0;
 
-pub(crate) fn install(parent: RawWindowHandle, sink: Box<dyn Fn(EngineEvent)>) {
+pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + Send + Sync>) {
     HOST.with(|cell| {
         *cell.borrow_mut() = Some(EngineHost {
             parent: ParentHandle(parent),
             views: HashMap::new(),
+            user_content: HashMap::new(),
             #[cfg(target_os = "macos")]
-            stage: None,
-            sink: Sink(Rc::from(sink)),
+            stages: HashMap::new(),
+            sink: Sink(sink),
         });
     });
 }
@@ -49,12 +48,11 @@ pub(crate) fn with<F: FnOnce(&mut EngineHost)>(f: F) {
 }
 
 #[derive(Clone)]
-struct Sink(Rc<dyn Fn(EngineEvent)>);
+struct Sink(Arc<dyn Fn(EngineEvent) + Send + Sync>);
 
 impl Sink {
     fn emit(&self, ev: EngineEvent) {
-        let f: &dyn Fn(EngineEvent) = &*self.0;
-        f(ev);
+        (self.0)(ev);
     }
 }
 
@@ -71,40 +69,89 @@ impl HasWindowHandle for ParentHandle {
 pub(crate) struct EngineHost {
     parent: ParentHandle,
     views: HashMap<ItemId, WebView>,
+    user_content: HashMap<ContentScope, UserContent>,
     #[cfg(target_os = "macos")]
-    stage: Option<Retained<ContentStage>>,
+    stages: HashMap<WindowId, Retained<ContentStage>>,
     sink: Sink,
 }
 
 impl EngineHost {
-    pub(crate) fn create_view(&mut self, id: ItemId, url: &str, bounds: Rect) {
+    pub(crate) fn create_view(
+        &mut self,
+        id: ItemId,
+        partition: Partition,
+        url: &str,
+        bounds: Rect,
+    ) {
         if self.views.contains_key(&id) {
             return;
         }
         let on_title = self.sink.clone();
         let on_load = self.sink.clone();
+        let on_new_window = self.sink.clone();
 
-        let built = WebViewBuilder::new()
-            .with_url(url)
+        let mut builder = WebViewBuilder::new()
             .with_bounds(to_wry(bounds))
             .with_devtools(true)
-            .with_initialization_script(SCROLLBAR_JS)
             .with_navigation_handler(|target| navigation::is_allowed_str(&target))
             .with_document_title_changed_handler(move |title| {
                 on_title.emit(EngineEvent::TitleChanged { id, title });
             })
-            .with_on_page_load_handler(move |event, url| match event {
-                PageLoadEvent::Started => {
-                    on_load.emit(EngineEvent::LoadingChanged { id, loading: true });
-                }
-                PageLoadEvent::Finished => {
-                    on_load.emit(EngineEvent::LoadingChanged { id, loading: false });
-                    on_load.emit(EngineEvent::UrlChanged { id, url });
-                }
-            })
-            .build_as_child(&self.parent);
+            .with_new_window_req_handler(move |url, _features| {
+                on_new_window.emit(EngineEvent::NewWindowRequested { id, url });
+                NewWindowResponse::Deny
+            });
 
-        let view = match built {
+        let scripts = self.scripts_for(partition);
+        for script in scripts
+            .iter()
+            .filter(|s| s.world == World::Page && s.at_start)
+        {
+            builder = builder.with_initialization_script(&script.source);
+        }
+
+        builder = match partition {
+            Partition::Default(_) => builder,
+            Partition::Persistent(profile) => {
+                #[cfg(target_os = "macos")]
+                {
+                    use wry::WebViewBuilderExtDarwin;
+                    builder.with_data_store_identifier(profile.bytes())
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = profile;
+                    builder
+                }
+            }
+            Partition::Ephemeral(_) => builder.with_incognito(true),
+        };
+
+        #[cfg(target_os = "macos")]
+        let wk_cell: Rc<OnceCell<Retained<objc2_web_kit::WKWebView>>> = Rc::new(OnceCell::new());
+        #[cfg(target_os = "macos")]
+        let load_cell = wk_cell.clone();
+
+        builder = builder.with_on_page_load_handler(move |event, url| match event {
+            PageLoadEvent::Started => {
+                on_load.emit(EngineEvent::LoadingChanged { id, loading: true });
+            }
+            PageLoadEvent::Finished => {
+                on_load.emit(EngineEvent::LoadingChanged { id, loading: false });
+                on_load.emit(EngineEvent::UrlChanged { id, url });
+                #[cfg(target_os = "macos")]
+                if let Some(wk) = load_cell.get() {
+                    let (back, forward) = unsafe { (wk.canGoBack(), wk.canGoForward()) };
+                    on_load.emit(EngineEvent::NavState {
+                        id,
+                        can_go_back: back,
+                        can_go_forward: forward,
+                    });
+                }
+            }
+        });
+
+        let view = match builder.build_as_child(&self.parent) {
             Ok(view) => view,
             Err(e) => {
                 eprintln!("engine: create_view({id}) failed: {e}");
@@ -112,12 +159,42 @@ impl EngineHost {
             }
         };
         crate::native::configure(&view, 12.0);
-        let _ = view.set_visible(false);
         #[cfg(target_os = "macos")]
-        if let Some(stage) = self.ensure_stage() {
-            stage.insert_view(id, webview_nsview(&view));
+        {
+            let _ = wk_cell.set(crate::native::webkit(&view));
+            for script in scripts
+                .iter()
+                .filter(|s| !(s.world == World::Page && s.at_start))
+            {
+                crate::native::add_user_script(&view, script);
+            }
         }
+        let _ = view.set_visible(false);
+        let _ = view.load_url(url);
         self.views.insert(id, view);
+    }
+
+    fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
+        let mut out = Vec::new();
+        for scope in [
+            ContentScope::Global,
+            ContentScope::Profile(partition.profile()),
+        ] {
+            if let Some(content) = self.user_content.get(&scope) {
+                out.extend(content.scripts.iter().cloned());
+                out.extend(content.styles.iter().map(|css| style_script(css)));
+            }
+        }
+        out
+    }
+
+    pub(crate) fn set_user_content(&mut self, scope: ContentScope, content: UserContent) {
+        self.user_content.insert(scope, content);
+    }
+
+    pub(crate) fn set_content_rules(&mut self, _profile: ProfileId, _compiled: String) {
+        // Lands with the blocker: WKContentRuleListStore on macOS,
+        // WebResourceRequested on Windows, UserContentFilter on GTK.
     }
 
     pub(crate) fn navigate(&self, id: ItemId, url: &str) {
@@ -132,23 +209,75 @@ impl EngineHost {
         }
     }
 
+    pub(crate) fn stop(&self, id: ItemId) {
+        if let Some(view) = self.views.get(&id) {
+            #[cfg(target_os = "macos")]
+            crate::native::stop_loading(view);
+            #[cfg(not(target_os = "macos"))]
+            let _ = view.evaluate_script("window.stop()");
+        }
+    }
+
     pub(crate) fn history(&self, id: ItemId, js: &str) {
         if let Some(view) = self.views.get(&id) {
             let _ = view.evaluate_script(js);
         }
     }
 
+    pub(crate) fn zoom(&self, id: ItemId, scale: f64) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = view.zoom(scale);
+        }
+    }
+
+    pub(crate) fn set_muted(&self, _id: ItemId, _muted: bool) {
+        // No public WKWebView mute API; per-engine work, lands with tab audio.
+    }
+
+    pub(crate) fn find(&self, _id: ItemId, _query: Option<&str>) {
+        // Block-based WKWebView findString; lands with find-in-page.
+    }
+
+    pub(crate) fn capture(&self, _id: ItemId) {
+        // takeSnapshot completion handler; lands with easel/previews.
+    }
+
+    pub(crate) fn extract_html(&self, id: ItemId) {
+        if let Some(view) = self.views.get(&id) {
+            let sink = self.sink.clone();
+            let _ = view.evaluate_script_with_callback(
+                "document.documentElement.outerHTML",
+                move |result| {
+                    if let Ok(html) = serde_json::from_str::<String>(&result) {
+                        sink.emit(EngineEvent::HtmlExtracted { id, html });
+                    }
+                },
+            );
+        }
+    }
+
+    pub(crate) fn print(&self, id: ItemId) {
+        if let Some(view) = self.views.get(&id) {
+            let _ = view.print();
+        }
+    }
+
     pub(crate) fn close(&mut self, id: ItemId) {
         self.views.remove(&id);
         #[cfg(target_os = "macos")]
-        if let Some(stage) = &self.stage {
+        for stage in self.stages.values() {
             stage.remove_view(id);
         }
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn set_content(&mut self, tree: Option<Pane>, region: Option<Rect>) {
-        let Some(stage) = self.ensure_stage() else {
+    pub(crate) fn set_content(
+        &mut self,
+        window: WindowId,
+        tree: Option<Pane>,
+        region: Option<Rect>,
+    ) {
+        let Some(stage) = self.ensure_stage(window) else {
             return;
         };
         match region {
@@ -157,6 +286,13 @@ impl EngineHost {
                 stage.setHidden(false);
                 stage_set_frame(&stage, &self.parent, r);
                 let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
+                for id in &tabs {
+                    if !stage.has_view(*id) {
+                        if let Some(view) = self.views.get(id) {
+                            stage.insert_view(*id, webview_nsview(view));
+                        }
+                    }
+                }
                 stage.set_tree(tree);
                 stage.set_visible(&tabs);
             }
@@ -164,17 +300,22 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn set_drop_indicator(&mut self, zone: Option<Rect>) {
-        if let Some(stage) = self.ensure_stage() {
+    pub(crate) fn set_drop_indicator(&mut self, window: WindowId, zone: Option<Rect>) {
+        if let Some(stage) = self.ensure_stage(window) {
             stage.set_drop_indicator(zone);
         }
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn set_drop_indicator(&mut self, _zone: Option<Rect>) {}
+    pub(crate) fn set_drop_indicator(&mut self, _window: WindowId, _zone: Option<Rect>) {}
 
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn set_content(&mut self, tree: Option<Pane>, region: Option<Rect>) {
+    pub(crate) fn set_content(
+        &mut self,
+        _window: WindowId,
+        tree: Option<Pane>,
+        region: Option<Rect>,
+    ) {
         let panes = match (tree, region) {
             (Some(t), Some(r)) => zephium_core::split::layout(&t, r, GAP),
             _ => Vec::new(),
@@ -193,8 +334,8 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
-    fn ensure_stage(&mut self) -> Option<Retained<ContentStage>> {
-        if let Some(stage) = &self.stage {
+    fn ensure_stage(&mut self, window: WindowId) -> Option<Retained<ContentStage>> {
+        if let Some(stage) = self.stages.get(&window) {
             return Some(stage.clone());
         }
         let mtm = MainThreadMarker::new()?;
@@ -202,11 +343,23 @@ impl EngineHost {
         let stage = ContentStage::new(mtm, GAP);
         let sink = self.sink.clone();
         stage.set_on_ratio(Box::new(move |tree| {
-            sink.emit(EngineEvent::SplitChanged(tree))
+            sink.emit(EngineEvent::SplitChanged { window, tree })
         }));
         content.addSubview(&stage);
-        self.stage = Some(stage.clone());
+        self.stages.insert(window, stage.clone());
         Some(stage)
+    }
+}
+
+fn style_script(css: &str) -> UserScript {
+    let source = format!(
+        "(function(){{var s=document.createElement('style');s.textContent={};(document.head||document.documentElement).appendChild(s);}})()",
+        serde_json::to_string(css).unwrap_or_default()
+    );
+    UserScript {
+        source,
+        world: World::Page,
+        at_start: true,
     }
 }
 
