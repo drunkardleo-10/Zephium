@@ -42,6 +42,7 @@ pub enum Command {
     SetSidebarWidth(f64),
     DragOver { x: f64, y: f64 },
     DropTab { id: ItemId, x: f64, y: f64 },
+    Run(String),
     Engine(EngineEvent),
 }
 
@@ -147,6 +148,7 @@ impl Shell {
                 }
             }
             Command::DropTab { id, x, y } => self.drop_tab(id, x, y),
+            Command::Run(id) => self.run_command(&id),
             Command::Engine(event) => self.on_engine_event(event),
         }
     }
@@ -406,6 +408,79 @@ impl Shell {
         }
     }
 
+    fn run_command(&mut self, id: &str) {
+        let active = self.windows.focused().and_then(|w| w.active);
+        match id {
+            "tab.new" => {
+                let fx = self.open_tab();
+                self.commit(fx);
+            }
+            "tab.close" => {
+                if let Some(a) = active {
+                    self.close(a);
+                }
+            }
+            "tab.next" => self.cycle_tab(1),
+            "tab.previous" => self.cycle_tab(-1),
+            "nav.back" => {
+                if let Some(a) = active {
+                    self.engine.go_back(a);
+                }
+            }
+            "nav.forward" => {
+                if let Some(a) = active {
+                    self.engine.go_forward(a);
+                }
+            }
+            "nav.reload" => {
+                if let Some(a) = active {
+                    self.engine.reload(a);
+                }
+            }
+            "nav.stop" => {
+                if let Some(a) = active {
+                    self.engine.stop(a);
+                }
+            }
+            "zoom.in" => self.adjust_zoom(Some(0.1)),
+            "zoom.out" => self.adjust_zoom(Some(-0.1)),
+            "zoom.reset" => self.adjust_zoom(None),
+            "url.focus" => (self.emit)(Projection::UiCommand("url.focus".into())),
+            _ => {}
+        }
+    }
+
+    fn cycle_tab(&mut self, step: isize) {
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
+        let Some(active) = win.active else {
+            return;
+        };
+        let tabs = self.today_tabs(win.space);
+        let Some(pos) = tabs.iter().position(|x| *x == active) else {
+            return;
+        };
+        if tabs.len() < 2 {
+            return;
+        }
+        let next = (pos as isize + step).rem_euclid(tabs.len() as isize) as usize;
+        self.activate(tabs[next]);
+    }
+
+    fn adjust_zoom(&mut self, delta: Option<f64>) {
+        let Some(active) = self.windows.focused().and_then(|w| w.active) else {
+            return;
+        };
+        let current = self.items.tab(active).map(|t| t.zoom).unwrap_or(1.0);
+        let zoom = match delta {
+            Some(d) => (current + d).clamp(0.3, 3.0),
+            None => 1.0,
+        };
+        self.items.set_zoom(active, zoom);
+        self.engine.zoom(active, zoom);
+    }
+
     fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
         match self.items.get(id)?.placement {
             Placement::Favorites { profile } => Some(profile),
@@ -641,7 +716,9 @@ mod tests {
             self.log(format!("layout {}", ids.join(",")));
         }
         fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) {}
-        fn zoom(&self, _id: ItemId, _scale: f64) {}
+        fn zoom(&self, id: ItemId, scale: f64) {
+            self.log(format!("zoom {id} {scale}"));
+        }
         fn set_muted(&self, _id: ItemId, _muted: bool) {}
         fn find(&self, _id: ItemId, _query: Option<&str>) {}
         fn capture(&self, _id: ItemId) {}
@@ -664,6 +741,10 @@ mod tests {
             self.saved.lock().unwrap().clone()
         }
         fn record_visit(&self, _profile: ProfileId, _url: String, _title: String) {}
+        fn app_setting(&self, _key: &str) -> Option<String> {
+            None
+        }
+        fn set_app_setting(&self, _key: String, _value: String) {}
     }
 
     struct FakeChrome;
@@ -683,6 +764,7 @@ mod tests {
                     *slot = t;
                 }
             }
+            Projection::UiCommand(_) => {}
         }
     }
 
@@ -858,6 +940,59 @@ mod tests {
     }
 
     #[test]
+    fn run_commands_drive_tabs_zoom_and_engine() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+
+        shell.handle(Command::Run("tab.new".into()));
+        let second = active_id(&screen);
+        assert_ne!(first, second);
+
+        shell.handle(Command::Run("tab.next".into()));
+        assert_eq!(active_id(&screen), first);
+        shell.handle(Command::Run("tab.previous".into()));
+        assert_eq!(active_id(&screen), second);
+
+        shell.handle(Command::Run("tab.close".into()));
+        assert_eq!(active_id(&screen), first);
+
+        shell.handle(Command::Run("zoom.in".into()));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("zoom {first} 1.1")));
+        shell.handle(Command::Run("zoom.reset".into()));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("zoom {first} 1")));
+    }
+
+    #[test]
+    fn url_focus_emits_ui_command() {
+        let engine = Arc::new(FakeEngine::default());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let mut shell = Shell::new(
+            engine,
+            Arc::new(FakeStore::default()),
+            Arc::new(FakeChrome),
+            Box::new(move |p| {
+                if let Projection::UiCommand(id) = p {
+                    sink.lock().unwrap().push(id);
+                }
+            }),
+        );
+        shell.handle(Command::Run("url.focus".into()));
+        assert_eq!(seen.lock().unwrap().as_slice(), ["url.focus"]);
+    }
+
+    #[test]
     fn spawned_actor_processes_dispatched_commands() {
         let (tx, rx) = channel();
         let handle = spawn(
@@ -875,7 +1010,7 @@ mod tests {
             .expect("projection from actor thread");
         match projection {
             Projection::Items(s) => assert!(s.active.is_some()),
-            Projection::Tab(_) => panic!("bootstrap must project an items snapshot"),
+            _ => panic!("bootstrap must project an items snapshot"),
         }
     }
 }

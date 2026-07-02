@@ -19,23 +19,36 @@ pub fn apply(conn: &mut Connection, migrations: &[Migration]) -> rusqlite::Resul
     Ok(())
 }
 
-pub const META: &[Migration] = &[Migration {
-    version: 1,
-    up: |tx| {
-        tx.execute_batch(
-            "CREATE TABLE profiles (
-                 id TEXT PRIMARY KEY,
-                 name TEXT NOT NULL,
-                 kind TEXT NOT NULL CHECK (kind IN ('default', 'named')),
-                 position INTEGER NOT NULL
-             ) STRICT;
-             CREATE TABLE state (
-                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                 last_profile TEXT
-             ) STRICT;",
-        )
+pub const META: &[Migration] = &[
+    Migration {
+        version: 1,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (
+                     id TEXT PRIMARY KEY,
+                     name TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK (kind IN ('default', 'named')),
+                     position INTEGER NOT NULL
+                 ) STRICT;
+                 CREATE TABLE state (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     last_profile TEXT
+                 ) STRICT;",
+            )
+        },
     },
-}];
+    Migration {
+        version: 2,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE settings (
+                     key TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 ) STRICT;",
+            )
+        },
+    },
+];
 
 pub const PROFILE: &[Migration] = &[Migration {
     version: 1,

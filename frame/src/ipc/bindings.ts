@@ -24,6 +24,7 @@ export const commands = {
 export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
+	uiCommand: makeEvent<UiCommand>("ui-command"),
 };
 
 /* Types */
@@ -44,6 +45,8 @@ export type TabView = {
 	can_go_back: boolean,
 	can_go_forward: boolean,
 };
+
+export type UiCommand = string;
 
 /* Tauri Specta runtime */
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;

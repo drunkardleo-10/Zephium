@@ -38,6 +38,7 @@ pub struct TabState {
     pub loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    pub zoom: f64,
     pub lifecycle: Lifecycle,
     // Distinct from `url`: a restored/hibernated tab has a url but no live view.
     pub(crate) view: bool,
@@ -51,6 +52,7 @@ impl TabState {
             loading: false,
             can_go_back: false,
             can_go_forward: false,
+            zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
             view: false,
         }

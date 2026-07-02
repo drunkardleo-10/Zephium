@@ -26,4 +26,5 @@ pub struct ItemsState {
 pub enum Projection {
     Items(ItemsState),
     Tab(TabView),
+    UiCommand(String),
 }

@@ -13,6 +13,7 @@ use zephium_core::geometry::Size;
 use zephium_core::ids::ItemId;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
+use zephium_core::ports::store::Store as _;
 use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
 use zephium_ipc::Projection;
@@ -25,6 +26,9 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct TabChanged(zephium_ipc::TabView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct UiCommand(String);
 
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
@@ -43,7 +47,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_drag_over,
             tab_drop
         ])
-        .events(collect_events![ItemsChanged, TabChanged])
+        .events(collect_events![ItemsChanged, TabChanged, UiCommand])
 }
 
 // Ids arrive as ULID strings from a semi-trusted webview; anything that does
@@ -217,6 +221,75 @@ impl Chrome for ChromeAdapter {
     fn position(&self, _frame: ChromeFrame) {}
 }
 
+fn build_menu(
+    handle: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
+
+    let resolved = zephium_core::commands::resolve(overrides);
+    let item = |id: &str| -> tauri::Result<MenuItem<tauri::Wry>> {
+        let c = resolved
+            .iter()
+            .find(|c| c.id == id)
+            .expect("registered command");
+        let mut b = MenuItemBuilder::with_id(c.id, c.title);
+        if let Some(accel) = &c.accelerator {
+            b = b.accelerator(accel);
+        }
+        b.build(handle)
+    };
+
+    let app_menu = SubmenuBuilder::new(handle, "Zephium")
+        .about(None)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    let file = SubmenuBuilder::new(handle, "File")
+        .item(&item("tab.new")?)
+        .item(&item("tab.close")?)
+        .build()?;
+    // Standard Edit selectors keep Cmd+C/V/X working inside every webview.
+    let edit = SubmenuBuilder::new(handle, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let view = SubmenuBuilder::new(handle, "View")
+        .item(&item("nav.reload")?)
+        .item(&item("nav.stop")?)
+        .separator()
+        .item(&item("zoom.in")?)
+        .item(&item("zoom.out")?)
+        .item(&item("zoom.reset")?)
+        .separator()
+        .item(&item("url.focus")?)
+        .build()?;
+    let history = SubmenuBuilder::new(handle, "History")
+        .item(&item("nav.back")?)
+        .item(&item("nav.forward")?)
+        .build()?;
+    let window = SubmenuBuilder::new(handle, "Window")
+        .minimize()
+        .fullscreen()
+        .separator()
+        .item(&item("tab.next")?)
+        .item(&item("tab.previous")?)
+        .build()?;
+
+    Menu::with_items(handle, &[&app_menu, &file, &edit, &view, &history, &window])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let specta = specta_builder();
@@ -272,11 +345,26 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let store = SqliteStore::open(&data_dir)?;
 
+            let keymap: std::collections::HashMap<String, String> = store
+                .app_setting("keymap")
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            app.set_menu(build_menu(&handle, &keymap)?)?;
+            app.on_menu_event(|app, event| {
+                let id = event.id().0.as_str();
+                if zephium_core::commands::get(id).is_some() {
+                    if let Some(shell) = app.try_state::<Handle>() {
+                        shell.dispatch(Command::Run(id.to_string()));
+                    }
+                }
+            });
+
             let emit_handle = handle.clone();
             let emit: EmitFn = Box::new(move |projection| {
                 let _ = match projection {
                     Projection::Items(state) => ItemsChanged(state).emit(&emit_handle),
                     Projection::Tab(tab) => TabChanged(tab).emit(&emit_handle),
+                    Projection::UiCommand(id) => UiCommand(id).emit(&emit_handle),
                 };
             });
 

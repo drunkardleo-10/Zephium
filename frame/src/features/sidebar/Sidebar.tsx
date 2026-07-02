@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createSignal, type JSX } from "solid-js";
 import * as tabs from "../../state/tabs";
+import * as ui from "../../state/ui";
 
 function host(url: string | null | undefined): string {
   if (!url) return "";
@@ -111,6 +112,14 @@ export function Sidebar() {
   createEffect(() => {
     const h = host(tabs.activeTab()?.url);
     if (!editing()) setValue(h);
+  });
+
+  createEffect(() => {
+    const cmd = ui.uiCommand();
+    if (cmd.seq > 0 && cmd.id === "url.focus") {
+      input.focus();
+      input.select();
+    }
   });
 
   const submit = (e: SubmitEvent) => {

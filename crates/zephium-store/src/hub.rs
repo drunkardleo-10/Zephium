@@ -434,6 +434,27 @@ impl Hub {
         }
     }
 
+    pub fn app_setting(&mut self, key: &str) -> Option<String> {
+        self.meta
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn set_app_setting(&mut self, key: &str, value: &str) {
+        let result = self.meta.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value],
+        );
+        if let Err(e) = result {
+            eprintln!("store: set_app_setting failed: {e}");
+        }
+    }
+
     fn import_legacy(&mut self, path: &Path) {
         let Some(data) = legacy::read(path) else {
             return;

@@ -31,6 +31,8 @@ enum Cmd {
         url: String,
         title: String,
     },
+    GetSetting(String, Sender<Option<String>>),
+    SetSetting(String, String),
     Flush(Sender<()>),
 }
 
@@ -77,6 +79,16 @@ impl Store for SqliteStore {
             title,
         });
     }
+
+    fn app_setting(&self, key: &str) -> Option<String> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Cmd::GetSetting(key.into(), tx)).ok()?;
+        rx.recv().ok().flatten()
+    }
+
+    fn set_app_setting(&self, key: String, value: String) {
+        let _ = self.tx.send(Cmd::SetSetting(key, value));
+    }
 }
 
 impl Drop for SqliteStore {
@@ -122,6 +134,10 @@ fn actor(mut hub: Hub, rx: Receiver<Cmd>) {
                 url,
                 title,
             }) => hub.record_visit(profile, &url, &title),
+            Some(Cmd::GetSetting(key, reply)) => {
+                let _ = reply.send(hub.app_setting(&key));
+            }
+            Some(Cmd::SetSetting(key, value)) => hub.set_app_setting(&key, &value),
             Some(Cmd::Flush(ack)) => {
                 flush(&mut hub, &mut pending);
                 let _ = ack.send(());
@@ -268,6 +284,17 @@ mod tests {
         assert_eq!(hub.history_count(known), 1);
         assert_eq!(hub.history_matches(known, "hacker"), 1);
         assert_eq!(hub.history_count(unknown), 0);
+    }
+
+    #[test]
+    fn app_settings_roundtrip() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert_eq!(store.app_setting("keymap"), None);
+        store.set_app_setting("keymap".into(), r#"{"tab.new":"CmdOrCtrl+N"}"#.into());
+        assert_eq!(
+            store.app_setting("keymap").as_deref(),
+            Some(r#"{"tab.new":"CmdOrCtrl+N"}"#)
+        );
     }
 
     #[test]

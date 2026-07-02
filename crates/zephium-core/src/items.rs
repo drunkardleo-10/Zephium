@@ -174,6 +174,12 @@ impl Items {
         }
     }
 
+    pub fn set_zoom(&mut self, id: ItemId, zoom: f64) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.zoom = zoom;
+        }
+    }
+
     pub fn set_nav_flags(&mut self, id: ItemId, can_go_back: bool, can_go_forward: bool) {
         if let Some(tab) = self.tab_mut(id) {
             tab.can_go_back = can_go_back;
