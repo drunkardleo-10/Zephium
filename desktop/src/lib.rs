@@ -6,77 +6,79 @@ use std::sync::{Arc, OnceLock};
 use raw_window_handle::HasWindowHandle;
 use tauri::{Emitter, Manager, State};
 
-use zephium_app::{Coordinator, EmitFn, SharedChrome};
+use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
+use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
 use zephium_store::SqliteStore;
 
-type Coord = Arc<Coordinator>;
-
 #[tauri::command]
-fn tabs_bootstrap(coord: State<'_, Coord>) {
-    coord.bootstrap();
+fn tabs_bootstrap(shell: State<'_, Handle>) {
+    shell.dispatch(Command::Bootstrap);
 }
 
 #[tauri::command]
-fn tabs_open(coord: State<'_, Coord>) {
-    coord.open();
+fn tabs_open(shell: State<'_, Handle>) {
+    shell.dispatch(Command::Open);
 }
 
 #[tauri::command]
-fn tabs_activate(coord: State<'_, Coord>, id: u64) {
-    coord.activate(id);
+fn tabs_activate(shell: State<'_, Handle>, id: u64) {
+    shell.dispatch(Command::Activate(id));
 }
 
 #[tauri::command]
-fn tabs_close(coord: State<'_, Coord>, id: u64) {
-    coord.close(id);
+fn tabs_close(shell: State<'_, Handle>, id: u64) {
+    shell.dispatch(Command::Close(id));
 }
 
 #[tauri::command]
-fn tabs_navigate(coord: State<'_, Coord>, id: u64, input: String) {
-    coord.navigate(id, &input);
+fn tabs_navigate(shell: State<'_, Handle>, id: u64, input: String) {
+    shell.dispatch(Command::Navigate { id, input });
 }
 
 #[tauri::command]
-fn tabs_reload(coord: State<'_, Coord>, id: u64) {
-    coord.reload(id);
+fn tabs_reload(shell: State<'_, Handle>, id: u64) {
+    shell.dispatch(Command::Reload(id));
 }
 
 #[tauri::command]
-fn tabs_back(coord: State<'_, Coord>, id: u64) {
-    coord.go_back(id);
+fn tabs_back(shell: State<'_, Handle>, id: u64) {
+    shell.dispatch(Command::GoBack(id));
 }
 
 #[tauri::command]
-fn tabs_forward(coord: State<'_, Coord>, id: u64) {
-    coord.go_forward(id);
+fn tabs_forward(shell: State<'_, Handle>, id: u64) {
+    shell.dispatch(Command::GoForward(id));
 }
 
 #[tauri::command]
-fn tabs_split(coord: State<'_, Coord>, other: u64) {
-    coord.split_with(other, zephium_core::split::Axis::Row);
+fn tabs_split(shell: State<'_, Handle>, other: u64) {
+    shell.dispatch(Command::SplitWith {
+        other,
+        axis: Axis::Row,
+    });
 }
 
 #[tauri::command]
-fn tabs_unsplit(coord: State<'_, Coord>) {
-    coord.unsplit();
+fn tabs_unsplit(shell: State<'_, Handle>) {
+    shell.dispatch(Command::Unsplit);
 }
 
 #[tauri::command]
-fn sidebar_set_width(coord: State<'_, Coord>, width: f64) {
-    coord.set_sidebar_width(width);
+fn sidebar_set_width(shell: State<'_, Handle>, width: f64) {
+    shell.dispatch(Command::SetSidebarWidth(width));
 }
 
 #[tauri::command]
-fn tab_drag_over(coord: State<'_, Coord>, x: f64, y: f64) {
-    coord.drag_over(x, y);
+fn tab_drag_over(shell: State<'_, Handle>, x: f64, y: f64) {
+    shell.dispatch(Command::DragOver { x, y });
 }
 
 #[tauri::command]
-fn tab_drop(coord: State<'_, Coord>, id: u64, x: f64, y: f64) {
-    coord.drop_tab(id, x, y);
+fn tab_drop(shell: State<'_, Handle>, id: u64, x: f64, y: f64) {
+    shell.dispatch(Command::DropTab { id, x, y });
 }
 
 #[cfg(target_os = "macos")]
@@ -209,11 +211,11 @@ pub fn run() {
                 let _ = dispatch_handle.run_on_main_thread(task);
             });
 
-            let slot: Arc<OnceLock<Coord>> = Arc::new(OnceLock::new());
+            let slot: Arc<OnceLock<Handle>> = Arc::new(OnceLock::new());
             let sink_slot = slot.clone();
             let engine = zephium_engine::install(parent, dispatch.clone(), move |event| {
-                if let Some(coord) = sink_slot.get() {
-                    coord.on_engine_event(event);
+                if let Some(shell) = sink_slot.get() {
+                    shell.dispatch(Command::Engine(event));
                 }
             });
 
@@ -234,18 +236,18 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let chrome: SharedChrome = Arc::new(ChromeAdapter);
 
-            let coordinator: Coord =
-                Arc::new(Coordinator::new(Arc::new(engine), Arc::new(store), chrome, emit));
-            let _ = slot.set(coordinator.clone());
+            let shell = zephium_app::spawn(Arc::new(engine), Arc::new(store), chrome, emit);
+            let _ = slot.set(shell.clone());
 
             #[cfg(target_os = "macos")]
-            let initial = content_view_size(chrome_wk.load(std::sync::atomic::Ordering::SeqCst) as usize)
-                .unwrap_or_else(|| inner_logical(&window));
+            let initial =
+                content_view_size(chrome_wk.load(std::sync::atomic::Ordering::SeqCst) as usize)
+                    .unwrap_or_else(|| inner_logical(&window));
             #[cfg(not(target_os = "macos"))]
             let initial = inner_logical(&window);
-            coordinator.set_window_size(initial);
+            shell.dispatch(Command::SetWindowSize(initial));
 
-            let resize_coord = coordinator.clone();
+            let resize_shell = shell.clone();
             let resize_window = window.clone();
             #[cfg(target_os = "macos")]
             let resize_wk = chrome_wk.clone();
@@ -258,7 +260,7 @@ pub fn run() {
                     .unwrap_or_else(|| inner_logical(&resize_window));
                     #[cfg(not(target_os = "macos"))]
                     let size = inner_logical(&resize_window);
-                    resize_coord.set_window_size(size);
+                    resize_shell.dispatch(Command::SetWindowSize(size));
                 }
             });
 
@@ -276,7 +278,7 @@ pub fn run() {
             .visible(false)
             .build()?;
 
-            app.manage(coordinator);
+            app.manage(shell);
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -10,6 +10,8 @@ use zephium_core::geometry::Rect;
 use zephium_core::split::{self, Divider, Pane};
 use zephium_core::tab::TabId;
 
+type RatioCallback = Box<dyn Fn(Pane)>;
+
 #[derive(Default)]
 pub struct StageIvars {
     tree: RefCell<Option<Pane>>,
@@ -17,7 +19,7 @@ pub struct StageIvars {
     gap: Cell<f64>,
     drag: RefCell<Option<Divider>>,
     indicator: RefCell<Option<Retained<NSView>>>,
-    on_ratio: RefCell<Option<Box<dyn Fn(Pane)>>>,
+    on_ratio: RefCell<Option<RatioCallback>>,
 }
 
 define_class!(
