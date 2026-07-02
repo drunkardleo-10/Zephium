@@ -4,7 +4,9 @@
 use std::sync::{Arc, OnceLock};
 
 use raw_window_handle::HasWindowHandle;
-use tauri::{Emitter, Manager, State};
+use serde::{Deserialize, Serialize};
+use tauri::{Manager, State};
+use tauri_specta::{collect_commands, collect_events, Event};
 
 use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
@@ -12,7 +14,34 @@ use zephium_core::ids::ItemId;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
+use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ItemsChanged(zephium_ipc::ItemsState);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct TabChanged(zephium_ipc::TabView);
+
+fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            tabs_bootstrap,
+            tabs_open,
+            tabs_activate,
+            tabs_close,
+            tabs_navigate,
+            tabs_reload,
+            tabs_back,
+            tabs_forward,
+            tabs_split,
+            tabs_unsplit,
+            sidebar_set_width,
+            tab_drag_over,
+            tab_drop
+        ])
+        .events(collect_events![ItemsChanged, TabChanged])
+}
 
 // Ids arrive as ULID strings from a semi-trusted webview; anything that does
 // not parse is dropped here, before it reaches the shell.
@@ -23,46 +52,55 @@ fn dispatch_with_id(shell: &Handle, id: &str, cmd: impl FnOnce(ItemId) -> Comman
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_bootstrap(shell: State<'_, Handle>) {
     shell.dispatch(Command::Bootstrap);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_open(shell: State<'_, Handle>) {
     shell.dispatch(Command::Open);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_activate(shell: State<'_, Handle>, id: String) {
     dispatch_with_id(&shell, &id, Command::Activate);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_close(shell: State<'_, Handle>, id: String) {
     dispatch_with_id(&shell, &id, Command::Close);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_navigate(shell: State<'_, Handle>, id: String, input: String) {
     dispatch_with_id(&shell, &id, |id| Command::Navigate { id, input });
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_reload(shell: State<'_, Handle>, id: String) {
     dispatch_with_id(&shell, &id, Command::Reload);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_back(shell: State<'_, Handle>, id: String) {
     dispatch_with_id(&shell, &id, Command::GoBack);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_forward(shell: State<'_, Handle>, id: String) {
     dispatch_with_id(&shell, &id, Command::GoForward);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_split(shell: State<'_, Handle>, other: String) {
     dispatch_with_id(&shell, &other, |other| Command::SplitWith {
         other,
@@ -71,21 +109,25 @@ fn tabs_split(shell: State<'_, Handle>, other: String) {
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tabs_unsplit(shell: State<'_, Handle>) {
     shell.dispatch(Command::Unsplit);
 }
 
 #[tauri::command]
+#[specta::specta]
 fn sidebar_set_width(shell: State<'_, Handle>, width: f64) {
     shell.dispatch(Command::SetSidebarWidth(width));
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tab_drag_over(shell: State<'_, Handle>, x: f64, y: f64) {
     shell.dispatch(Command::DragOver { x, y });
 }
 
 #[tauri::command]
+#[specta::specta]
 fn tab_drop(shell: State<'_, Handle>, id: String, x: f64, y: f64) {
     dispatch_with_id(&shell, &id, |id| Command::DropTab { id, x, y });
 }
@@ -174,23 +216,11 @@ impl Chrome for ChromeAdapter {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let specta = specta_builder();
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            tabs_bootstrap,
-            tabs_open,
-            tabs_activate,
-            tabs_close,
-            tabs_navigate,
-            tabs_reload,
-            tabs_back,
-            tabs_forward,
-            tabs_split,
-            tabs_unsplit,
-            sidebar_set_width,
-            tab_drag_over,
-            tab_drop,
-        ])
-        .setup(|app| {
+        .invoke_handler(specta.invoke_handler())
+        .setup(move |app| {
+            specta.mount_events(app);
             let window = app.get_webview_window("main").expect("main window");
 
             #[cfg(target_os = "macos")]
@@ -233,8 +263,11 @@ pub fn run() {
             let store = SqliteStore::open(&data_dir)?;
 
             let emit_handle = handle.clone();
-            let emit: EmitFn = Box::new(move |snapshot| {
-                let _ = emit_handle.emit("tabs:state", snapshot);
+            let emit: EmitFn = Box::new(move |projection| {
+                let _ = match projection {
+                    Projection::Items(state) => ItemsChanged(state).emit(&emit_handle),
+                    Projection::Tab(tab) => TabChanged(tab).emit(&emit_handle),
+                };
             });
 
             #[cfg(target_os = "macos")]
@@ -292,4 +325,17 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running zephium");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn export_typescript_bindings() {
+        super::specta_builder()
+            .export(
+                specta_typescript::Typescript::default(),
+                "../frame/src/ipc/bindings.ts",
+            )
+            .expect("export bindings");
+    }
 }

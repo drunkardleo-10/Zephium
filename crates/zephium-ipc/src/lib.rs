@@ -1,10 +1,11 @@
-//! Typed contract between the Rust core and the frame. Pure data. specta-derived
-//! TS codegen is added at the desktop/codegen step (with tauri-specta). No tauri.
-//! Persistent ids (ULIDs) cross the boundary as strings.
+//! Typed contract between the Rust core and the frame. Pure data, no tauri;
+//! the desktop crate maps `Projection` onto typed events and exports the TS
+//! bindings. ULIDs cross the boundary as strings.
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct TabView {
     pub id: String,
     pub title: String,
@@ -14,16 +15,15 @@ pub struct TabView {
     pub can_go_forward: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TabsSnapshot {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct ItemsState {
     pub tabs: Vec<TabView>,
     pub active: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct RectDto {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
+/// Snapshots for structural changes, single-row deltas for per-tab churn.
+#[derive(Clone, Debug)]
+pub enum Projection {
+    Items(ItemsState),
+    Tab(TabView),
 }

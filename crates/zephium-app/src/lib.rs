@@ -19,12 +19,12 @@ use zephium_core::session;
 use zephium_core::spaces::{Space, Spaces};
 use zephium_core::split::{self, Axis, Edge, Pane};
 use zephium_core::windows::{WindowKind, Windows};
-use zephium_ipc::{TabView, TabsSnapshot};
+use zephium_ipc::{ItemsState, Projection, TabView};
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
 pub type SharedChrome = Arc<dyn Chrome + Send + Sync>;
-pub type EmitFn = Box<dyn Fn(TabsSnapshot) + Send + Sync>;
+pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -195,7 +195,7 @@ impl Shell {
         }
         self.apply(fx);
         self.relayout();
-        self.project();
+        self.project_items();
     }
 
     fn create_default_space(&mut self) -> SpaceId {
@@ -303,7 +303,7 @@ impl Shell {
         }
         self.persist();
         self.relayout();
-        self.project();
+        self.project_items();
     }
 
     fn drop_tab(&mut self, dropped: ItemId, client_x: f64, client_y: f64) {
@@ -329,7 +329,7 @@ impl Shell {
         }
         self.persist();
         self.relayout();
-        self.project();
+        self.project_items();
     }
 
     fn resolve_drop(&self, client_x: f64, client_y: f64) -> Option<split::Drop> {
@@ -357,11 +357,11 @@ impl Shell {
             }
             EngineEvent::TitleChanged { id, title } => {
                 self.items.set_title(id, title);
-                self.project();
+                self.project_tab(id);
             }
             EngineEvent::LoadingChanged { id, loading } => {
                 self.items.set_loading(id, loading);
-                self.project();
+                self.project_tab(id);
             }
             EngineEvent::UrlChanged { id, url } => {
                 self.items.set_committed_url_str(id, &url);
@@ -381,7 +381,7 @@ impl Shell {
                     self.store.record_visit(profile, url, title);
                 }
                 self.persist();
-                self.project();
+                self.project_tab(id);
             }
         }
     }
@@ -397,7 +397,7 @@ impl Shell {
         self.apply(effects);
         self.persist();
         self.relayout();
-        self.project();
+        self.project_items();
     }
 
     fn apply(&self, effects: Vec<Effect>) {
@@ -476,7 +476,7 @@ impl Shell {
         self.store.save_session(state);
     }
 
-    fn project(&self) {
+    fn project_items(&self) {
         let Some(win) = self.windows.focused() else {
             return;
         };
@@ -485,10 +485,16 @@ impl Shell {
             .into_iter()
             .filter_map(|id| self.items.tab(id).map(|t| tab_view(id, t)))
             .collect();
-        (self.emit)(TabsSnapshot {
+        (self.emit)(Projection::Items(ItemsState {
             tabs,
             active: win.active.map(|i| i.to_string()),
-        });
+        }));
+    }
+
+    fn project_tab(&self, id: ItemId) {
+        if let Some(tab) = self.items.tab(id) {
+            (self.emit)(Projection::Tab(tab_view(id, tab)));
+        }
     }
 }
 
@@ -581,39 +587,55 @@ mod tests {
         fn position(&self, _frame: ChromeFrame) {}
     }
 
-    type Snaps = Arc<Mutex<Vec<TabsSnapshot>>>;
+    // Materializes projections the way the frontend store does: snapshots
+    // replace, deltas patch one row.
+    type Screen = Arc<Mutex<ItemsState>>;
 
-    fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Snaps) {
+    fn apply_projection(view: &mut ItemsState, p: Projection) {
+        match p {
+            Projection::Items(s) => *view = s,
+            Projection::Tab(t) => {
+                if let Some(slot) = view.tabs.iter_mut().find(|x| x.id == t.id) {
+                    *slot = t;
+                }
+            }
+        }
+    }
+
+    fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
         let engine = Arc::new(FakeEngine::default());
-        let snaps: Snaps = Arc::new(Mutex::new(Vec::new()));
-        let sink = snaps.clone();
+        let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            tabs: Vec::new(),
+            active: None,
+        }));
+        let sink = screen.clone();
         let mut shell = Shell::new(
             engine.clone(),
             store,
             Arc::new(FakeChrome),
-            Box::new(move |s| sink.lock().unwrap().push(s)),
+            Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
-        (shell, engine, snaps)
+        (shell, engine, screen)
     }
 
-    fn setup() -> (Shell, Arc<FakeEngine>, Snaps) {
+    fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
         setup_with(Arc::new(FakeStore::default()))
     }
 
-    fn last(snaps: &Snaps) -> TabsSnapshot {
-        snaps.lock().unwrap().last().unwrap().clone()
+    fn last(screen: &Screen) -> ItemsState {
+        screen.lock().unwrap().clone()
     }
 
-    fn active_id(snaps: &Snaps) -> ItemId {
-        ItemId::parse(&last(snaps).active.unwrap()).unwrap()
+    fn active_id(screen: &Screen) -> ItemId {
+        ItemId::parse(&last(screen).active.unwrap()).unwrap()
     }
 
     #[test]
     fn navigate_creates_and_shows_active_tab() {
-        let (mut shell, engine, snaps) = setup();
+        let (mut shell, engine, screen) = setup();
         shell.handle(Command::Bootstrap);
-        let id = active_id(&snaps);
+        let id = active_id(&screen);
 
         shell.handle(Command::Navigate {
             id,
@@ -626,7 +648,7 @@ mod tests {
         assert_eq!(engine.last_layout(), vec![id.to_string()]);
 
         let active = id.to_string();
-        let tab = last(&snaps)
+        let tab = last(&screen)
             .tabs
             .into_iter()
             .find(|t| t.id == active)
@@ -637,9 +659,9 @@ mod tests {
 
     #[test]
     fn engine_events_fold_into_projection() {
-        let (mut shell, _engine, snaps) = setup();
+        let (mut shell, _engine, screen) = setup();
         shell.handle(Command::Bootstrap);
-        let id = active_id(&snaps);
+        let id = active_id(&screen);
         shell.handle(Command::Navigate {
             id,
             input: "example.com".into(),
@@ -655,22 +677,26 @@ mod tests {
         }));
 
         let key = id.to_string();
-        let tab = last(&snaps).tabs.into_iter().find(|t| t.id == key).unwrap();
+        let tab = last(&screen)
+            .tabs
+            .into_iter()
+            .find(|t| t.id == key)
+            .unwrap();
         assert_eq!(tab.title, "Example");
         assert!(!tab.loading);
     }
 
     #[test]
     fn switching_tabs_shows_only_active() {
-        let (mut shell, engine, snaps) = setup();
+        let (mut shell, engine, screen) = setup();
         shell.handle(Command::Bootstrap);
-        let first = active_id(&snaps);
+        let first = active_id(&screen);
         shell.handle(Command::Navigate {
             id: first,
             input: "example.com".into(),
         });
         shell.handle(Command::Open);
-        let second = active_id(&snaps);
+        let second = active_id(&screen);
         shell.handle(Command::Navigate {
             id: second,
             input: "github.com".into(),
@@ -683,15 +709,15 @@ mod tests {
 
     #[test]
     fn split_shows_both_panes_close_collapses() {
-        let (mut shell, engine, snaps) = setup();
+        let (mut shell, engine, screen) = setup();
         shell.handle(Command::Bootstrap);
-        let first = active_id(&snaps);
+        let first = active_id(&screen);
         shell.handle(Command::Navigate {
             id: first,
             input: "example.com".into(),
         });
         shell.handle(Command::Open);
-        let second = active_id(&snaps);
+        let second = active_id(&screen);
         shell.handle(Command::Navigate {
             id: second,
             input: "github.com".into(),
@@ -713,15 +739,15 @@ mod tests {
     #[test]
     fn restart_preserves_ids_actives_and_splits() {
         let store = Arc::new(FakeStore::default());
-        let (mut shell, _engine, snaps) = setup_with(store.clone());
+        let (mut shell, _engine, screen) = setup_with(store.clone());
         shell.handle(Command::Bootstrap);
-        let first = active_id(&snaps);
+        let first = active_id(&screen);
         shell.handle(Command::Navigate {
             id: first,
             input: "example.com".into(),
         });
         shell.handle(Command::Open);
-        let second = active_id(&snaps);
+        let second = active_id(&screen);
         shell.handle(Command::Navigate {
             id: second,
             input: "github.com".into(),
@@ -731,14 +757,14 @@ mod tests {
             axis: Axis::Row,
         });
 
-        let before = last(&snaps);
+        let before = last(&screen);
 
-        let (mut shell2, engine2, snaps2) = setup_with(store);
+        let (mut shell2, engine2, screen2) = setup_with(store);
         shell2.handle(Command::Bootstrap);
-        let after = last(&snaps2);
+        let after = last(&screen2);
 
         // same ULIDs, same order, same active tab survive the restart
-        let ids = |s: &TabsSnapshot| s.tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let ids = |s: &ItemsState| s.tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(&after), ids(&before));
         assert_eq!(after.active, before.active);
         // the split tree is restored and both panes get views again
@@ -760,9 +786,12 @@ mod tests {
         );
         handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0)));
         handle.dispatch(Command::Bootstrap);
-        let snap = rx
+        let projection = rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("projection from actor thread");
-        assert!(snap.active.is_some());
+        match projection {
+            Projection::Items(s) => assert!(s.active.is_some()),
+            Projection::Tab(_) => panic!("bootstrap must project an items snapshot"),
+        }
     }
 }

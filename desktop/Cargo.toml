@@ -15,10 +15,15 @@ tauri-build.workspace = true
 tauri.workspace = true
 raw-window-handle.workspace = true
 zephium-core.workspace = true
+zephium-ipc.workspace = true
 zephium-app.workspace = true
 zephium-engine.workspace = true
 zephium-store.workspace = true
 window-vibrancy = "0.7"
+serde.workspace = true
+specta.workspace = true
+specta-typescript.workspace = true
+tauri-specta.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

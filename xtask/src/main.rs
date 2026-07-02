@@ -25,7 +25,10 @@ fn ci() {
             "warnings",
         ],
     );
+    // The desktop test suite regenerates frame/src/ipc/bindings.ts, so the
+    // frontend typecheck after it doubles as a Rust/TS drift check.
     run("cargo", &["test", "--workspace"]);
+    run("pnpm", &["--dir", "frame", "run", "check"]);
 }
 
 fn run(cmd: &str, args: &[&str]) {
