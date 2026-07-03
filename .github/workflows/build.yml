@@ -51,7 +51,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build bundles
-        run: pnpm -C desktop tauri build
+        run: pnpm --dir desktop run build
 
       # The Ubuntu 22.04 host bundles libwayland 1.20 into the AppImage, which
       # shadows the host copy and breaks EGL on recent Mesa (Arch, Fedora).
