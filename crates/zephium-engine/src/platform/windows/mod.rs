@@ -1,6 +1,10 @@
-//! Windows adapter. Content views are child HWNDs laid out by the shared
-//! set_bounds path; per-view rounded corners have no clean Win32 equivalent
-//! and are skipped by design.
+//! Windows adapter. Content views are child HWNDs managed by the stage:
+//! positioning, SetWindowRgn rounding, divider drags and the drop indicator
+//! all mirror the macOS ContentStage.
+
+mod stage;
+
+pub use stage::Stage;
 
 use std::cell::OnceCell;
 use std::rc::Rc;

@@ -20,6 +20,9 @@ use {
     objc2_foundation::MainThreadMarker,
 };
 
+#[cfg(target_os = "windows")]
+use {crate::platform::imp::Stage, windows::Win32::Foundation::HWND};
+
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
 }
@@ -35,7 +38,7 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
             views: HashMap::new(),
             user_content: HashMap::new(),
             shortcuts: Vec::new(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             stages: HashMap::new(),
             sink: Sink(sink),
         });
@@ -79,6 +82,8 @@ pub(crate) struct EngineHost {
     shortcuts: Vec<Shortcut>,
     #[cfg(target_os = "macos")]
     stages: HashMap<WindowId, Retained<ContentStage>>,
+    #[cfg(target_os = "windows")]
+    stages: HashMap<WindowId, Stage>,
     sink: Sink,
 }
 
@@ -320,7 +325,7 @@ impl EngineHost {
 
     pub(crate) fn close(&mut self, id: ItemId) {
         self.views.remove(&id);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         for stage in self.stages.values() {
             stage.remove_view(id);
         }
@@ -362,10 +367,60 @@ impl EngineHost {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_content(
+        &mut self,
+        window: WindowId,
+        tree: Option<Pane>,
+        region: Option<Rect>,
+    ) {
+        let Some(stage) = self.ensure_stage(window) else {
+            return;
+        };
+        match region {
+            None => stage.set_hidden(true),
+            Some(r) => {
+                stage.set_hidden(false);
+                stage.set_frame(r);
+                let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
+                for id in &tabs {
+                    if !stage.has_view(*id) {
+                        if let Some(view) = self.views.get(id) {
+                            stage.insert_view(*id, view);
+                        }
+                    }
+                }
+                stage.set_tree(tree);
+                stage.set_visible(&tabs);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_drop_indicator(&mut self, window: WindowId, zone: Option<Rect>) {
+        if let Some(stage) = self.ensure_stage(window) {
+            stage.set_drop_indicator(zone);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn ensure_stage(&mut self, window: WindowId) -> Option<Stage> {
+        if let Some(stage) = self.stages.get(&window) {
+            return Some(*stage);
+        }
+        let RawWindowHandle::Win32(h) = self.parent.0 else {
+            return None;
+        };
+        let parent = HWND(h.hwnd.get() as *mut _);
+        let stage = Stage::new(parent, GAP, window, self.sink.0.clone());
+        self.stages.insert(window, stage);
+        Some(stage)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub(crate) fn set_drop_indicator(&mut self, _window: WindowId, _zone: Option<Rect>) {}
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub(crate) fn set_content(
         &mut self,
         _window: WindowId,

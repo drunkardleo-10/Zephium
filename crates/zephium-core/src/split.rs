@@ -111,48 +111,52 @@ pub fn layout(root: &Pane, region: Rect, gap: f64) -> Vec<(ItemId, Rect)> {
 pub struct Divider {
     pub path: Vec<usize>,
     pub axis: Axis,
+    /// Rect of the branch the divider belongs to; ratio math runs against it.
     pub rect: Rect,
+    /// The gap strip between the two children; the grabbable area.
+    pub strip: Rect,
+}
+
+pub fn dividers(tree: &Pane, region: Rect, gap: f64) -> Vec<Divider> {
+    fn walk(pane: &Pane, rect: Rect, gap: f64, path: &mut Vec<usize>, out: &mut Vec<Divider>) {
+        let Pane::Branch { axis, ratio, a, b } = pane else {
+            return;
+        };
+        let (ra, rb) = divide(rect, *axis, *ratio, gap);
+        let strip = match axis {
+            Axis::Row => Rect::new(ra.x + ra.width, rect.y, rb.x - ra.x - ra.width, rect.height),
+            Axis::Col => Rect::new(
+                rect.x,
+                ra.y + ra.height,
+                rect.width,
+                rb.y - ra.y - ra.height,
+            ),
+        };
+        out.push(Divider {
+            path: path.clone(),
+            axis: *axis,
+            rect,
+            strip,
+        });
+        path.push(0);
+        walk(a, ra, gap, path, out);
+        path.pop();
+        path.push(1);
+        walk(b, rb, gap, path, out);
+        path.pop();
+    }
+    let mut out = Vec::new();
+    walk(tree, region, gap, &mut Vec::new(), &mut out);
+    out
 }
 
 pub fn divider_at(tree: &Pane, region: Rect, gap: f64, px: f64, py: f64) -> Option<Divider> {
-    fn walk(
-        pane: &Pane,
-        rect: Rect,
-        gap: f64,
-        p: (f64, f64),
-        path: &mut Vec<usize>,
-    ) -> Option<Divider> {
-        let Pane::Branch { axis, ratio, a, b } = pane else {
-            return None;
-        };
-        let (ra, rb) = divide(rect, *axis, *ratio, gap);
-        let (px, py) = p;
-        let on_divider = match axis {
-            Axis::Row => {
-                px >= ra.x + ra.width && px <= rb.x && py >= rect.y && py <= rect.y + rect.height
-            }
-            Axis::Col => {
-                py >= ra.y + ra.height && py <= rb.y && px >= rect.x && px <= rect.x + rect.width
-            }
-        };
-        if on_divider {
-            return Some(Divider {
-                path: path.clone(),
-                axis: *axis,
-                rect,
-            });
-        }
-        path.push(0);
-        if let Some(d) = walk(a, ra, gap, p, path) {
-            return Some(d);
-        }
-        path.pop();
-        path.push(1);
-        let d = walk(b, rb, gap, p, path);
-        path.pop();
-        d
-    }
-    walk(tree, region, gap, (px, py), &mut Vec::new())
+    dividers(tree, region, gap).into_iter().find(|d| {
+        px >= d.strip.x
+            && px <= d.strip.x + d.strip.width
+            && py >= d.strip.y
+            && py <= d.strip.y + d.strip.height
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -368,6 +372,19 @@ mod tests {
                 b: Box::new(Pane::leaf(id(3))),
             }),
         }
+    }
+
+    #[test]
+    fn dividers_enumerate_strips() {
+        let region = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let divs = dividers(&nested(), region, 8.0);
+        assert_eq!(divs.len(), 2);
+        // outer row divider: left pane is (1000-8)/2 = 496 wide
+        assert_eq!(divs[0].strip, Rect::new(496.0, 0.0, 8.0, 800.0));
+        assert_eq!(divs[0].axis, Axis::Row);
+        // inner col divider spans the right pane, at half its (800-8) height
+        assert_eq!(divs[1].strip, Rect::new(504.0, 396.0, 496.0, 8.0));
+        assert_eq!(divs[1].path, vec![1]);
     }
 
     #[test]
