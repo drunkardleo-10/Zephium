@@ -38,7 +38,6 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
             views: HashMap::new(),
             user_content: HashMap::new(),
             shortcuts: Vec::new(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             stages: HashMap::new(),
             sink: Sink(sink),
         });
@@ -82,8 +81,8 @@ pub(crate) struct EngineHost {
     shortcuts: Vec<Shortcut>,
     #[cfg(target_os = "macos")]
     stages: HashMap<WindowId, Retained<ContentStage>>,
-    #[cfg(target_os = "windows")]
-    stages: HashMap<WindowId, Stage>,
+    #[cfg(not(target_os = "macos"))]
+    stages: HashMap<WindowId, crate::platform::imp::Stage>,
     sink: Sink,
 }
 
@@ -325,7 +324,6 @@ impl EngineHost {
 
     pub(crate) fn close(&mut self, id: ItemId) {
         self.views.remove(&id);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         for stage in self.stages.values() {
             stage.remove_view(id);
         }
@@ -367,7 +365,7 @@ impl EngineHost {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn set_content(
         &mut self,
         window: WindowId,
@@ -396,7 +394,7 @@ impl EngineHost {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn set_drop_indicator(&mut self, window: WindowId, zone: Option<Rect>) {
         if let Some(stage) = self.ensure_stage(window) {
             stage.set_drop_indicator(zone);
@@ -418,30 +416,14 @@ impl EngineHost {
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    pub(crate) fn set_drop_indicator(&mut self, _window: WindowId, _zone: Option<Rect>) {}
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub(crate) fn set_content(
-        &mut self,
-        _window: WindowId,
-        tree: Option<Pane>,
-        region: Option<Rect>,
-    ) {
-        let panes = match (tree, region) {
-            (Some(t), Some(r)) => zephium_core::split::layout(&t, r, GAP),
-            _ => Vec::new(),
-        };
-        for (id, view) in &self.views {
-            if !panes.iter().any(|(p, _)| p == id) {
-                let _ = view.set_visible(false);
-            }
+    fn ensure_stage(&mut self, window: WindowId) -> Option<crate::platform::imp::Stage> {
+        if let Some(stage) = self.stages.get(&window) {
+            return Some(stage.clone());
         }
-        for (id, rect) in panes {
-            if let Some(view) = self.views.get(&id) {
-                let _ = view.set_bounds(to_wry(rect));
-                let _ = view.set_visible(true);
-            }
-        }
+        let fixed = crate::platform::imp::container()?;
+        let stage = crate::platform::imp::Stage::new(fixed, GAP, window, self.sink.0.clone());
+        self.stages.insert(window, stage.clone());
+        Some(stage)
     }
 
     #[cfg(target_os = "macos")]

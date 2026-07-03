@@ -1,6 +1,10 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
-//! composition root (wry positions children only inside a Fixed); layout goes
-//! through the shared set_bounds path.
+//! composition root; the stage positions them and runs divider drags and the
+//! drop indicator, mirroring the macOS ContentStage.
+
+mod stage;
+
+pub use stage::Stage;
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
