@@ -137,9 +137,13 @@ impl Store for SqliteStore {
 
 impl Drop for SqliteStore {
     fn drop(&mut self) {
+        // Wait for the ack, not a deadline: on a slow disk a bounded wait can
+        // return while the actor is mid-save, and a reopen would then observe
+        // partial state. If the actor died, the channel disconnects and recv
+        // returns immediately.
         let (tx, rx) = mpsc::channel();
         if self.tx.send(Cmd::Flush(tx)).is_ok() {
-            let _ = rx.recv_timeout(Duration::from_secs(1));
+            let _ = rx.recv();
         }
     }
 }
