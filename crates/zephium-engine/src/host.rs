@@ -410,8 +410,10 @@ impl EngineHost {
 }
 
 fn style_script(css: &str) -> UserScript {
+    // WebView2 runs document-start scripts before <html> exists; WebKit does
+    // not. The observer path injects the instant the root appears.
     let source = format!(
-        "(function(){{var s=document.createElement('style');s.textContent={};(document.head||document.documentElement).appendChild(s);}})()",
+        "(function(){{var css={};function add(){{var s=document.createElement('style');s.textContent=css;(document.head||document.documentElement).appendChild(s)}}if(document.head||document.documentElement){{add()}}else{{new MutationObserver(function(_,o){{if(document.documentElement){{o.disconnect();add()}}}}).observe(document,{{childList:true}})}}}})()",
         serde_json::to_string(css).unwrap_or_default()
     );
     UserScript {

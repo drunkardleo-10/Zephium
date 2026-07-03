@@ -576,6 +576,8 @@ pub fn run() {
                     Some(16.0),
                 );
             }
+            #[cfg(target_os = "windows")]
+            platform::imp::apply_material(&panel_window);
 
             let overlay = overlay::Overlay::new(panel_window.clone());
             let blur_overlay = overlay.clone();

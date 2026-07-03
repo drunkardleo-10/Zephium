@@ -18,14 +18,27 @@ thread_local! {
 static MATERIAL: AtomicBool = AtomicBool::new(false);
 
 pub fn init(window: &WebviewWindow) {
-    use window_vibrancy::{apply_acrylic, apply_mica};
-    let applied =
-        apply_mica(window, None).is_ok() || apply_acrylic(window, Some((28, 28, 34, 160))).is_ok();
-    MATERIAL.store(applied, Ordering::SeqCst);
+    MATERIAL.store(apply_material(window), Ordering::SeqCst);
     let _ = window.with_webview(|webview| {
         let controller = webview.controller();
         CONTROLLER.with(|slot| *slot.borrow_mut() = Some(controller));
     });
+}
+
+// Tauri applies the first effect the OS build supports.
+pub fn apply_material(window: &WebviewWindow) -> bool {
+    use tauri::utils::config::WindowEffectsConfig;
+    use tauri::window::Effect;
+    let result = window.set_effects(WindowEffectsConfig {
+        effects: vec![Effect::Acrylic, Effect::Mica],
+        state: None,
+        radius: None,
+        color: None,
+    });
+    if let Err(e) = &result {
+        eprintln!("material: window effects unavailable: {e}");
+    }
+    result.is_ok()
 }
 
 pub fn material() -> bool {
