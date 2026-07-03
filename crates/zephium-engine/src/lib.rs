@@ -28,6 +28,13 @@ pub fn install(
     WebviewEngine { dispatch }
 }
 
+/// Linux only: wry positions child webviews only inside a gtk::Fixed, so the
+/// composition root hands one over before any view is created.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn install_container(fixed: gtk::Fixed) {
+    platform::imp::install_container(fixed);
+}
+
 impl WebviewEngine {
     fn run(&self, f: impl FnOnce() + Send + 'static) {
         (self.dispatch)(Box::new(f));

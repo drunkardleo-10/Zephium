@@ -1,5 +1,7 @@
 import { Show, createEffect, createSignal, on } from "solid-js";
 
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+
 export function iconUrl(key: string): string {
   const hash = key.lastIndexOf("#");
   const version = hash === -1 ? "" : `?v=${key.slice(hash + 1)}`;
@@ -7,7 +9,8 @@ export function iconUrl(key: string): string {
   const slash = base.indexOf("/");
   const profile = base.slice(0, slash);
   const origin = encodeURIComponent(base.slice(slash + 1));
-  return `zicon://localhost/${profile}/${origin}${version}`;
+  const root = IS_WINDOWS ? "http://zicon.localhost" : "zicon://localhost";
+  return `${root}/${profile}/${origin}${version}`;
 }
 
 // The img stays mounted through loading cycles; swapping elements would

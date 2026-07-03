@@ -1,3 +1,9 @@
+use std::cell::OnceCell;
+use std::rc::Rc;
+
+use objc2::rc::Retained;
+use objc2_web_kit::WKWebView;
+
 pub fn webkit(view: &wry::WebView) -> objc2::rc::Retained<objc2_web_kit::WKWebView> {
     use wry::WebViewExtMacOS;
     // SAFETY: WryWebView is a WKWebView subclass; this is a plain upcast.
@@ -64,4 +70,22 @@ pub fn add_user_script(view: &wry::WebView, script: &zephium_core::ports::engine
             .userContentController()
             .addUserScript(&user_script)
     };
+}
+
+#[derive(Clone, Default)]
+pub struct NavProbe(Rc<OnceCell<Retained<WKWebView>>>);
+
+impl NavProbe {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn fill(&self, view: &wry::WebView) {
+        let _ = self.0.set(webkit(view));
+    }
+
+    pub fn query(&self) -> Option<(bool, bool)> {
+        let wk = self.0.get()?;
+        Some(unsafe { (wk.canGoBack(), wk.canGoForward()) })
+    }
 }

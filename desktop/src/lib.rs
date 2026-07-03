@@ -4,6 +4,7 @@
 mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
+mod platform;
 
 use std::sync::{Arc, OnceLock};
 
@@ -15,7 +16,6 @@ use tauri_specta::{collect_commands, collect_events, Event};
 use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
 use zephium_core::ids::ItemId;
-use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
 use zephium_core::ports::store::Store as _;
 use zephium_core::split::Axis;
@@ -212,86 +212,12 @@ fn tab_drop(shell: State<'_, Handle>, id: String, x: f64, y: f64) {
     dispatch_with_id(&shell, &id, |id| Command::DropTab { id, x, y });
 }
 
-#[cfg(target_os = "macos")]
-struct ChromeAdapter {
-    dispatch: MainThreadDispatch,
-    wk: Arc<std::sync::atomic::AtomicPtr<std::ffi::c_void>>,
-}
-
-#[cfg(target_os = "macos")]
-impl Chrome for ChromeAdapter {
-    fn position(&self, frame: ChromeFrame) {
-        let addr = self.wk.load(std::sync::atomic::Ordering::SeqCst) as usize;
-        if addr == 0 {
-            return;
-        }
-        (self.dispatch)(Box::new(move || {
-            set_chrome_frame(addr as *mut objc2::runtime::AnyObject, frame)
-        }));
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn chrome_view(wk: *mut objc2::runtime::AnyObject) -> &'static objc2_app_kit::NSView {
-    // The chrome WKWebView is an NSView subclass owned by Tauri; borrow it on the
-    // main thread to position it. Caller guarantees a live pointer.
-    unsafe { &*wk.cast::<objc2_app_kit::NSView>() }
-}
-
-#[cfg(target_os = "macos")]
-fn content_view_size(wk_addr: usize) -> Option<Size> {
-    if wk_addr == 0 {
-        return None;
-    }
-    // inner_size() reflects the shrunk chrome webview, so the window's real content
-    // area is read from the webview's superview instead.
-    let view = chrome_view(wk_addr as *mut objc2::runtime::AnyObject);
-    let sv = unsafe { view.superview() }?;
-    let b = sv.bounds();
-    Some(Size::new(b.size.width, b.size.height))
-}
-
-#[cfg(target_os = "macos")]
-fn set_chrome_frame(wk: *mut objc2::runtime::AnyObject, frame: ChromeFrame) {
-    use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
-
-    let view = chrome_view(wk);
-    let Some(sv) = (unsafe { view.superview() }) else {
-        return;
-    };
-    let h = sv.bounds().size.height;
-    let r = frame.rect;
-    // Height follows the window; width either follows (fill) or stays fixed and
-    // pinned left. AppKit applies this in the window's own layout pass.
-    let mask = if frame.fill_width {
-        Mask::ViewWidthSizable | Mask::ViewHeightSizable
-    } else {
-        Mask::ViewMaxXMargin | Mask::ViewHeightSizable
-    };
-    let f = NSRect::new(
-        NSPoint::new(r.x, h - r.y - r.height),
-        NSSize::new(r.width, r.height),
-    );
-    view.setTranslatesAutoresizingMaskIntoConstraints(true);
-    view.setAutoresizingMask(mask);
-    view.setFrame(f);
-}
-
 fn inner_logical(window: &tauri::WebviewWindow) -> Size {
     let scale = window.scale_factor().unwrap_or(1.0);
     window
         .inner_size()
         .map(|s| Size::new(s.width as f64 / scale, s.height as f64 / scale))
         .unwrap_or_default()
-}
-
-#[cfg(not(target_os = "macos"))]
-struct ChromeAdapter;
-
-#[cfg(not(target_os = "macos"))]
-impl Chrome for ChromeAdapter {
-    fn position(&self, _frame: ChromeFrame) {}
 }
 
 fn zicon_response(
@@ -414,26 +340,6 @@ pub fn run() {
         .setup(move |app| {
             specta.mount_events(app);
             let window = app.get_webview_window("main").expect("main window");
-
-            #[cfg(target_os = "macos")]
-            let chrome_wk: Arc<std::sync::atomic::AtomicPtr<std::ffi::c_void>> =
-                Arc::new(std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()));
-
-            #[cfg(target_os = "macos")]
-            {
-                use objc2::runtime::AnyObject;
-                use std::sync::atomic::Ordering;
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, Some(12.0));
-                let slot = chrome_wk.clone();
-                let _ = window.with_webview(move |webview| {
-                    let wk = webview.inner() as *mut AnyObject;
-                    let webkit: &objc2_web_kit::WKWebView = unsafe { &*wk.cast() };
-                    unsafe { webkit.setInspectable(false) };
-                    slot.store(wk.cast(), Ordering::SeqCst);
-                });
-            }
-
             let parent = window.window_handle()?.as_raw();
             let handle = app.handle().clone();
 
@@ -441,6 +347,8 @@ pub fn run() {
             let dispatch: MainThreadDispatch = Arc::new(move |task: Box<dyn FnOnce() + Send>| {
                 let _ = dispatch_handle.run_on_main_thread(task);
             });
+
+            platform::imp::init(&window);
 
             let slot: Arc<OnceLock<Handle>> = Arc::new(OnceLock::new());
             let sink_slot = slot.clone();
@@ -479,39 +387,22 @@ pub fn run() {
                 };
             });
 
-            #[cfg(target_os = "macos")]
-            let chrome: SharedChrome = Arc::new(ChromeAdapter {
-                dispatch: dispatch.clone(),
-                wk: chrome_wk.clone(),
-            });
-            #[cfg(not(target_os = "macos"))]
-            let chrome: SharedChrome = Arc::new(ChromeAdapter);
+            let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
 
             let net = Arc::new(zephium_net::HttpNet::new());
             let shell = zephium_app::spawn(Arc::new(engine), store, chrome, net, emit);
             let _ = slot.set(shell.clone());
 
-            #[cfg(target_os = "macos")]
             let initial =
-                content_view_size(chrome_wk.load(std::sync::atomic::Ordering::SeqCst) as usize)
-                    .unwrap_or_else(|| inner_logical(&window));
-            #[cfg(not(target_os = "macos"))]
-            let initial = inner_logical(&window);
+                platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
             shell.dispatch(Command::SetWindowSize(initial));
 
             let resize_shell = shell.clone();
             let resize_window = window.clone();
-            #[cfg(target_os = "macos")]
-            let resize_wk = chrome_wk.clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::Resized(_) = event {
-                    #[cfg(target_os = "macos")]
-                    let size = content_view_size(
-                        resize_wk.load(std::sync::atomic::Ordering::SeqCst) as usize,
-                    )
-                    .unwrap_or_else(|| inner_logical(&resize_window));
-                    #[cfg(not(target_os = "macos"))]
-                    let size = inner_logical(&resize_window);
+                    let size = platform::imp::content_size(&resize_window)
+                        .unwrap_or_else(|| inner_logical(&resize_window));
                     resize_shell.dispatch(Command::SetWindowSize(size));
                 }
             });

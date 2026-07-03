@@ -17,7 +17,7 @@ use zephium_core::split::Pane;
 #[cfg(target_os = "macos")]
 use {
     crate::platform::imp::ContentStage, objc2::rc::Retained, objc2_app_kit::NSView,
-    objc2_foundation::MainThreadMarker, std::cell::OnceCell, std::rc::Rc,
+    objc2_foundation::MainThreadMarker,
 };
 
 thread_local! {
@@ -129,10 +129,8 @@ impl EngineHost {
             Partition::Ephemeral(_) => builder.with_incognito(true),
         };
 
-        #[cfg(target_os = "macos")]
-        let wk_cell: Rc<OnceCell<Retained<objc2_web_kit::WKWebView>>> = Rc::new(OnceCell::new());
-        #[cfg(target_os = "macos")]
-        let load_cell = wk_cell.clone();
+        let probe = crate::platform::imp::NavProbe::new();
+        let load_probe = probe.clone();
 
         builder = builder.with_on_page_load_handler(move |event, url| match event {
             PageLoadEvent::Started => {
@@ -141,19 +139,31 @@ impl EngineHost {
             PageLoadEvent::Finished => {
                 on_load.emit(EngineEvent::LoadingChanged { id, loading: false });
                 on_load.emit(EngineEvent::UrlChanged { id, url });
-                #[cfg(target_os = "macos")]
-                if let Some(wk) = load_cell.get() {
-                    let (back, forward) = unsafe { (wk.canGoBack(), wk.canGoForward()) };
+                if let Some((can_go_back, can_go_forward)) = load_probe.query() {
                     on_load.emit(EngineEvent::NavState {
                         id,
-                        can_go_back: back,
-                        can_go_forward: forward,
+                        can_go_back,
+                        can_go_forward,
                     });
                 }
             }
         });
 
-        let view = match builder.build_as_child(&self.parent) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let built = {
+            use wry::WebViewBuilderExtUnix;
+            match crate::platform::imp::container() {
+                Some(container) => builder.build_gtk(&container),
+                None => {
+                    eprintln!("engine: gtk container not installed");
+                    return;
+                }
+            }
+        };
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let built = builder.build_as_child(&self.parent);
+
+        let view = match built {
             Ok(view) => view,
             Err(e) => {
                 eprintln!("engine: create_view({id}) failed: {e}");
@@ -161,15 +171,13 @@ impl EngineHost {
             }
         };
         crate::platform::imp::configure(&view, 12.0);
+        probe.fill(&view);
         #[cfg(target_os = "macos")]
+        for script in scripts
+            .iter()
+            .filter(|s| !(s.world == World::Page && s.at_start))
         {
-            let _ = wk_cell.set(crate::platform::imp::webkit(&view));
-            for script in scripts
-                .iter()
-                .filter(|s| !(s.world == World::Page && s.at_start))
-            {
-                crate::platform::imp::add_user_script(&view, script);
-            }
+            crate::platform::imp::add_user_script(&view, script);
         }
         let _ = view.set_visible(false);
         let _ = view.load_url(url);

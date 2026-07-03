@@ -5014,6 +5014,7 @@ dependencies = [
 name = "zephium-desktop"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -5028,7 +5029,10 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-global-shortcut",
  "tauri-specta",
+ "webkit2gtk",
+ "webview2-com",
  "window-vibrancy 0.7.1",
+ "windows",
  "zephium-app",
  "zephium-core",
  "zephium-engine",
@@ -5041,6 +5045,7 @@ dependencies = [
 name = "zephium-engine"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "objc2",
  "objc2-app-kit",
  "objc2-core-graphics",
@@ -5050,6 +5055,9 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "url",
+ "webkit2gtk",
+ "webview2-com",
+ "windows-core 0.61.2",
  "wry",
  "zephium-core",
 ]
