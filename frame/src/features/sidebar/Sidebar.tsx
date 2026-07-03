@@ -1,8 +1,18 @@
-import { For, Show, createEffect, createSignal, type JSX } from "solid-js";
+import {
+  Add01Icon,
+  ArrowLeft01Icon,
+  ArrowRight01Icon,
+  Cancel01Icon,
+  MoreHorizontalIcon,
+  RefreshIcon,
+  TableColumnsSplitIcon,
+} from "@hugeicons/core-free-icons";
+import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
 import { commands } from "../../ipc/bindings";
 import * as tabs from "../../state/tabs";
 import * as ui from "../../state/ui";
 import { FavIcon } from "../../ui/FavIcon";
+import { Icon } from "../../ui/Icon";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 
@@ -134,10 +144,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside
-      style={{ width: `${width()}px` }}
-      class="relative flex shrink-0 select-none flex-col"
-    >
+    <aside style={{ width: `${width()}px` }} class="relative flex shrink-0 select-none flex-col">
       <div
         onPointerDown={onResizeDown}
         onPointerMove={onResizeMove}
@@ -147,19 +154,21 @@ export function Sidebar() {
       <div data-tauri-drag-region class="h-8 shrink-0" />
 
       <div class="flex items-center gap-0.5 px-2.5">
-        <NavButton label="Back" onClick={tabs.backActive}>‹</NavButton>
-        <NavButton label="Forward" onClick={tabs.forwardActive}>›</NavButton>
-        <NavButton label="Reload" onClick={tabs.reloadActive}>⟳</NavButton>
-        <NavButton
-          label="Split"
-          active={splitting()}
-          onClick={() => setSplitting((s) => !s)}
-        >
-          ⊟
+        <NavButton label="Back" onClick={tabs.backActive}>
+          <Icon icon={ArrowLeft01Icon} />
+        </NavButton>
+        <NavButton label="Forward" onClick={tabs.forwardActive}>
+          <Icon icon={ArrowRight01Icon} />
+        </NavButton>
+        <NavButton label="Reload" onClick={tabs.reloadActive}>
+          <Icon icon={RefreshIcon} size={15} />
+        </NavButton>
+        <NavButton label="Split" active={splitting()} onClick={() => setSplitting((s) => !s)}>
+          <Icon icon={TableColumnsSplitIcon} size={15} />
         </NavButton>
         <Show when={!IS_MAC}>
           <NavButton label="Menu" onClick={() => void commands.menuPopup()}>
-            ⋯
+            <Icon icon={MoreHorizontalIcon} />
           </NavButton>
         </Show>
       </div>
@@ -188,6 +197,7 @@ export function Sidebar() {
         <For each={tabs.tabs()}>
           {(tab) => (
             <button
+              type="button"
               onPointerDown={(e) => onTabDown(e, tab.id, tab.title)}
               onPointerMove={onTabMove}
               onPointerUp={onTabUp}
@@ -208,7 +218,7 @@ export function Sidebar() {
                 }}
                 class="hidden h-5 w-5 items-center justify-center rounded text-faint hover:bg-hover hover:text-text group-hover:flex"
               >
-                ×
+                <Icon icon={Cancel01Icon} size={12} />
               </span>
             </button>
           )}
@@ -217,10 +227,11 @@ export function Sidebar() {
 
       <div class="px-2.5 pb-3 pt-1">
         <button
+          type="button"
           onClick={() => tabs.open()}
           class="flex h-9 w-full items-center gap-2 rounded-md px-3 text-[13px] text-muted hover:bg-hover hover:text-text"
         >
-          <span class="text-base leading-none">+</span> New Tab
+          <Icon icon={Add01Icon} size={15} /> New Tab
         </button>
       </div>
 
@@ -246,6 +257,7 @@ function NavButton(props: {
 }) {
   return (
     <button
+      type="button"
       aria-label={props.label}
       onClick={props.onClick}
       class="flex h-7 w-7 items-center justify-center rounded-md"

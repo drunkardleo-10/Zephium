@@ -1,13 +1,12 @@
 import { createStore, reconcile } from "solid-js/store";
-import { commands, events } from "../ipc/bindings";
 import type { ItemsState, TabView } from "../ipc/bindings";
+import { commands, events } from "../ipc/bindings";
 
 const [state, setState] = createStore<ItemsState>({ tabs: [], active: null });
 
 export const tabs = () => state.tabs;
 export const activeId = () => state.active;
-export const activeTab = (): TabView | undefined =>
-  state.tabs.find((t) => t.id === state.active);
+export const activeTab = (): TabView | undefined => state.tabs.find((t) => t.id === state.active);
 
 let unlisten: (() => void) | null = null;
 

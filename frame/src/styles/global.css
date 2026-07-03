@@ -19,6 +19,10 @@
   --radius-sm: 6px;
   --radius-md: 9px;
   --radius-lg: 13px;
+
+  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
 }
 
 [data-theme="light"] {
@@ -46,7 +50,7 @@ body {
   margin: 0;
   background: transparent;
   color: var(--color-text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }

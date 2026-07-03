@@ -1,7 +1,7 @@
 import { Show } from "solid-js";
-import * as tabs from "../state/tabs";
-import { Sidebar } from "../features/sidebar/Sidebar";
 import { NewTab } from "../features/newtab/NewTab";
+import { Sidebar } from "../features/sidebar/Sidebar";
+import * as tabs from "../state/tabs";
 
 export function Shell() {
   return (

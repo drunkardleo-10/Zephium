@@ -1,4 +1,4 @@
-import { Show, createEffect, createSignal, on } from "solid-js";
+import { createEffect, createSignal, on, Show } from "solid-js";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
@@ -17,7 +17,12 @@ export function iconUrl(key: string): string {
 // re-request the icon on every navigation (custom schemes bypass http cache).
 export function FavIcon(props: { favicon: string | null; loading?: boolean }) {
   const [failed, setFailed] = createSignal(false);
-  createEffect(on(() => props.favicon, () => setFailed(false)));
+  createEffect(
+    on(
+      () => props.favicon,
+      () => setFailed(false),
+    ),
+  );
   return (
     <Show
       when={props.favicon && !failed()}

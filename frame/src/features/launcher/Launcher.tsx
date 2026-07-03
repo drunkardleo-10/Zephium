@@ -1,7 +1,7 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { commands, events } from "../../ipc/bindings";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { SearchResult } from "../../ipc/bindings";
+import { commands, events } from "../../ipc/bindings";
 import { FavIcon } from "../../ui/FavIcon";
 
 const KIND_LABEL: Record<string, string> = {
@@ -87,10 +87,11 @@ export function Launcher() {
   };
 
   return (
-    <div class="flex h-screen w-screen flex-col" onKeyDown={onKeyDown}>
+    <div class="flex h-screen w-screen flex-col">
       <input
         ref={input}
         value={value()}
+        onKeyDown={onKeyDown}
         onInput={(e) => search(e.currentTarget.value)}
         placeholder="Search or enter address"
         spellcheck={false}
@@ -100,6 +101,7 @@ export function Launcher() {
         <For each={results()}>
           {(result, index) => (
             <button
+              type="button"
               onMouseMove={() => setSelected(index())}
               onClick={() => run(result)}
               class="flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left"
@@ -109,9 +111,7 @@ export function Launcher() {
                 <Show
                   when={result.favicon}
                   fallback={
-                    <span class="text-[12px] text-faint">
-                      {KIND_GLYPH[result.kind] ?? ""}
-                    </span>
+                    <span class="text-[12px] text-faint">{KIND_GLYPH[result.kind] ?? ""}</span>
                   }
                 >
                   <FavIcon favicon={result.favicon} />
@@ -120,9 +120,7 @@ export function Launcher() {
               <span class="w-14 shrink-0 text-[10px] uppercase tracking-wide text-faint">
                 {KIND_LABEL[result.kind] ?? result.kind}
               </span>
-              <span class="min-w-0 flex-1 truncate text-[13.5px] text-text">
-                {result.title}
-              </span>
+              <span class="min-w-0 flex-1 truncate text-[13.5px] text-text">{result.title}</span>
               <span class="max-w-56 shrink-0 truncate text-[12px] text-faint">
                 {result.kind === "command" ? accel(result.detail) : result.detail}
               </span>

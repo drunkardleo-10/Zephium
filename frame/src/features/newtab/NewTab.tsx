@@ -35,6 +35,7 @@ export function NewTab() {
         <For each={SHORTCUTS}>
           {(name) => (
             <button
+              type="button"
               onClick={() => go(`${name.toLowerCase().replace(/\s+/g, "")}.com`)}
               class="flex flex-col items-center gap-2 rounded-xl px-2 py-4 hover:bg-hover"
             >
