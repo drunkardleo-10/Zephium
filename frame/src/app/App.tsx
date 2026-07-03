@@ -4,6 +4,7 @@ import { Shell } from "./Shell";
 import { Launcher } from "../features/launcher/Launcher";
 import { commands } from "../ipc/bindings";
 import * as tabs from "../state/tabs";
+import * as theme from "../state/theme";
 import * as ui from "../state/ui";
 
 // WebKit consumes these inside our own webview before the native menu sees
@@ -24,6 +25,11 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 export default function App() {
+  onMount(() => {
+    void theme.init();
+    onCleanup(() => theme.dispose());
+  });
+
   if (getCurrentWindow().label === "panel") {
     return <Launcher />;
   }

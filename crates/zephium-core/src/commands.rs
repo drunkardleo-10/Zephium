@@ -99,6 +99,24 @@ pub const REGISTRY: &[CommandSpec] = &[
         accelerator: Some("CmdOrCtrl+Shift+Space"),
         group: Group::Global,
     },
+    CommandSpec {
+        id: "theme.system",
+        title: "Appearance: System",
+        accelerator: None,
+        group: Group::Global,
+    },
+    CommandSpec {
+        id: "theme.light",
+        title: "Appearance: Light",
+        accelerator: None,
+        group: Group::Global,
+    },
+    CommandSpec {
+        id: "theme.dark",
+        title: "Appearance: Dark",
+        accelerator: None,
+        group: Group::Global,
+    },
 ];
 
 #[derive(Clone, Debug, PartialEq)]

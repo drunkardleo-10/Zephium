@@ -25,7 +25,7 @@ use zephium_ipc::Projection;
 const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}";
 use zephium_store::SqliteStore;
 
-static ICON_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
+static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ItemsChanged(zephium_ipc::ItemsState);
@@ -54,6 +54,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_unsplit,
             run_command,
             panel_hide,
+            setting_get,
+            setting_set,
             launcher_search,
             launcher_run,
             sidebar_set_width,
@@ -139,10 +141,32 @@ fn tabs_unsplit(shell: State<'_, Handle>) {
     shell.dispatch(Command::Unsplit);
 }
 
+const SETTING_KEYS: &[&str] = &["appearance"];
+
+fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
+    let theme = match mode {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    };
+    // Keeps vibrancy and native controls in step with a forced appearance.
+    app.set_theme(theme);
+}
+
 fn execute_command(app: &tauri::AppHandle, id: &str) {
     if id == "launcher.toggle" {
         if let Some(overlay) = app.try_state::<overlay::Overlay>() {
             overlay.toggle();
+        }
+        return;
+    }
+    if let Some(mode) = id.strip_prefix("theme.") {
+        if matches!(mode, "system" | "light" | "dark") {
+            if let Some(store) = APP_STORE.get() {
+                store.set_app_setting("appearance".into(), mode.into());
+            }
+            apply_native_theme(app, mode);
+            let _ = UiCommand(id.to_string()).emit(app);
         }
         return;
     }
@@ -183,6 +207,25 @@ fn launcher_run(app: tauri::AppHandle, action: zephium_ipc::SearchAction) {
         SearchAction::ActivateTab { id } => dispatch_with_id(&shell, &id, Command::Activate),
         SearchAction::OpenUrl { url } => shell.dispatch(Command::OpenUrl(url)),
         SearchAction::RunCommand { id } => execute_command(&app, &id),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+fn setting_get(key: String) -> Option<String> {
+    if !SETTING_KEYS.contains(&key.as_str()) {
+        return None;
+    }
+    APP_STORE.get().and_then(|store| store.app_setting(&key))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn setting_set(key: String, value: String) {
+    if SETTING_KEYS.contains(&key.as_str()) && value.len() <= 256 {
+        if let Some(store) = APP_STORE.get() {
+            store.set_app_setting(key, value);
+        }
     }
 }
 
@@ -244,7 +287,7 @@ fn zicon_response(
     let Ok(origin) = percent_decode_str(origin).decode_utf8() else {
         return not_found();
     };
-    let Some(store) = ICON_STORE.get() else {
+    let Some(store) = APP_STORE.get() else {
         return not_found();
     };
     match store.favicon_bytes(profile, &origin) {
@@ -305,6 +348,11 @@ fn build_menu(
         .paste()
         .select_all()
         .build()?;
+    let appearance = SubmenuBuilder::new(handle, "Appearance")
+        .item(&item("theme.system")?)
+        .item(&item("theme.light")?)
+        .item(&item("theme.dark")?)
+        .build()?;
     let view = SubmenuBuilder::new(handle, "View")
         .item(&item("nav.reload")?)
         .item(&item("nav.stop")?)
@@ -312,6 +360,8 @@ fn build_menu(
         .item(&item("zoom.in")?)
         .item(&item("zoom.out")?)
         .item(&item("zoom.reset")?)
+        .separator()
+        .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
         .build()?;
@@ -368,7 +418,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let store = Arc::new(SqliteStore::open(&data_dir)?);
-            let _ = ICON_STORE.set(store.clone());
+            let _ = APP_STORE.set(store.clone());
 
             let keymap: std::collections::HashMap<String, String> = store
                 .app_setting("keymap")
@@ -462,6 +512,10 @@ pub fn run() {
                         eprintln!("global shortcut {accel} unavailable: {e}");
                     }
                 }
+            }
+
+            if let Some(mode) = APP_STORE.get().and_then(|s| s.app_setting("appearance")) {
+                apply_native_theme(&handle, &mode);
             }
 
             app.manage(shell);

@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+/* Dark is the default theme; [data-theme="light"] overrides the same
+   variables, so every utility retokens at runtime with zero re-render. */
 @theme {
   --color-bg: #1b1b1f;
   --color-surface: #232329;
@@ -7,14 +9,31 @@
   --color-elevated: #2c2c34;
   --color-border: #34343d;
   --color-hover: #2a2a31;
+  --color-active: #34343d;
   --color-text: #ededf1;
   --color-muted: #9a9aa5;
   --color-faint: #6e6e78;
   --color-accent: #5b8cff;
+  --color-danger: #ff5b5b;
 
   --radius-sm: 6px;
   --radius-md: 9px;
   --radius-lg: 13px;
+}
+
+[data-theme="light"] {
+  --color-bg: #f4f4f6;
+  --color-surface: #ffffff;
+  --color-sidebar: #ececef;
+  --color-elevated: #ffffff;
+  --color-border: #d9d9df;
+  --color-hover: #e4e4e9;
+  --color-active: #d9d9df;
+  --color-text: #1d1d22;
+  --color-muted: #5f5f6a;
+  --color-faint: #8f8f9a;
+  --color-accent: #3b6cf0;
+  --color-danger: #d92f2f;
 }
 
 html,
@@ -30,4 +49,13 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 70%, transparent);
+  outline-offset: -2px;
 }

@@ -94,7 +94,7 @@ export function Launcher() {
         onInput={(e) => search(e.currentTarget.value)}
         placeholder="Search or enter address"
         spellcheck={false}
-        class="h-14 w-full shrink-0 border-b border-white/10 bg-transparent px-5 text-[15px] text-text outline-none placeholder:text-faint"
+        class="h-14 w-full shrink-0 border-b border-border bg-transparent px-5 text-[15px] text-text outline-none placeholder:text-faint"
       />
       <div class="flex-1 overflow-y-auto p-2">
         <For each={results()}>
@@ -103,7 +103,7 @@ export function Launcher() {
               onMouseMove={() => setSelected(index())}
               onClick={() => run(result)}
               class="flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left"
-              classList={{ "bg-white/10": index() === selected() }}
+              classList={{ "bg-hover": index() === selected() }}
             >
               <span class="flex h-5 w-5 shrink-0 items-center justify-center">
                 <Show
