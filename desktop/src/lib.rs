@@ -494,6 +494,7 @@ pub fn run() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
+            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
             let mut global_styles = vec![SCROLLBAR_CSS.to_string()];
             // Child HWNDs cannot be rounded by DWM; a transparent webview plus
             // page-side clipping renders the same corners the mac stage gets.
