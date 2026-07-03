@@ -99,8 +99,11 @@ jobs:
       - name: cargo check
         run: cargo check --all-targets --locked
 
+      # The desktop test binary needs the WebView2 loader at run time, which
+      # plain runners do not provide; its only test (bindings export) runs on
+      # the ubuntu job.
       - name: cargo nextest
-        run: cargo nextest run --locked --retries 2
+        run: cargo nextest run --locked --retries 2 --workspace --exclude zephium-desktop
 
   coverage:
     runs-on: ubuntu-22.04
