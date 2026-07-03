@@ -69,6 +69,8 @@ impl HasWindowHandle for ParentHandle {
 }
 
 pub(crate) struct EngineHost {
+    // Views are parented via the gtk container on Linux, not the raw handle.
+    #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     parent: ParentHandle,
     views: HashMap<ItemId, WebView>,
     user_content: HashMap<ContentScope, UserContent>,
