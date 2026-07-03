@@ -120,9 +120,7 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         {
             use wry::WebViewBuilderExtWindows;
-            builder = builder
-                .with_transparent(true)
-                .with_browser_accelerator_keys(false);
+            builder = builder.with_browser_accelerator_keys(false);
         }
 
         builder = match partition {

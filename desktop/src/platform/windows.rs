@@ -18,22 +18,28 @@ thread_local! {
 static MATERIAL: AtomicBool = AtomicBool::new(false);
 
 pub fn init(window: &WebviewWindow) {
-    MATERIAL.store(apply_material(window), Ordering::SeqCst);
+    MATERIAL.store(apply_material(window, true), Ordering::SeqCst);
     let _ = window.with_webview(|webview| {
         let controller = webview.controller();
         CONTROLLER.with(|slot| *slot.borrow_mut() = Some(controller));
     });
 }
 
-// Tauri applies the first effect the OS build supports.
-pub fn apply_material(window: &WebviewWindow) -> bool {
-    use tauri::utils::config::WindowEffectsConfig;
+// Tauri applies the first effect the OS build supports. The tint keeps
+// acrylic deep instead of washed out and follows the app theme.
+pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
+    use tauri::utils::config::{Color, WindowEffectsConfig};
     use tauri::window::Effect;
+    let tint = if dark {
+        Color(22, 22, 27, 200)
+    } else {
+        Color(242, 242, 246, 200)
+    };
     let result = window.set_effects(WindowEffectsConfig {
         effects: vec![Effect::Acrylic, Effect::Mica],
         state: None,
         radius: None,
-        color: None,
+        color: Some(tint),
     });
     if let Err(e) = &result {
         eprintln!("material: window effects unavailable: {e}");

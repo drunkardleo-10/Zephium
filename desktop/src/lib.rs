@@ -211,6 +211,14 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     };
     // Keeps vibrancy and native controls in step with a forced appearance.
     app.set_theme(theme);
+    #[cfg(target_os = "windows")]
+    for label in ["main", "panel"] {
+        if let Some(window) = app.get_webview_window(label) {
+            platform::imp::apply_material(&window, mode != "light");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
 }
 
 fn execute_command(app: &tauri::AppHandle, id: &str) {
@@ -494,17 +502,11 @@ pub fn run() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
-            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-            let mut global_styles = vec![SCROLLBAR_CSS.to_string()];
-            // Child HWNDs cannot be rounded by DWM; a transparent webview plus
-            // page-side clipping renders the same corners the mac stage gets.
-            #[cfg(target_os = "windows")]
-            global_styles.push("html{border-radius:12px;overflow:hidden}".into());
             engine.set_user_content(
                 ContentScope::Global,
                 UserContent {
                     scripts: Vec::new(),
-                    styles: global_styles,
+                    styles: vec![SCROLLBAR_CSS.to_string()],
                 },
             );
 
@@ -543,12 +545,17 @@ pub fn run() {
 
             let resize_shell = shell.clone();
             let resize_window = window.clone();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::Resized(_) = event {
+            let exit_handle = handle.clone();
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::Resized(_) => {
                     let size = platform::imp::content_size(&resize_window)
                         .unwrap_or_else(|| inner_logical(&resize_window));
                     resize_shell.dispatch(Command::SetWindowSize(size));
                 }
+                // The hidden launcher panel would otherwise keep the process
+                // alive after the browser window is gone.
+                tauri::WindowEvent::Destroyed => exit_handle.exit(0),
+                _ => {}
             });
 
             let panel_window = tauri::WebviewWindowBuilder::new(
@@ -577,7 +584,7 @@ pub fn run() {
                 );
             }
             #[cfg(target_os = "windows")]
-            platform::imp::apply_material(&panel_window);
+            platform::imp::apply_material(&panel_window, true);
 
             let overlay = overlay::Overlay::new(panel_window.clone());
             let blur_overlay = overlay.clone();
