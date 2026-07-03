@@ -47,6 +47,17 @@ pub struct UserScript {
     pub at_start: bool,
 }
 
+/// A resolved keyboard shortcut for platforms where the engine must
+/// intercept keys natively (WebView2 AcceleratorKeyPressed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shortcut {
+    pub id: String,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub key: u32,
+}
+
 pub trait Engine {
     fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect);
     fn navigate(&self, id: ItemId, url: &str);
@@ -73,6 +84,7 @@ pub trait Engine {
     fn discover_favicon(&self, id: ItemId);
     fn print(&self, id: ItemId);
     fn set_user_content(&self, scope: ContentScope, content: UserContent);
+    fn set_shortcuts(&self, shortcuts: Vec<Shortcut>);
     /// Compiled rule payload; format is engine-specific (WebKit JSON,
     /// WebView2 filter set).
     fn set_content_rules(&self, profile: ProfileId, compiled: String);
@@ -137,5 +149,8 @@ pub enum EngineEvent {
     SplitChanged {
         window: WindowId,
         tree: Pane,
+    },
+    ShortcutPressed {
+        id: String,
     },
 }

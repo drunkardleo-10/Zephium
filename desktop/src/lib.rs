@@ -56,6 +56,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             panel_hide,
             setting_get,
             setting_set,
+            ui_info,
+            menu_popup,
             launcher_search,
             launcher_run,
             sidebar_set_width,
@@ -143,6 +145,64 @@ fn tabs_unsplit(shell: State<'_, Handle>) {
 
 const SETTING_KEYS: &[&str] = &["appearance"];
 
+// "CmdOrCtrl+T" style accelerators become native VK shortcuts for platforms
+// where the engine intercepts keys itself (Windows content webviews).
+fn shortcut_table(
+    keymap: &std::collections::HashMap<String, String>,
+) -> Vec<zephium_core::ports::engine::Shortcut> {
+    zephium_core::commands::resolve(keymap)
+        .iter()
+        .filter(|c| c.id != "launcher.toggle")
+        .filter_map(|c| parse_accel(c.id, c.accelerator.as_deref()?))
+        .collect()
+}
+
+fn parse_accel(id: &str, accel: &str) -> Option<zephium_core::ports::engine::Shortcut> {
+    let mut shortcut = zephium_core::ports::engine::Shortcut {
+        id: id.to_string(),
+        ctrl: false,
+        shift: false,
+        alt: false,
+        key: 0,
+    };
+    for part in accel.split('+') {
+        match part {
+            "CmdOrCtrl" | "Ctrl" | "Control" | "Cmd" | "Super" => shortcut.ctrl = true,
+            "Shift" => shortcut.shift = true,
+            "Alt" | "Option" => shortcut.alt = true,
+            token => shortcut.key = vk_for(token)?,
+        }
+    }
+    (shortcut.key != 0).then_some(shortcut)
+}
+
+fn vk_for(token: &str) -> Option<u32> {
+    let upper = token.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    if bytes.len() == 1 && bytes[0].is_ascii_alphanumeric() {
+        return Some(bytes[0] as u32);
+    }
+    Some(match upper.as_str() {
+        "TAB" => 0x09,
+        "SPACE" => 0x20,
+        "," => 0xBC,
+        "-" => 0xBD,
+        "." => 0xBE,
+        "=" => 0xBB,
+        "[" => 0xDB,
+        "]" => 0xDD,
+        _ => return None,
+    })
+}
+
+fn load_keymap() -> std::collections::HashMap<String, String> {
+    APP_STORE
+        .get()
+        .and_then(|store| store.app_setting("keymap"))
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     let theme = match mode {
         "light" => Some(tauri::Theme::Light),
@@ -207,6 +267,28 @@ fn launcher_run(app: tauri::AppHandle, action: zephium_ipc::SearchAction) {
         SearchAction::ActivateTab { id } => dispatch_with_id(&shell, &id, Command::Activate),
         SearchAction::OpenUrl { url } => shell.dispatch(Command::OpenUrl(url)),
         SearchAction::RunCommand { id } => execute_command(&app, &id),
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+struct UiInfo {
+    material: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+fn ui_info() -> UiInfo {
+    UiInfo {
+        material: platform::imp::material(),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+fn menu_popup(app: tauri::AppHandle) {
+    let keymap = load_keymap();
+    if let (Some(window), Ok(menu)) = (app.get_webview_window("main"), build_menu(&app, &keymap)) {
+        let _ = window.popup_menu(&menu);
     }
 }
 
@@ -402,16 +484,26 @@ pub fn run() {
 
             let slot: Arc<OnceLock<Handle>> = Arc::new(OnceLock::new());
             let sink_slot = slot.clone();
+            let sink_app = handle.clone();
             let engine = zephium_engine::install(parent, dispatch.clone(), move |event| {
+                if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { id } = &event {
+                    execute_command(&sink_app, id);
+                    return;
+                }
                 if let Some(shell) = sink_slot.get() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
+            let mut global_styles = vec![SCROLLBAR_CSS.to_string()];
+            // Child HWNDs cannot be rounded by DWM; a transparent webview plus
+            // page-side clipping renders the same corners the mac stage gets.
+            #[cfg(target_os = "windows")]
+            global_styles.push("html{border-radius:12px;overflow:hidden}".into());
             engine.set_user_content(
                 ContentScope::Global,
                 UserContent {
                     scripts: Vec::new(),
-                    styles: vec![SCROLLBAR_CSS.into()],
+                    styles: global_styles,
                 },
             );
 
@@ -420,12 +512,13 @@ pub fn run() {
             let store = Arc::new(SqliteStore::open(&data_dir)?);
             let _ = APP_STORE.set(store.clone());
 
-            let keymap: std::collections::HashMap<String, String> = store
-                .app_setting("keymap")
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
+            let keymap = load_keymap();
+            // Windows and Linux get the same menu as a popup from the sidebar
+            // "more" button instead of a persistent bar.
+            #[cfg(target_os = "macos")]
             app.set_menu(build_menu(&handle, &keymap)?)?;
             app.on_menu_event(|app, event| execute_command(app, event.id().0.as_str()));
+            engine.set_shortcuts(shortcut_table(&keymap));
 
             let emit_handle = handle.clone();
             let emit: EmitFn = Box::new(move |projection| {

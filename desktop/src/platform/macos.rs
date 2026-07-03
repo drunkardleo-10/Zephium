@@ -23,6 +23,10 @@ pub fn init(window: &WebviewWindow) {
     });
 }
 
+pub fn material() -> bool {
+    true
+}
+
 pub fn make_chrome(_window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter { dispatch })
 }

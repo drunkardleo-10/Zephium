@@ -1,7 +1,10 @@
 import { For, Show, createEffect, createSignal, type JSX } from "solid-js";
+import { commands } from "../../ipc/bindings";
 import * as tabs from "../../state/tabs";
 import * as ui from "../../state/ui";
 import { FavIcon } from "../../ui/FavIcon";
+
+const IS_MAC = navigator.userAgent.includes("Mac");
 
 function host(url: string | null | undefined): string {
   if (!url) return "";
@@ -154,6 +157,11 @@ export function Sidebar() {
         >
           ⊟
         </NavButton>
+        <Show when={!IS_MAC}>
+          <NavButton label="Menu" onClick={() => void commands.menuPopup()}>
+            ⋯
+          </NavButton>
+        </Show>
       </div>
 
       <form class="px-2.5 pb-2 pt-1" onSubmit={submit}>

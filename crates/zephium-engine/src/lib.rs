@@ -6,7 +6,9 @@ use std::sync::Arc;
 use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
-use zephium_core::ports::engine::{ContentScope, Engine, EngineEvent, Partition, UserContent};
+use zephium_core::ports::engine::{
+    ContentScope, Engine, EngineEvent, Partition, Shortcut, UserContent,
+};
 use zephium_core::split::Pane;
 
 /// Runs a closure on the main thread (where the webviews live). Provided by the
@@ -111,6 +113,10 @@ impl Engine for WebviewEngine {
 
     fn set_user_content(&self, scope: ContentScope, content: UserContent) {
         self.run(move || host::with(|h| h.set_user_content(scope, content)));
+    }
+
+    fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {
+        self.run(move || host::with(|h| h.set_shortcuts(shortcuts)));
     }
 
     fn set_content_rules(&self, profile: ProfileId, compiled: String) {

@@ -12,6 +12,8 @@ function apply() {
 }
 
 export async function init() {
+  const info = await commands.uiInfo();
+  document.documentElement.setAttribute("data-material", info.material ? "native" : "none");
   const stored = await commands.settingGet("appearance");
   if (stored === "light" || stored === "dark" || stored === "system") {
     appearance = stored;

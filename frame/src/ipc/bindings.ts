@@ -19,6 +19,8 @@ export const commands = {
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<void>("setting_set", { key, value }),
+	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
+	menuPopup: () => __TAURI_INVOKE<void>("menu_popup"),
 	launcherSearch: (query: string) => __TAURI_INVOKE<void>("launcher_search", { query }),
 	launcherRun: (action: SearchAction) => __TAURI_INVOKE<void>("launcher_run", { action }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
@@ -72,6 +74,10 @@ export type TabView = {
 };
 
 export type UiCommand = string;
+
+export type UiInfo = {
+	material: boolean,
+};
 
 /* Tauri Specta runtime */
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;

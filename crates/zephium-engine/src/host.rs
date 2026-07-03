@@ -10,7 +10,7 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::navigation;
 use zephium_core::ports::engine::{
-    ContentScope, EngineEvent, Partition, UserContent, UserScript, World,
+    ContentScope, EngineEvent, Partition, Shortcut, UserContent, UserScript, World,
 };
 use zephium_core::split::Pane;
 
@@ -34,6 +34,7 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
             parent: ParentHandle(parent),
             views: HashMap::new(),
             user_content: HashMap::new(),
+            shortcuts: Vec::new(),
             #[cfg(target_os = "macos")]
             stages: HashMap::new(),
             sink: Sink(sink),
@@ -74,6 +75,8 @@ pub(crate) struct EngineHost {
     parent: ParentHandle,
     views: HashMap<ItemId, WebView>,
     user_content: HashMap<ContentScope, UserContent>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    shortcuts: Vec<Shortcut>,
     #[cfg(target_os = "macos")]
     stages: HashMap<WindowId, Retained<ContentStage>>,
     sink: Sink,
@@ -112,6 +115,14 @@ impl EngineHost {
             .filter(|s| s.world == World::Page && s.at_start)
         {
             builder = builder.with_initialization_script(&script.source);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use wry::WebViewBuilderExtWindows;
+            builder = builder
+                .with_transparent(true)
+                .with_browser_accelerator_keys(false);
         }
 
         builder = match partition {
@@ -174,6 +185,12 @@ impl EngineHost {
         };
         crate::platform::imp::configure(&view, 12.0);
         probe.fill(&view);
+        #[cfg(target_os = "windows")]
+        crate::platform::imp::install_accelerators(
+            &view,
+            self.shortcuts.clone(),
+            self.sink.0.clone(),
+        );
         #[cfg(target_os = "macos")]
         for script in scripts
             .iter()
@@ -202,6 +219,10 @@ impl EngineHost {
 
     pub(crate) fn set_user_content(&mut self, scope: ContentScope, content: UserContent) {
         self.user_content.insert(scope, content);
+    }
+
+    pub(crate) fn set_shortcuts(&mut self, shortcuts: Vec<Shortcut>) {
+        self.shortcuts = shortcuts;
     }
 
     pub(crate) fn set_content_rules(&mut self, _profile: ProfileId, _compiled: String) {

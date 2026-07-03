@@ -170,7 +170,12 @@ impl Shell {
                 self.relayout();
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
-                Some(win) => win.size = size,
+                Some(win) => {
+                    win.size = size;
+                    // macOS resizes natively via autoresizing masks; Windows
+                    // and Linux have no equivalent, the shell must relayout.
+                    self.relayout();
+                }
                 None => self.pending_size = size,
             },
             Command::SetSidebarWidth(width) => {
@@ -435,6 +440,7 @@ impl Shell {
             EngineEvent::Crashed { .. } => {}
             EngineEvent::Captured { .. } => {}
             EngineEvent::HtmlExtracted { .. } => {}
+            EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.items.set_title(id, title);
                 self.project_tab(id);
@@ -1046,6 +1052,7 @@ mod tests {
         }
         fn print(&self, _id: ItemId) {}
         fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
+        fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
         fn set_content_rules(&self, _profile: ProfileId, _compiled: String) {}
     }
 

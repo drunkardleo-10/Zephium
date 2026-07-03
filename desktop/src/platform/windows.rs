@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::WebviewWindow;
@@ -14,11 +15,21 @@ thread_local! {
     static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
 }
 
+static MATERIAL: AtomicBool = AtomicBool::new(false);
+
 pub fn init(window: &WebviewWindow) {
+    use window_vibrancy::{apply_acrylic, apply_mica};
+    let applied =
+        apply_mica(window, None).is_ok() || apply_acrylic(window, Some((28, 28, 34, 160))).is_ok();
+    MATERIAL.store(applied, Ordering::SeqCst);
     let _ = window.with_webview(|webview| {
         let controller = webview.controller();
         CONTROLLER.with(|slot| *slot.borrow_mut() = Some(controller));
     });
+}
+
+pub fn material() -> bool {
+    MATERIAL.load(Ordering::SeqCst)
 }
 
 pub fn make_chrome(window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
