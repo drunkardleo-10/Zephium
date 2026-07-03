@@ -29,7 +29,7 @@ pub fn init(window: &WebviewWindow) {
         container.remove(&chrome);
         let fixed = gtk::Fixed::new();
         fixed.put(&chrome, 0, 0);
-        if let Some(vbox) = win.default_vbox() {
+        if let Ok(vbox) = win.default_vbox() {
             vbox.pack_start(&fixed, true, true, 0);
         }
         fixed.show_all();
