@@ -17,6 +17,28 @@ thread_local! {
 
 static MATERIAL: AtomicBool = AtomicBool::new(false);
 
+// GUI-subsystem builds have no stderr; without this every eprintln in the
+// app vanishes and Windows-only failures stay undiagnosable.
+pub fn redirect_stderr(dir: &std::path::Path) {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE};
+    let live = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+        .map(|h| !h.is_invalid() && !h.0.is_null())
+        .unwrap_or(false);
+    if live {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("zephium.log"))
+    else {
+        return;
+    };
+    let _ = unsafe { SetStdHandle(STD_ERROR_HANDLE, HANDLE(file.into_raw_handle())) };
+}
+
 pub fn init(window: &WebviewWindow) {
     MATERIAL.store(apply_material(window, true, false), Ordering::SeqCst);
     let _ = window.with_webview(|webview| {

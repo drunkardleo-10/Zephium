@@ -63,6 +63,15 @@ impl SqliteStore {
             .expect("spawn store thread");
         Ok(Self { tx })
     }
+
+    /// Blocks until every queued write has hit disk. For exit paths that
+    /// terminate the process without running Drop.
+    pub fn flush(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.send(Cmd::Flush(tx)).is_ok() {
+            let _ = rx.recv();
+        }
+    }
 }
 
 impl Store for SqliteStore {

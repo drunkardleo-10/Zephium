@@ -1,7 +1,9 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { onCleanup, onMount } from "solid-js";
+import { onCleanup, onMount, Show } from "solid-js";
 import { Launcher } from "../features/launcher/Launcher";
+import { Dividers } from "../features/split/Dividers";
 import { commands } from "../ipc/bindings";
+import * as layout from "../state/layout";
 import * as tabs from "../state/tabs";
 import * as theme from "../state/theme";
 import * as ui from "../state/ui";
@@ -61,12 +63,21 @@ export default function App() {
   onMount(() => {
     void tabs.init();
     void ui.init();
+    if (!IS_MAC) void layout.init();
     document.addEventListener("keydown", onKeyDown);
     onCleanup(() => {
       tabs.dispose();
       ui.dispose();
+      if (!IS_MAC) layout.dispose();
       document.removeEventListener("keydown", onKeyDown);
     });
   });
-  return <Shell />;
+  return (
+    <>
+      <Shell />
+      <Show when={!IS_MAC}>
+        <Dividers />
+      </Show>
+    </>
+  );
 }

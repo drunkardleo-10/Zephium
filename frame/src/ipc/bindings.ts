@@ -26,22 +26,44 @@ export const commands = {
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drop", { id, x, y }),
+	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
+	dividerDrag: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_drag", { x, y }),
+	dividerRelease: () => __TAURI_INVOKE<void>("divider_release"),
 };
 
 /** Events */
 export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
+	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
 };
 
 /* Types */
+/**
+ *  Split divider hit-strip in window logical coordinates; the chrome renders
+ *  these as drag targets on platforms without native stage dividers.
+ */
+export type DividerView = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+	vertical: boolean,
+};
+
 export type ItemsChanged = ItemsState;
 
 export type ItemsState = {
 	tabs: TabView[],
 	active: string | null,
+};
+
+export type LayoutChanged = LayoutState;
+
+export type LayoutState = {
+	dividers: DividerView[],
 };
 
 export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };

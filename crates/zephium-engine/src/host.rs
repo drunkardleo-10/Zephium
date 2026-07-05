@@ -410,7 +410,7 @@ impl EngineHost {
             return None;
         };
         let parent = HWND(h.hwnd.get() as *mut _);
-        let stage = Stage::new(parent, GAP, window, self.sink.0.clone());
+        let stage = Stage::new(parent, GAP);
         self.stages.insert(window, stage);
         Some(stage)
     }
@@ -421,7 +421,7 @@ impl EngineHost {
             return Some(stage.clone());
         }
         let fixed = crate::platform::imp::container()?;
-        let stage = crate::platform::imp::Stage::new(fixed, GAP, window, self.sink.0.clone());
+        let stage = crate::platform::imp::Stage::new(fixed, GAP);
         self.stages.insert(window, stage.clone());
         Some(stage)
     }

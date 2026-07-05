@@ -39,6 +39,9 @@ struct UiCommand(String);
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct SearchChanged(zephium_ipc::SearchResults);
 
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct LayoutChanged(zephium_ipc::LayoutState);
+
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(collect_commands![
@@ -62,13 +65,17 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_run,
             sidebar_set_width,
             tab_drag_over,
-            tab_drop
+            tab_drop,
+            divider_grab,
+            divider_drag,
+            divider_release
         ])
         .events(collect_events![
             ItemsChanged,
             TabChanged,
             UiCommand,
-            SearchChanged
+            SearchChanged,
+            LayoutChanged
         ])
 }
 
@@ -345,6 +352,24 @@ fn tab_drop(shell: State<'_, Handle>, id: String, x: f64, y: f64) {
     dispatch_with_id(&shell, &id, |id| Command::DropTab { id, x, y });
 }
 
+#[tauri::command]
+#[specta::specta]
+fn divider_grab(shell: State<'_, Handle>, x: f64, y: f64) {
+    shell.dispatch(Command::DividerGrab { x, y });
+}
+
+#[tauri::command]
+#[specta::specta]
+fn divider_drag(shell: State<'_, Handle>, x: f64, y: f64) {
+    shell.dispatch(Command::DividerDrag { x, y });
+}
+
+#[tauri::command]
+#[specta::specta]
+fn divider_release(shell: State<'_, Handle>) {
+    shell.dispatch(Command::DividerRelease);
+}
+
 fn inner_logical(window: &tauri::WebviewWindow) -> Size {
     let scale = window.scale_factor().unwrap_or(1.0);
     window
@@ -512,6 +537,11 @@ pub fn run() {
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            #[cfg(target_os = "windows")]
+            {
+                platform::imp::redirect_stderr(&data_dir);
+                eprintln!("zephium {} starting", env!("CARGO_PKG_VERSION"));
+            }
             let store = Arc::new(SqliteStore::open(&data_dir)?);
             let _ = APP_STORE.set(store.clone());
 
@@ -530,6 +560,7 @@ pub fn run() {
                     Projection::Tab(tab) => TabChanged(tab).emit(&emit_handle),
                     Projection::UiCommand(id) => UiCommand(id).emit(&emit_handle),
                     Projection::Search(results) => SearchChanged(results).emit(&emit_handle),
+                    Projection::Layout(layout) => LayoutChanged(layout).emit(&emit_handle),
                 };
             });
 
@@ -553,8 +584,24 @@ pub fn run() {
                     resize_shell.dispatch(Command::SetWindowSize(size));
                 }
                 // The hidden launcher panel would otherwise keep the process
-                // alive after the browser window is gone.
-                tauri::WindowEvent::Destroyed => exit_handle.exit(0),
+                // alive after the browser window is gone. exit() terminates
+                // without unwinding, so the store must flush first.
+                tauri::WindowEvent::Destroyed => {
+                    if let Some(store) = APP_STORE.get() {
+                        store.flush();
+                    }
+                    exit_handle.exit(0);
+                }
+                // DWM occasionally drops the backdrop applied before first
+                // show; one re-apply on first focus heals it.
+                #[cfg(target_os = "windows")]
+                tauri::WindowEvent::Focused(true) => {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static HEALED: AtomicBool = AtomicBool::new(false);
+                    if !HEALED.swap(true, Ordering::SeqCst) {
+                        platform::imp::apply_material(&resize_window, true, false);
+                    }
+                }
                 _ => {}
             });
 

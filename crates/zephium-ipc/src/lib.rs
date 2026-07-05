@@ -45,6 +45,22 @@ pub struct SearchResults {
     pub results: Vec<SearchResult>,
 }
 
+/// Split divider hit-strip in window logical coordinates; the chrome renders
+/// these as drag targets on platforms without native stage dividers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct DividerView {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub vertical: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct LayoutState {
+    pub dividers: Vec<DividerView>,
+}
+
 /// Snapshots for structural changes, single-row deltas for per-tab churn.
 #[derive(Clone, Debug)]
 pub enum Projection {
@@ -52,4 +68,5 @@ pub enum Projection {
     Tab(TabView),
     UiCommand(String),
     Search(SearchResults),
+    Layout(LayoutState),
 }

@@ -1,42 +1,36 @@
-//! Win32 mirror of the macOS ContentStage. There is no container window:
-//! wry already wraps each child webview in its own HWND, so the stage
-//! positions and rounds those directly and the corner cutouts and pane gaps
-//! show the chrome webview behind them, the only theme-correct backdrop
-//! Win32 offers. Divider drags run on invisible layered strip windows over
-//! the gaps; the drop indicator is a per-pixel-alpha layered window drawn to
-//! match the macOS one.
+//! Win32 mirror of the macOS ContentStage. wry already wraps each child
+//! webview in its own HWND; the stage positions and rounds those directly,
+//! so corner cutouts and pane gaps show the chrome webview behind them.
+//! Divider drags are DOM strips in the chrome (layered child windows drop
+//! mouse input on Win8+, an MS-confirmed bug). The drop indicator is a
+//! top-level per-pixel-alpha layered window in screen coordinates.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC, DeleteObject, GetDC,
-    ReleaseDC, ScreenToClient, SelectObject, SetWindowRgn, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
+    DeleteObject, GetDC, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA, AC_SRC_OVER,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, LoadCursorW,
-    RegisterClassW, SetCursor, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, UpdateLayeredWindow, CREATESTRUCTW, GWLP_ID, GWLP_USERDATA, HMENU, HWND_TOP,
-    IDC_SIZENS, IDC_SIZEWE, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, ULW_ALPHA,
-    WM_CAPTURECHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
-    WM_SETCURSOR, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow,
+    UpdateLayeredWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, ULW_ALPHA,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use wry::WebViewExtWindows;
 
 use zephium_core::geometry::Rect;
-use zephium_core::ids::{ItemId, WindowId};
-use zephium_core::ports::engine::EngineEvent;
-use zephium_core::split::{self, Axis, Divider, Pane};
+use zephium_core::ids::ItemId;
+use zephium_core::split::{self, Pane};
 
-const RADIUS: f64 = 12.0;
+const RADIUS: f64 = 8.0;
 const INDICATOR_RADIUS: f64 = 10.0;
 const INDICATOR_BORDER: f64 = 1.5;
 const INDICATOR_FILL: f64 = 0.12;
@@ -56,12 +50,8 @@ struct State {
     tree: Option<Pane>,
     views: HashMap<ItemId, HostView>,
     visible: Vec<ItemId>,
-    strips: Vec<HWND>,
-    dividers: Vec<Divider>,
-    drag: Option<Divider>,
     indicator: Option<HWND>,
     indicator_size: (i32, i32),
-    on_ratio: Box<dyn Fn(Pane)>,
 }
 
 #[derive(Clone, Copy)]
@@ -70,12 +60,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(
-        parent: HWND,
-        gap: f64,
-        window: WindowId,
-        sink: Arc<dyn Fn(EngineEvent) + Send + Sync>,
-    ) -> Self {
+    pub fn new(parent: HWND, gap: f64) -> Self {
         let state = Box::leak(Box::new(RefCell::new(State {
             parent,
             gap,
@@ -85,14 +70,8 @@ impl Stage {
             tree: None,
             views: HashMap::new(),
             visible: Vec::new(),
-            strips: Vec::new(),
-            dividers: Vec::new(),
-            drag: None,
             indicator: None,
             indicator_size: (0, 0),
-            on_ratio: Box::new(move |tree| {
-                sink(EngineEvent::SplitChanged { window, tree });
-            }),
         })));
         Self { state }
     }
@@ -158,20 +137,17 @@ impl Stage {
             }
             Some(zone) => {
                 let scale = scale_of(s.parent);
-                let x = ((s.origin.0 + zone.x) * scale).round() as i32;
-                let y = ((s.origin.1 + zone.y) * scale).round() as i32;
+                let mut top_left = POINT {
+                    x: ((s.origin.0 + zone.x) * scale).round() as i32,
+                    y: ((s.origin.1 + zone.y) * scale).round() as i32,
+                };
+                let _ = unsafe { ClientToScreen(s.parent, &mut top_left) };
                 let w = ((zone.width * scale).round() as i32).max(1);
                 let h = ((zone.height * scale).round() as i32).max(1);
                 let hwnd = match s.indicator {
                     Some(hwnd) => hwnd,
                     None => {
-                        let Some(created) = create_child(
-                            s.parent,
-                            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-                            plain_class(),
-                            None,
-                            None,
-                        ) else {
+                        let Some(created) = create_indicator(s.parent) else {
                             return;
                         };
                         s.indicator = Some(created);
@@ -183,9 +159,17 @@ impl Stage {
                 drop(s);
                 unsafe {
                     if resized {
-                        draw_indicator(hwnd, x, y, w, h, scale);
+                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale);
                     }
-                    let _ = SetWindowPos(hwnd, Some(HWND_TOP), x, y, w, h, SWP_NOACTIVATE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        top_left.x,
+                        top_left.y,
+                        w,
+                        h,
+                        SWP_NOACTIVATE,
+                    );
                     let _ = ShowWindow(hwnd, SW_SHOWNA);
                 }
             }
@@ -201,15 +185,12 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn register(
-    slot: &'static OnceLock<Vec<u16>>,
-    name: &str,
-    wndproc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
-) -> PCWSTR {
-    let name = slot.get_or_init(|| {
-        let name = wide(name);
+fn indicator_class() -> PCWSTR {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    let name = NAME.get_or_init(|| {
+        let name = wide("ZephiumIndicator");
         let class = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
+            lpfnWndProc: Some(plain_proc),
             lpszClassName: PCWSTR(name.as_ptr()),
             hInstance: unsafe { GetModuleHandleW(None) }.unwrap_or_default().into(),
             ..Default::default()
@@ -220,121 +201,77 @@ fn register(
     PCWSTR(name.as_ptr())
 }
 
-fn plain_class() -> PCWSTR {
-    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
-    register(&NAME, "ZephiumIndicator", plain_proc)
-}
-
-fn strip_class() -> PCWSTR {
-    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
-    register(&NAME, "ZephiumDivider", strip_proc)
-}
-
-fn create_child(
-    parent: HWND,
-    exstyle: windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE,
-    class: PCWSTR,
-    id: Option<usize>,
-    param: Option<*const std::ffi::c_void>,
-) -> Option<HWND> {
-    // NULL hInstance fails class lookup with ERROR_CANNOT_FIND_WND_CLASS.
+// Owned popup, not a child: layered child windows have broken input and
+// spotty ULW support; a top-level layered window is the reliable primitive.
+fn create_indicator(owner: HWND) -> Option<HWND> {
     let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
     unsafe {
         CreateWindowExW(
-            exstyle,
-            class,
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            indicator_class(),
             PCWSTR::null(),
-            WS_CHILD,
+            WS_POPUP,
             0,
             0,
             0,
             0,
-            Some(parent),
-            id.map(|id| HMENU(id as *mut _)),
+            Some(owner),
+            None,
             Some(module.into()),
-            param,
+            None,
         )
     }
-    .map_err(|e| eprintln!("stage: child window creation failed: {e}"))
+    .map_err(|e| eprintln!("stage: indicator creation failed: {e}"))
     .ok()
 }
 
-struct HostPlace {
-    container: HWND,
-    controller: ICoreWebView2Controller,
-    rect: Option<(i32, i32, i32, i32)>,
-    show: bool,
+unsafe extern "system" fn plain_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Reconciles every native window with the current tree: pane containers get
-/// position, rounded region and visibility; divider strips get pooled and
-/// placed over the gaps. Two-phase on purpose: all state reads happen under
-/// one borrow, all win32 calls (which can re-enter the wndprocs) after it.
 fn sync(state: &'static RefCell<State>) {
-    let Ok(mut s) = state.try_borrow_mut() else {
+    let Ok(s) = state.try_borrow() else {
         return;
     };
     let scale = scale_of(s.parent);
     let local = Rect::new(0.0, 0.0, s.size.0, s.size.1);
-    let (panes, dividers) = match &s.tree {
-        Some(tree) => (
-            split::layout(tree, local, s.gap),
-            split::dividers(tree, local, s.gap),
-        ),
-        None => (Vec::new(), Vec::new()),
+    let panes = match &s.tree {
+        Some(tree) => split::layout(tree, local, s.gap),
+        None => Vec::new(),
     };
-
-    while s.strips.len() < dividers.len() {
-        let ptr = state as *const RefCell<State> as *const std::ffi::c_void;
-        let Some(strip) = create_child(
-            s.parent,
-            WS_EX_LAYERED | WS_EX_NOACTIVATE,
-            strip_class(),
-            Some(s.strips.len()),
-            Some(ptr),
-        ) else {
-            break;
-        };
-        let _ = unsafe { SetLayeredWindowAttributes(strip, COLORREF(0), 1, LWA_ALPHA) };
-        s.strips.push(strip);
-    }
-    while s.strips.len() > dividers.len() {
-        if let Some(strip) = s.strips.pop() {
-            let _ = unsafe { DestroyWindow(strip) };
-        }
-    }
-
-    let to_phys = |r: &Rect, origin: (f64, f64)| {
+    let to_phys = |r: &Rect| {
         (
-            ((origin.0 + r.x) * scale).round() as i32,
-            ((origin.1 + r.y) * scale).round() as i32,
+            ((s.origin.0 + r.x) * scale).round() as i32,
+            ((s.origin.1 + r.y) * scale).round() as i32,
             ((r.width * scale).round() as i32).max(0),
             ((r.height * scale).round() as i32).max(0),
         )
     };
-
-    let hosts: Vec<HostPlace> = s
+    struct Place {
+        container: HWND,
+        controller: ICoreWebView2Controller,
+        rect: Option<(i32, i32, i32, i32)>,
+        show: bool,
+    }
+    let hosts: Vec<Place> = s
         .views
         .iter()
         .map(|(id, view)| {
             let pane = panes.iter().find(|(pid, _)| pid == id).map(|(_, r)| r);
-            HostPlace {
+            Place {
                 container: view.container,
                 controller: view.controller.clone(),
-                rect: pane.map(|r| to_phys(r, s.origin)),
+                rect: pane.map(&to_phys),
                 show: !s.hidden && pane.is_some() && s.visible.contains(id),
             }
         })
         .collect();
-    let strips: Vec<(HWND, (i32, i32, i32, i32))> = s
-        .strips
-        .iter()
-        .zip(dividers.iter())
-        .map(|(hwnd, d)| (*hwnd, to_phys(&d.strip, s.origin)))
-        .collect();
-    let hidden = s.hidden;
     let radius = ((RADIUS * scale * 2.0).round() as i32).max(1);
-    s.dividers = dividers;
     drop(s);
 
     for host in hosts {
@@ -363,174 +300,10 @@ fn sync(state: &'static RefCell<State>) {
             let _ = host.controller.SetIsVisible(host.show);
         }
     }
-    for (hwnd, (x, y, w, h)) in strips {
-        unsafe {
-            let _ = SetWindowPos(hwnd, Some(HWND_TOP), x, y, w, h, SWP_NOACTIVATE);
-            let _ = ShowWindow(hwnd, if hidden { SW_HIDE } else { SW_SHOWNA });
-        }
-    }
 }
 
-fn state_of(hwnd: HWND) -> Option<&'static RefCell<State>> {
-    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
-    if ptr == 0 {
-        None
-    } else {
-        Some(unsafe { &*(ptr as *const RefCell<State>) })
-    }
-}
-
-fn strip_index(hwnd: HWND) -> usize {
-    (unsafe { GetWindowLongPtrW(hwnd, GWLP_ID) }).max(0) as usize
-}
-
-fn cursor_in_region(state: &RefCell<State>) -> Option<(f64, f64)> {
-    let (parent, origin) = {
-        let s = state.try_borrow().ok()?;
-        (s.parent, s.origin)
-    };
-    let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point) }.ok()?;
-    let _ = unsafe { ScreenToClient(parent, &mut point) };
-    let scale = scale_of(parent);
-    Some((
-        point.x as f64 / scale - origin.0,
-        point.y as f64 / scale - origin.1,
-    ))
-}
-
-fn axis_cursor(axis: Axis) {
-    let name = match axis {
-        Axis::Row => IDC_SIZEWE,
-        Axis::Col => IDC_SIZENS,
-    };
-    unsafe { SetCursor(LoadCursorW(None, name).ok()) };
-}
-
-fn finish_drag(state: &RefCell<State>) {
-    let tree = {
-        let Ok(mut s) = state.try_borrow_mut() else {
-            return;
-        };
-        if s.drag.take().is_none() {
-            return;
-        }
-        s.tree.clone()
-    };
-    if let Some(tree) = tree {
-        if let Ok(s) = state.try_borrow() {
-            (s.on_ratio)(tree);
-        }
-    }
-}
-
-unsafe extern "system" fn strip_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_NCCREATE => {
-            let create = lparam.0 as *const CREATESTRUCTW;
-            let state = unsafe { (*create).lpCreateParams };
-            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize) };
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-        WM_NCDESTROY => {
-            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-        WM_SETCURSOR => {
-            let axis = state_of(hwnd).and_then(|state| {
-                let s = state.try_borrow().ok()?;
-                s.dividers.get(strip_index(hwnd)).map(|d| d.axis)
-            });
-            match axis {
-                Some(axis) => {
-                    axis_cursor(axis);
-                    LRESULT(1)
-                }
-                None => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-            }
-        }
-        WM_LBUTTONDOWN => {
-            let Some(state) = state_of(hwnd) else {
-                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-            };
-            let grabbed = {
-                let Ok(mut s) = state.try_borrow_mut() else {
-                    return LRESULT(0);
-                };
-                let divider = s.dividers.get(strip_index(hwnd)).cloned();
-                s.drag = divider.clone();
-                divider
-            };
-            if let Some(divider) = grabbed {
-                unsafe { SetCapture(hwnd) };
-                axis_cursor(divider.axis);
-            }
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            let Some(state) = state_of(hwnd) else {
-                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-            };
-            let drag = state.try_borrow().ok().and_then(|s| s.drag.clone());
-            if let Some(drag) = drag {
-                if let Some((px, py)) = cursor_in_region(state) {
-                    let moved = {
-                        let Ok(mut s) = state.try_borrow_mut() else {
-                            return LRESULT(0);
-                        };
-                        let ratio = split::ratio_for(drag.axis, drag.rect, s.gap, px, py);
-                        match s.tree.as_mut() {
-                            Some(tree) => {
-                                tree.set_ratio(&drag.path, ratio);
-                                true
-                            }
-                            None => false,
-                        }
-                    };
-                    if moved {
-                        sync(state);
-                        axis_cursor(drag.axis);
-                    }
-                }
-            }
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            if let Some(state) = state_of(hwnd) {
-                finish_drag(state);
-            }
-            let _ = unsafe { ReleaseCapture() };
-            LRESULT(0)
-        }
-        WM_CAPTURECHANGED => {
-            // Capture can vanish mid-drag (alt-tab, window loss); persist the
-            // last ratio exactly like a mouse-up would.
-            if let Some(state) = state_of(hwnd) {
-                finish_drag(state);
-            }
-            LRESULT(0)
-        }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    }
-}
-
-unsafe extern "system" fn plain_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-}
-
-/// Rasterizes the drop indicator into a premultiplied BGRA surface and pushes
-/// it through UpdateLayeredWindow: white rounded rect, translucent fill,
-/// brighter border, antialiased by a signed-distance edge.
+/// Premultiplied BGRA rounded rect pushed through UpdateLayeredWindow:
+/// translucent white fill, brighter border, signed-distance antialiasing.
 fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
     let header = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -578,7 +351,7 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        let _ = UpdateLayeredWindow(
+        if let Err(e) = UpdateLayeredWindow(
             hwnd,
             None,
             Some(&POINT { x, y }),
@@ -588,7 +361,9 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
             COLORREF(0),
             Some(&blend),
             ULW_ALPHA,
-        );
+        ) {
+            eprintln!("stage: indicator ULW failed: {e}");
+        }
         SelectObject(memory, previous);
         let _ = DeleteDC(memory);
         let _ = DeleteObject(bitmap.into());

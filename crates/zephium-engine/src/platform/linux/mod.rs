@@ -1,6 +1,5 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
-//! composition root; the stage positions them and runs divider drags and the
-//! drop indicator, mirroring the macOS ContentStage.
+//! composition root; the stage positions them and draws the drop indicator.
 
 mod stage;
 

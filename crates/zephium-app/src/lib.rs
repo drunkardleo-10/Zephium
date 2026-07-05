@@ -21,7 +21,10 @@ use zephium_core::spaces::{Space, Spaces};
 use zephium_core::split::{self, Axis, Edge, Pane};
 use zephium_core::windows::{WindowKind, Windows};
 use zephium_core::{commands, navigation};
-use zephium_ipc::{ItemsState, Projection, SearchAction, SearchResult, SearchResults, TabView};
+use zephium_ipc::{
+    DividerView, ItemsState, LayoutState, Projection, SearchAction, SearchResult, SearchResults,
+    TabView,
+};
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
@@ -58,6 +61,15 @@ pub enum Command {
         x: f64,
         y: f64,
     },
+    DividerGrab {
+        x: f64,
+        y: f64,
+    },
+    DividerDrag {
+        x: f64,
+        y: f64,
+    },
+    DividerRelease,
     Run(String),
     Search(String),
     OpenUrl(String),
@@ -111,6 +123,7 @@ pub struct Shell {
     icon_versions: std::collections::HashMap<(ProfileId, String), u32>,
     icon_queue: std::collections::HashMap<(ProfileId, String), Vec<String>>,
     icon_epoch: u32,
+    divider: Option<split::Divider>,
     self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
@@ -137,6 +150,7 @@ impl Shell {
             icon_versions: std::collections::HashMap::new(),
             icon_queue: std::collections::HashMap::new(),
             icon_epoch: 0,
+            divider: None,
             self_tx: None,
             engine,
             store,
@@ -191,6 +205,13 @@ impl Shell {
                 }
             }
             Command::DropTab { id, x, y } => self.drop_tab(id, x, y),
+            Command::DividerGrab { x, y } => self.divider = self.locate_divider(x, y),
+            Command::DividerDrag { x, y } => self.divider_drag(x, y),
+            Command::DividerRelease => {
+                if self.divider.take().is_some() {
+                    self.persist();
+                }
+            }
             Command::Run(id) => self.run_command(&id),
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {
@@ -220,7 +241,14 @@ impl Shell {
         let mut active_item = None;
         let mut active_space = None;
         let mut splits = None;
-        if let Some(state) = self.store.load_session().filter(|s| !s.items.is_empty()) {
+        let loaded = self.store.load_session();
+        eprintln!(
+            "session: {}",
+            loaded
+                .as_ref()
+                .map_or("none".to_string(), |s| format!("{} items", s.items.len()))
+        );
+        if let Some(state) = loaded.filter(|s| !s.items.is_empty()) {
             let restored = session::restore(state);
             self.profiles = restored.profiles;
             self.spaces = restored.spaces;
@@ -823,7 +851,53 @@ impl Shell {
             rect: l.chrome,
             fill_width: l.content.is_none(),
         });
+        let dividers = match (&tree, l.content) {
+            (Some(tree), Some(region)) => {
+                let local = Rect::new(0.0, 0.0, region.width, region.height);
+                split::dividers(tree, local, win.metrics.gap)
+                    .into_iter()
+                    .map(|d| DividerView {
+                        x: region.x + d.strip.x,
+                        y: region.y + d.strip.y,
+                        width: d.strip.width,
+                        height: d.strip.height,
+                        vertical: d.axis == Axis::Row,
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        (self.emit)(Projection::Layout(LayoutState { dividers }));
         self.engine.set_content(win.id, tree, l.content);
+    }
+
+    fn locate_divider(&self, x: f64, y: f64) -> Option<split::Divider> {
+        let win = self.windows.focused()?;
+        let tree = win.splits.clone()?;
+        let region =
+            layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
+        let local = Rect::new(0.0, 0.0, region.width, region.height);
+        split::divider_at(&tree, local, win.metrics.gap, x - region.x, y - region.y)
+    }
+
+    fn divider_drag(&mut self, x: f64, y: f64) {
+        let Some(d) = self.divider.clone() else {
+            return;
+        };
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
+        let Some(region) = layout::compute(win.size, win.mode, win.metrics, true).content else {
+            return;
+        };
+        let gap = win.metrics.gap;
+        let ratio = split::ratio_for(d.axis, d.rect, gap, x - region.x, y - region.y);
+        if let Some(win) = self.windows.focused_mut() {
+            if let Some(tree) = win.splits.as_mut() {
+                tree.set_ratio(&d.path, ratio);
+            }
+        }
+        self.relayout();
     }
 
     fn present(&self, tree: &Pane) -> bool {
@@ -1164,6 +1238,7 @@ mod tests {
             }
             Projection::UiCommand(_) => {}
             Projection::Search(_) => {}
+            Projection::Layout(_) => {}
         }
     }
 
@@ -1300,6 +1375,67 @@ mod tests {
         // closing one pane collapses the split onto the other
         shell.handle(Command::Close(first));
         assert_eq!(engine.last_layout(), vec![second.to_string()]);
+    }
+
+    #[test]
+    fn divider_drag_updates_ratio_and_projects_strips() {
+        let store = Arc::new(FakeStore::default());
+        let engine = Arc::new(FakeEngine::default());
+        let strips: Arc<Mutex<Vec<DividerView>>> = Arc::new(Mutex::new(Vec::new()));
+        let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            tabs: Vec::new(),
+            active: None,
+        }));
+        let (sink, strip_sink) = (screen.clone(), strips.clone());
+        let mut shell = Shell::new(
+            engine,
+            store.clone(),
+            Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
+            Box::new(move |p| match p {
+                Projection::Layout(l) => *strip_sink.lock().unwrap() = l.dividers,
+                p => apply_projection(&mut sink.lock().unwrap(), p),
+            }),
+        );
+        shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+        shell.handle(Command::Open);
+        let second = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: second,
+            input: "github.com".into(),
+        });
+        shell.handle(Command::SplitWith {
+            other: first,
+            axis: Axis::Row,
+        });
+
+        let before = strips.lock().unwrap().clone();
+        assert_eq!(before.len(), 1);
+        assert!(before[0].vertical);
+
+        let (cx, cy) = (before[0].x + before[0].width / 2.0, before[0].y + 10.0);
+        shell.handle(Command::DividerGrab { x: cx, y: cy });
+        shell.handle(Command::DividerDrag {
+            x: cx - 100.0,
+            y: cy,
+        });
+        shell.handle(Command::DividerRelease);
+
+        let after = strips.lock().unwrap().clone();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].x < before[0].x - 50.0, "strip follows the drag");
+
+        let saved = store.load_session().expect("release persists the split");
+        let Some(Pane::Branch { ratio, .. }) = saved.splits else {
+            panic!("split persisted");
+        };
+        assert!(ratio < 0.5);
     }
 
     #[test]
@@ -1600,12 +1736,13 @@ mod tests {
         );
         handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0)));
         handle.dispatch(Command::Bootstrap);
-        let projection = rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("projection from actor thread");
-        match projection {
-            Projection::Items(s) => assert!(s.active.is_some()),
-            _ => panic!("bootstrap must project an items snapshot"),
-        }
+        let projection =
+            std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+                .find(|p| matches!(p, Projection::Items(_)))
+                .expect("bootstrap must project an items snapshot");
+        let Projection::Items(s) = projection else {
+            unreachable!()
+        };
+        assert!(s.active.is_some());
     }
 }
