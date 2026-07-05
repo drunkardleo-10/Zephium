@@ -18,16 +18,16 @@ thread_local! {
 static MATERIAL: AtomicBool = AtomicBool::new(false);
 
 pub fn init(window: &WebviewWindow) {
-    MATERIAL.store(apply_material(window, true), Ordering::SeqCst);
+    MATERIAL.store(apply_material(window, true, false), Ordering::SeqCst);
     let _ = window.with_webview(|webview| {
         let controller = webview.controller();
         CONTROLLER.with(|slot| *slot.borrow_mut() = Some(controller));
     });
 }
 
-// Tauri applies the first effect the OS build supports. The tint keeps
-// acrylic deep instead of washed out and follows the app theme.
-pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
+// Mica for the app window, acrylic for transient surfaces; tinted acrylic
+// doubles as the Win10 fallback (tauri applies the first supported effect).
+pub fn apply_material(window: &WebviewWindow, dark: bool, transient: bool) -> bool {
     use tauri::utils::config::{Color, WindowEffectsConfig};
     use tauri::window::Effect;
     let tint = if dark {
@@ -35,8 +35,18 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     } else {
         Color(242, 242, 246, 200)
     };
+    let mica = if dark {
+        Effect::MicaDark
+    } else {
+        Effect::MicaLight
+    };
+    let effects = if transient {
+        vec![Effect::Acrylic]
+    } else {
+        vec![mica, Effect::Acrylic]
+    };
     let result = window.set_effects(WindowEffectsConfig {
-        effects: vec![Effect::Acrylic, Effect::Mica],
+        effects,
         state: None,
         radius: None,
         color: Some(tint),

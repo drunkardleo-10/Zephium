@@ -214,7 +214,7 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     #[cfg(target_os = "windows")]
     for label in ["main", "panel"] {
         if let Some(window) = app.get_webview_window(label) {
-            platform::imp::apply_material(&window, mode != "light");
+            platform::imp::apply_material(&window, mode != "light", label == "panel");
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -584,7 +584,7 @@ pub fn run() {
                 );
             }
             #[cfg(target_os = "windows")]
-            platform::imp::apply_material(&panel_window, true);
+            platform::imp::apply_material(&panel_window, true, true);
 
             let overlay = overlay::Overlay::new(panel_window.clone());
             let blur_overlay = overlay.clone();
