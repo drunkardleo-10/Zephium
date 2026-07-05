@@ -237,6 +237,8 @@ fn create_child(
     id: Option<usize>,
     param: Option<*const std::ffi::c_void>,
 ) -> Option<HWND> {
+    // NULL hInstance fails class lookup with ERROR_CANNOT_FIND_WND_CLASS.
+    let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
     unsafe {
         CreateWindowExW(
             exstyle,
@@ -249,10 +251,11 @@ fn create_child(
             0,
             Some(parent),
             id.map(|id| HMENU(id as *mut _)),
-            None,
+            Some(module.into()),
             param,
         )
     }
+    .map_err(|e| eprintln!("stage: child window creation failed: {e}"))
     .ok()
 }
 
