@@ -316,7 +316,6 @@ impl Shell {
         let Some(win) = self.windows.focused_mut() else {
             return Vec::new();
         };
-        win.splits = None;
         let space = win.space;
         let id = ItemId::generate();
         self.items.insert_tab(
@@ -345,11 +344,6 @@ impl Shell {
     fn activate(&mut self, id: ItemId) {
         if self.items.tab(id).is_none() {
             return;
-        }
-        if let Some(win) = self.windows.focused_mut() {
-            if win.splits.as_ref().is_some_and(|t| !t.contains(id)) {
-                win.splits = None;
-            }
         }
         let fx = self.focus_tab(id);
         self.commit(fx);
@@ -873,7 +867,7 @@ impl Shell {
 
     fn locate_divider(&self, x: f64, y: f64) -> Option<split::Divider> {
         let win = self.windows.focused()?;
-        let tree = win.splits.clone()?;
+        let tree = self.pane_tree()?;
         let region =
             layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
         let local = Rect::new(0.0, 0.0, region.width, region.height);
@@ -906,10 +900,14 @@ impl Shell {
             .any(|id| self.items.tab(*id).is_some_and(TabState::has_view))
     }
 
+    // The split group persists across tab switches (Arc model): members show
+    // the whole group, other tabs show alone, the group is a tab away.
     fn pane_tree(&self) -> Option<Pane> {
         let win = self.windows.focused()?;
         if let Some(tree) = win.splits.clone() {
-            return Some(tree);
+            if win.active.is_some_and(|a| tree.contains(a)) {
+                return Some(tree);
+            }
         }
         win.active.map(Pane::Leaf)
     }
@@ -1375,6 +1373,43 @@ mod tests {
         // closing one pane collapses the split onto the other
         shell.handle(Command::Close(first));
         assert_eq!(engine.last_layout(), vec![second.to_string()]);
+    }
+
+    #[test]
+    fn split_group_survives_tab_switches() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+        shell.handle(Command::Open);
+        let second = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: second,
+            input: "github.com".into(),
+        });
+        shell.handle(Command::SplitWith {
+            other: first,
+            axis: Axis::Row,
+        });
+        assert_eq!(engine.last_layout().len(), 2);
+
+        // a fresh tab shows alone without dissolving the group
+        shell.handle(Command::Open);
+        let third = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: third,
+            input: "wikipedia.org".into(),
+        });
+        assert_eq!(engine.last_layout(), vec![third.to_string()]);
+
+        // returning to a member brings the whole group back
+        shell.handle(Command::Activate(first));
+        let panes = engine.last_layout();
+        assert_eq!(panes.len(), 2);
+        assert!(panes.contains(&first.to_string()) && panes.contains(&second.to_string()));
     }
 
     #[test]
