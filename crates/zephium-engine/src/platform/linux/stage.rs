@@ -78,7 +78,10 @@ impl Stage {
     }
 
     pub fn insert_view(&self, id: ItemId, view: &wry::WebView) {
-        self.state.borrow_mut().views.insert(id, view.webview());
+        let widget = view.webview();
+        // wry seeds a size_request; a gtk request is a minimum, blocks shrinking
+        widget.set_size_request(-1, -1);
+        self.state.borrow_mut().views.insert(id, widget);
     }
 
     pub fn remove_view(&self, id: ItemId) {
@@ -140,9 +143,12 @@ fn sync(state: &Rc<RefCell<State>>) {
         let pane = panes.iter().find(|(pid, _)| pid == id).map(|(_, r)| r);
         let show = !s.hidden && pane.is_some() && s.visible.contains(id);
         if let Some(r) = pane {
-            s.fixed
-                .move_(view, (origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
-            view.set_size_request(r.width as i32, r.height as i32);
+            view.size_allocate(&gtk::Allocation::new(
+                (origin.0 + r.x) as i32,
+                (origin.1 + r.y) as i32,
+                r.width.max(1.0) as i32,
+                r.height.max(1.0) as i32,
+            ));
         }
         view.set_visible(show);
     }

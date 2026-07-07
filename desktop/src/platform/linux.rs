@@ -33,8 +33,9 @@ pub fn init(window: &WebviewWindow) {
         fixed.put(&chrome, 0, 0);
         win.add(&fixed);
         fixed.show_all();
+        // allocation, not size_request: a request is a gtk minimum
         fixed.connect_size_allocate(move |_, alloc| {
-            chrome.set_size_request(alloc.width(), alloc.height());
+            chrome.size_allocate(&gtk::Allocation::new(0, 0, alloc.width(), alloc.height()));
         });
         zephium_engine::install_container(fixed.clone());
     });
