@@ -1,5 +1,6 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
@@ -36,6 +37,7 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
         *cell.borrow_mut() = Some(EngineHost {
             parent: ParentHandle(parent),
             views: HashMap::new(),
+            spare: None,
             user_content: HashMap::new(),
             shortcuts: Vec::new(),
             stages: HashMap::new(),
@@ -71,11 +73,20 @@ impl HasWindowHandle for ParentHandle {
     }
 }
 
+// A prebuilt hidden webview: renderer spawn costs hundreds of ms on weak
+// machines, so the next navigation adopts this one and rebinds its id.
+struct Spare {
+    partition: Partition,
+    view: WebView,
+    id: Rc<Cell<ItemId>>,
+}
+
 pub(crate) struct EngineHost {
     // Views are parented via the gtk container on Linux, not the raw handle.
     #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     parent: ParentHandle,
     views: HashMap<ItemId, WebView>,
+    spare: Option<Spare>,
     user_content: HashMap<ContentScope, UserContent>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     shortcuts: Vec<Shortcut>,
@@ -97,19 +108,69 @@ impl EngineHost {
         if self.views.contains_key(&id) {
             return;
         }
+        if let Some(spare) = self.spare.take_if(|s| s.partition == partition) {
+            spare.id.set(id);
+            let _ = spare.view.load_url(url);
+            self.views.insert(id, spare.view);
+            return;
+        }
+        let cell = Rc::new(Cell::new(id));
+        if let Some(view) = self.build_view(cell, partition, url, bounds) {
+            self.views.insert(id, view);
+        }
+    }
+
+    // Rebuilt after adoption from a page-load-finished hook, when the spawn
+    // cost hides behind the page render.
+    pub(crate) fn ensure_spare(&mut self, partition: Partition) {
+        if matches!(partition, Partition::Ephemeral(_))
+            || self
+                .spare
+                .as_ref()
+                .is_some_and(|s| s.partition == partition)
+        {
+            return;
+        }
+        self.spare = None;
+        let cell = Rc::new(Cell::new(ItemId::generate()));
+        if let Some(view) = self.build_view(cell.clone(), partition, "about:blank", Rect::default())
+        {
+            self.spare = Some(Spare {
+                partition,
+                view,
+                id: cell,
+            });
+        }
+    }
+
+    fn build_view(
+        &mut self,
+        id: Rc<Cell<ItemId>>,
+        partition: Partition,
+        url: &str,
+        bounds: Rect,
+    ) -> Option<WebView> {
         let on_title = self.sink.clone();
         let on_load = self.sink.clone();
         let on_new_window = self.sink.clone();
+        let (title_id, load_id, new_window_id) = (id.clone(), id.clone(), id);
 
         let mut builder = WebViewBuilder::new()
             .with_bounds(to_wry(bounds))
+            .with_background_color((16, 16, 21, 255))
             .with_devtools(true)
             .with_navigation_handler(|target| navigation::is_allowed_str(&target))
             .with_document_title_changed_handler(move |title| {
-                on_title.emit(EngineEvent::TitleChanged { id, title });
+                on_title.emit(EngineEvent::TitleChanged {
+                    id: title_id.get(),
+                    title,
+                });
             })
             .with_new_window_req_handler(move |url, _features| {
-                on_new_window.emit(EngineEvent::NewWindowRequested { id, url });
+                on_new_window.emit(EngineEvent::NewWindowRequested {
+                    id: new_window_id.get(),
+                    url,
+                });
                 NewWindowResponse::Deny
             });
 
@@ -147,19 +208,23 @@ impl EngineHost {
         let probe = crate::platform::imp::NavProbe::new();
         let load_probe = probe.clone();
 
-        builder = builder.with_on_page_load_handler(move |event, url| match event {
-            PageLoadEvent::Started => {
-                on_load.emit(EngineEvent::LoadingChanged { id, loading: true });
-            }
-            PageLoadEvent::Finished => {
-                on_load.emit(EngineEvent::LoadingChanged { id, loading: false });
-                on_load.emit(EngineEvent::UrlChanged { id, url });
-                if let Some((can_go_back, can_go_forward)) = load_probe.query() {
-                    on_load.emit(EngineEvent::NavState {
-                        id,
-                        can_go_back,
-                        can_go_forward,
-                    });
+        builder = builder.with_on_page_load_handler(move |event, url| {
+            let id = load_id.get();
+            match event {
+                PageLoadEvent::Started => {
+                    on_load.emit(EngineEvent::LoadingChanged { id, loading: true });
+                }
+                PageLoadEvent::Finished => {
+                    on_load.emit(EngineEvent::LoadingChanged { id, loading: false });
+                    on_load.emit(EngineEvent::UrlChanged { id, url });
+                    if let Some((can_go_back, can_go_forward)) = load_probe.query() {
+                        on_load.emit(EngineEvent::NavState {
+                            id,
+                            can_go_back,
+                            can_go_forward,
+                        });
+                    }
+                    crate::host::with(|host| host.ensure_spare(partition));
                 }
             }
         });
@@ -171,7 +236,7 @@ impl EngineHost {
                 Some(container) => builder.build_gtk(&container),
                 None => {
                     eprintln!("engine: gtk container not installed");
-                    return;
+                    return None;
                 }
             }
         };
@@ -181,8 +246,8 @@ impl EngineHost {
         let view = match built {
             Ok(view) => view,
             Err(e) => {
-                eprintln!("engine: create_view({id}) failed: {e}");
-                return;
+                eprintln!("engine: build_view failed: {e}");
+                return None;
             }
         };
         crate::platform::imp::configure(&view, 12.0);
@@ -202,7 +267,7 @@ impl EngineHost {
         }
         let _ = view.set_visible(false);
         let _ = view.load_url(url);
-        self.views.insert(id, view);
+        Some(view)
     }
 
     fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
@@ -221,10 +286,13 @@ impl EngineHost {
 
     pub(crate) fn set_user_content(&mut self, scope: ContentScope, content: UserContent) {
         self.user_content.insert(scope, content);
+        // scripts and shortcuts are baked in at build; a stale spare lies
+        self.spare = None;
     }
 
     pub(crate) fn set_shortcuts(&mut self, shortcuts: Vec<Shortcut>) {
         self.shortcuts = shortcuts;
+        self.spare = None;
     }
 
     pub(crate) fn set_content_rules(&mut self, _profile: ProfileId, _compiled: String) {
