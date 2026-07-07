@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use gtk::prelude::*;
@@ -9,13 +8,10 @@ use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_engine::MainThreadDispatch;
 
-thread_local! {
-    static STATE: RefCell<Option<(gtk::Fixed, webkit2gtk::WebView)>> = const { RefCell::new(None) };
-}
-
 // The Fixed replaces tauri's vbox as the window's direct child: tauri's
 // resize handler resolves the window via webview.parent().parent() and
-// aborts on deeper nesting.
+// aborts on deeper nesting. The chrome tracks the window size; the sidebar
+// is a region of its DOM and content views overlay it.
 pub fn init(window: &WebviewWindow) {
     let _ = window.with_webview(move |webview| {
         let chrome = webview.inner();
@@ -37,8 +33,10 @@ pub fn init(window: &WebviewWindow) {
         fixed.put(&chrome, 0, 0);
         win.add(&fixed);
         fixed.show_all();
+        fixed.connect_size_allocate(move |_, alloc| {
+            chrome.set_size_request(alloc.width(), alloc.height());
+        });
         zephium_engine::install_container(fixed.clone());
-        STATE.with(|slot| *slot.borrow_mut() = Some((fixed, chrome)));
     });
 }
 
@@ -46,26 +44,14 @@ pub fn material() -> bool {
     false
 }
 
-pub fn make_chrome(_window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
-    Arc::new(ChromeAdapter { dispatch })
+pub fn make_chrome(_window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
+    Arc::new(ChromeAdapter)
 }
 
-struct ChromeAdapter {
-    dispatch: MainThreadDispatch,
-}
+struct ChromeAdapter;
 
 impl Chrome for ChromeAdapter {
-    fn position(&self, frame: ChromeFrame) {
-        (self.dispatch)(Box::new(move || {
-            STATE.with(|slot| {
-                if let Some((fixed, chrome)) = &*slot.borrow() {
-                    let r = frame.rect;
-                    fixed.move_(chrome, r.x as i32, r.y as i32);
-                    chrome.set_size_request(r.width as i32, r.height as i32);
-                }
-            });
-        }));
-    }
+    fn position(&self, _frame: ChromeFrame) {}
 }
 
 pub fn content_size(_window: &WebviewWindow) -> Option<Size> {

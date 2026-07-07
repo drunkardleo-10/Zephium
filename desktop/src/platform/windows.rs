@@ -1,19 +1,12 @@
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::WebviewWindow;
-use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
-use windows::Win32::Foundation::RECT;
 
 use zephium_app::SharedChrome;
 use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_engine::MainThreadDispatch;
-
-thread_local! {
-    static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
-}
 
 static MATERIAL: AtomicBool = AtomicBool::new(false);
 
@@ -40,35 +33,21 @@ pub fn redirect_stderr(dir: &std::path::Path) {
 }
 
 pub fn init(window: &WebviewWindow) {
-    MATERIAL.store(apply_material(window, true, false), Ordering::SeqCst);
-    let _ = window.with_webview(|webview| {
-        let controller = webview.controller();
-        CONTROLLER.with(|slot| *slot.borrow_mut() = Some(controller));
-    });
+    MATERIAL.store(apply_material(window, true), Ordering::SeqCst);
 }
 
-// Mica for the app window, acrylic for transient surfaces; tinted acrylic
-// doubles as the Win10 fallback (tauri applies the first supported effect).
-pub fn apply_material(window: &WebviewWindow, dark: bool, transient: bool) -> bool {
+// Acrylic with a deep tint; a high-alpha tint keeps the blur readable
+// instead of smeared. Applies from Win10 up.
+pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     use tauri::utils::config::{Color, WindowEffectsConfig};
     use tauri::window::Effect;
     let tint = if dark {
-        Color(22, 22, 27, 200)
+        Color(20, 20, 26, 235)
     } else {
-        Color(242, 242, 246, 200)
-    };
-    let mica = if dark {
-        Effect::MicaDark
-    } else {
-        Effect::MicaLight
-    };
-    let effects = if transient {
-        vec![Effect::Acrylic]
-    } else {
-        vec![mica, Effect::Acrylic]
+        Color(243, 243, 247, 235)
     };
     let result = window.set_effects(WindowEffectsConfig {
-        effects,
+        effects: vec![Effect::Acrylic],
         state: None,
         radius: None,
         color: Some(tint),
@@ -83,38 +62,17 @@ pub fn material() -> bool {
     MATERIAL.load(Ordering::SeqCst)
 }
 
-pub fn make_chrome(window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
-    Arc::new(ChromeAdapter {
-        window: window.clone(),
-        dispatch,
-    })
+pub fn make_chrome(_window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
+    Arc::new(ChromeAdapter)
 }
 
-struct ChromeAdapter {
-    window: WebviewWindow,
-    dispatch: MainThreadDispatch,
-}
+// The chrome webview stays full-window (wry keeps it sized to the client
+// area); the sidebar is a region of its DOM and content views overlay it,
+// so the chrome owns every background pixel and the divider strips.
+struct ChromeAdapter;
 
 impl Chrome for ChromeAdapter {
-    fn position(&self, frame: ChromeFrame) {
-        let scale = self.window.scale_factor().unwrap_or(1.0);
-        // Tauri re-applies full-window bounds on its own resize handler; the
-        // shell repositions right after every resize event, which wins.
-        (self.dispatch)(Box::new(move || {
-            CONTROLLER.with(|slot| {
-                if let Some(controller) = &*slot.borrow() {
-                    let r = frame.rect;
-                    let rect = RECT {
-                        left: (r.x * scale) as i32,
-                        top: (r.y * scale) as i32,
-                        right: ((r.x + r.width) * scale) as i32,
-                        bottom: ((r.y + r.height) * scale) as i32,
-                    };
-                    let _ = unsafe { controller.SetBounds(rect) };
-                }
-            });
-        }));
-    }
+    fn position(&self, _frame: ChromeFrame) {}
 }
 
 pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
