@@ -22,7 +22,15 @@ export async function init() {
     unItems();
     unTab();
   };
-  await commands.tabsBootstrap();
+  // a cold first run can outrace tauri's setup, the command rejects until then
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      await commands.tabsBootstrap();
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
 }
 
 export function dispose() {

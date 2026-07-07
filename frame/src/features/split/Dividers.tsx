@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { Index } from "solid-js";
 import * as layout from "../../state/layout";
 
 // Invisible drag strips over the pane gaps. The gaps show the chrome
@@ -31,16 +31,17 @@ export function Dividers() {
     e.currentTarget.releasePointerCapture(e.pointerId);
   };
   return (
-    <For each={layout.dividers()}>
+    // Index, not For: swapping the node mid-drag drops the pointer capture
+    <Index each={layout.dividers()}>
       {(d) => (
         <div
           class="fixed z-40"
           style={{
-            left: `${d.x}px`,
-            top: `${d.y}px`,
-            width: `${d.width}px`,
-            height: `${d.height}px`,
-            cursor: d.vertical ? "col-resize" : "row-resize",
+            left: `${d().x}px`,
+            top: `${d().y}px`,
+            width: `${d().width}px`,
+            height: `${d().height}px`,
+            cursor: d().vertical ? "col-resize" : "row-resize",
           }}
           onPointerDown={onDown}
           onPointerMove={onMove}
@@ -48,6 +49,6 @@ export function Dividers() {
           onPointerCancel={onUp}
         />
       )}
-    </For>
+    </Index>
   );
 }
