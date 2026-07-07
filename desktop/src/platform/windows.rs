@@ -42,9 +42,9 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     use tauri::utils::config::{Color, WindowEffectsConfig};
     use tauri::window::Effect;
     let tint = if dark {
-        Color(20, 20, 26, 235)
+        Color(16, 16, 21, 245)
     } else {
-        Color(243, 243, 247, 235)
+        Color(245, 245, 249, 242)
     };
     let result = window.set_effects(WindowEffectsConfig {
         effects: vec![Effect::Acrylic],
