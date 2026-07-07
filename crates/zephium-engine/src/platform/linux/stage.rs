@@ -29,7 +29,7 @@ struct State {
     tree: Option<Pane>,
     views: HashMap<ItemId, webkit2gtk::WebView>,
     visible: Vec<ItemId>,
-    indicator: Option<gtk::DrawingArea>,
+    indicator: Option<gtk::Window>,
 }
 
 #[derive(Clone)]
@@ -95,28 +95,34 @@ impl Stage {
         let mut s = self.state.borrow_mut();
         match zone {
             None => {
-                if let Some(area) = s.indicator.take() {
-                    s.fixed.remove(&area);
+                if let Some(popup) = s.indicator.take() {
+                    popup.close();
                 }
             }
             Some(zone) => {
-                let area = match &s.indicator {
-                    Some(area) => area.clone(),
+                let popup = match &s.indicator {
+                    Some(popup) => popup.clone(),
                     None => {
-                        let area = make_indicator(&s.fixed);
-                        s.indicator = Some(area.clone());
-                        area
+                        let popup = make_indicator(&s.fixed);
+                        s.indicator = Some(popup.clone());
+                        popup
                     }
                 };
-                let x = (s.origin.0 + zone.x) as i32;
-                let y = (s.origin.1 + zone.y) as i32;
-                s.fixed.move_(&area, x, y);
-                area.set_size_request(zone.width as i32, zone.height as i32);
-                area.show();
-                if let Some(win) = area.window() {
-                    win.raise();
-                }
-                area.queue_draw();
+                let (ox, oy) = s
+                    .fixed
+                    .window()
+                    .map(|w| {
+                        let (_, x, y) = w.origin();
+                        (x, y)
+                    })
+                    .unwrap_or((0, 0));
+                popup.move_(
+                    ox + (s.origin.0 + zone.x) as i32,
+                    oy + (s.origin.1 + zone.y) as i32,
+                );
+                popup.resize(zone.width.max(1.0) as i32, zone.height.max(1.0) as i32);
+                popup.show_all();
+                popup.queue_draw();
             }
         }
     }
@@ -142,13 +148,22 @@ fn sync(state: &Rc<RefCell<State>>) {
     }
 }
 
-fn make_indicator(fixed: &gtk::Fixed) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    area.set_app_paintable(true);
+// A popup toplevel, not a child widget: gtk child windows do not alpha-blend
+// over sibling native windows, the compositor blends toplevels.
+fn make_indicator(fixed: &gtk::Fixed) -> gtk::Window {
+    let popup = gtk::Window::new(gtk::WindowType::Popup);
+    popup.set_app_paintable(true);
+    popup.set_accept_focus(false);
     if let Some(screen) = WidgetExt::screen(fixed) {
-        area.set_visual(screen.rgba_visual().as_ref());
+        popup.set_visual(screen.rgba_visual().as_ref());
     }
-    area.connect_draw(|area, cr| {
+    if let Some(top) = fixed
+        .toplevel()
+        .and_then(|t| t.downcast::<gtk::Window>().ok())
+    {
+        popup.set_transient_for(Some(&top));
+    }
+    popup.connect_draw(|area, cr| {
         let w = area.allocated_width() as f64;
         let h = area.allocated_height() as f64;
         let _ = cr.save();
@@ -172,8 +187,7 @@ fn make_indicator(fixed: &gtk::Fixed) -> gtk::DrawingArea {
         let _ = cr.stroke();
         Propagation::Proceed
     });
-    fixed.put(&area, 0, 0);
-    area
+    popup
 }
 
 fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, radius: f64) {
