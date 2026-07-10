@@ -1,17 +1,13 @@
-import { Index } from "solid-js";
+import { Index, onCleanup, onMount } from "solid-js";
 import * as layout from "../../state/layout";
 
-// Invisible drag strips over the pane gaps. The gaps show the chrome
-// background, so the chrome owns those pixels; ratio math stays in Rust.
+// Drag strips over the pane gaps. Moves are window-level: the chrome holds
+// native mouse capture while a button is down, so the window sees every
+// event no matter what happens to the strip node or pointer capture.
 export function Dividers() {
   let frame = 0;
   let active = false;
-  const onDown = (e: PointerEvent & { currentTarget: HTMLElement }) => {
-    e.preventDefault();
-    active = true;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    layout.grab(e.clientX, e.clientY);
-  };
+
   const onMove = (e: PointerEvent) => {
     if (!active || frame) return;
     const { clientX: x, clientY: y } = e;
@@ -20,7 +16,7 @@ export function Dividers() {
       layout.drag(x, y);
     });
   };
-  const onUp = (e: PointerEvent & { currentTarget: HTMLElement }) => {
+  const onUp = () => {
     if (!active) return;
     active = false;
     if (frame) {
@@ -28,10 +24,27 @@ export function Dividers() {
       frame = 0;
     }
     layout.release();
-    e.currentTarget.releasePointerCapture(e.pointerId);
+    document.body.style.cursor = "";
   };
+  const onDown = (e: PointerEvent, vertical: boolean) => {
+    e.preventDefault();
+    active = true;
+    layout.grab(e.clientX, e.clientY);
+    document.body.style.cursor = vertical ? "col-resize" : "row-resize";
+  };
+
+  onMount(() => {
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    onCleanup(() => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    });
+  });
+
   return (
-    // Index, not For: swapping the node mid-drag drops the pointer capture
     <Index each={layout.dividers()}>
       {(d) => (
         <div
@@ -43,10 +56,7 @@ export function Dividers() {
             height: `${d().height}px`,
             cursor: d().vertical ? "col-resize" : "row-resize",
           }}
-          onPointerDown={onDown}
-          onPointerMove={onMove}
-          onPointerUp={onUp}
-          onPointerCancel={onUp}
+          onPointerDown={(e) => onDown(e, d().vertical)}
         />
       )}
     </Index>
