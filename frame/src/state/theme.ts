@@ -13,7 +13,12 @@ function apply() {
 
 export async function init() {
   const info = await commands.uiInfo();
-  document.documentElement.setAttribute("data-material", info.material ? "native" : "none");
+  const kind = !info.material
+    ? "none"
+    : navigator.userAgent.includes("Mac")
+      ? "vibrancy"
+      : "acrylic";
+  document.documentElement.setAttribute("data-material", kind);
   const stored = await commands.settingGet("appearance");
   if (stored === "light" || stored === "dark" || stored === "system") {
     appearance = stored;

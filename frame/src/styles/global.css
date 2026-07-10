@@ -59,6 +59,11 @@ body {
   background: var(--color-bg);
 }
 
+/* dwm ignores the acrylic tint on win11 22h2+; the chrome paints it */
+:root[data-material="acrylic"] body {
+  background: color-mix(in srgb, var(--color-bg) 88%, transparent);
+}
+
 ::selection {
   background: color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
