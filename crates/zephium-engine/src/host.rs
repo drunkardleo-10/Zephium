@@ -46,11 +46,16 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
     });
 }
 
+// try_borrow: webview creation pumps the message loop on Windows and a
+// nested event must never re-enter the host mid-borrow.
 pub(crate) fn with<F: FnOnce(&mut EngineHost)>(f: F) {
-    HOST.with(|cell| {
-        if let Some(host) = cell.borrow_mut().as_mut() {
-            f(host);
+    HOST.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut slot) => {
+            if let Some(host) = slot.as_mut() {
+                f(host);
+            }
         }
+        Err(_) => eprintln!("engine: reentrant host access dropped"),
     });
 }
 
@@ -224,7 +229,6 @@ impl EngineHost {
                             can_go_forward,
                         });
                     }
-                    crate::host::with(|host| host.ensure_spare(partition));
                 }
             }
         });

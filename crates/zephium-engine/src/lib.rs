@@ -54,6 +54,10 @@ impl Engine for WebviewEngine {
         self.run(move || host::with(|h| h.navigate(id, &url)));
     }
 
+    fn warm_spare(&self, partition: Partition) {
+        self.run(move || host::with(|h| h.ensure_spare(partition)));
+    }
+
     fn reload(&self, id: ItemId) {
         self.run(move || host::with(|h| h.reload(id)));
     }

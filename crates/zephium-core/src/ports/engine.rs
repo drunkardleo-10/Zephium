@@ -85,6 +85,9 @@ pub trait Engine {
     fn print(&self, id: ItemId);
     fn set_user_content(&self, scope: ContentScope, content: UserContent);
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>);
+    /// Prebuild a hidden webview for `partition` so the next open adopts it
+    /// instead of paying the renderer spawn. Safe moment: after a page load.
+    fn warm_spare(&self, _partition: Partition) {}
     /// Compiled rule payload; format is engine-specific (WebKit JSON,
     /// WebView2 filter set).
     fn set_content_rules(&self, profile: ProfileId, compiled: String);

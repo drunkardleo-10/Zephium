@@ -470,6 +470,9 @@ impl Shell {
             EngineEvent::LoadingChanged { id, loading } => {
                 self.items.set_loading(id, loading);
                 self.project_tab(id);
+                if !loading {
+                    self.engine.warm_spare(self.partition_of(id));
+                }
             }
             EngineEvent::UrlChanged { id, url } => {
                 self.items.set_committed_url_str(id, &url);
