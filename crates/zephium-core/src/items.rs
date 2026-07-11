@@ -140,6 +140,20 @@ impl Items {
         Vec::new()
     }
 
+    /// Drops the tab's webview but keeps the item; activation recreates it.
+    pub fn hibernate(&mut self, id: ItemId) -> Vec<Effect> {
+        let Some(tab) = self.tab_mut(id) else {
+            return Vec::new();
+        };
+        if !tab.view {
+            return Vec::new();
+        }
+        tab.view = false;
+        tab.loading = false;
+        tab.lifecycle = Lifecycle::Hibernated;
+        vec![Effect::Close { id }]
+    }
+
     pub fn set_lifecycle(&mut self, id: ItemId, lifecycle: Lifecycle) {
         if let Some(tab) = self.tab_mut(id) {
             tab.lifecycle = lifecycle;

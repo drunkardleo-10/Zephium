@@ -124,6 +124,7 @@ pub struct Shell {
     icon_queue: std::collections::HashMap<(ProfileId, String), Vec<String>>,
     icon_epoch: u32,
     divider: Option<split::Divider>,
+    recent: Vec<ItemId>,
     self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
@@ -151,6 +152,7 @@ impl Shell {
             icon_queue: std::collections::HashMap::new(),
             icon_epoch: 0,
             divider: None,
+            recent: Vec::new(),
             self_tx: None,
             engine,
             store,
@@ -338,6 +340,8 @@ impl Shell {
             self.items.set_lifecycle(prev, Lifecycle::Inactive);
         }
         self.items.set_lifecycle(id, Lifecycle::Active);
+        self.recent.retain(|r| *r != id);
+        self.recent.push(id);
         self.items.ensure_view(id)
     }
 
@@ -815,9 +819,41 @@ impl Shell {
 
     fn commit(&mut self, effects: Vec<Effect>) {
         self.apply(effects);
+        self.evict_views();
         self.persist();
         self.relayout();
         self.project_items();
+    }
+
+    // Every webview is a renderer process; background tabs beyond the warm
+    // cap hibernate (view dropped, item kept, activation recreates it).
+    fn evict_views(&mut self) {
+        const MAX_WARM_VIEWS: usize = 5;
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
+        let mut keep: std::collections::HashSet<ItemId> = self
+            .pane_tree()
+            .map(|t| t.tabs().into_iter().collect())
+            .unwrap_or_default();
+        keep.extend(win.active);
+        if let Some(tree) = &win.splits {
+            keep.extend(tree.tabs());
+        }
+        self.recent.retain(|id| self.items.tab(*id).is_some());
+        let mut warm = 0;
+        let mut fx = Vec::new();
+        for id in self.recent.iter().rev().copied().collect::<Vec<_>>() {
+            if keep.contains(&id) || !self.items.tab(id).is_some_and(TabState::has_view) {
+                continue;
+            }
+            if warm < MAX_WARM_VIEWS {
+                warm += 1;
+            } else {
+                fx.extend(self.items.hibernate(id));
+            }
+        }
+        self.apply(fx);
     }
 
     fn apply(&self, effects: Vec<Effect>) {
@@ -1376,6 +1412,43 @@ mod tests {
         // closing one pane collapses the split onto the other
         shell.handle(Command::Close(first));
         assert_eq!(engine.last_layout(), vec![second.to_string()]);
+    }
+
+    #[test]
+    fn background_views_beyond_cap_hibernate_and_revive() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let mut ids = vec![active_id(&screen)];
+        shell.handle(Command::Navigate {
+            id: ids[0],
+            input: "site0.com".into(),
+        });
+        for n in 1..8 {
+            shell.handle(Command::Open);
+            let id = active_id(&screen);
+            shell.handle(Command::Navigate {
+                id,
+                input: format!("site{n}.com"),
+            });
+            ids.push(id);
+        }
+        // 8 tabs, cap is active + 5 warm: the two oldest lose their views
+        assert!(!shell.items.tab(ids[0]).unwrap().has_view());
+        assert!(!shell.items.tab(ids[1]).unwrap().has_view());
+        assert!(shell.items.tab(ids[2]).unwrap().has_view());
+        assert!(shell.items.tab(ids[7]).unwrap().has_view());
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("close {}", ids[0])));
+
+        // activation revives a hibernated tab with its url
+        shell.handle(Command::Activate(ids[0]));
+        assert!(shell.items.tab(ids[0]).unwrap().has_view());
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("create {} https://site0.com/ [default]", ids[0])));
     }
 
     #[test]
