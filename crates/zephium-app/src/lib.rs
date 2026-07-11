@@ -593,6 +593,7 @@ impl Shell {
         };
         self.items.set_zoom(active, zoom);
         self.engine.zoom(active, zoom);
+        self.persist();
     }
 
     fn search(&self, query: &str) {
@@ -816,14 +817,12 @@ impl Shell {
     }
 
     /// window.open / target=_blank lands as a new Today tab next to its
-    /// source, routed through the same navigation policy.
+    /// source, routed through the same navigation policy. The split group
+    /// survives: the new tab shows alone, the group stays a tab away.
     fn open_linked_tab(&mut self, source: ItemId, url: &str) {
         let Some(space) = self.space_of_item(source) else {
             return;
         };
-        if let Some(win) = self.windows.focused_mut() {
-            win.splits = None;
-        }
         let id = ItemId::generate();
         self.items.insert_tab(
             id,
@@ -921,7 +920,12 @@ impl Shell {
             match effect {
                 Effect::CreateView { id, url } => {
                     self.engine
-                        .create_view(id, self.partition_of(id), &url, bounds)
+                        .create_view(id, self.partition_of(id), &url, bounds);
+                    // restored or revived views keep their zoom
+                    let zoom = self.items.tab(id).map(|t| t.zoom).unwrap_or(1.0);
+                    if zoom != 1.0 {
+                        self.engine.zoom(id, zoom);
+                    }
                 }
                 Effect::Navigate { id, url } => self.engine.navigate(id, &url),
                 Effect::Close { id } => self.engine.close(id),
@@ -1516,6 +1520,39 @@ mod tests {
             .calls()
             .iter()
             .any(|c| c == &format!("create {} https://site0.com/ [default]", ids[0])));
+    }
+
+    #[test]
+    fn linked_tab_shows_alone_and_split_group_survives() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+        shell.handle(Command::Open);
+        let second = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: second,
+            input: "github.com".into(),
+        });
+        shell.handle(Command::SplitWith {
+            other: first,
+            axis: Axis::Row,
+        });
+        assert_eq!(engine.last_layout().len(), 2);
+
+        // page JS opens a link: the popup shows alone
+        shell.handle(Command::Engine(EngineEvent::NewWindowRequested {
+            id: second,
+            url: "https://wikipedia.org/".into(),
+        }));
+        assert_eq!(engine.last_layout().len(), 1);
+
+        // returning to a member restores the whole group
+        shell.handle(Command::Activate(first));
+        assert_eq!(engine.last_layout().len(), 2);
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub struct PersistedItem {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PersistedKind {
     Folder { name: String },
-    Tab { url: String, title: String },
+    Tab { url: String, title: String, zoom: f64 },
 }
 
 pub fn snapshot(
@@ -120,6 +120,7 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
                 Some(url) => PersistedKind::Tab {
                     url: url.to_string(),
                     title: tab.title.clone(),
+                    zoom: tab.zoom,
                 },
             },
         };
@@ -179,10 +180,11 @@ pub fn restore(state: SessionState) -> Restored {
         }
         let kind = match i.kind {
             PersistedKind::Folder { name } => ItemKind::Folder { name },
-            PersistedKind::Tab { url, title } => {
+            PersistedKind::Tab { url, title, zoom } => {
                 let mut tab = TabState::new();
                 tab.url = Url::parse(&url).ok();
                 tab.title = title;
+                tab.zoom = if zoom.is_finite() { zoom.clamp(0.3, 3.0) } else { 1.0 };
                 ItemKind::Tab(tab)
             }
         };
@@ -310,6 +312,7 @@ mod tests {
                 kind: PersistedKind::Tab {
                     url: "https://example.com/".into(),
                     title: "E".into(),
+                    zoom: 1.0,
                 },
             }],
             active_space: Some(SpaceId::from(2)),

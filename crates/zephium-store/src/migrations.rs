@@ -119,6 +119,12 @@ pub const PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 3,
+        up: |tx| {
+            tx.execute_batch("ALTER TABLE items ADD COLUMN zoom REAL NOT NULL DEFAULT 1;")
+        },
+    },
 ];
 
 #[cfg(test)]

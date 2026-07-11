@@ -190,7 +190,14 @@ fn actor(mut hub: Hub, rx: Receiver<Cmd>) {
                 profile,
                 url,
                 title,
-            }) => hub.record_visit(profile, &url, &title),
+            }) => {
+                // A first-run profile's registry row may still sit in the
+                // debounce window; the visit must not race past it.
+                if !hub.knows(profile) {
+                    flush(&mut hub, &mut pending);
+                }
+                hub.record_visit(profile, &url, &title);
+            }
             Some(Cmd::GetSetting(key, reply)) => {
                 let _ = reply.send(hub.app_setting(&key));
             }
@@ -245,6 +252,7 @@ mod tests {
             kind: PersistedKind::Tab {
                 url: url.into(),
                 title: "T".into(),
+                zoom: 1.0,
             },
         }
     }
@@ -286,6 +294,7 @@ mod tests {
                     kind: PersistedKind::Tab {
                         url: "https://docs.rs/".into(),
                         title: "Docs".into(),
+                        zoom: 1.5,
                     },
                 },
                 tab(10, space, "https://example.com/"),
@@ -338,6 +347,17 @@ mod tests {
             .path()
             .join(format!("profile-{}.sqlite", ProfileId::from(1)))
             .exists());
+    }
+
+    #[test]
+    fn first_visit_lands_even_inside_the_save_debounce() {
+        let store = SqliteStore::in_memory().unwrap();
+        let profile = ProfileId::from(1);
+        // save is still pending (debounced) when the visit arrives
+        store.save_session(sample());
+        store.record_visit(profile, "https://news.ycombinator.com/".into(), "HN".into());
+        let hits = store.search_history(profile, "news", 10);
+        assert_eq!(hits.len(), 1, "visit must not race the registry flush");
     }
 
     #[test]

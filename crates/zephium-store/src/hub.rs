@@ -157,8 +157,8 @@ impl Hub {
                 Root(Placement),
             }
             let mut ins = tx.prepare_cached(
-                "INSERT INTO items(id, parent_id, space_id, section, position, kind, name, url, title)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO items(id, parent_id, space_id, section, position, kind, name, url, title, zoom)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             let mut counters: HashMap<Container, i64> = HashMap::new();
             for item in s
@@ -177,10 +177,12 @@ impl Hub {
                         (Some(space.to_string()), section_to_str(section))
                     }
                 };
-                let (kind, name, url, title) = match &item.kind {
-                    PersistedKind::Folder { name } => ("folder", Some(name.as_str()), None, None),
-                    PersistedKind::Tab { url, title } => {
-                        ("tab", None, Some(url.as_str()), Some(title.as_str()))
+                let (kind, name, url, title, zoom) = match &item.kind {
+                    PersistedKind::Folder { name } => {
+                        ("folder", Some(name.as_str()), None, None, 1.0)
+                    }
+                    PersistedKind::Tab { url, title, zoom } => {
+                        ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom)
                     }
                 };
                 ins.execute(params![
@@ -192,7 +194,8 @@ impl Hub {
                     kind,
                     name,
                     url,
-                    title
+                    title,
+                    zoom
                 ])?;
                 *pos += 1;
             }
@@ -294,7 +297,7 @@ impl Hub {
         }
         let rows: Vec<Row> = {
             let mut stmt = conn.prepare_cached(
-                "SELECT id, parent_id, space_id, section, position, kind, name, url, title
+                "SELECT id, parent_id, space_id, section, position, kind, name, url, title, zoom
                  FROM items",
             )?;
             let mapped = stmt.query_map([], |r| {
@@ -308,12 +311,13 @@ impl Hub {
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
+                    r.get::<_, f64>(9)?,
                 ))
             })?;
             mapped
                 .filter_map(Result::ok)
                 .filter_map(
-                    |(id, parent, space, section, position, kind, name, url, title)| {
+                    |(id, parent, space, section, position, kind, name, url, title, zoom)| {
                         let id = ItemId::parse(&id)?;
                         let parent = match parent {
                             Some(p) => Some(ItemId::parse(&p)?),
@@ -336,6 +340,7 @@ impl Hub {
                             ("tab", _, Some(url)) => PersistedKind::Tab {
                                 url,
                                 title: title.unwrap_or_default(),
+                                zoom,
                             },
                             _ => return None,
                         };
@@ -416,6 +421,10 @@ impl Hub {
         out.spaces.extend(spaces);
         out.items.extend(items);
         Ok(())
+    }
+
+    pub fn knows(&self, profile: ProfileId) -> bool {
+        self.registry.contains(&profile)
     }
 
     pub fn record_visit(&mut self, profile: ProfileId, url: &str, title: &str) {

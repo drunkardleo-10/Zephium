@@ -157,6 +157,7 @@ fn decode_item(item: StoredItem) -> Option<PersistedItem> {
         (None, Some(url)) => PersistedKind::Tab {
             url,
             title: item.title.unwrap_or_default(),
+            zoom: 1.0,
         },
         _ => return None,
     };
@@ -190,6 +191,7 @@ fn decode_v1(v1: V1Session) -> SessionState {
             kind: PersistedKind::Tab {
                 url: t.url,
                 title: t.title,
+                zoom: 1.0,
             },
         })
         .collect();
