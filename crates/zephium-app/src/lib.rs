@@ -78,6 +78,9 @@ pub enum Command {
         origin: String,
         fetched: Option<(Option<String>, Vec<u8>)>,
     },
+    /// Periodic maintenance heartbeat; idle tabs suspend or hibernate even
+    /// when no user command arrives.
+    Tick,
     Engine(EngineEvent),
 }
 
@@ -110,6 +113,16 @@ pub fn spawn(
             }
         })
         .expect("spawn shell thread");
+    let tick_tx = tx.clone();
+    thread::Builder::new()
+        .name("zephium-tick".into())
+        .spawn(move || loop {
+            thread::sleep(std::time::Duration::from_secs(60));
+            if tick_tx.send(Command::Tick).is_err() {
+                break;
+            }
+        })
+        .expect("spawn tick thread");
     Handle { tx }
 }
 
@@ -127,6 +140,8 @@ pub struct Shell {
     recent: Vec<ItemId>,
     last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
     idle_min: std::time::Duration,
+    dormant_min: std::time::Duration,
+    dormant_sent: Vec<ItemId>,
     self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
@@ -157,6 +172,8 @@ impl Shell {
             recent: Vec::new(),
             last_focus: std::collections::HashMap::new(),
             idle_min: std::time::Duration::from_secs(15 * 60),
+            dormant_min: std::time::Duration::from_secs(5 * 60),
+            dormant_sent: Vec::new(),
             self_tx: None,
             engine,
             store,
@@ -232,6 +249,11 @@ impl Shell {
                 origin,
                 fetched,
             } => self.favicon_fetched(profile, origin, fetched),
+            Command::Tick => {
+                if self.maintain_views() {
+                    self.project_items();
+                }
+            }
             Command::Engine(event) => self.on_engine_event(event),
         }
     }
@@ -285,6 +307,7 @@ impl Shell {
         if let Some(tree) = splits {
             for leaf in tree.tabs() {
                 fx.extend(self.items.ensure_view(leaf));
+                self.touch(leaf);
             }
             if let Some(win) = self.windows.get_mut(window) {
                 win.splits = Some(tree);
@@ -346,7 +369,7 @@ impl Shell {
         self.items.set_lifecycle(id, Lifecycle::Active);
         self.recent.retain(|r| *r != id);
         self.recent.push(id);
-        self.last_focus.insert(id, std::time::Instant::now());
+        self.touch(id);
         self.items.ensure_view(id)
     }
 
@@ -391,6 +414,7 @@ impl Shell {
         }
         let fx = self.items.ensure_view(other);
         self.apply(fx);
+        self.touch(other);
         let Some(mut tree) = self.pane_tree() else {
             return;
         };
@@ -418,6 +442,7 @@ impl Shell {
         }
         let fx = self.items.ensure_view(dropped);
         self.apply(fx);
+        self.touch(dropped);
         let Some(mut tree) = self.pane_tree() else {
             return;
         };
@@ -820,26 +845,29 @@ impl Shell {
 
     fn commit(&mut self, effects: Vec<Effect>) {
         self.apply(effects);
-        self.evict_views();
+        self.maintain_views();
         self.persist();
         self.relayout();
         self.project_items();
     }
 
-    // Sleeping-tabs model: hidden views suspend cheaply engine-side; the
-    // shell only discards (view dropped, item kept, activation recreates)
-    // when a tab is BOTH beyond the warm cap and idle. Candidates come from
-    // the items themselves so split-created views are always counted;
-    // never-focused ones rank oldest.
-    fn evict_views(&mut self) {
+    // Sleeping-tabs model, Safari-shaped: three tiers. Hidden views carry a
+    // low-memory hint (engine-side, on the visibility transition); hidden
+    // AND idle views suspend (engine primitive where one exists); beyond the
+    // warm cap idle views are discarded (view dropped, item kept, activation
+    // recreates). Candidates come from the items themselves so split-created
+    // views are always counted; never-focused ones rank oldest. Returns
+    // whether any tab was discarded.
+    fn maintain_views(&mut self) -> bool {
         const WARM_CAP: usize = 12;
         let Some(win) = self.windows.focused() else {
-            return;
+            return false;
         };
-        let mut keep: std::collections::HashSet<ItemId> = self
+        let shown: std::collections::HashSet<ItemId> = self
             .pane_tree()
             .map(|t| t.tabs().into_iter().collect())
             .unwrap_or_default();
+        let mut keep = shown.clone();
         keep.extend(win.active);
         if let Some(tree) = &win.splits {
             keep.extend(tree.tabs());
@@ -862,15 +890,32 @@ impl Shell {
         candidates.sort_by_key(|id| std::cmp::Reverse(rank.get(id).copied().unwrap_or(0)));
         let mut fx = Vec::new();
         for (i, id) in candidates.into_iter().enumerate() {
-            let idle = self
-                .last_focus
-                .get(&id)
-                .is_none_or(|t| t.elapsed() >= self.idle_min);
-            if i >= WARM_CAP && idle {
+            if i >= WARM_CAP && self.idle_for(id, self.idle_min) {
                 fx.extend(self.items.hibernate(id));
             }
         }
+        let mut dormant: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| !shown.contains(id) && self.idle_for(*id, self.dormant_min))
+            .collect();
+        dormant.sort();
+        if dormant != self.dormant_sent {
+            self.dormant_sent = dormant.clone();
+            self.engine.set_dormant(dormant);
+        }
+        let changed = !fx.is_empty();
         self.apply(fx);
+        changed
+    }
+
+    fn idle_for(&self, id: ItemId, min: std::time::Duration) -> bool {
+        self.last_focus.get(&id).is_none_or(|t| t.elapsed() >= min)
+    }
+
+    fn touch(&mut self, id: ItemId) {
+        self.last_focus.insert(id, std::time::Instant::now());
     }
 
     fn apply(&self, effects: Vec<Effect>) {
@@ -1178,6 +1223,11 @@ mod tests {
         fn discover_favicon(&self, id: ItemId) {
             self.log(format!("discover {id}"));
         }
+        fn set_dormant(&self, ids: Vec<ItemId>) {
+            let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+            ids.sort();
+            self.log(format!("dormant {}", ids.join(",")));
+        }
         fn print(&self, _id: ItemId) {}
         fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
         fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
@@ -1472,6 +1522,41 @@ mod tests {
             .calls()
             .iter()
             .any(|c| c == &format!("create {} https://site0.com/ [default]", ids[0])));
+    }
+
+    #[test]
+    fn hidden_idle_views_go_dormant_and_wake_on_show() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "example.com".into(),
+        });
+        shell.handle(Command::Open);
+        let second = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: second,
+            input: "github.com".into(),
+        });
+
+        // nothing is idle yet: no dormancy requested
+        assert!(!engine.calls().iter().any(|c| c.starts_with("dormant")));
+
+        // once idle, the hidden view suspends; the shown one does not
+        shell.dormant_min = std::time::Duration::ZERO;
+        shell.handle(Command::Tick);
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("dormant {first}")));
+
+        // refocusing moves dormancy to the other tab
+        shell.handle(Command::Activate(first));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|c| c == &format!("dormant {second}")));
     }
 
     #[test]

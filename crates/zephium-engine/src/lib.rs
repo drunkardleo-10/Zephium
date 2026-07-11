@@ -58,6 +58,10 @@ impl Engine for WebviewEngine {
         self.run(move || host::with(|h| h.ensure_spare(partition)));
     }
 
+    fn set_dormant(&self, ids: Vec<ItemId>) {
+        self.run(move || host::with(|h| h.set_dormant(ids)));
+    }
+
     fn reload(&self, id: ItemId) {
         self.run(move || host::with(|h| h.reload(id)));
     }

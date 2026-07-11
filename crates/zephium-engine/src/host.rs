@@ -42,6 +42,8 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
             shortcuts: Vec::new(),
             stages: HashMap::new(),
             #[cfg(target_os = "windows")]
+            hidden: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
             dormant: std::collections::HashSet::new(),
             sink: Sink(sink),
         });
@@ -101,6 +103,10 @@ pub(crate) struct EngineHost {
     stages: HashMap<WindowId, Retained<ContentStage>>,
     #[cfg(not(target_os = "macos"))]
     stages: HashMap<WindowId, crate::platform::imp::Stage>,
+    // Off-screen views carrying the low-memory hint, and the subset the
+    // shell's idle policy asked WebView2 to suspend.
+    #[cfg(target_os = "windows")]
+    hidden: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     dormant: std::collections::HashSet<ItemId>,
     sink: Sink,
@@ -410,10 +416,36 @@ impl EngineHost {
     pub(crate) fn close(&mut self, id: ItemId) {
         self.views.remove(&id);
         #[cfg(target_os = "windows")]
-        self.dormant.remove(&id);
+        {
+            self.hidden.remove(&id);
+            self.dormant.remove(&id);
+        }
         for stage in self.stages.values() {
             stage.remove_view(id);
         }
+    }
+
+    /// Suspends the given hidden views (shell idle policy). Only Windows has
+    /// an explicit primitive; WebKit suspends hidden/unmapped processes on
+    /// its own. Resume is implicit: WebView2 wakes a view on SetIsVisible.
+    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>) {
+        #[cfg(target_os = "windows")]
+        {
+            let next: std::collections::HashSet<ItemId> = ids
+                .into_iter()
+                .filter(|id| self.hidden.contains(id))
+                .collect();
+            for id in &next {
+                if !self.dormant.contains(id) {
+                    if let Some(view) = self.views.get(id) {
+                        crate::platform::imp::try_suspend(view);
+                    }
+                }
+            }
+            self.dormant = next;
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = ids;
     }
 
     #[cfg(target_os = "macos")]
@@ -462,11 +494,14 @@ impl EngineHost {
         let Some(stage) = self.ensure_stage(window) else {
             return;
         };
+        let tabs = match region {
+            Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
+            None => Vec::new(),
+        };
         match region {
             None => stage.set_hidden(true),
             Some(r) => {
                 stage.set_frame(r);
-                let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
                 for id in &tabs {
                     if !stage.has_view(*id) {
                         if let Some(view) = self.views.get(id) {
@@ -479,26 +514,26 @@ impl EngineHost {
                 // unhide only after the new tree is laid out: unhiding first
                 // flashes the previous panes for a frame
                 stage.set_hidden(false);
-                // Sleeping tabs: on the hide transition the view gets the
-                // low-memory hint and a suspend request (WebView2 refuses
-                // while media plays); becoming visible resumes it natively.
-                #[cfg(target_os = "windows")]
-                {
-                    use wry::{MemoryUsageLevel, WebViewExtWindows};
-                    for (id, view) in &self.views {
-                        let hidden = !tabs.contains(id);
-                        if hidden == self.dormant.contains(id) {
-                            continue;
-                        }
-                        if hidden {
-                            self.dormant.insert(*id);
-                            let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
-                            crate::platform::imp::try_suspend(view);
-                        } else {
-                            self.dormant.remove(id);
-                            let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
-                        }
-                    }
+            }
+        }
+        // Off-screen views drop to the low-memory hint (reversible, nothing
+        // freezes); actual suspension waits for the shell's idle verdict.
+        // Becoming visible resumes a suspended view natively.
+        #[cfg(target_os = "windows")]
+        {
+            use wry::{MemoryUsageLevel, WebViewExtWindows};
+            for (id, view) in &self.views {
+                let off = !tabs.contains(id);
+                if off == self.hidden.contains(id) {
+                    continue;
+                }
+                if off {
+                    self.hidden.insert(*id);
+                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
+                } else {
+                    self.hidden.remove(id);
+                    self.dormant.remove(id);
+                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
                 }
             }
         }

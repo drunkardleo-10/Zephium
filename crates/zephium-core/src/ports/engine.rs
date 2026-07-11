@@ -88,6 +88,10 @@ pub trait Engine {
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}
+    /// Hidden views the shell's idle policy wants suspended. The engine
+    /// suspends where it has a primitive (WebView2) and resumes implicitly
+    /// when a view becomes visible again.
+    fn set_dormant(&self, _ids: Vec<ItemId>) {}
     /// Compiled rule payload; format is engine-specific (WebKit JSON,
     /// WebView2 filter set).
     fn set_content_rules(&self, profile: ProfileId, compiled: String);
