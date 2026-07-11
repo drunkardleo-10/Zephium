@@ -11,7 +11,7 @@ pub fn webkit(view: &wry::WebView) -> objc2::rc::Retained<objc2_web_kit::WKWebVi
 }
 
 pub fn configure(webview: &wry::WebView, radius: f64) {
-    use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
+    use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSColor, NSView};
 
     let wk = webkit(webview);
     unsafe { wk.setInspectable(true) };
@@ -22,6 +22,11 @@ pub fn configure(webview: &wry::WebView, radius: f64) {
     if let Some(layer) = view.layer() {
         layer.setCornerRadius(radius);
         layer.setMasksToBounds(true);
+        // a hairline keeps the edge readable when page and backdrop are both
+        // dark; without it the rounded corners visually vanish
+        let border = NSColor::colorWithWhite_alpha(1.0, 0.09);
+        layer.setBorderColor(Some(&border.CGColor()));
+        layer.setBorderWidth(1.0);
     }
 }
 
