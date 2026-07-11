@@ -209,7 +209,10 @@ fn corner_region(w: i32, h: i32) -> cairo::Region {
             cr.arc(cx, cy, rf, 0.0, 2.0 * std::f64::consts::PI);
             let _ = cr.fill();
         }
-        let sliver = gtk::gdk::cairo_region_create_from_surface(&surface);
+        surface.flush();
+        let Some(sliver) = gtk::gdk::prelude::GdkSurfaceExt::create_region(&*surface) else {
+            continue;
+        };
         sliver.translate(x, y);
         let _ = region.union(&sliver);
     }
