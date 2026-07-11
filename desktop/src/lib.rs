@@ -16,13 +16,12 @@ use tauri_specta::{collect_commands, collect_events, Event};
 use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
 use zephium_core::ids::ItemId;
-use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
+use zephium_core::ports::engine::Engine as _;
 use zephium_core::ports::store::Store as _;
 use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
 use zephium_ipc::Projection;
 
-const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}";
 use zephium_store::SqliteStore;
 
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
@@ -497,6 +496,13 @@ fn build_menu(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // fluent overlay scrollbars; process-wide so the shared browser process
+    // uses the same flags for the chrome and every content view
+    #[cfg(target_os = "windows")]
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--enable-features=msOverlayScrollbarWinStyle,msOverlayScrollbarWinStyleAnimation",
+    );
     let specta = specta_builder();
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -527,13 +533,6 @@ pub fn run() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
-            engine.set_user_content(
-                ContentScope::Global,
-                UserContent {
-                    scripts: Vec::new(),
-                    styles: vec![SCROLLBAR_CSS.to_string()],
-                },
-            );
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
