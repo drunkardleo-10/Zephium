@@ -56,22 +56,19 @@ impl Stage {
         }
     }
 
-    pub fn set_hidden(&self, hidden: bool) {
-        self.state.borrow_mut().hidden = hidden;
-        sync(&self.state);
-    }
-
-    pub fn set_frame(&self, rect: Rect) {
+    /// One native pass for frame, tree and visibility; `None` region hides
+    /// the whole stage.
+    pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) {
         {
             let mut s = self.state.borrow_mut();
-            s.origin = (rect.x, rect.y);
-            s.size = (rect.width, rect.height);
+            s.hidden = region.is_none();
+            if let Some(r) = region {
+                s.origin = (r.x, r.y);
+                s.size = (r.width, r.height);
+            }
+            s.tree = tree;
+            s.visible = visible.to_vec();
         }
-        sync(&self.state);
-    }
-
-    pub fn set_tree(&self, tree: Option<Pane>) {
-        self.state.borrow_mut().tree = tree;
         sync(&self.state);
     }
 
@@ -86,11 +83,6 @@ impl Stage {
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the widget; dropping the webview removes it from the Fixed.
         self.state.borrow_mut().views.remove(&id);
-    }
-
-    pub fn set_visible(&self, visible: &[ItemId]) {
-        self.state.borrow_mut().visible = visible.to_vec();
-        sync(&self.state);
     }
 
     pub fn set_drop_indicator(&self, zone: Option<Rect>) {

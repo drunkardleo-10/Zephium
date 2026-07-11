@@ -39,6 +39,9 @@ const INDICATOR_STROKE: f64 = 0.42;
 struct HostView {
     container: HWND,
     controller: ICoreWebView2Controller,
+    // last size the round-rect region was built for; SetWindowRgn forces a
+    // repaint, so it only reapplies when the size actually changed
+    rounded: std::cell::Cell<(i32, i32)>,
 }
 
 struct State {
@@ -76,22 +79,19 @@ impl Stage {
         Self { state }
     }
 
-    pub fn set_hidden(&self, hidden: bool) {
-        self.state.borrow_mut().hidden = hidden;
-        sync(self.state);
-    }
-
-    pub fn set_frame(&self, rect: Rect) {
+    /// One native pass for frame, tree and visibility; `None` region hides
+    /// the whole stage.
+    pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) {
         {
             let mut s = self.state.borrow_mut();
-            s.origin = (rect.x, rect.y);
-            s.size = (rect.width, rect.height);
+            s.hidden = region.is_none();
+            if let Some(r) = region {
+                s.origin = (r.x, r.y);
+                s.size = (r.width, r.height);
+            }
+            s.tree = tree;
+            s.visible = visible.to_vec();
         }
-        sync(self.state);
-    }
-
-    pub fn set_tree(&self, tree: Option<Pane>) {
-        self.state.borrow_mut().tree = tree;
         sync(self.state);
     }
 
@@ -110,6 +110,7 @@ impl Stage {
             HostView {
                 container,
                 controller,
+                rounded: std::cell::Cell::new((0, 0)),
             },
         );
     }
@@ -117,11 +118,6 @@ impl Stage {
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the container window; dropping the webview destroys it.
         self.state.borrow_mut().views.remove(&id);
-    }
-
-    pub fn set_visible(&self, visible: &[ItemId]) {
-        self.state.borrow_mut().visible = visible.to_vec();
-        sync(self.state);
     }
 
     pub fn set_drop_indicator(&self, zone: Option<Rect>) {
@@ -257,17 +253,26 @@ fn sync(state: &'static RefCell<State>) {
         controller: ICoreWebView2Controller,
         rect: Option<(i32, i32, i32, i32)>,
         show: bool,
+        round: bool,
     }
     let hosts: Vec<Place> = s
         .views
         .iter()
         .map(|(id, view)| {
             let pane = panes.iter().find(|(pid, _)| pid == id).map(|(_, r)| r);
+            let rect = pane.map(&to_phys);
+            let show = !s.hidden && pane.is_some() && s.visible.contains(id);
+            let mut round = false;
+            if let (true, Some((_, _, w, h))) = (show, rect) {
+                round = view.rounded.get() != (w, h);
+                view.rounded.set((w, h));
+            }
             Place {
                 container: view.container,
                 controller: view.controller.clone(),
-                rect: pane.map(&to_phys),
-                show: !s.hidden && pane.is_some() && s.visible.contains(id),
+                rect,
+                show,
+                round,
             }
         })
         .collect();
@@ -294,8 +299,10 @@ fn sync(state: &'static RefCell<State>) {
                     h,
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 );
-                let region = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius, radius);
-                let _ = SetWindowRgn(host.container, Some(region), true);
+                if host.round {
+                    let region = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius, radius);
+                    let _ = SetWindowRgn(host.container, Some(region), true);
+                }
                 let _ = host.controller.SetBounds(RECT {
                     left: 0,
                     top: 0,

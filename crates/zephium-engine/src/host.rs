@@ -498,24 +498,16 @@ impl EngineHost {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
-        match region {
-            None => stage.set_hidden(true),
-            Some(r) => {
-                stage.set_frame(r);
-                for id in &tabs {
-                    if !stage.has_view(*id) {
-                        if let Some(view) = self.views.get(id) {
-                            stage.insert_view(*id, view);
-                        }
-                    }
+        for id in &tabs {
+            if !stage.has_view(*id) {
+                if let Some(view) = self.views.get(id) {
+                    stage.insert_view(*id, view);
                 }
-                stage.set_tree(tree);
-                stage.set_visible(&tabs);
-                // unhide only after the new tree is laid out: unhiding first
-                // flashes the previous panes for a frame
-                stage.set_hidden(false);
             }
         }
+        // one native pass: frame, tree and visibility land atomically, so a
+        // switch can never flash the previous pane
+        stage.apply(region, tree, &tabs);
         // Off-screen views drop to the low-memory hint (reversible, nothing
         // freezes); actual suspension waits for the shell's idle verdict.
         // Becoming visible resumes a suspended view natively.
