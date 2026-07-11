@@ -1,7 +1,9 @@
 //! Gtk mirror of the macOS ContentStage. Content webviews live in the
 //! composition root's gtk::Fixed with the chrome webview beneath them, so
 //! pane gaps show the chrome background. Divider drags are DOM strips in the
-//! chrome; the drop indicator is a DrawingArea painted with cairo.
+//! chrome; the drop indicator is a popup toplevel painted with cairo.
+//! Corner rounding is deferred to the UI phase (needs the theme color
+//! channel); gaps stay square on Linux until then.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,7 +17,6 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::split::{self, Pane};
 
-const RADIUS: i32 = 12;
 const INDICATOR_RADIUS: f64 = 10.0;
 const INDICATOR_BORDER: f64 = 1.5;
 const INDICATOR_FILL: f64 = 0.12;
@@ -29,7 +30,6 @@ struct State {
     hidden: bool,
     tree: Option<Pane>,
     views: HashMap<ItemId, webkit2gtk::WebView>,
-    rings: HashMap<ItemId, gtk::DrawingArea>,
     visible: Vec<ItemId>,
     indicator: Option<gtk::Window>,
 }
@@ -50,7 +50,6 @@ impl Stage {
                 hidden: true,
                 tree: None,
                 views: HashMap::new(),
-                rings: HashMap::new(),
                 visible: Vec::new(),
                 indicator: None,
             })),
@@ -86,11 +85,7 @@ impl Stage {
 
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the widget; dropping the webview removes it from the Fixed.
-        let mut s = self.state.borrow_mut();
-        s.views.remove(&id);
-        if let Some(ring) = s.rings.remove(&id) {
-            s.fixed.remove(&ring);
-        }
+        self.state.borrow_mut().views.remove(&id);
     }
 
     pub fn set_visible(&self, visible: &[ItemId]) {
@@ -136,87 +131,34 @@ impl Stage {
 }
 
 fn sync(state: &Rc<RefCell<State>>) {
-    let mut s = state.borrow_mut();
+    let s = state.borrow();
     let local = Rect::new(0.0, 0.0, s.size.0, s.size.1);
     let panes = match &s.tree {
         Some(tree) => split::layout(tree, local, s.gap),
         None => Vec::new(),
     };
     let origin = s.origin;
-    let ids: Vec<ItemId> = s.views.keys().copied().collect();
-    for id in ids {
-        let view = s.views[&id].clone();
-        let pane = panes.iter().find(|(pid, _)| *pid == id).map(|(_, r)| *r);
-        let show = !s.hidden && pane.is_some() && s.visible.contains(&id);
-        view.set_visible(show);
-        let ring = s.rings.get(&id).cloned();
+    for (id, view) in &s.views {
+        let pane = panes.iter().find(|(pid, _)| pid == id).map(|(_, r)| *r);
+        let show = !s.hidden && pane.is_some() && s.visible.contains(id);
         if let Some(r) = pane {
-            let (x, y) = ((origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
-            let (w, h) = (r.width.max(1.0) as i32, r.height.max(1.0) as i32);
-            s.fixed.move_(&view, x, y);
-            view.set_size_request(w, h);
-            let ring = ring.unwrap_or_else(|| {
-                let ring = make_ring(&s.fixed);
-                s.rings.insert(id, ring.clone());
-                ring
-            });
-            s.fixed.move_(&ring, x, y);
-            ring.set_size_request(w, h);
-            ring.shape_combine_region(Some(&corner_region(w, h)));
-            ring.set_visible(show);
-        } else if let Some(ring) = ring {
-            ring.set_visible(false);
+            s.fixed
+                .move_(view, (origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
+            view.set_size_request(r.width.max(1.0) as i32, r.height.max(1.0) as i32);
+        }
+        if show == view.is_visible() {
+            continue;
+        }
+        if show {
+            // wry's own visibility path is show_all; a remapped webkitgtk
+            // view keeps a stale compositing surface until forced to relayout
+            view.show_all();
+            view.queue_resize();
+            view.queue_draw();
+        } else {
+            view.hide();
         }
     }
-}
-
-// Content views cannot be clipped in gtk3; an opaque background-colored
-// widget shaped to the four corner slivers fakes the rounding. Alpha over a
-// native sibling never composites, a shaped window needs none.
-fn make_ring(fixed: &gtk::Fixed) -> gtk::DrawingArea {
-    let ring = gtk::DrawingArea::new();
-    ring.connect_draw(|_, cr| {
-        cr.set_source_rgb(27.0 / 255.0, 27.0 / 255.0, 31.0 / 255.0);
-        let _ = cr.paint();
-        Propagation::Proceed
-    });
-    ring.input_shape_combine_region(Some(&cairo::Region::create()));
-    fixed.put(&ring, 0, 0);
-    ring
-}
-
-fn corner_region(w: i32, h: i32) -> cairo::Region {
-    let region = cairo::Region::create();
-    let r = RADIUS.min(w / 2).min(h / 2).max(1);
-    let rf = r as f64;
-    // quarter-disc centers in each corner square's local coordinates
-    let corners = [
-        (0, 0, rf, rf),
-        (w - r, 0, 0.0, rf),
-        (0, h - r, rf, 0.0),
-        (w - r, h - r, 0.0, 0.0),
-    ];
-    for (x, y, cx, cy) in corners {
-        let Ok(surface) = cairo::ImageSurface::create(cairo::Format::A1, r, r) else {
-            continue;
-        };
-        {
-            let Ok(cr) = cairo::Context::new(&surface) else {
-                continue;
-            };
-            let _ = cr.paint();
-            cr.set_operator(cairo::Operator::Clear);
-            cr.arc(cx, cy, rf, 0.0, 2.0 * std::f64::consts::PI);
-            let _ = cr.fill();
-        }
-        surface.flush();
-        let Some(sliver) = gtk::gdk::prelude::GdkSurfaceExt::create_region(&*surface) else {
-            continue;
-        };
-        sliver.translate(x, y);
-        let _ = region.union(&sliver);
-    }
-    region
 }
 
 // A popup toplevel, not a child widget: gtk child windows do not alpha-blend

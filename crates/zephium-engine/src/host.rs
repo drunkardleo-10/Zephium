@@ -277,6 +277,11 @@ impl EngineHost {
         {
             crate::platform::imp::add_user_script(&view, script);
         }
+        // Not on Linux: webkitgtk never builds a compositing surface for a
+        // view that loads while unmapped, and the widget stays blank after it
+        // is shown (why the Linux spare is disabled). The stage hides
+        // non-visible views at the first layout instead.
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
         let _ = view.set_visible(false);
         let _ = view.load_url(url);
         Some(view)
