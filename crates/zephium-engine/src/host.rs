@@ -418,7 +418,6 @@ impl EngineHost {
         match region {
             None => stage.setHidden(true),
             Some(r) => {
-                stage.setHidden(false);
                 stage_set_frame(&stage, &self.parent, r);
                 let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
                 for id in &tabs {
@@ -430,6 +429,7 @@ impl EngineHost {
                 }
                 stage.set_tree(tree);
                 stage.set_visible(&tabs);
+                stage.setHidden(false);
             }
         }
     }
@@ -454,7 +454,6 @@ impl EngineHost {
         match region {
             None => stage.set_hidden(true),
             Some(r) => {
-                stage.set_hidden(false);
                 stage.set_frame(r);
                 let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
                 for id in &tabs {
@@ -466,6 +465,9 @@ impl EngineHost {
                 }
                 stage.set_tree(tree);
                 stage.set_visible(&tabs);
+                // unhide only after the new tree is laid out: unhiding first
+                // flashes the previous panes for a frame
+                stage.set_hidden(false);
                 #[cfg(target_os = "windows")]
                 {
                     use wry::{MemoryUsageLevel, WebViewExtWindows};
