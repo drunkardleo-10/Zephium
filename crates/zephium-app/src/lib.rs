@@ -125,6 +125,8 @@ pub struct Shell {
     icon_epoch: u32,
     divider: Option<split::Divider>,
     recent: Vec<ItemId>,
+    last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
+    idle_min: std::time::Duration,
     self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
@@ -153,6 +155,8 @@ impl Shell {
             icon_epoch: 0,
             divider: None,
             recent: Vec::new(),
+            last_focus: std::collections::HashMap::new(),
+            idle_min: std::time::Duration::from_secs(15 * 60),
             self_tx: None,
             engine,
             store,
@@ -183,7 +187,7 @@ impl Shell {
                 if let Some(win) = self.windows.focused_mut() {
                     win.splits = None;
                 }
-                self.relayout();
+                self.commit(Vec::new());
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {
@@ -342,6 +346,7 @@ impl Shell {
         self.items.set_lifecycle(id, Lifecycle::Active);
         self.recent.retain(|r| *r != id);
         self.recent.push(id);
+        self.last_focus.insert(id, std::time::Instant::now());
         self.items.ensure_view(id)
     }
 
@@ -394,9 +399,7 @@ impl Shell {
                 win.splits = Some(tree);
             }
         }
-        self.persist();
-        self.relayout();
-        self.project_items();
+        self.commit(Vec::new());
     }
 
     fn drop_tab(&mut self, dropped: ItemId, client_x: f64, client_y: f64) {
@@ -423,9 +426,7 @@ impl Shell {
                 win.splits = Some(tree);
             }
         }
-        self.persist();
-        self.relayout();
-        self.project_items();
+        self.commit(Vec::new());
     }
 
     fn resolve_drop(&self, client_x: f64, client_y: f64) -> Option<split::Drop> {
@@ -825,10 +826,13 @@ impl Shell {
         self.project_items();
     }
 
-    // Every webview is a renderer process; background tabs beyond the warm
-    // cap hibernate (view dropped, item kept, activation recreates it).
+    // Sleeping-tabs model: hidden views suspend cheaply engine-side; the
+    // shell only discards (view dropped, item kept, activation recreates)
+    // when a tab is BOTH beyond the warm cap and idle. Candidates come from
+    // the items themselves so split-created views are always counted;
+    // never-focused ones rank oldest.
     fn evict_views(&mut self) {
-        const MAX_WARM_VIEWS: usize = 5;
+        const WARM_CAP: usize = 12;
         let Some(win) = self.windows.focused() else {
             return;
         };
@@ -841,15 +845,28 @@ impl Shell {
             keep.extend(tree.tabs());
         }
         self.recent.retain(|id| self.items.tab(*id).is_some());
-        let mut warm = 0;
+        self.last_focus
+            .retain(|id, _| self.items.tab(*id).is_some());
+        let rank: std::collections::HashMap<ItemId, usize> = self
+            .recent
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i + 1))
+            .collect();
+        let mut candidates: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| !keep.contains(id))
+            .collect();
+        candidates.sort_by_key(|id| std::cmp::Reverse(rank.get(id).copied().unwrap_or(0)));
         let mut fx = Vec::new();
-        for id in self.recent.iter().rev().copied().collect::<Vec<_>>() {
-            if keep.contains(&id) || !self.items.tab(id).is_some_and(TabState::has_view) {
-                continue;
-            }
-            if warm < MAX_WARM_VIEWS {
-                warm += 1;
-            } else {
+        for (i, id) in candidates.into_iter().enumerate() {
+            let idle = self
+                .last_focus
+                .get(&id)
+                .is_none_or(|t| t.elapsed() >= self.idle_min);
+            if i >= WARM_CAP && idle {
                 fx.extend(self.items.hibernate(id));
             }
         }
@@ -1415,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn background_views_beyond_cap_hibernate_and_revive() {
+    fn background_views_hibernate_only_when_idle_and_beyond_cap() {
         let (mut shell, engine, screen) = setup();
         shell.handle(Command::Bootstrap);
         let mut ids = vec![active_id(&screen)];
@@ -1423,7 +1440,7 @@ mod tests {
             id: ids[0],
             input: "site0.com".into(),
         });
-        for n in 1..8 {
+        for n in 1..15 {
             shell.handle(Command::Open);
             let id = active_id(&screen);
             shell.handle(Command::Navigate {
@@ -1432,11 +1449,17 @@ mod tests {
             });
             ids.push(id);
         }
-        // 8 tabs, cap is active + 5 warm: the two oldest lose their views
+        // 15 tabs but none idle: everything stays warm
+        assert!(ids
+            .iter()
+            .all(|id| shell.items.tab(*id).unwrap().has_view()));
+
+        // once idle, only tabs beyond the warm cap hibernate, oldest first
+        shell.idle_min = std::time::Duration::ZERO;
+        shell.handle(Command::Open);
         assert!(!shell.items.tab(ids[0]).unwrap().has_view());
         assert!(!shell.items.tab(ids[1]).unwrap().has_view());
-        assert!(shell.items.tab(ids[2]).unwrap().has_view());
-        assert!(shell.items.tab(ids[7]).unwrap().has_view());
+        assert!(shell.items.tab(ids[13]).unwrap().has_view());
         assert!(engine
             .calls()
             .iter()
@@ -1449,6 +1472,42 @@ mod tests {
             .calls()
             .iter()
             .any(|c| c == &format!("create {} https://site0.com/ [default]", ids[0])));
+    }
+
+    #[test]
+    fn split_created_views_are_counted_after_group_dissolves() {
+        let (mut shell, _engine, screen) = setup();
+        shell.idle_min = std::time::Duration::ZERO;
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: first,
+            input: "left.com".into(),
+        });
+        shell.handle(Command::Open);
+        let second = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id: second,
+            input: "right.com".into(),
+        });
+        shell.handle(Command::Activate(first));
+        // splitting creates second's view without focusing it
+        shell.handle(Command::SplitWith {
+            other: second,
+            axis: Axis::Row,
+        });
+        shell.handle(Command::Unsplit);
+        // fill the warm cap with focused tabs; the never-focused split view
+        // ranks oldest and hibernates first
+        for n in 0..13 {
+            shell.handle(Command::Open);
+            let id = active_id(&screen);
+            shell.handle(Command::Navigate {
+                id,
+                input: format!("warm{n}.com"),
+            });
+        }
+        assert!(!shell.items.tab(second).unwrap().has_view());
     }
 
     #[test]

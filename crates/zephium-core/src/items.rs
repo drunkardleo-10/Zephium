@@ -140,6 +140,14 @@ impl Items {
         Vec::new()
     }
 
+    pub fn view_ids(&self) -> Vec<ItemId> {
+        self.items
+            .iter()
+            .filter(|(_, item)| item.tab().is_some_and(TabState::has_view))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Drops the tab's webview but keeps the item; activation recreates it.
     pub fn hibernate(&mut self, id: ItemId) -> Vec<Effect> {
         let Some(tab) = self.tab_mut(id) else {
