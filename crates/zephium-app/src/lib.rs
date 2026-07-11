@@ -270,12 +270,6 @@ impl Shell {
         let mut active_space = None;
         let mut splits = None;
         let loaded = self.store.load_session();
-        eprintln!(
-            "session: {}",
-            loaded
-                .as_ref()
-                .map_or("none".to_string(), |s| format!("{} items", s.items.len()))
-        );
         if let Some(state) = loaded.filter(|s| !s.items.is_empty()) {
             let restored = session::restore(state);
             self.profiles = restored.profiles;

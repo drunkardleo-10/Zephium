@@ -415,10 +415,7 @@ fn zicon_response(
     use tauri::http::Response;
     use zephium_core::ids::ProfileId;
 
-    let respond = |status: u16,
-                   cache: &str,
-                   mime: &str,
-                   body: std::borrow::Cow<'static, [u8]>| {
+    let respond = |status: u16, cache: &str, mime: &str, body: std::borrow::Cow<'static, [u8]>| {
         Response::builder()
             .status(status)
             .header("Cache-Control", cache)

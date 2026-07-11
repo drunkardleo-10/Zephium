@@ -46,8 +46,14 @@ pub struct PersistedItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PersistedKind {
-    Folder { name: String },
-    Tab { url: String, title: String, zoom: f64 },
+    Folder {
+        name: String,
+    },
+    Tab {
+        url: String,
+        title: String,
+        zoom: f64,
+    },
 }
 
 pub fn snapshot(
@@ -184,7 +190,11 @@ pub fn restore(state: SessionState) -> Restored {
                 let mut tab = TabState::new();
                 tab.url = Url::parse(&url).ok();
                 tab.title = title;
-                tab.zoom = if zoom.is_finite() { zoom.clamp(0.3, 3.0) } else { 1.0 };
+                tab.zoom = if zoom.is_finite() {
+                    zoom.clamp(0.3, 3.0)
+                } else {
+                    1.0
+                };
                 ItemKind::Tab(tab)
             }
         };
