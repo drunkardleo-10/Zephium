@@ -274,7 +274,15 @@ fn sync(state: &'static RefCell<State>) {
     let radius = ((RADIUS * scale * 2.0).round() as i32).max(1);
     drop(s);
 
-    for host in hosts {
+    // hide first: showing the new pane before the old one is gone flashes
+    // the previous tab's last frame
+    for host in hosts.iter().filter(|h| !h.show) {
+        unsafe {
+            let _ = ShowWindow(host.container, SW_HIDE);
+            let _ = host.controller.SetIsVisible(false);
+        }
+    }
+    for host in hosts.iter().filter(|h| h.show) {
         unsafe {
             if let Some((x, y, w, h)) = host.rect {
                 let _ = SetWindowPos(
@@ -296,8 +304,8 @@ fn sync(state: &'static RefCell<State>) {
                 });
                 let _ = host.controller.NotifyParentWindowPositionChanged();
             }
-            let _ = ShowWindow(host.container, if host.show { SW_SHOWNA } else { SW_HIDE });
-            let _ = host.controller.SetIsVisible(host.show);
+            let _ = ShowWindow(host.container, SW_SHOWNA);
+            let _ = host.controller.SetIsVisible(true);
         }
     }
 }

@@ -128,6 +128,10 @@ impl EngineHost {
     // Rebuilt after adoption from a page-load-finished hook, when the spawn
     // cost hides behind the page render.
     pub(crate) fn ensure_spare(&mut self, partition: Partition) {
+        // webkitgtk suspends unmapped views; an adopted spare can stay black
+        if cfg!(all(unix, not(target_os = "macos"))) {
+            return;
+        }
         if matches!(partition, Partition::Ephemeral(_))
             || self
                 .spare
@@ -462,6 +466,18 @@ impl EngineHost {
                 }
                 stage.set_tree(tree);
                 stage.set_visible(&tabs);
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::{MemoryUsageLevel, WebViewExtWindows};
+                    for (id, view) in &self.views {
+                        let level = if tabs.contains(id) {
+                            MemoryUsageLevel::Normal
+                        } else {
+                            MemoryUsageLevel::Low
+                        };
+                        let _ = view.set_memory_usage_level(level);
+                    }
+                }
             }
         }
     }
