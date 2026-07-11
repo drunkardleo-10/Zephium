@@ -83,6 +83,11 @@ pub fn material() -> bool {
     MATERIAL.load(Ordering::SeqCst)
 }
 
+// Full-window chrome: client coords already are window coords.
+pub fn to_window(x: f64, y: f64) -> (f64, f64) {
+    (x, y)
+}
+
 pub fn make_chrome(_window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter)
 }

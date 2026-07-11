@@ -342,24 +342,28 @@ fn sidebar_set_width(shell: State<'_, Handle>, width: f64) {
 #[tauri::command]
 #[specta::specta]
 fn tab_drag_over(shell: State<'_, Handle>, x: f64, y: f64) {
+    let (x, y) = platform::imp::to_window(x, y);
     shell.dispatch(Command::DragOver { x, y });
 }
 
 #[tauri::command]
 #[specta::specta]
 fn tab_drop(shell: State<'_, Handle>, id: String, x: f64, y: f64) {
+    let (x, y) = platform::imp::to_window(x, y);
     dispatch_with_id(&shell, &id, |id| Command::DropTab { id, x, y });
 }
 
 #[tauri::command]
 #[specta::specta]
 fn divider_grab(shell: State<'_, Handle>, x: f64, y: f64) {
+    let (x, y) = platform::imp::to_window(x, y);
     shell.dispatch(Command::DividerGrab { x, y });
 }
 
 #[tauri::command]
 #[specta::specta]
 fn divider_drag(shell: State<'_, Handle>, x: f64, y: f64) {
+    let (x, y) = platform::imp::to_window(x, y);
     shell.dispatch(Command::DividerDrag { x, y });
 }
 

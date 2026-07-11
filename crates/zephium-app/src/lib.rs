@@ -454,20 +454,14 @@ impl Shell {
         self.commit(Vec::new());
     }
 
-    fn resolve_drop(&self, client_x: f64, client_y: f64) -> Option<split::Drop> {
+    /// `x`/`y` are window coords (the desktop layer normalizes per platform).
+    fn resolve_drop(&self, x: f64, y: f64) -> Option<split::Drop> {
         let win = self.windows.focused()?;
         let tree = self.pane_tree()?;
         let region =
             layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
-        let m = win.metrics;
         let local = Rect::new(0.0, 0.0, region.width, region.height);
-        split::drop_target(
-            &tree,
-            local,
-            m.gap,
-            client_x - m.sidebar_width - m.gap,
-            client_y,
-        )
+        split::drop_target(&tree, local, win.metrics.gap, x - region.x, y - region.y)
     }
 
     fn on_engine_event(&mut self, event: EngineEvent) {

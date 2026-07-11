@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use objc2::runtime::AnyObject;
@@ -11,6 +11,18 @@ use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_engine::MainThreadDispatch;
 
 static CHROME_WK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static CHROME_X: AtomicU64 = AtomicU64::new(0);
+static CHROME_Y: AtomicU64 = AtomicU64::new(0);
+
+/// Pointer coords arrive chrome-relative; the shell expects window coords.
+/// Here the chrome webview sits at the sidebar rect (Windows/Linux keep it
+/// full-window, where this is the identity).
+pub fn to_window(x: f64, y: f64) -> (f64, f64) {
+    (
+        x + f64::from_bits(CHROME_X.load(Ordering::Relaxed)),
+        y + f64::from_bits(CHROME_Y.load(Ordering::Relaxed)),
+    )
+}
 
 pub fn init(window: &WebviewWindow) {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
@@ -37,6 +49,8 @@ struct ChromeAdapter {
 
 impl Chrome for ChromeAdapter {
     fn position(&self, frame: ChromeFrame) {
+        CHROME_X.store(frame.rect.x.to_bits(), Ordering::Relaxed);
+        CHROME_Y.store(frame.rect.y.to_bits(), Ordering::Relaxed);
         let addr = CHROME_WK.load(Ordering::SeqCst) as usize;
         if addr == 0 {
             return;
