@@ -66,6 +66,25 @@ pub fn install_accelerators(
     let _ = unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) };
 }
 
+// Edge's sleeping-tabs primitive: a suspended view frees most of its
+// renderer working set and wakes on SetIsVisible(true).
+pub fn try_suspend(view: &wry::WebView) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+    use webview2_com::TrySuspendCompletedHandler;
+    use windows_core::Interface;
+    let controller = view.controller();
+    let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+        return;
+    };
+    let Ok(v3) = core.cast::<ICoreWebView2_3>() else {
+        return;
+    };
+    let handler = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
+    if let Err(e) = unsafe { v3.TrySuspend(&handler) } {
+        eprintln!("engine: suspend failed: {e}");
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct NavProbe(Rc<OnceCell<ICoreWebView2>>);
 

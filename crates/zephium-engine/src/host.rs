@@ -41,6 +41,8 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
             user_content: HashMap::new(),
             shortcuts: Vec::new(),
             stages: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            dormant: std::collections::HashSet::new(),
             sink: Sink(sink),
         });
     });
@@ -99,6 +101,8 @@ pub(crate) struct EngineHost {
     stages: HashMap<WindowId, Retained<ContentStage>>,
     #[cfg(not(target_os = "macos"))]
     stages: HashMap<WindowId, crate::platform::imp::Stage>,
+    #[cfg(target_os = "windows")]
+    dormant: std::collections::HashSet<ItemId>,
     sink: Sink,
 }
 
@@ -400,6 +404,8 @@ impl EngineHost {
 
     pub(crate) fn close(&mut self, id: ItemId) {
         self.views.remove(&id);
+        #[cfg(target_os = "windows")]
+        self.dormant.remove(&id);
         for stage in self.stages.values() {
             stage.remove_view(id);
         }
@@ -468,16 +474,25 @@ impl EngineHost {
                 // unhide only after the new tree is laid out: unhiding first
                 // flashes the previous panes for a frame
                 stage.set_hidden(false);
+                // Sleeping tabs: on the hide transition the view gets the
+                // low-memory hint and a suspend request (WebView2 refuses
+                // while media plays); becoming visible resumes it natively.
                 #[cfg(target_os = "windows")]
                 {
                     use wry::{MemoryUsageLevel, WebViewExtWindows};
                     for (id, view) in &self.views {
-                        let level = if tabs.contains(id) {
-                            MemoryUsageLevel::Normal
+                        let hidden = !tabs.contains(id);
+                        if hidden == self.dormant.contains(id) {
+                            continue;
+                        }
+                        if hidden {
+                            self.dormant.insert(*id);
+                            let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
+                            crate::platform::imp::try_suspend(view);
                         } else {
-                            MemoryUsageLevel::Low
-                        };
-                        let _ = view.set_memory_usage_level(level);
+                            self.dormant.remove(id);
+                            let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
+                        }
                     }
                 }
             }
