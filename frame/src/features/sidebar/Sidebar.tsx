@@ -3,10 +3,13 @@ import {
   ArrowLeft01Icon,
   ArrowRight01Icon,
   Cancel01Icon,
+  Maximize01Icon,
+  MinusSignIcon,
   MoreHorizontalIcon,
   RefreshIcon,
   TableColumnsSplitIcon,
 } from "@hugeicons/core-free-icons";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
 import { commands } from "../../ipc/bindings";
 import * as tabs from "../../state/tabs";
@@ -144,14 +147,32 @@ export function Sidebar() {
   };
 
   return (
-    <aside style={{ width: `${width()}px` }} class="relative flex shrink-0 select-none flex-col">
+    <aside
+      data-tauri-drag-region
+      style={{ width: `${width()}px` }}
+      class="relative flex shrink-0 select-none flex-col"
+    >
       <div
         onPointerDown={onResizeDown}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeUp}
         class="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/20"
       />
-      <div data-tauri-drag-region class="h-8 shrink-0" />
+      <div data-tauri-drag-region class="flex h-8 shrink-0 items-center justify-end">
+        <Show when={!IS_MAC}>
+          <div class="flex gap-0.5 pr-1.5">
+            <WindowButton label="Minimize" onClick={() => void getCurrentWindow().minimize()}>
+              <Icon icon={MinusSignIcon} size={13} />
+            </WindowButton>
+            <WindowButton label="Maximize" onClick={() => void getCurrentWindow().toggleMaximize()}>
+              <Icon icon={Maximize01Icon} size={11} />
+            </WindowButton>
+            <WindowButton label="Close" onClick={() => void getCurrentWindow().close()}>
+              <Icon icon={Cancel01Icon} size={13} />
+            </WindowButton>
+          </div>
+        </Show>
+      </div>
 
       <div class="flex items-center gap-0.5 px-2.5">
         <NavButton label="Back" onClick={tabs.backActive}>
@@ -246,6 +267,20 @@ export function Sidebar() {
         )}
       </Show>
     </aside>
+  );
+}
+
+function WindowButton(props: { label: string; onClick: () => void; children: JSX.Element }) {
+  return (
+    <button
+      type="button"
+      aria-label={props.label}
+      title={props.label}
+      onClick={props.onClick}
+      class="flex h-6 w-7 items-center justify-center rounded-md text-faint hover:bg-hover hover:text-text"
+    >
+      {props.children}
+    </button>
   );
 }
 

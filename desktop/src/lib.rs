@@ -631,7 +631,10 @@ pub fn run() {
                 );
             }
             #[cfg(target_os = "windows")]
-            platform::imp::apply_material(&panel_window, true);
+            {
+                platform::imp::round_corners(&panel_window);
+                platform::imp::apply_material(&panel_window, true);
+            }
 
             let overlay = overlay::Overlay::new(panel_window.clone());
             let blur_overlay = overlay.clone();

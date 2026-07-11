@@ -9,7 +9,7 @@ const IS_MAC = navigator.userAgent.includes("Mac");
 // it spans the whole window, so the shell's 8px window padding is DOM-side.
 export function Shell() {
   return (
-    <div class="flex h-screen w-screen" classList={{ "p-2": !IS_MAC }}>
+    <div class="shell flex h-screen w-screen" classList={{ "p-2": !IS_MAC }}>
       <Sidebar />
       <Show when={!tabs.activeTab()?.url}>
         <div class="min-w-0 flex-1">

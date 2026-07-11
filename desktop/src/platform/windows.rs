@@ -33,7 +33,28 @@ pub fn redirect_stderr(dir: &std::path::Path) {
 }
 
 pub fn init(window: &WebviewWindow) {
+    round_corners(window);
     MATERIAL.store(apply_material(window, true), Ordering::SeqCst);
+}
+
+// Undecorated windows lose DWM rounding unless asked for explicitly.
+pub fn round_corners(window: &WebviewWindow) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = windows::Win32::Foundation::HWND(hwnd.0);
+    let pref = DWMWCP_ROUND;
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const _,
+            std::mem::size_of_val(&pref) as u32,
+        )
+    };
 }
 
 // Acrylic with a deep tint; a high-alpha tint keeps the blur readable

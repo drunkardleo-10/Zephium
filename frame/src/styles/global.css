@@ -55,8 +55,12 @@ body {
   overflow: hidden;
 }
 
-:root[data-material="none"] body {
+/* no system material: the chrome draws the window frame itself */
+:root[data-material="none"] .shell {
   background: var(--color-bg);
+  border: 1px solid color-mix(in srgb, var(--color-text) 8%, transparent);
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 /* dwm ignores the acrylic tint on win11 22h2+; the chrome paints it */

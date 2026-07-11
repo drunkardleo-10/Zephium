@@ -87,7 +87,7 @@ export function Launcher() {
   };
 
   return (
-    <div class="flex h-screen w-screen flex-col">
+    <div class="shell flex h-screen w-screen flex-col">
       <input
         ref={input}
         value={value()}
