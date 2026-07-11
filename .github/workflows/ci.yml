@@ -57,7 +57,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-machete
+          tool: cargo-nextest,cargo-machete,cargo-deny
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -70,6 +70,10 @@ jobs:
 
       - name: Unused crates (advisory)
         run: cargo machete
+        continue-on-error: true
+
+      - name: Licenses, advisories, sources (advisory)
+        run: cargo deny check
         continue-on-error: true
 
       - name: cargo nextest
