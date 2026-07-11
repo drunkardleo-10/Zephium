@@ -381,6 +381,33 @@ fn inner_logical(window: &tauri::WebviewWindow) -> Size {
         .unwrap_or_default()
 }
 
+// The stored content type came from a response the page's author chose; an
+// internal scheme must never relay an executable mime into the chrome.
+fn icon_mime(stored: Option<String>) -> &'static str {
+    const ALLOWED: &[&str] = &[
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/avif",
+        "image/svg+xml",
+        "image/x-icon",
+        "image/vnd.microsoft.icon",
+    ];
+    let stored = stored.unwrap_or_default();
+    let essence = stored
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    ALLOWED
+        .iter()
+        .find(|m| **m == essence)
+        .copied()
+        .unwrap_or("application/octet-stream")
+}
+
 fn zicon_response(
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<std::borrow::Cow<'static, [u8]>> {
@@ -388,12 +415,26 @@ fn zicon_response(
     use tauri::http::Response;
     use zephium_core::ids::ProfileId;
 
-    let not_found = || {
+    let respond = |status: u16,
+                   cache: &str,
+                   mime: &str,
+                   body: std::borrow::Cow<'static, [u8]>| {
         Response::builder()
-            .status(404)
-            .header("Cache-Control", "no-store")
-            .body(std::borrow::Cow::Borrowed(&[][..]))
-            .expect("static response")
+            .status(status)
+            .header("Cache-Control", cache)
+            .header("Content-Type", mime)
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Content-Security-Policy", "default-src 'none'")
+            .body(body)
+            .expect("icon response")
+    };
+    let not_found = || {
+        respond(
+            404,
+            "no-store",
+            "text/plain",
+            std::borrow::Cow::Borrowed(&[][..]),
+        )
     };
     let path = request.uri().path();
     let Some((profile, origin)) = path.trim_start_matches('/').split_once('/') else {
@@ -409,15 +450,12 @@ fn zicon_response(
         return not_found();
     };
     match store.favicon_bytes(profile, &origin) {
-        Some((content_type, bytes)) => Response::builder()
-            .status(200)
-            .header(
-                "Content-Type",
-                content_type.unwrap_or_else(|| "image/png".into()),
-            )
-            .header("Cache-Control", "max-age=86400")
-            .body(std::borrow::Cow::Owned(bytes))
-            .expect("icon response"),
+        Some((content_type, bytes)) => respond(
+            200,
+            "max-age=86400",
+            icon_mime(content_type),
+            std::borrow::Cow::Owned(bytes),
+        ),
         None => not_found(),
     }
 }

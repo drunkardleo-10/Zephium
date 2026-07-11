@@ -49,8 +49,16 @@ fn looks_like_host(s: &str) -> bool {
     if s == "localhost" || s.starts_with("localhost:") || s.starts_with("localhost/") {
         return true;
     }
-    let host = s.split(['/', '?', '#']).next().unwrap_or(s);
-    let host = host.split(':').next().unwrap_or(host);
+    let authority = s.split(['/', '?', '#']).next().unwrap_or(s);
+    // `user@host` in bare input is an email or a `trusted.com@evil.com`
+    // spoof; both belong in search, never in the address.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority.split(':').next().unwrap_or(authority);
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
     matches!(host.rsplit_once('.'), Some((label, tld)) if !label.is_empty() && tld.len() >= 2)
 }
 
@@ -102,6 +110,30 @@ mod tests {
         let u = classify("javascript:alert(1)");
         assert!(is_allowed(&u));
         assert_eq!(u.host_str(), Some("duckduckgo.com"));
+    }
+
+    #[test]
+    fn userinfo_input_searches_instead_of_spoofing() {
+        assert_eq!(
+            classify("paypal.com@evil.com").host_str(),
+            Some("duckduckgo.com")
+        );
+        assert_eq!(
+            classify("someone@example.com").host_str(),
+            Some("duckduckgo.com")
+        );
+        assert!(is_query("paypal.com@evil.com"));
+    }
+
+    #[test]
+    fn ipv4_literals_navigate() {
+        assert_eq!(classify("192.168.1.1").as_str(), "https://192.168.1.1/");
+        assert_eq!(
+            classify("192.168.1.1:8080/admin").as_str(),
+            "https://192.168.1.1:8080/admin"
+        );
+        // not a valid address: searched, not navigated
+        assert!(is_query("999.1.1.1"));
     }
 
     proptest! {
