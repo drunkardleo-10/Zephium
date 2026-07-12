@@ -45,6 +45,8 @@ pub(crate) fn install(parent: RawWindowHandle, sink: Arc<dyn Fn(EngineEvent) + S
             hidden: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             dormant: std::collections::HashSet::new(),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            web_context: None,
             sink: Sink(sink),
         });
     });
@@ -109,6 +111,10 @@ pub(crate) struct EngineHost {
     hidden: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     dormant: std::collections::HashSet<ItemId>,
+    // One network session for all non-ephemeral views: shared cookies,
+    // shared HTTP cache, one network process.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    web_context: Option<wry::WebContext>,
     sink: Sink,
 }
 
@@ -138,10 +144,6 @@ impl EngineHost {
     // Rebuilt after adoption from a page-load-finished hook, when the spawn
     // cost hides behind the page render.
     pub(crate) fn ensure_spare(&mut self, partition: Partition) {
-        // webkitgtk suspends unmapped views; an adopted spare can stay black
-        if cfg!(all(unix, not(target_os = "macos"))) {
-            return;
-        }
         if matches!(partition, Partition::Ephemeral(_))
             || self
                 .spare
@@ -173,8 +175,24 @@ impl EngineHost {
         let on_load = self.sink.clone();
         let on_new_window = self.sink.clone();
         let (title_id, load_id, new_window_id) = (id.clone(), id.clone(), id);
+        let scripts = self.scripts_for(partition);
 
-        let mut builder = WebViewBuilder::new()
+        // Without a shared context, webkitgtk gives every view its own
+        // network session: no shared cookies, cold HTTP cache and a fresh
+        // network process per tab. One context per host; ephemeral views
+        // get their own through with_incognito.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let builder = match partition {
+            Partition::Ephemeral(_) => WebViewBuilder::new(),
+            _ => WebViewBuilder::new_with_web_context(
+                self.web_context
+                    .get_or_insert_with(|| wry::WebContext::new(None)),
+            ),
+        };
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let builder = WebViewBuilder::new();
+
+        let mut builder = builder
             .with_bounds(to_wry(bounds))
             .with_background_color((16, 16, 21, 255))
             .with_devtools(true)
@@ -193,7 +211,6 @@ impl EngineHost {
                 NewWindowResponse::Deny
             });
 
-        let scripts = self.scripts_for(partition);
         for script in scripts
             .iter()
             .filter(|s| s.world == World::Page && s.at_start)
