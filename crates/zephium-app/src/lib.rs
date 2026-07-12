@@ -142,6 +142,7 @@ pub struct Shell {
     idle_min: std::time::Duration,
     dormant_min: std::time::Duration,
     dormant_sent: Vec<ItemId>,
+    crashes: std::collections::HashMap<ItemId, std::time::Instant>,
     self_tx: Option<Sender<Command>>,
     engine: SharedEngine,
     store: SharedStore,
@@ -174,6 +175,7 @@ impl Shell {
             idle_min: std::time::Duration::from_secs(15 * 60),
             dormant_min: std::time::Duration::from_secs(5 * 60),
             dormant_sent: Vec::new(),
+            crashes: std::collections::HashMap::new(),
             self_tx: None,
             engine,
             store,
@@ -477,7 +479,7 @@ impl Shell {
             EngineEvent::FaviconChanged { id, urls } => self.favicon_found(id, urls),
             EngineEvent::PermissionRequested { .. } => {}
             EngineEvent::DownloadRequested { .. } => {}
-            EngineEvent::Crashed { .. } => {}
+            EngineEvent::Crashed { id } => self.on_crashed(id),
             EngineEvent::Captured { .. } => {}
             EngineEvent::HtmlExtracted { .. } => {}
             EngineEvent::ShortcutPressed { .. } => {}
@@ -901,6 +903,27 @@ impl Shell {
         self.last_focus.get(&id).is_none_or(|t| t.elapsed() >= min)
     }
 
+    // One automatic relaunch per crash burst: a second death inside the
+    // window means the page kills its web process deterministically, and a
+    // reload loop would peg the machine.
+    fn on_crashed(&mut self, id: ItemId) {
+        const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+        if self.items.tab(id).is_none() {
+            return;
+        }
+        self.items.set_loading(id, false);
+        let recent = self
+            .crashes
+            .insert(id, std::time::Instant::now())
+            .is_some_and(|t| t.elapsed() < RETRY_WINDOW);
+        if recent {
+            self.items.set_title(id, "Page crashed".into());
+        } else {
+            self.engine.reload(id);
+        }
+        self.project_tab(id);
+    }
+
     fn touch(&mut self, id: ItemId) {
         self.last_focus.insert(id, std::time::Instant::now());
     }
@@ -1190,7 +1213,9 @@ mod tests {
         fn navigate(&self, id: ItemId, url: &str) {
             self.log(format!("navigate {id} {url}"));
         }
-        fn reload(&self, _id: ItemId) {}
+        fn reload(&self, id: ItemId) {
+            self.log(format!("reload {id}"));
+        }
         fn stop(&self, _id: ItemId) {}
         fn go_back(&self, _id: ItemId) {}
         fn go_forward(&self, _id: ItemId) {}
@@ -1514,6 +1539,39 @@ mod tests {
             .calls()
             .iter()
             .any(|c| c == &format!("create {} https://site0.com/ [default]", ids[0])));
+    }
+
+    #[test]
+    fn crashed_page_reloads_once_then_reports() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "example.com".into(),
+        });
+
+        // first crash: automatic relaunch
+        shell.handle(Command::Engine(EngineEvent::Crashed { id }));
+        assert!(engine.calls().iter().any(|c| c == &format!("reload {id}")));
+
+        // second crash right after: no reload loop, the tab reports it
+        shell.handle(Command::Engine(EngineEvent::Crashed { id }));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|c| *c == &format!("reload {id}"))
+                .count(),
+            1
+        );
+        let tab = last(&screen)
+            .tabs
+            .into_iter()
+            .find(|t| t.id == id.to_string())
+            .unwrap();
+        assert_eq!(tab.title, "Page crashed");
+        assert!(!tab.loading);
     }
 
     #[test]

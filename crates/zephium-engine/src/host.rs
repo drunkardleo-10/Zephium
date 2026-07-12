@@ -174,6 +174,8 @@ impl EngineHost {
         let on_title = self.sink.clone();
         let on_load = self.sink.clone();
         let on_new_window = self.sink.clone();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let (on_crash, crash_id) = (self.sink.clone(), id.clone());
         let (title_id, load_id, new_window_id) = (id.clone(), id.clone(), id);
         let scripts = self.scripts_for(partition);
 
@@ -192,9 +194,12 @@ impl EngineHost {
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let builder = WebViewBuilder::new();
 
+        // No custom background color: the scrollbar gutter and unpainted
+        // regions show the webview background, and anything but the engine
+        // default reads as a detached strip along the page edge. The spawn
+        // flash fix belongs to the theme->engine channel, not a hardcode.
         let mut builder = builder
             .with_bounds(to_wry(bounds))
-            .with_background_color((16, 16, 21, 255))
             .with_devtools(true)
             .with_navigation_handler(|target| navigation::is_allowed_str(&target))
             .with_document_title_changed_handler(move |title| {
@@ -287,6 +292,18 @@ impl EngineHost {
         };
         crate::platform::imp::configure(&view, 12.0);
         probe.fill(&view);
+        // A dead web process must surface as an event, never as a silently
+        // blank pane; the shell decides whether to relaunch.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use webkit2gtk::WebViewExt;
+            use wry::WebViewExtUnix;
+            view.webview()
+                .connect_web_process_terminated(move |_, reason| {
+                    eprintln!("engine: web process terminated: {reason:?}");
+                    on_crash.emit(EngineEvent::Crashed { id: crash_id.get() });
+                });
+        }
         #[cfg(target_os = "windows")]
         crate::platform::imp::install_accelerators(
             &view,
