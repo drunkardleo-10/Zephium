@@ -16,13 +16,14 @@ use tauri_specta::{collect_commands, collect_events, Event};
 use zephium_app::{Command, EmitFn, Handle, SharedChrome};
 use zephium_core::geometry::Size;
 use zephium_core::ids::ItemId;
-use zephium_core::ports::engine::Engine as _;
+use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
 use zephium_core::ports::store::Store as _;
 use zephium_core::split::Axis;
 use zephium_engine::MainThreadDispatch;
 use zephium_ipc::Projection;
-
 use zephium_store::SqliteStore;
+
+const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}";
 
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
 
@@ -425,9 +426,12 @@ fn zicon_response(
             .body(body)
             .expect("icon response")
     };
+    // 204, not 404: a missing icon is the normal case until discovery runs,
+    // and error statuses spam the chrome console. An empty body still fires
+    // the img error event, so the fallback renders either way.
     let not_found = || {
         respond(
-            404,
+            204,
             "no-store",
             "text/plain",
             std::borrow::Cow::Borrowed(&[][..]),
@@ -535,13 +539,6 @@ fn build_menu(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // fluent overlay scrollbars; process-wide so the shared browser process
-    // uses the same flags for the chrome and every content view
-    #[cfg(target_os = "windows")]
-    std::env::set_var(
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--enable-features=msOverlayScrollbarWinStyle,msOverlayScrollbarWinStyleAnimation",
-    );
     let specta = specta_builder();
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -572,6 +569,15 @@ pub fn run() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
+            // In-page scrollbars on every platform: native bars vary from
+            // overlay to chunky-classic with the OS and input device.
+            engine.set_user_content(
+                ContentScope::Global,
+                UserContent {
+                    scripts: Vec::new(),
+                    styles: vec![SCROLLBAR_CSS.to_string()],
+                },
+            );
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -590,6 +596,13 @@ pub fn run() {
             app.set_menu(build_menu(&handle, &keymap)?)?;
             app.on_menu_event(|app, event| execute_command(app, event.id().0.as_str()));
             engine.set_shortcuts(shortcut_table(&keymap));
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let shortcut_app = handle.clone();
+                platform::imp::install_shortcuts(&window, shortcut_table(&keymap), move |id| {
+                    execute_command(&shortcut_app, id)
+                });
+            }
 
             let emit_handle = handle.clone();
             let emit: EmitFn = Box::new(move |projection| {

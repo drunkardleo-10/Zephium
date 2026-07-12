@@ -8,6 +8,7 @@ use tauri::WebviewWindow;
 use zephium_app::SharedChrome;
 use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
+use zephium_core::ports::engine::Shortcut;
 use zephium_engine::MainThreadDispatch;
 
 mod zero_fixed {
@@ -85,6 +86,70 @@ pub fn init(window: &WebviewWindow) {
         });
         zephium_engine::install_container(fixed.clone());
     });
+}
+
+/// Browser shortcuts fire regardless of focus: handlers connected on the
+/// toplevel run before gtk forwards the key to the focused widget, so a
+/// content webview never swallows Ctrl+T. Mirrors the Windows
+/// AcceleratorKeyPressed hook; the table is the same resolved keymap.
+pub fn install_shortcuts(
+    window: &WebviewWindow,
+    shortcuts: Vec<Shortcut>,
+    on: impl Fn(&str) + 'static,
+) {
+    let Ok(gtk_window) = window.gtk_window() else {
+        return;
+    };
+    gtk_window.connect_key_press_event(move |_, event| {
+        let state = event.state();
+        let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+        let alt = state.contains(gtk::gdk::ModifierType::MOD1_MASK);
+        if !ctrl && !alt {
+            return glib::Propagation::Proceed;
+        }
+        let keyval = normalize_keyval(event.keyval());
+        for s in &shortcuts {
+            if s.ctrl == ctrl
+                && s.shift == shift
+                && s.alt == alt
+                && vk_keyval(s.key) == Some(keyval)
+            {
+                on(&s.id);
+                return glib::Propagation::Stop;
+            }
+        }
+        glib::Propagation::Proceed
+    });
+}
+
+// Shift+Tab arrives as ISO_Left_Tab; letters arrive in shifted case.
+fn normalize_keyval(key: gtk::gdk::keys::Key) -> u32 {
+    let raw: u32 = *key;
+    if raw == 0xfe20 {
+        return 0xff09;
+    }
+    match key.to_unicode() {
+        Some(c) if c.is_ascii_graphic() || c == ' ' => c.to_ascii_lowercase() as u32,
+        _ => raw,
+    }
+}
+
+// The shared shortcut table speaks Windows VK codes; translate to keyvals.
+fn vk_keyval(vk: u32) -> Option<u32> {
+    Some(match vk {
+        0x09 => 0xff09,
+        0x20 => 0x20,
+        0xBB => '=' as u32,
+        0xBC => ',' as u32,
+        0xBD => '-' as u32,
+        0xBE => '.' as u32,
+        0xDB => '[' as u32,
+        0xDD => ']' as u32,
+        v @ 0x41..=0x5A => (v as u8).to_ascii_lowercase() as u32,
+        v @ 0x30..=0x39 => v,
+        _ => return None,
+    })
 }
 
 pub fn material() -> bool {
