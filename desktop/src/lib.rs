@@ -23,7 +23,10 @@ use zephium_engine::MainThreadDispatch;
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
 
-const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}";
+// Only the thumb may paint. Every other part stays transparent so the page
+// background shows through the gutter; an unstyled scrollbar background is
+// what rendered as a detached band along the edge.
+const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-button{display:none}";
 
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
 
@@ -569,8 +572,6 @@ pub fn run() {
                     shell.dispatch(Command::Engine(event));
                 }
             });
-            // In-page scrollbars on every platform: native bars vary from
-            // overlay to chunky-classic with the OS and input device.
             engine.set_user_content(
                 ContentScope::Global,
                 UserContent {
