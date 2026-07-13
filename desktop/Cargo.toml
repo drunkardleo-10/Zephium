@@ -21,6 +21,7 @@ zephium-engine.workspace = true
 zephium-net.workspace = true
 zephium-store.workspace = true
 tauri-plugin-global-shortcut.workspace = true
+tauri-plugin-single-instance.workspace = true
 window-vibrancy = "0.7"
 serde.workspace = true
 serde_json.workspace = true

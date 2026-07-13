@@ -544,6 +544,15 @@ fn build_menu(
 pub fn run() {
     let specta = specta_builder();
     tauri::Builder::default()
+        // Must register first: a second launch (file association, dock, a
+        // stale instance holding the global hotkey and the profile dbs)
+        // focuses the running window and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .register_uri_scheme_protocol("zicon", |_ctx, request| zicon_response(request))
         .invoke_handler(specta.invoke_handler())
