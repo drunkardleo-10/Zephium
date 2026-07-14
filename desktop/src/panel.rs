@@ -1,79 +1,52 @@
-//! Converts the overlay Tauri window's NSWindow into an NSPanel subclass:
-//! key-capable while borderless, non-activating, visible on every Space and
-//! over fullscreen apps. The delegate tao installed survives the class swap,
-//! so tauri focus events keep working.
+//! Configures the Tao-owned overlay window without changing its Objective-C
+//! class. Tao allocates a private `NSWindow` subclass with its own ivars and
+//! method overrides; replacing that live object's class with an unrelated
+//! `NSPanel` subclass violates Objective-C's layout and dispatch invariants.
 
-use objc2::{define_class, ClassType, MainThreadOnly};
-use objc2_app_kit::{NSPanel, NSWindowCollectionBehavior, NSWindowStyleMask};
+use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+use objc2_foundation::MainThreadMarker;
 use tauri::WebviewWindow;
 
-define_class!(
-    #[unsafe(super(NSPanel))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "ZephiumPanel"]
-    pub struct PanelClass;
-
-    impl PanelClass {
-        #[unsafe(method(canBecomeKeyWindow))]
-        fn can_become_key_window(&self) -> bool {
-            true
-        }
-
-        #[unsafe(method(canBecomeMainWindow))]
-        fn can_become_main_window(&self) -> bool {
-            false
-        }
+fn with_window(window: &WebviewWindow, f: impl FnOnce(&NSWindow)) {
+    if MainThreadMarker::new().is_none() {
+        return;
     }
-);
-
-fn with_panel(window: &WebviewWindow, f: impl FnOnce(&NSPanel)) {
-    debug_assert!(objc2_foundation::MainThreadMarker::new().is_some());
     if let Ok(ptr) = window.ns_window() {
-        // SAFETY: ns_window returns a live NSWindow owned by tao; after
-        // convert() its class is our NSPanel subclass (no extra ivars).
-        f(unsafe { &*(ptr as *const NSPanel) });
+        // SAFETY: `ns_window` returns Tao's live `NSWindow` subclass. We only
+        // borrow it for this main-thread call and never change its class.
+        f(unsafe { &*(ptr as *const NSWindow) });
     }
 }
 
-pub fn convert(window: &WebviewWindow) {
-    let Ok(ptr) = window.ns_window() else {
-        return;
-    };
-    unsafe {
-        objc2::ffi::object_setClass(
-            ptr.cast(),
-            (PanelClass::class() as *const objc2::runtime::AnyClass).cast(),
-        );
-    }
-    with_panel(window, |panel| {
-        panel.setStyleMask(panel.styleMask() | NSWindowStyleMask::NonactivatingPanel);
-        panel.setCollectionBehavior(
-            panel.collectionBehavior()
+pub fn configure(window: &WebviewWindow) {
+    with_window(window, |window| {
+        window.setCollectionBehavior(
+            window.collectionBehavior()
                 | NSWindowCollectionBehavior::CanJoinAllSpaces
                 | NSWindowCollectionBehavior::FullScreenAuxiliary,
         );
-        panel.setHidesOnDeactivate(false);
+        window.setHidesOnDeactivate(false);
     });
 }
 
 pub fn show(window: &WebviewWindow) {
-    with_panel(window, |panel| {
-        if let Some(view) = panel.contentView() {
-            panel.makeFirstResponder(Some(&view));
+    with_window(window, |window| {
+        if let Some(view) = window.contentView() {
+            window.makeFirstResponder(Some(&view));
         }
-        panel.orderFrontRegardless();
-        panel.makeKeyWindow();
+        window.orderFrontRegardless();
+        window.makeKeyWindow();
     });
 }
 
 pub fn hide(window: &WebviewWindow) {
-    with_panel(window, |panel| {
-        panel.orderOut(None);
+    with_window(window, |window| {
+        window.orderOut(None);
     });
 }
 
 pub fn is_visible(window: &WebviewWindow) -> bool {
     let mut visible = false;
-    with_panel(window, |panel| visible = panel.isVisible());
+    with_window(window, |window| visible = window.isVisible());
     visible
 }

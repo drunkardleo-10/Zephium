@@ -17,7 +17,7 @@ impl Overlay {
         #[cfg(target_os = "macos")]
         {
             let w = window.clone();
-            let _ = window.run_on_main_thread(move || crate::panel::convert(&w));
+            let _ = window.run_on_main_thread(move || crate::panel::configure(&w));
         }
         Self { window }
     }
