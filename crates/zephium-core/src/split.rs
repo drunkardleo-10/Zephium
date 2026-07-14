@@ -4,13 +4,13 @@
 use crate::geometry::Rect;
 use crate::ids::ItemId;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Axis {
     Row,
     Col,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Pane {
     Leaf(ItemId),
     Branch {
@@ -61,10 +61,22 @@ impl Pane {
     }
 
     pub fn set_ratio(&mut self, path: &[usize], ratio: f64) {
+        if !ratio.is_finite() {
+            return;
+        }
         let mut node = self;
         for &step in path {
             match node {
-                Pane::Branch { a, b, .. } => node = if step == 0 { a } else { b },
+                Pane::Branch { a, b, .. } => {
+                    node = match step {
+                        0 => a,
+                        1 => b,
+                        // Paths are an exact binary-tree address. Treating an
+                        // arbitrary value as `1` aliases malformed input onto
+                        // a different live branch.
+                        _ => return,
+                    };
+                }
                 Pane::Leaf(_) => return,
             }
         }
@@ -214,11 +226,19 @@ pub fn drop_target(tree: &Pane, region: Rect, gap: f64, x: f64, y: f64) -> Optio
 }
 
 pub fn ratio_for(axis: Axis, rect: Rect, gap: f64, px: f64, py: f64) -> f64 {
-    let raw = match axis {
-        Axis::Row => (px - rect.x) / (rect.width - gap),
-        Axis::Col => (py - rect.y) / (rect.height - gap),
+    let (offset, available) = match axis {
+        Axis::Row => (px - rect.x, rect.width - gap),
+        Axis::Col => (py - rect.y, rect.height - gap),
     };
-    raw.clamp(0.05, 0.95)
+    if !offset.is_finite() || !available.is_finite() || available <= 0.0 {
+        return 0.5;
+    }
+    let raw = offset / available;
+    if raw.is_finite() {
+        raw.clamp(0.05, 0.95)
+    } else {
+        0.5
+    }
 }
 
 fn place(pane: &Pane, rect: Rect, gap: f64, out: &mut Vec<(ItemId, Rect)>) {
@@ -233,7 +253,11 @@ fn place(pane: &Pane, rect: Rect, gap: f64, out: &mut Vec<(ItemId, Rect)>) {
 }
 
 fn divide(r: Rect, axis: Axis, ratio: f64, gap: f64) -> (Rect, Rect) {
-    let ratio = ratio.clamp(0.0, 1.0);
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
     match axis {
         Axis::Row => {
             let avail = (r.width - gap).max(0.0);
@@ -457,6 +481,36 @@ mod tests {
             panic!()
         };
         assert!((*ratio - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn malformed_ratio_updates_do_not_alias_or_store_nan() {
+        let mut tree = nested();
+        let original = tree.clone();
+        tree.set_ratio(&[2], 0.3);
+        assert_eq!(tree, original);
+        tree.set_ratio(&[], f64::NAN);
+        assert_eq!(tree, original);
+
+        let degenerate = Rect::new(0.0, 0.0, 8.0, 8.0);
+        assert_eq!(ratio_for(Axis::Row, degenerate, 8.0, 4.0, 0.0), 0.5);
+        assert_eq!(ratio_for(Axis::Row, REGION, 8.0, f64::INFINITY, 0.0), 0.5);
+    }
+
+    #[test]
+    fn layout_contains_nonfinite_stored_ratios() {
+        let tree = Pane::Branch {
+            axis: Axis::Row,
+            ratio: f64::NAN,
+            a: Box::new(Pane::leaf(id(1))),
+            b: Box::new(Pane::leaf(id(2))),
+        };
+        for (_, rect) in layout(&tree, REGION, 8.0) {
+            assert!(rect.x.is_finite());
+            assert!(rect.y.is_finite());
+            assert!(rect.width.is_finite());
+            assert!(rect.height.is_finite());
+        }
     }
 
     #[test]

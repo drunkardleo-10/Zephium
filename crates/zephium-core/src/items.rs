@@ -1,19 +1,30 @@
 //! The sidebar item tree: one aggregate for favorites, pinned tabs, folders
 //! and ephemeral (Today) tabs. Mutations return `Effect`s for the engine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use url::Url;
 
 use crate::ids::ItemId;
-use crate::item::{Item, ItemKind, Lifecycle, Placement, TabState};
+use crate::item::{sanitize_page_title, Item, ItemKind, Lifecycle, Placement, TabState};
 use crate::navigation;
+use crate::ports::engine::NavigationRequestId;
+use crate::spaces::RemovedProfileSpaces;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
-    CreateView { id: ItemId, url: String },
-    Navigate { id: ItemId, url: String },
-    Close { id: ItemId },
+    CreateView {
+        id: ItemId,
+        url: String,
+    },
+    Navigate {
+        id: ItemId,
+        url: String,
+        request: NavigationRequestId,
+    },
+    Close {
+        id: ItemId,
+    },
 }
 
 #[derive(Default)]
@@ -21,6 +32,16 @@ pub struct Items {
     items: HashMap<ItemId, Item>,
     roots: HashMap<Placement, Vec<ItemId>>,
     children: HashMap<ItemId, Vec<ItemId>>,
+    // Runtime-only navigation intents. Session state and chrome projections
+    // use TabState::url, which changes only after an authoritative native
+    // UrlChanged observation.
+    pending_navigations: HashMap<ItemId, PendingNavigation>,
+    next_navigation_request: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PendingNavigation {
+    request: NavigationRequestId,
 }
 
 impl Items {
@@ -47,7 +68,9 @@ impl Items {
     /// Inserts at the end of its container. Parent (when set) must be an
     /// existing folder with the same placement; otherwise the insert is refused.
     pub fn insert(&mut self, item: Item) -> bool {
-        if self.items.contains_key(&item.id) {
+        if self.items.len() >= crate::session::MAX_SESSION_ITEMS
+            || self.items.contains_key(&item.id)
+        {
             return false;
         }
         match item.parent {
@@ -57,6 +80,19 @@ impl Items {
                 });
                 if !ok {
                     return false;
+                }
+                // Item snapshots are flat, so JSON's recursion limit cannot
+                // protect the later recursive projection/persistence walks.
+                // Keep the aggregate's invariant bounded at insertion time,
+                // including future non-storage callers.
+                let mut ancestor = Some(parent);
+                let mut depth = 1_usize;
+                while let Some(id) = ancestor {
+                    if depth > crate::session::MAX_ITEM_TREE_DEPTH {
+                        return false;
+                    }
+                    ancestor = self.items.get(&id).and_then(|item| item.parent);
+                    depth += 1;
                 }
                 self.children.entry(parent).or_default().push(item.id);
             }
@@ -97,6 +133,7 @@ impl Items {
         let mut stack = vec![id];
         while let Some(next) = stack.pop() {
             stack.extend(self.children.remove(&next).unwrap_or_default());
+            self.pending_navigations.remove(&next);
             if let Some(removed) = self.items.remove(&next) {
                 if removed.tab().is_some_and(TabState::has_view) {
                     effects.push(Effect::Close { id: next });
@@ -106,19 +143,107 @@ impl Items {
         effects
     }
 
-    pub fn navigate(&mut self, id: ItemId, input: &str) -> Vec<Effect> {
-        let url = navigation::classify(input);
-        if !navigation::is_allowed(&url) {
+    /// Removes items whose ownership is directly proven by a profile's
+    /// favorites placement or by the exact `Spaces` aggregate removal proof.
+    /// A space absent from that proof is never inferred to belong to the
+    /// profile. Returns at most `MAX_SESSION_ITEMS` native close effects.
+    pub fn remove_for_profile(&mut self, spaces: &RemovedProfileSpaces) -> Vec<Effect> {
+        let removed_spaces: HashSet<_> = spaces.ids().iter().copied().collect();
+        let owned: HashSet<ItemId> = self
+            .items
+            .iter()
+            .filter_map(|(id, item)| {
+                let owned = match item.placement {
+                    Placement::Favorites { profile } => profile == spaces.profile(),
+                    Placement::Space { space, .. } => removed_spaces.contains(&space),
+                };
+                owned.then_some(*id)
+            })
+            .collect();
+        if owned.is_empty() {
             return Vec::new();
         }
-        let Some(tab) = self.tab_mut(id) else {
+
+        let mut ordered: Vec<ItemId> = owned.iter().copied().collect();
+        ordered.sort_unstable();
+        let effects = ordered
+            .iter()
+            .filter(|id| {
+                self.items
+                    .get(id)
+                    .and_then(Item::tab)
+                    .is_some_and(TabState::has_view)
+            })
+            .map(|id| Effect::Close { id: *id })
+            .collect();
+
+        // Preserve any structurally unexpected child that does not itself
+        // carry direct ownership proof. Re-rooting is safer than recursively
+        // deleting across an invalid ownership boundary.
+        let mut reroot = Vec::new();
+        for parent in &ordered {
+            if let Some(children) = self.children.remove(parent) {
+                for child in children {
+                    if owned.contains(&child) {
+                        continue;
+                    }
+                    let Some(item) = self.items.get_mut(&child) else {
+                        continue;
+                    };
+                    if item.parent == Some(*parent) {
+                        item.parent = None;
+                        reroot.push((item.placement, child));
+                    }
+                }
+            }
+        }
+
+        for roots in self.roots.values_mut() {
+            roots.retain(|id| !owned.contains(id));
+        }
+        for children in self.children.values_mut() {
+            children.retain(|id| !owned.contains(id));
+        }
+        for (placement, id) in reroot {
+            let roots = self.roots.entry(placement).or_default();
+            if !roots.contains(&id) {
+                roots.push(id);
+            }
+        }
+        for id in ordered {
+            self.pending_navigations.remove(&id);
+            self.items.remove(&id);
+        }
+        self.roots.retain(|_, roots| !roots.is_empty());
+        self.children.retain(|_, children| !children.is_empty());
+        effects
+    }
+
+    pub fn navigate(&mut self, id: ItemId, input: &str) -> Vec<Effect> {
+        let Some(url) = navigation::classify(input) else {
             return Vec::new();
         };
-        tab.url = Some(url.clone());
-        tab.loading = true;
+        if self.tab(id).is_none() {
+            return Vec::new();
+        }
+        self.next_navigation_request = self.next_navigation_request.wrapping_add(1);
+        if self.next_navigation_request == 0 {
+            self.next_navigation_request = 1;
+        }
+        let request = NavigationRequestId(self.next_navigation_request);
+        self.pending_navigations
+            .insert(id, PendingNavigation { request });
+        let Some(tab) = self.tab_mut(id) else {
+            // Keep this path non-panicking even if a future mutation is added
+            // between the existence check and this borrow.  A failed admission
+            // must not leave a request that can later be attributed to another
+            // native view generation.
+            self.pending_navigations.remove(&id);
+            return Vec::new();
+        };
         let url = url.to_string();
         if tab.view {
-            vec![Effect::Navigate { id, url }]
+            vec![Effect::Navigate { id, url, request }]
         } else {
             tab.view = true;
             vec![Effect::CreateView { id, url }]
@@ -150,16 +275,28 @@ impl Items {
 
     /// Drops the tab's webview but keeps the item; activation recreates it.
     pub fn hibernate(&mut self, id: ItemId) -> Vec<Effect> {
+        if self.mark_view_discarded(id) {
+            vec![Effect::Close { id }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Records an engine-acknowledged native discard without emitting a
+    /// second close. Used only after the engine has physically destroyed the
+    /// exact view generation and released its same-id reuse gate.
+    pub fn mark_view_discarded(&mut self, id: ItemId) -> bool {
+        self.pending_navigations.remove(&id);
         let Some(tab) = self.tab_mut(id) else {
-            return Vec::new();
+            return false;
         };
         if !tab.view {
-            return Vec::new();
+            return false;
         }
         tab.view = false;
         tab.loading = false;
         tab.lifecycle = Lifecycle::Hibernated;
-        vec![Effect::Close { id }]
+        true
     }
 
     pub fn set_lifecycle(&mut self, id: ItemId, lifecycle: Lifecycle) {
@@ -168,13 +305,22 @@ impl Items {
         }
     }
 
+    /// Roll back the optimistic `view` bit when the native engine cannot
+    /// create a controller. The next explicit navigation/activation can then
+    /// retry instead of leaving an unrecoverable blank tab.
+    pub fn view_creation_failed(&mut self, id: ItemId) {
+        self.pending_navigations.remove(&id);
+        if let Some(tab) = self.tab_mut(id) {
+            tab.view = false;
+            tab.loading = false;
+            tab.lifecycle = Lifecycle::Hibernated;
+            tab.title = "Page failed to open".into();
+        }
+    }
+
     pub fn set_title(&mut self, id: ItemId, title: String) {
         if let Some(tab) = self.tab_mut(id) {
-            tab.title = if title.is_empty() {
-                "Untitled".into()
-            } else {
-                title
-            };
+            tab.title = sanitize_page_title(&title);
         }
     }
 
@@ -184,16 +330,44 @@ impl Items {
         }
     }
 
-    pub fn set_committed_url(&mut self, id: ItemId, url: Url) {
+    pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
         if let Some(tab) = self.tab_mut(id) {
             tab.url = Some(url);
+            self.pending_navigations.remove(&id);
+            true
+        } else {
+            false
         }
     }
 
-    pub fn set_committed_url_str(&mut self, id: ItemId, url: &str) {
-        if let Ok(parsed) = Url::parse(url) {
-            self.set_committed_url(id, parsed);
+    /// Clears only the still-current intent. A delayed failure from an older
+    /// native request cannot cancel a newer navigation.
+    pub fn navigation_failed(&mut self, id: ItemId, request: NavigationRequestId) -> bool {
+        let current = self
+            .pending_navigations
+            .get(&id)
+            .is_some_and(|pending| pending.request == request);
+        if current {
+            self.pending_navigations.remove(&id);
         }
+        current
+    }
+
+    #[cfg(test)]
+    fn pending_navigation(&self, id: ItemId) -> Option<NavigationRequestId> {
+        self.pending_navigations
+            .get(&id)
+            .map(|pending| pending.request)
+    }
+
+    pub fn set_committed_url_str(&mut self, id: ItemId, url: &str) -> bool {
+        if let Ok(parsed) = Url::parse(url) {
+            if !navigation::is_allowed(&parsed) {
+                return false;
+            }
+            return self.set_committed_url(id, parsed);
+        }
+        false
     }
 
     pub fn set_zoom(&mut self, id: ItemId, zoom: f64) {
@@ -213,8 +387,9 @@ impl Items {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::SpaceId;
+    use crate::ids::{ProfileId, SpaceId};
     use crate::item::SpaceSection;
+    use crate::spaces::{Space, Spaces};
     use proptest::prelude::*;
 
     fn id(n: u128) -> ItemId {
@@ -240,6 +415,132 @@ mod tests {
     }
 
     #[test]
+    fn profile_removal_requires_direct_ownership_and_preserves_unknown_spaces() {
+        let target = ProfileId::from(1);
+        let other = ProfileId::from(2);
+        let target_space = SpaceId::from(10);
+        let other_space = SpaceId::from(11);
+        let unknown_space = SpaceId::from(99);
+        let mut spaces = Spaces::default();
+        for (id, profile) in [(target_space, target), (other_space, other)] {
+            assert!(spaces.insert(Space {
+                id,
+                profile,
+                name: "Space".into(),
+            }));
+        }
+
+        let target_favorite = id(1);
+        let target_tab = id(2);
+        let other_tab = id(3);
+        let unknown_tab = id(4);
+        let target_folder = id(5);
+        let structurally_foreign_child = id(6);
+        let mut items = Items::default();
+        assert!(items.insert_tab(target_favorite, Placement::Favorites { profile: target },));
+        assert!(items.insert_tab(
+            target_tab,
+            Placement::Space {
+                space: target_space,
+                section: SpaceSection::Today,
+            },
+        ));
+        assert!(items.insert_tab(
+            other_tab,
+            Placement::Space {
+                space: other_space,
+                section: SpaceSection::Today,
+            },
+        ));
+        assert!(items.insert_tab(
+            unknown_tab,
+            Placement::Space {
+                space: unknown_space,
+                section: SpaceSection::Today,
+            },
+        ));
+        assert!(items.insert(Item {
+            id: target_folder,
+            parent: None,
+            placement: Placement::Favorites { profile: target },
+            kind: ItemKind::Folder { name: "F".into() },
+        }));
+        assert!(items.insert_tab(
+            structurally_foreign_child,
+            Placement::Favorites { profile: other },
+        ));
+
+        for tab in [target_favorite, target_tab, other_tab, unknown_tab] {
+            assert!(!items.navigate(tab, "https://example.com").is_empty());
+        }
+
+        // Model a damaged internal parent edge. Direct placement ownership,
+        // not ancestry, must decide whether the child is deleted.
+        items
+            .roots
+            .get_mut(&Placement::Favorites { profile: other })
+            .unwrap()
+            .retain(|id| *id != structurally_foreign_child);
+        items
+            .items
+            .get_mut(&structurally_foreign_child)
+            .unwrap()
+            .parent = Some(target_folder);
+        items
+            .children
+            .entry(target_folder)
+            .or_default()
+            .push(structurally_foreign_child);
+
+        let proof = spaces.remove_for_profile(target);
+        let effects = items.remove_for_profile(&proof);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Close {
+                    id: target_favorite,
+                },
+                Effect::Close { id: target_tab },
+            ]
+        );
+        for removed in [target_favorite, target_tab, target_folder] {
+            assert!(items.get(removed).is_none());
+        }
+        for preserved in [other_tab, unknown_tab, structurally_foreign_child] {
+            assert!(items.get(preserved).is_some());
+        }
+        assert_eq!(items.get(structurally_foreign_child).unwrap().parent, None);
+        assert_eq!(
+            items.roots(Placement::Favorites { profile: other }),
+            &[structurally_foreign_child]
+        );
+    }
+
+    #[test]
+    fn item_tree_depth_is_bounded_before_recursive_consumers_see_it() {
+        let mut items = Items::default();
+        let mut parent = folder(&mut items, 1);
+        for depth in 1..=crate::session::MAX_ITEM_TREE_DEPTH {
+            let child = id(depth as u128 + 1);
+            assert!(items.insert(Item {
+                id: child,
+                parent: Some(parent),
+                placement: today(),
+                kind: ItemKind::Folder { name: "F".into() },
+            }));
+            parent = child;
+        }
+
+        assert!(!items.insert(Item {
+            id: id(10_000),
+            parent: Some(parent),
+            placement: today(),
+            kind: ItemKind::Tab(TabState::new()),
+        }));
+        assert_eq!(items.items.len(), crate::session::MAX_ITEM_TREE_DEPTH + 1);
+    }
+
+    #[test]
     fn navigate_creates_view_then_navigates() {
         let mut items = Items::default();
         assert!(items.insert_tab(id(1), today()));
@@ -254,15 +555,82 @@ mod tests {
             }]
         );
         assert!(items.tab(id(1)).unwrap().has_view());
+        assert!(items.tab(id(1)).unwrap().url.is_none());
+        assert!(!items.tab(id(1)).unwrap().loading);
+        assert_eq!(
+            items.pending_navigation(id(1)),
+            Some(NavigationRequestId(1))
+        );
+
+        items.set_committed_url_str(id(1), "https://example.com/");
+        assert_eq!(
+            items.tab(id(1)).unwrap().url.as_ref().map(Url::as_str),
+            Some("https://example.com/")
+        );
+        assert_eq!(items.pending_navigation(id(1)), None);
 
         let fx = items.navigate(id(1), "github.com");
         assert_eq!(
             fx,
             vec![Effect::Navigate {
                 id: id(1),
-                url: "https://github.com/".into()
+                url: "https://github.com/".into(),
+                request: NavigationRequestId(2),
             }]
         );
+        // An intent is never exposed as the page currently displayed.
+        assert_eq!(
+            items.tab(id(1)).unwrap().url.as_ref().map(Url::as_str),
+            Some("https://example.com/")
+        );
+        assert_eq!(
+            items.pending_navigation(id(1)),
+            Some(NavigationRequestId(2))
+        );
+    }
+
+    #[test]
+    fn acknowledged_native_discard_preserves_metadata_without_a_second_close() {
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        assert!(matches!(
+            items.navigate(id(1), "https://example.com/path").as_slice(),
+            [Effect::CreateView { .. }]
+        ));
+        assert!(items.set_committed_url_str(id(1), "https://example.com/path"));
+        items.set_title(id(1), "Kept title".into());
+
+        assert!(items.mark_view_discarded(id(1)));
+        let tab = items.tab(id(1)).unwrap();
+        assert!(!tab.has_view());
+        assert_eq!(tab.lifecycle, Lifecycle::Hibernated);
+        assert_eq!(tab.title, "Kept title");
+        assert_eq!(
+            tab.url.as_ref().map(Url::as_str),
+            Some("https://example.com/path")
+        );
+        assert!(!items.mark_view_discarded(id(1)));
+        assert!(matches!(
+            items.ensure_view(id(1)).as_slice(),
+            [Effect::CreateView { url, .. }] if url == "https://example.com/path"
+        ));
+    }
+
+    #[test]
+    fn only_current_navigation_failure_clears_pending_intent() {
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        items.navigate(id(1), "first.example");
+        let fx = items.navigate(id(1), "second.example");
+        let Effect::Navigate { request, .. } = fx[0] else {
+            panic!("existing view navigation expected");
+        };
+
+        assert!(!items.navigation_failed(id(1), NavigationRequestId(1)));
+        assert_eq!(items.pending_navigation(id(1)), Some(request));
+        assert!(items.navigation_failed(id(1), request));
+        assert_eq!(items.pending_navigation(id(1)), None);
+        assert!(items.tab(id(1)).unwrap().url.is_none());
     }
 
     #[test]

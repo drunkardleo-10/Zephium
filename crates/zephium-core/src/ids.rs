@@ -37,6 +37,26 @@ macro_rules! ulid_id {
             }
         }
 
+        impl serde::Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(&self.to_string())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::parse(&value)
+                    .ok_or_else(|| serde::de::Error::custom(concat!("invalid ", stringify!($name))))
+            }
+        }
+
         impl From<u128> for $name {
             fn from(n: u128) -> Self {
                 Self(Ulid(n))

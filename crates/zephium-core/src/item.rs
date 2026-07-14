@@ -5,6 +5,33 @@ use url::Url;
 
 use crate::ids::{ItemId, ProfileId, SpaceId};
 
+pub const MAX_PAGE_TITLE_CHARS: usize = 512;
+
+/// Page titles and legacy/session titles are equally untrusted. Keep one
+/// canonical sanitizer so restored data cannot bypass the renderer boundary.
+pub fn sanitize_page_title(title: &str) -> String {
+    let title: String = title
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    *c,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(MAX_PAGE_TITLE_CHARS)
+        .collect();
+    if title.is_empty() {
+        "Untitled".into()
+    } else {
+        title
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lifecycle {
     Active,
@@ -12,7 +39,7 @@ pub enum Lifecycle {
     Hibernated,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpaceSection {
     Pinned,
     Today,
@@ -20,7 +47,7 @@ pub enum SpaceSection {
 
 /// Where an item lives: the profile-wide favorites grid, or a section of a
 /// space. Children of a folder share the folder's placement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Placement {
     Favorites {
         profile: ProfileId,

@@ -2,16 +2,26 @@
 //! Restore validates every reference and drops anything dangling: store data
 //! is semi-trusted input.
 
+use std::collections::HashSet;
+
 use url::Url;
 
 use crate::ids::{ItemId, ProfileId, SpaceId};
-use crate::item::{Item, ItemKind, Placement, TabState};
+use crate::item::{sanitize_page_title, Item, ItemKind, Placement, TabState};
 use crate::items::Items;
+use crate::navigation;
 use crate::profiles::{Profile, ProfileKind, Profiles};
 use crate::spaces::{Space, Spaces};
 use crate::split::Pane;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+pub const MAX_SESSION_PROFILES: usize = 64;
+pub const MAX_SESSION_SPACES: usize = 512;
+pub const MAX_SESSION_ITEMS: usize = 1024;
+pub const MAX_SESSION_NAME_CHARS: usize = 256;
+pub const MAX_ITEM_TREE_DEPTH: usize = 64;
+pub const MAX_SPLIT_DEPTH: usize = 64;
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionState {
     pub profiles: Vec<PersistedProfile>,
     pub spaces: Vec<PersistedSpace>,
@@ -22,21 +32,21 @@ pub struct SessionState {
     pub splits: Option<Pane>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedProfile {
     pub id: ProfileId,
     pub name: String,
     pub kind: ProfileKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSpace {
     pub id: SpaceId,
     pub profile: ProfileId,
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedItem {
     pub id: ItemId,
     pub parent: Option<ItemId>,
@@ -44,7 +54,7 @@ pub struct PersistedItem {
     pub kind: PersistedKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PersistedKind {
     Folder {
         name: String,
@@ -104,11 +114,20 @@ pub fn snapshot(
         }
     }
 
+    let active_space = active_space.filter(|s| state.spaces.iter().any(|x| x.id == *s));
     let persisted = |id: ItemId| state.items.iter().any(|i| i.id == id);
-    state.active_space = active_space.filter(|s| state.spaces.iter().any(|x| x.id == *s));
-    state.active_item = active_item.filter(|i| persisted(*i));
+    let in_active_scope = |id: ItemId| {
+        active_space.is_some_and(|space| item_in_space_scope(items, spaces, id, space))
+    };
+    state.active_space = active_space;
+    state.active_item = active_item.filter(|id| persisted(*id) && in_active_scope(*id));
     state.splits = splits
-        .filter(|tree| tree.tabs().iter().all(|id| persisted(*id)))
+        .filter(|tree| {
+            active_space.is_some_and(|space| {
+                valid_split_tree(tree, items, spaces, space)
+                    && tree.tabs().iter().all(|id| persisted(*id))
+            })
+        })
         .cloned();
     state
 }
@@ -154,29 +173,47 @@ pub struct Restored {
     pub splits: Option<Pane>,
 }
 
+/// Rebuilds a persistence snapshot through the same validation path used at
+/// startup. Store adapters use this before writing so dangling/private rows,
+/// dangerous URLs, and oversized legacy display data never land on disk.
+pub fn canonicalize(state: SessionState) -> SessionState {
+    let restored = restore(state);
+    snapshot(
+        &restored.profiles,
+        &restored.spaces,
+        &restored.items,
+        restored.active_space,
+        restored.active_item,
+        restored.splits.as_ref(),
+    )
+}
+
 pub fn restore(state: SessionState) -> Restored {
     let mut profiles = Profiles::default();
-    for p in state.profiles {
+    for p in state.profiles.into_iter().take(MAX_SESSION_PROFILES) {
+        if p.kind == ProfileKind::Incognito {
+            continue;
+        }
         profiles.insert(Profile {
             id: p.id,
-            name: p.name,
+            name: bounded_name(&p.name, "Profile"),
             kind: p.kind,
         });
     }
 
     let mut spaces = Spaces::default();
-    for s in state.spaces {
+    for s in state.spaces.into_iter().take(MAX_SESSION_SPACES) {
         if profiles.get(s.profile).is_some() {
             spaces.insert(Space {
                 id: s.id,
                 profile: s.profile,
-                name: s.name,
+                name: bounded_name(&s.name, "Space"),
             });
         }
     }
 
     let mut items = Items::default();
-    for i in state.items {
+    for i in state.items.into_iter().take(MAX_SESSION_ITEMS) {
         let placement_ok = match i.placement {
             Placement::Favorites { profile } => profiles.get(profile).is_some(),
             Placement::Space { space, .. } => spaces.get(space).is_some(),
@@ -185,11 +222,19 @@ pub fn restore(state: SessionState) -> Restored {
             continue;
         }
         let kind = match i.kind {
-            PersistedKind::Folder { name } => ItemKind::Folder { name },
+            PersistedKind::Folder { name } => ItemKind::Folder {
+                name: bounded_name(&name, "Folder"),
+            },
             PersistedKind::Tab { url, title, zoom } => {
+                let Ok(url) = Url::parse(&url) else {
+                    continue;
+                };
+                if !navigation::is_allowed(&url) {
+                    continue;
+                }
                 let mut tab = TabState::new();
-                tab.url = Url::parse(&url).ok();
-                tab.title = title;
+                tab.url = Some(url);
+                tab.title = sanitize_page_title(&title);
                 tab.zoom = if zoom.is_finite() {
                     zoom.clamp(0.3, 3.0)
                 } else {
@@ -208,11 +253,13 @@ pub fn restore(state: SessionState) -> Restored {
         });
     }
 
-    let active_item = state.active_item.filter(|id| items.tab(*id).is_some());
     let active_space = state.active_space.filter(|id| spaces.get(*id).is_some());
-    let splits = state
-        .splits
-        .filter(|tree| tree.tabs().iter().all(|id| items.tab(*id).is_some()));
+    let active_item = state.active_item.filter(|id| {
+        active_space.is_some_and(|space| item_in_space_scope(&items, &spaces, *id, space))
+    });
+    let splits = state.splits.filter(|tree| {
+        active_space.is_some_and(|space| valid_split_tree(tree, &items, &spaces, space))
+    });
 
     Restored {
         profiles,
@@ -221,6 +268,70 @@ pub fn restore(state: SessionState) -> Restored {
         active_space,
         active_item,
         splits,
+    }
+}
+
+fn item_in_space_scope(items: &Items, spaces: &Spaces, id: ItemId, space: SpaceId) -> bool {
+    let Some(active_space) = spaces.get(space) else {
+        return false;
+    };
+    let Some(item) = items.get(id).filter(|item| item.tab().is_some()) else {
+        return false;
+    };
+    match item.placement {
+        Placement::Favorites { profile } => profile == active_space.profile,
+        Placement::Space {
+            space: item_space, ..
+        } => item_space == space,
+    }
+}
+
+fn valid_split_tree(tree: &Pane, items: &Items, spaces: &Spaces, space: SpaceId) -> bool {
+    fn walk(
+        tree: &Pane,
+        items: &Items,
+        spaces: &Spaces,
+        space: SpaceId,
+        depth: usize,
+        unique: &mut HashSet<ItemId>,
+    ) -> bool {
+        if depth > MAX_SPLIT_DEPTH || unique.len() >= MAX_SESSION_ITEMS {
+            return false;
+        }
+        match tree {
+            Pane::Leaf(id) => item_in_space_scope(items, spaces, *id, space) && unique.insert(*id),
+            Pane::Branch { ratio, a, b, .. } => {
+                ratio.is_finite()
+                    && (0.05..=0.95).contains(ratio)
+                    && walk(a, items, spaces, space, depth + 1, unique)
+                    && walk(b, items, spaces, space, depth + 1, unique)
+            }
+        }
+    }
+
+    walk(tree, items, spaces, space, 0, &mut HashSet::new())
+}
+
+fn bounded_name(value: &str, fallback: &str) -> String {
+    let value: String = value
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    *c,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(MAX_SESSION_NAME_CHARS)
+        .collect();
+    if value.is_empty() {
+        fallback.into()
+    } else {
+        value
     }
 }
 
@@ -254,14 +365,20 @@ mod tests {
         }
     }
 
+    fn navigate_and_commit(items: &mut Items, id: ItemId, input: &str) {
+        assert!(!items.navigate(id, input).is_empty());
+        let url = navigation::classify(input).expect("test URL must be valid");
+        items.set_committed_url(id, url);
+    }
+
     #[test]
     fn snapshot_restore_roundtrips_ids_order_and_splits() {
         let (profiles, spaces, mut items, _profile, space) = seed();
         let (a, b) = (ItemId::from(10), ItemId::from(11));
         items.insert_tab(a, today(space));
         items.insert_tab(b, today(space));
-        items.navigate(a, "example.com");
-        items.navigate(b, "github.com");
+        navigate_and_commit(&mut items, a, "example.com");
+        navigate_and_commit(&mut items, b, "github.com");
         let mut tree = Pane::leaf(a);
         tree.split(a, b, crate::split::Axis::Row, false);
 
@@ -293,7 +410,7 @@ mod tests {
         });
         let fav = ItemId::from(20);
         items.insert_tab(fav, Placement::Favorites { profile: incognito });
-        items.navigate(fav, "example.com");
+        navigate_and_commit(&mut items, fav, "example.com");
         let empty = ItemId::from(21);
         items.insert_tab(empty, today(space));
 
@@ -334,5 +451,229 @@ mod tests {
         assert!(restored.items.get(ItemId::from(10)).is_none());
         assert_eq!(restored.active_item, None);
         assert_eq!(restored.splits, None);
+    }
+
+    #[test]
+    fn canonicalize_filters_private_dangerous_and_hostile_display_data() {
+        let profile = ProfileId::from(1);
+        let private = ProfileId::from(2);
+        let space = SpaceId::from(3);
+        let private_space = SpaceId::from(4);
+        let kept = ItemId::from(10);
+        let dangerous = ItemId::from(11);
+        let private_tab = ItemId::from(12);
+        let state = SessionState {
+            profiles: vec![
+                PersistedProfile {
+                    id: profile,
+                    name: format!("\u{202e}Personal\0{}", "x".repeat(300)),
+                    kind: ProfileKind::Default,
+                },
+                PersistedProfile {
+                    id: private,
+                    name: "Private".into(),
+                    kind: ProfileKind::Incognito,
+                },
+            ],
+            spaces: vec![
+                PersistedSpace {
+                    id: space,
+                    profile,
+                    name: "\u{2066}Work\n".into(),
+                },
+                PersistedSpace {
+                    id: private_space,
+                    profile: private,
+                    name: "Secret".into(),
+                },
+            ],
+            items: vec![
+                PersistedItem {
+                    id: kept,
+                    parent: None,
+                    placement: today(space),
+                    kind: PersistedKind::Tab {
+                        url: "https://example.com/".into(),
+                        title: format!("\u{202e}Example\0{}", "y".repeat(600)),
+                        zoom: f64::INFINITY,
+                    },
+                },
+                PersistedItem {
+                    id: dangerous,
+                    parent: None,
+                    placement: today(space),
+                    kind: PersistedKind::Tab {
+                        url: "file:///etc/passwd".into(),
+                        title: "Local file".into(),
+                        zoom: 1.0,
+                    },
+                },
+                PersistedItem {
+                    id: private_tab,
+                    parent: None,
+                    placement: today(private_space),
+                    kind: PersistedKind::Tab {
+                        url: "https://private.example/".into(),
+                        title: "Private".into(),
+                        zoom: 1.0,
+                    },
+                },
+            ],
+            active_space: Some(private_space),
+            active_item: Some(dangerous),
+            splits: Some(Pane::Branch {
+                axis: crate::split::Axis::Row,
+                ratio: 0.5,
+                a: Box::new(Pane::Leaf(kept)),
+                b: Box::new(Pane::Leaf(kept)),
+            }),
+        };
+
+        let clean = canonicalize(state);
+        assert_eq!(clean.profiles.len(), 1);
+        assert_eq!(clean.spaces.len(), 1);
+        assert_eq!(clean.items.len(), 1);
+        assert_eq!(
+            clean.profiles[0].name.chars().count(),
+            MAX_SESSION_NAME_CHARS
+        );
+        assert!(clean.profiles[0]
+            .name
+            .chars()
+            .all(|c| !c.is_control() && c != '\u{202e}'));
+        assert_eq!(clean.spaces[0].name, "Work");
+        let PersistedKind::Tab { title, zoom, .. } = &clean.items[0].kind else {
+            panic!("kept item changed kind")
+        };
+        assert_eq!(title.chars().count(), crate::item::MAX_PAGE_TITLE_CHARS);
+        assert!(title.chars().all(|c| !c.is_control() && c != '\u{202e}'));
+        assert_eq!(*zoom, 1.0);
+        assert_eq!(clean.active_space, None);
+        assert_eq!(clean.active_item, None);
+        assert_eq!(
+            clean.splits, None,
+            "duplicate split leaves must be rejected"
+        );
+    }
+
+    #[test]
+    fn focus_and_splits_cannot_cross_the_active_space_or_profile() {
+        let (mut profiles, mut spaces, mut items, profile, active_space) = seed();
+        let sibling_space = SpaceId::from(3);
+        spaces.insert(Space {
+            id: sibling_space,
+            profile,
+            name: "Sibling".into(),
+        });
+        let foreign_profile = ProfileId::from(4);
+        let foreign_space = SpaceId::from(5);
+        profiles.insert(Profile {
+            id: foreign_profile,
+            name: "Foreign".into(),
+            kind: ProfileKind::Named,
+        });
+        spaces.insert(Space {
+            id: foreign_space,
+            profile: foreign_profile,
+            name: "Foreign".into(),
+        });
+
+        let local = ItemId::from(10);
+        let sibling = ItemId::from(11);
+        let foreign = ItemId::from(12);
+        let favorite = ItemId::from(13);
+        let foreign_favorite = ItemId::from(14);
+        for (id, placement, url) in [
+            (local, today(active_space), "local.example"),
+            (sibling, today(sibling_space), "sibling.example"),
+            (foreign, today(foreign_space), "foreign.example"),
+            (
+                favorite,
+                Placement::Favorites { profile },
+                "favorite.example",
+            ),
+            (
+                foreign_favorite,
+                Placement::Favorites {
+                    profile: foreign_profile,
+                },
+                "foreign-favorite.example",
+            ),
+        ] {
+            assert!(items.insert_tab(id, placement));
+            navigate_and_commit(&mut items, id, url);
+        }
+
+        // A same-profile favorite is intentionally available from every
+        // space in that profile, but a tab from a sibling space is not.
+        let favorite_state = snapshot(
+            &profiles,
+            &spaces,
+            &items,
+            Some(active_space),
+            Some(favorite),
+            Some(&Pane::Leaf(favorite)),
+        );
+        assert_eq!(favorite_state.active_item, Some(favorite));
+        assert_eq!(favorite_state.splits, Some(Pane::Leaf(favorite)));
+
+        for attacker in [sibling, foreign, foreign_favorite] {
+            let state = snapshot(
+                &profiles,
+                &spaces,
+                &items,
+                Some(active_space),
+                Some(attacker),
+                Some(&Pane::Branch {
+                    axis: crate::split::Axis::Row,
+                    ratio: 0.5,
+                    a: Box::new(Pane::Leaf(local)),
+                    b: Box::new(Pane::Leaf(attacker)),
+                }),
+            );
+            assert_eq!(state.active_item, None);
+            assert_eq!(state.splits, None);
+
+            // Restore must independently reject equivalent forged store
+            // references; it cannot rely on snapshots being the producer.
+            let mut forged = snapshot(
+                &profiles,
+                &spaces,
+                &items,
+                Some(active_space),
+                Some(local),
+                None,
+            );
+            forged.active_item = Some(attacker);
+            forged.splits = Some(Pane::Branch {
+                axis: crate::split::Axis::Row,
+                ratio: 0.5,
+                a: Box::new(Pane::Leaf(local)),
+                b: Box::new(Pane::Leaf(attacker)),
+            });
+            let restored = restore(forged);
+            assert_eq!(restored.active_space, Some(active_space));
+            assert_eq!(restored.active_item, None);
+            assert_eq!(restored.splits, None);
+        }
+    }
+
+    #[test]
+    fn restore_rejects_out_of_range_split_geometry() {
+        let (profiles, spaces, mut items, _profile, space) = seed();
+        let (a, b) = (ItemId::from(10), ItemId::from(11));
+        items.insert_tab(a, today(space));
+        items.insert_tab(b, today(space));
+        navigate_and_commit(&mut items, a, "example.com");
+        navigate_and_commit(&mut items, b, "example.org");
+        let mut state = snapshot(&profiles, &spaces, &items, Some(space), Some(a), None);
+        state.splits = Some(Pane::Branch {
+            axis: crate::split::Axis::Col,
+            ratio: -10.0,
+            a: Box::new(Pane::Leaf(a)),
+            b: Box::new(Pane::Leaf(b)),
+        });
+
+        assert_eq!(restore(state).splits, None);
     }
 }

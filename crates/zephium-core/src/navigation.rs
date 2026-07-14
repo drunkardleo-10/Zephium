@@ -1,40 +1,104 @@
 use url::Url;
 
-const ALLOWED_SCHEMES: &[&str] = &["http", "https", "about"];
 const SEARCH_BASE: &str = "https://duckduckgo.com/";
+const MAX_URL_BYTES: usize = 8 * 1024;
+const RESERVED_HOSTS: &[&str] = &["asset.localhost", "ipc.localhost", "tauri.localhost"];
 
-/// Turn raw omnibox text into a URL: explicit URLs pass through, bare hosts get
-/// `https://`, everything else becomes a search query.
-pub fn classify(input: &str) -> Url {
+/// Turn raw omnibox text into an allowed URL. Explicit but forbidden or
+/// malformed URL-like input is rejected instead of being sent to the search
+/// provider: a local file path or password-bearing URL must not become a
+/// network query merely because native navigation policy blocks it.
+pub fn classify(input: &str) -> Option<Url> {
     let s = input.trim();
     if s.is_empty() {
-        return Url::parse("about:blank").expect("static url");
+        return Url::parse("about:blank").ok();
     }
-    if s.contains("://") {
-        if let Ok(url) = Url::parse(s) {
-            return url;
-        }
+    match classify_input(s) {
+        InputKind::Direct(url) | InputKind::Search(url) => Some(url),
+        InputKind::Rejected => None,
     }
-    if looks_like_host(s) {
-        if let Ok(url) = Url::parse(&format!("https://{s}")) {
-            return url;
-        }
-    }
-    let mut url = Url::parse(SEARCH_BASE).expect("static url");
-    url.query_pairs_mut().append_pair("q", s);
-    url
 }
 
 /// Whether the omnibox input will be treated as a web search rather than a URL.
 pub fn is_query(input: &str) -> bool {
     let s = input.trim();
-    !s.is_empty() && !s.contains("://") && !looks_like_host(s)
+    !s.is_empty() && matches!(classify_input(s), InputKind::Search(_))
+}
+
+enum InputKind {
+    Direct(Url),
+    Search(Url),
+    Rejected,
+}
+
+fn classify_input(s: &str) -> InputKind {
+    // Path-shaped input is commonly pasted into an omnibox by mistake. Never
+    // disclose it to a remote search provider. Explicit file: URLs are caught
+    // by the absolute-URL branch below; this handles native paths that the URL
+    // parser intentionally does not recognize as URLs.
+    if looks_like_local_path(s) {
+        return InputKind::Rejected;
+    }
+    if looks_like_host(s) {
+        return Url::parse(&format!("https://{s}"))
+            .ok()
+            .filter(is_allowed)
+            .map_or(InputKind::Rejected, InputKind::Direct);
+    }
+
+    // A syntactically absolute input expresses an intent to navigate, not to
+    // search. This includes schemes without `//` such as file:, data: and
+    // javascript:. Reject every disallowed absolute URL without exfiltrating
+    // its original text to SEARCH_BASE. A malformed `scheme://` is treated the
+    // same way because it may still contain credentials or a local path.
+    if s.contains("://") || Url::parse(s).is_ok() {
+        return Url::parse(s)
+            .ok()
+            .filter(is_allowed)
+            .map_or(InputKind::Rejected, InputKind::Direct);
+    }
+
+    let Ok(mut url) = Url::parse(SEARCH_BASE) else {
+        return InputKind::Rejected;
+    };
+    url.query_pairs_mut().append_pair("q", s);
+    if is_allowed(&url) {
+        InputKind::Search(url)
+    } else {
+        // Percent-encoding can expand an otherwise bounded omnibox string.
+        // Apply the native URL ceiling to the final request so core never
+        // commits a URL that the engine will reject later.
+        InputKind::Rejected
+    }
+}
+
+fn looks_like_local_path(s: &str) -> bool {
+    s.starts_with('/')
+        || s.starts_with("~/")
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with('\\')
+        || matches!(
+            s.as_bytes(),
+            [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic()
+        )
 }
 
 /// Whether a URL may commit. Blocks file, javascript, internal and external app
-/// schemes; only http/https/about pass.
+/// schemes; only http(s) and exact `about:blank` pass. Internal pseudo-hosts
+/// and credentials are rejected even if a platform happens to expose them as
+/// http(s).
 pub fn is_allowed(url: &Url) -> bool {
-    ALLOWED_SCHEMES.contains(&url.scheme())
+    if url.as_str() == "about:blank" {
+        return true;
+    }
+    matches!(url.scheme(), "http" | "https")
+        && url.as_str().len() <= MAX_URL_BYTES
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| !RESERVED_HOSTS.contains(&host))
 }
 
 /// Gate for page-initiated navigations (the engine hands us a resolved URL).
@@ -69,14 +133,26 @@ mod tests {
 
     #[test]
     fn bare_host_gets_https() {
-        assert_eq!(classify("example.com").as_str(), "https://example.com/");
-        assert_eq!(classify("  github.com  ").as_str(), "https://github.com/");
-        assert_eq!(classify("sub.example.com:8080/x").scheme(), "https");
+        assert_eq!(
+            classify("example.com").unwrap().as_str(),
+            "https://example.com/"
+        );
+        assert_eq!(
+            classify("  github.com  ").unwrap().as_str(),
+            "https://github.com/"
+        );
+        assert_eq!(
+            classify("sub.example.com:8080/x").unwrap().scheme(),
+            "https"
+        );
     }
 
     #[test]
     fn explicit_url_passes_through() {
-        assert_eq!(classify("https://x.com/a").as_str(), "https://x.com/a");
+        assert_eq!(
+            classify("https://x.com/a").unwrap().as_str(),
+            "https://x.com/a"
+        );
     }
 
     #[test]
@@ -84,20 +160,40 @@ mod tests {
         assert!(is_query("hello world"));
         assert!(!is_query("example.com"));
         assert!(!is_query("https://x.com/a"));
+        assert!(!is_query("file:///etc/passwd"));
+        assert!(!is_query("tauri.localhost/index.html"));
         assert!(!is_query(""));
     }
 
     #[test]
     fn text_becomes_search() {
-        let u = classify("hello world");
+        let u = classify("hello world").unwrap();
         assert_eq!(u.host_str(), Some("duckduckgo.com"));
         assert_eq!(u.query(), Some("q=hello+world"));
+    }
+
+    #[test]
+    fn percent_expanded_search_must_fit_the_native_url_ceiling() {
+        assert!(classify(&"x".repeat(MAX_URL_BYTES)).is_none());
+        assert!(classify(&"💣".repeat(MAX_URL_BYTES / 4)).is_none());
+
+        let accepted = classify(&"x".repeat(1024)).expect("small search");
+        assert!(accepted.as_str().len() <= MAX_URL_BYTES);
+        assert!(is_allowed(&accepted));
     }
 
     #[test]
     fn scheme_gate_blocks_dangerous() {
         assert!(!is_allowed(&Url::parse("javascript:alert(1)").unwrap()));
         assert!(!is_allowed(&Url::parse("file:///etc/passwd").unwrap()));
+        assert!(!is_allowed(&Url::parse("about:config").unwrap()));
+        assert!(!is_allowed(&Url::parse("about:srcdoc").unwrap()));
+        assert!(!is_allowed(
+            &Url::parse("https://user:secret@example.com/").unwrap()
+        ));
+        assert!(!is_allowed(
+            &Url::parse("http://tauri.localhost/index.html").unwrap()
+        ));
         assert!(is_allowed(&Url::parse("https://example.com").unwrap()));
         assert!(is_allowed(&Url::parse("about:blank").unwrap()));
         assert!(is_allowed_str("https://x.com/"));
@@ -106,30 +202,50 @@ mod tests {
     }
 
     #[test]
-    fn omnibox_routes_dangerous_to_search() {
-        let u = classify("javascript:alert(1)");
-        assert!(is_allowed(&u));
-        assert_eq!(u.host_str(), Some("duckduckgo.com"));
+    fn omnibox_rejects_explicit_forbidden_targets_without_searching() {
+        for input in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,secret",
+            "about:config",
+            "tauri.localhost/index.html",
+            "https://user:secret@example.com/",
+            "https://",
+            "/home/alice/private.txt",
+            "~/private.txt",
+            "./private.txt",
+            "../private.txt",
+            r"C:\Users\alice\private.txt",
+            r"C:/Users/alice/private.txt",
+            r"\\server\share\private.txt",
+        ] {
+            assert!(classify(input).is_none(), "accepted {input}");
+            assert!(!is_query(input), "searched {input}");
+        }
     }
 
     #[test]
     fn userinfo_input_searches_instead_of_spoofing() {
         assert_eq!(
-            classify("paypal.com@evil.com").host_str(),
+            classify("paypal.com@evil.com").unwrap().host_str(),
             Some("duckduckgo.com")
         );
         assert_eq!(
-            classify("someone@example.com").host_str(),
+            classify("someone@example.com").unwrap().host_str(),
             Some("duckduckgo.com")
         );
         assert!(is_query("paypal.com@evil.com"));
+        assert!(classify("https://user:secret@example.com/").is_none());
     }
 
     #[test]
     fn ipv4_literals_navigate() {
-        assert_eq!(classify("192.168.1.1").as_str(), "https://192.168.1.1/");
         assert_eq!(
-            classify("192.168.1.1:8080/admin").as_str(),
+            classify("192.168.1.1").unwrap().as_str(),
+            "https://192.168.1.1/"
+        );
+        assert_eq!(
+            classify("192.168.1.1:8080/admin").unwrap().as_str(),
             "https://192.168.1.1:8080/admin"
         );
         // not a valid address: searched, not navigated
