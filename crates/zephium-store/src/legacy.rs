@@ -4,17 +4,23 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 
 use zephium_core::ids::{ItemId, ProfileId, SpaceId};
-use zephium_core::item::{Placement, SpaceSection};
+use zephium_core::item::{sanitize_page_title, Placement, SpaceSection};
+use zephium_core::navigation;
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
-    PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
+    self, PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
+    MAX_SESSION_ITEMS, MAX_SESSION_PROFILES, MAX_SESSION_SPACES,
 };
 
+use crate::bounded_json;
+use crate::hub::{MAX_NAME_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES};
 use crate::pane::{self, StoredPane};
+
+const MAX_LEGACY_SESSION_BYTES: i64 = 16 * 1024 * 1024;
 
 pub struct LegacyData {
     pub session: SessionState,
@@ -22,9 +28,23 @@ pub struct LegacyData {
 }
 
 pub fn read(path: &Path) -> Option<LegacyData> {
-    let conn = Connection::open(path).ok()?;
+    let parent = std::fs::canonicalize(path.parent()?).ok()?;
+    let path = parent.join(path.file_name()?);
+    if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .ok()?;
     let json: Option<String> = conn
-        .query_row("SELECT data FROM session WHERE id = 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data END
+             FROM session WHERE id = 1",
+            [MAX_LEGACY_SESSION_BYTES],
+            |r| r.get(0),
+        )
         .optional()
         .ok()?;
     let session = json.and_then(|j| decode(&j))?;
@@ -33,21 +53,61 @@ pub fn read(path: &Path) -> Option<LegacyData> {
 }
 
 fn read_visits(conn: &Connection) -> Vec<(String, String, i64)> {
-    let Ok(mut stmt) = conn.prepare("SELECT url, title, visited_at FROM history ORDER BY id")
-    else {
+    read_visits_with_budget(conn, crate::hub::MAX_HISTORY_BYTES as usize)
+}
+
+fn read_visits_with_budget(conn: &Connection, maximum_bytes: usize) -> Vec<(String, String, i64)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT url, title, visited_at FROM history
+         WHERE length(CAST(url AS BLOB)) <= 8192
+           AND length(CAST(title AS BLOB)) <= 4096
+         ORDER BY visited_at DESC, id DESC
+         LIMIT 50000",
+    ) else {
         return Vec::new();
     };
-    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+    let Ok(rows) = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    let mut retained_bytes = 0_usize;
+    let mut visits = Vec::new();
+    for row in rows {
+        let Ok((url, title, at)) = row else {
+            continue;
+        };
+        if !navigation::is_allowed_str(&url) {
+            continue;
+        }
+        let title = sanitize_page_title(&title);
+        let row_bytes = url.len().saturating_add(title.len());
+        if retained_bytes.saturating_add(row_bytes) > maximum_bytes {
+            // Rows are newest-first. Keep a deterministic bounded recent
+            // prefix instead of retaining up to ~600 MiB of legacy strings
+            // before the normal history quota gets a chance to run.
+            break;
+        }
+        retained_bytes += row_bytes;
+        visits.push((url, title, at));
+    }
+    visits.reverse();
+    visits
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredSession {
-    #[allow(dead_code)]
     v: u32,
+    #[serde(deserialize_with = "deserialize_stored_profiles")]
     profiles: Vec<StoredProfile>,
+    #[serde(deserialize_with = "deserialize_stored_spaces")]
     spaces: Vec<StoredSpace>,
+    #[serde(deserialize_with = "deserialize_stored_items")]
     items: Vec<StoredItem>,
     active_space: Option<String>,
     active_item: Option<String>,
@@ -55,6 +115,7 @@ struct StoredSession {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredProfile {
     id: String,
     name: String,
@@ -62,6 +123,7 @@ struct StoredProfile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredSpace {
     id: String,
     profile: String,
@@ -69,6 +131,7 @@ struct StoredSpace {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredItem {
     id: String,
     parent: Option<String>,
@@ -81,31 +144,113 @@ struct StoredItem {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V1Session {
+    #[serde(deserialize_with = "deserialize_v1_tabs")]
     tabs: Vec<V1Tab>,
     active: usize,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct V1Tab {
     url: String,
     title: String,
 }
 
 fn decode(json: &str) -> Option<SessionState> {
-    if let Ok(stored) = serde_json::from_str::<StoredSession>(json) {
-        return Some(decode_v2(stored));
-    }
-    serde_json::from_str::<V1Session>(json).ok().map(decode_v1)
+    let json = bounded_json::preflight(json).ok()?;
+    let state = if let Ok(stored) = json.deserialize::<StoredSession>() {
+        decode_v2(stored)?
+    } else {
+        decode_v1(json.deserialize::<V1Session>().ok()?)?
+    };
+    // Import is the last point at which the exact source still exists. Never
+    // delete it after silently normalizing invalid URLs, dangling references,
+    // duplicate IDs, malformed focus, or hostile display data.
+    (session::canonicalize(state.clone()) == state).then_some(state)
 }
 
-fn decode_v2(stored: StoredSession) -> SessionState {
+fn deserialize_stored_profiles<'de, D>(deserializer: D) -> Result<Vec<StoredProfile>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_PROFILES, |profile| {
+        profile.id.len() <= 26
+            && profile.name.len() <= MAX_NAME_BYTES
+            && profile.kind.len() <= "default".len()
+    })
+}
+
+fn deserialize_stored_spaces<'de, D>(deserializer: D) -> Result<Vec<StoredSpace>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_SPACES, |space| {
+        space.id.len() <= 26 && space.profile.len() <= 26 && space.name.len() <= MAX_NAME_BYTES
+    })
+}
+
+fn deserialize_stored_items<'de, D>(deserializer: D) -> Result<Vec<StoredItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_ITEMS, |item| {
+        item.id.len() <= 26
+            && item.parent.as_ref().is_none_or(|value| value.len() <= 26)
+            && item.profile.as_ref().is_none_or(|value| value.len() <= 26)
+            && item.space.as_ref().is_none_or(|value| value.len() <= 26)
+            && item
+                .section
+                .as_ref()
+                .is_none_or(|value| value.len() <= "pinned".len())
+            && item
+                .folder
+                .as_ref()
+                .is_none_or(|value| value.len() <= MAX_NAME_BYTES)
+            && item
+                .url
+                .as_ref()
+                .is_none_or(|value| value.len() <= MAX_URL_BYTES)
+            && item
+                .title
+                .as_ref()
+                .is_none_or(|value| value.len() <= MAX_TITLE_BYTES)
+    })
+}
+
+fn deserialize_v1_tabs<'de, D>(deserializer: D) -> Result<Vec<V1Tab>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_ITEMS, |tab| {
+        tab.url.len() <= MAX_URL_BYTES && tab.title.len() <= MAX_TITLE_BYTES
+    })
+}
+
+fn decode_v2(stored: StoredSession) -> Option<SessionState> {
+    if stored.v != 2
+        || stored.profiles.len() > MAX_SESSION_PROFILES
+        || stored.spaces.len() > MAX_SESSION_SPACES
+        || stored.items.len() > MAX_SESSION_ITEMS
+        || stored
+            .active_space
+            .as_ref()
+            .is_some_and(|value| value.len() > 26)
+        || stored
+            .active_item
+            .as_ref()
+            .is_some_and(|value| value.len() > 26)
+    {
+        return None;
+    }
     let profiles = stored
         .profiles
         .into_iter()
-        .filter_map(|p| {
+        .map(|p| {
+            let id = ProfileId::parse(&p.id).filter(|id| id.to_string() == p.id)?;
             Some(PersistedProfile {
-                id: ProfileId::parse(&p.id)?,
+                id,
                 name: p.name,
                 kind: match p.kind.as_str() {
                     "default" => ProfileKind::Default,
@@ -114,36 +259,55 @@ fn decode_v2(stored: StoredSession) -> SessionState {
                 },
             })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     let spaces = stored
         .spaces
         .into_iter()
-        .filter_map(|s| {
+        .map(|s| {
+            let id = SpaceId::parse(&s.id).filter(|id| id.to_string() == s.id)?;
+            let profile = ProfileId::parse(&s.profile).filter(|id| id.to_string() == s.profile)?;
             Some(PersistedSpace {
-                id: SpaceId::parse(&s.id)?,
-                profile: ProfileId::parse(&s.profile)?,
+                id,
+                profile,
                 name: s.name,
             })
         })
-        .collect();
-    let items = stored.items.into_iter().filter_map(decode_item).collect();
-    SessionState {
+        .collect::<Option<Vec<_>>>()?;
+    let items = stored
+        .items
+        .into_iter()
+        .map(decode_item)
+        .collect::<Option<Vec<_>>>()?;
+    let active_space = match stored.active_space {
+        Some(raw) => Some(SpaceId::parse(&raw).filter(|id| id.to_string() == raw)?),
+        None => None,
+    };
+    let active_item = match stored.active_item {
+        Some(raw) => Some(ItemId::parse(&raw).filter(|id| id.to_string() == raw)?),
+        None => None,
+    };
+    let splits = match stored.splits {
+        Some(stored) => Some(pane::decode(&stored)?),
+        None => None,
+    };
+    Some(SessionState {
         profiles,
         spaces,
         items,
-        active_space: stored.active_space.and_then(|s| SpaceId::parse(&s)),
-        active_item: stored.active_item.and_then(|s| ItemId::parse(&s)),
-        splits: stored.splits.and_then(|p| pane::decode(&p)),
-    }
+        active_space,
+        active_item,
+        splits,
+    })
 }
 
 fn decode_item(item: StoredItem) -> Option<PersistedItem> {
     let placement = match (&item.profile, &item.space, &item.section) {
-        (Some(profile), None, None) => Placement::Favorites {
-            profile: ProfileId::parse(profile)?,
-        },
+        (Some(profile), None, None) => {
+            let profile = ProfileId::parse(profile).filter(|id| id.to_string() == *profile)?;
+            Placement::Favorites { profile }
+        }
         (None, Some(space), Some(section)) => Placement::Space {
-            space: SpaceId::parse(space)?,
+            space: SpaceId::parse(space).filter(|id| id.to_string() == *space)?,
             section: match section.as_str() {
                 "pinned" => SpaceSection::Pinned,
                 "today" => SpaceSection::Today,
@@ -162,11 +326,12 @@ fn decode_item(item: StoredItem) -> Option<PersistedItem> {
         _ => return None,
     };
     let parent = match item.parent {
-        Some(p) => Some(ItemId::parse(&p)?),
+        Some(p) => Some(ItemId::parse(&p).filter(|id| id.to_string() == p)?),
         None => None,
     };
+    let id = ItemId::parse(&item.id).filter(|id| id.to_string() == item.id)?;
     Some(PersistedItem {
-        id: ItemId::parse(&item.id)?,
+        id,
         parent,
         placement,
         kind,
@@ -175,7 +340,13 @@ fn decode_item(item: StoredItem) -> Option<PersistedItem> {
 
 /// v1 blobs predate profiles: mint a default profile/space and turn the flat
 /// tabs into Today items.
-fn decode_v1(v1: V1Session) -> SessionState {
+fn decode_v1(v1: V1Session) -> Option<SessionState> {
+    if v1.tabs.len() > MAX_SESSION_ITEMS
+        || (v1.tabs.is_empty() && v1.active != 0)
+        || (!v1.tabs.is_empty() && v1.active >= v1.tabs.len())
+    {
+        return None;
+    }
     let profile = ProfileId::generate();
     let space = SpaceId::generate();
     let items: Vec<PersistedItem> = v1
@@ -196,7 +367,7 @@ fn decode_v1(v1: V1Session) -> SessionState {
         })
         .collect();
     let active_item = items.get(v1.active).or(items.first()).map(|i| i.id);
-    SessionState {
+    Some(SessionState {
         profiles: vec![PersistedProfile {
             id: profile,
             name: "Personal".into(),
@@ -211,7 +382,7 @@ fn decode_v1(v1: V1Session) -> SessionState {
         active_space: Some(space),
         active_item,
         splits: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -230,11 +401,113 @@ mod tests {
     }
 
     #[test]
-    fn v2_blob_corrupt_rows_are_dropped() {
+    fn v2_blob_corrupt_rows_reject_the_entire_import() {
         let json = r#"{"v":2,
             "profiles":[{"id":"not-a-ulid","name":"X","kind":"default"}],
             "spaces":[],"items":[],"active_space":null,"active_item":null,"splits":null}"#;
-        let session = decode(json).unwrap();
-        assert!(session.profiles.is_empty());
+        assert!(decode(json).is_none());
+    }
+
+    #[test]
+    fn oversized_legacy_snapshot_is_rejected_before_materialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("default.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE history (
+                 id INTEGER PRIMARY KEY, url TEXT, title TEXT, visited_at INTEGER
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session(id, data)
+             VALUES (1, CAST(zeroblob(?1) AS TEXT))",
+            [MAX_LEGACY_SESSION_BYTES + 1],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(read(&path).is_none());
+    }
+
+    #[test]
+    fn legacy_history_filters_urls_and_sanitizes_titles() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                 id INTEGER PRIMARY KEY, url TEXT, title TEXT, visited_at INTEGER
+             );
+             INSERT INTO history VALUES
+                 (1, 'file:///etc/passwd', 'Local', 1),
+                 (2, 'https://example.com/', char(8238) || 'Example' || char(10), 2);",
+        )
+        .unwrap();
+
+        let visits = read_visits(&conn);
+        assert_eq!(
+            visits,
+            vec![("https://example.com/".into(), "Example".into(), 2)]
+        );
+    }
+
+    #[test]
+    fn legacy_history_retention_has_an_aggregate_byte_budget() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                 id INTEGER PRIMARY KEY, url TEXT, title TEXT, visited_at INTEGER
+             );
+             INSERT INTO history VALUES
+                 (1, 'https://example.com/older', 'Old', 1),
+                 (2, 'https://example.com/newest', 'New', 2);",
+        )
+        .unwrap();
+        let budget = "https://example.com/newest".len() + "New".len();
+        assert_eq!(
+            read_visits_with_budget(&conn, budget),
+            vec![("https://example.com/newest".into(), "New".into(), 2)]
+        );
+    }
+
+    #[test]
+    fn v1_item_and_focus_limits_are_fail_closed() {
+        let too_many = V1Session {
+            tabs: (0..=MAX_SESSION_ITEMS)
+                .map(|index| V1Tab {
+                    url: format!("https://example.com/{index}"),
+                    title: "Tab".into(),
+                })
+                .collect(),
+            active: 0,
+        };
+        assert!(decode_v1(too_many).is_none());
+        assert!(decode_v1(V1Session {
+            tabs: vec![V1Tab {
+                url: "https://example.com/".into(),
+                title: "Tab".into(),
+            }],
+            active: 1,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn legacy_collection_limit_is_enforced_during_deserialization() {
+        let tab = r#"{"url":"https://example.com/","title":"Tab"}"#;
+        let tabs = vec![tab; MAX_SESSION_ITEMS + 1].join(",");
+        let json = format!(r#"{{"tabs":[{tabs}],"active":0}}"#);
+        assert!(decode(&json).is_none());
+    }
+
+    #[test]
+    fn near_legacy_cap_oversized_string_is_rejected_by_lexical_preflight() {
+        let title = "x".repeat(MAX_LEGACY_SESSION_BYTES as usize - 1024);
+        let json = format!(
+            r#"{{"tabs":[{{"url":"https://example.com/","title":"{title}"}}],"active":0}}"#
+        );
+        assert!(json.len() < MAX_LEGACY_SESSION_BYTES as usize);
+        assert!(json.len() > MAX_LEGACY_SESSION_BYTES as usize - 2048);
+        assert!(decode(&json).is_none());
     }
 }
