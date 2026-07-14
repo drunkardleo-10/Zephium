@@ -1,0 +1,127 @@
+# Vendored Wry provenance
+
+This directory is Wry 0.55.1 from the immutable upstream revision
+`fe9e7fb73bb6ad2637cb0b4b1685676c86970aeb`:
+
+<https://github.com/tauri-apps/wry/commit/fe9e7fb73bb6ad2637cb0b4b1685676c86970aeb>
+
+`FORK.toml` is the machine-readable companion to this document. This is a
+reviewed native security adapter under active hardening, not an unmodified copy
+of the crates.io package and not yet an externally audited production boundary.
+Its security-relevant deltas currently enforce these invariants:
+
+- Permission callbacks are available on every supported platform and unhandled
+  permission requests fail closed.
+- No script-message/IPC bridge is registered when the embedder supplied no
+  handler.
+- GTK regular and ephemeral `WebContext`s opt into cross-site process swapping,
+  enable the Web-process sandbox, and verify both results before a WebView is
+  constructed. Construction is fallible when either postcondition cannot be
+  proved; it never asserts in a release process. `try_new` reports this at
+  context creation, while source-compatible `new` is revalidated by
+  `build_gtk` before WebView/WebProcess creation. Incognito related views must
+  use the exact supplied ephemeral context.
+- WebView2 construction exposes a pre-controller hardening hook and tracks
+  partially constructed controller ownership so failures remain cleanable.
+  `native_cleanup.rs` models the ordered, retryable ownership debt. The Windows
+  adapter keeps parent-subclass state, controller `Close`, and Wry-owned HWND
+  destruction explicit; successful steps are terminal. Incomplete COM/HWND
+  debt is transferred immediately into a bounded apartment-local registry.
+  The public error carries only a `Send + Sync` incident identifier and
+  failure description, never an apartment-bound native object.
+- `native_bounds.rs` bounds untrusted native title, URL, version, and filename
+  strings before copying them into Rust. Privileged IPC accepts only primitive
+  strings up to 64 KiB (checked in both native units and UTF-8 bytes) on all
+  three desktop engines; non-string and oversized messages are dropped before
+  a Rust payload allocation. On WebKitGTK, the native message handler exists
+  only in an isolated script world. A page-world DOM bridge feeds an isolated
+  listener that checks both ceilings before asking WebKit to materialize the
+  native `GBytes`, so hostile page code cannot bypass the pre-allocation
+  check through `window.webkit.messageHandlers`. Privileged custom-protocol requests additionally
+  admit at most a 64-byte method, 128 headers / 64 KiB of aggregate header
+  bytes (with 1 KiB names and 16 KiB values), and a 64 KiB body. Native engines
+  may materialize their own request/string objects before exposing a length;
+  the adapter prevents a second attacker-sized Rust allocation and stops body
+  streaming at the limit. `native_admission.rs` additionally allows at most 32
+  asynchronous custom-protocol requests per WebView (per verified WebKitGTK
+  context on Linux). Every accepted request carries a unique non-cloneable
+  RAII permit through response, cancellation, timeout, or teardown; overflow
+  completes synchronously with an empty 503 response and never acquires a
+  native deferral. Teardown seals and drains accounting, and late permit drops
+  cannot underflow or reopen it. Zephium's page-evaluation integration accepts
+  primitive-only contracts: fixed-size discard and favicon results and one
+  explicitly bounded HTML string. Page objects and attacker-controlled object
+  serialization are not accepted as host protocol messages.
+- A successfully constructed macOS view retains its proven host `NSWindow` and
+  updates that ownership only after successful reparenting. The source-compatible
+  `ns_window()` API therefore does not manufacture a static borrow or unwrap a
+  transiently detached AppKit relationship.
+- WebKit native file, credential/client-certificate, media, popup, navigation,
+  download, drag/drop, and custom-protocol callbacks fail closed on malformed
+  optional native values. Standard TLS server-trust challenges retain the
+  system's default certificate validation and never accept a custom credential.
+  Page-facing callbacks do not use panic-based control flow.
+- WebView2 construction requires both the basic-authentication and
+  client-certificate event interfaces and registers deny handlers before the
+  initial navigation. Basic authentication is cancelled; certificate
+  selection is cancelled and marked handled, so neither can fall back to an
+  unowned native dialog. It also requires `ICoreWebView2_25` and cancels plus
+  suppresses `SaveAsUIShowing`, closing the independent native Save As surface
+  that context-menu, accelerator, PDF-toolbar, and download policy do not
+  comprehensively cover.
+- WebView2 and WebKitGTK page-driven close requests default to a no-op.
+  Destroying Wry's child container/widget is an explicit builder policy for
+  embedders that can also reconcile native and logical-view ownership; a page
+  cannot otherwise leave the host tracking a stale HWND or GTK widget.
+- Raw WebKit link previews, Picture-in-Picture, and WebKitGTK fullscreen are
+  disabled until the embedder has an origin/gesture-labelled native-surface
+  broker. A macOS file drag with no explicit handler is rejected before Wry
+  reads pasteboard entries; handler-enabled drags cap both file count and each
+  native file-URL string before allocating Rust paths.
+- Asynchronous custom-protocol responders are structurally `Send`; the fork has
+  no blanket unsafe `Send` implementation for them. Apartment/main-thread-only
+  WKWebView and WebView2 objects remain in UI-thread registries while workers
+  carry only opaque tokens and owned HTTP responses. Dropped responders complete
+  exactly once with an internal-error response instead of leaking a native
+  request or deferral.
+- WebView2 validates every COM `IStream::Read` byte count against the supplied
+  buffer before budget arithmetic or slicing. Its trusted print method calls
+  `ICoreWebView2_16::ShowPrintUI` directly instead of evaluating the same
+  page-controlled scripted-print primitives an embedder may deny at document
+  creation. Disabling browser accelerator keys is a construction postcondition:
+  the fork requires `ICoreWebView2Settings3`, applies the setting, and reads it
+  back before an untrusted page can load.
+
+The standalone `Cargo.lock` is intentional. Fork CI invokes this manifest with
+`--locked` so it cannot silently resolve a graph different from the reviewed
+one. Application builds still use the workspace lockfile at the repository
+root.
+
+The Windows patch adds a pre-controller environment-observation hook so the
+embedder can retain the exact environment, process HANDLE, and Environment5
+exit registration even when a later controller initialization step fails. A
+construction guard attempts to remove any installed parent subclass, close a
+partially initialized controller, and destroy its child HWND on error. Each
+  step can be retried independently; incomplete work remains typed cleanup
+  debt in the creating COM apartment and the error exposes a send-safe incident
+  descriptor rather than describing the native state as closed. Callback state takes a temporary strong
+reference on entry so reentrant removal cannot free it while USER32 is still
+executing the callback. Wry no longer injects/registers its web-message IPC
+surface when no IPC handler was supplied, malformed WebMessage source data is
+dropped instead of panicking, and a popup callback with a missing native sender
+is denied instead of unwrapped. These changes make the fork expose a staged
+native-ownership boundary without adding a page capability.
+
+The same no-handler rule applies to WebKitGTK: raw views no longer register an
+unused IPC script-message listener. Handler-enabled views register the native
+endpoint only in Wry's isolated world; registration failure aborts
+construction. The signal closure holds only a weak WebView reference, avoiding
+a manager/WebView retention cycle. Malformed/missing native URI or message
+values (including load notifications) are dropped/defaulted rather than
+unwrapped in the UI process.
+
+When updating Wry, diff the complete upstream range, reapply or retire every
+entry in `FORK.toml` explicitly, regenerate both lockfiles deliberately, run
+native hostile-page tests on all three platforms, update the immutable
+revision, and rerun dependency, license, and provenance gates. A version bump
+without that review is not an accepted update procedure.

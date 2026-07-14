@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "desktop", "xtask"]
+exclude = ["vendor/wry"]
 
 [workspace.package]
 version = "0.1.0"

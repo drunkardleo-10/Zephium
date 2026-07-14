@@ -1,0 +1,58 @@
+schema = 1
+fork = "Zephium Wry native security adapter"
+reviewed_on = "2026-07-14"
+production_status = "pre-production; packaged hostile tests and an external native-boundary audit remain required"
+
+[upstream]
+repository = "https://github.com/tauri-apps/wry"
+version = "0.55.1"
+commit = "fe9e7fb73bb6ad2637cb0b4b1685676c86970aeb"
+
+[reproducibility]
+standalone_manifest = "Cargo.toml"
+standalone_lockfile = "Cargo.lock"
+application_lockfile = "../../Cargo.lock"
+
+[[patch_sets]]
+name = "deny-by-default permissions and IPC"
+paths = ["src/lib.rs", "src/permissions.rs", "src/android", "src/webkitgtk", "src/webview2", "src/wkwebview"]
+
+[[patch_sets]]
+name = "GTK process and private-profile isolation"
+paths = ["src/web_context.rs", "src/webkitgtk/web_context.rs", "src/webkitgtk/mod.rs"]
+
+[[patch_sets]]
+name = "WebView2 staged construction and teardown"
+paths = ["src/native_cleanup.rs", "src/webview2/mod.rs", "src/error.rs", "src/lib.rs"]
+
+[[patch_sets]]
+name = "host-owned page-close lifecycle"
+paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs"]
+
+[[patch_sets]]
+name = "bounded native input and primitive evaluation contracts"
+paths = ["src/native_admission.rs", "src/native_bounds.rs", "src/webkitgtk", "src/webview2", "src/wkwebview"]
+
+[[patch_sets]]
+name = "retained AppKit host-window ownership"
+paths = ["src/lib.rs", "src/wkwebview/mod.rs"]
+
+[[patch_sets]]
+name = "WebKit callback and prompt hardening"
+paths = ["src/wkwebview"]
+
+[[patch_sets]]
+name = "deny-by-default native media, preview, fullscreen, and file-drag surfaces"
+paths = ["src/native_bounds.rs", "src/webkitgtk/mod.rs", "src/wkwebview"]
+
+[[patch_sets]]
+name = "thread-affine asynchronous protocol completion"
+paths = ["src/lib.rs", "src/webkitgtk/web_context.rs", "src/webview2/mod.rs", "src/wkwebview/class/url_scheme_handler.rs", "src/wkwebview/util.rs"]
+
+[release_gates]
+standalone_fmt = "cargo fmt --manifest-path vendor/wry/Cargo.toml -- --check"
+standalone_check = "cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets"
+standalone_clippy = "cargo clippy --manifest-path vendor/wry/Cargo.toml --locked --all-targets -- -D warnings"
+native_platforms = ["windows", "macos", "linux"]
+packaged_hostile_tests = "required on supported Windows, macOS, and Fedora release artifacts"
+external_native_boundary_audit = "required before stable"
