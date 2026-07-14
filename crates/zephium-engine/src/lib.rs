@@ -1,22 +1,635 @@
+mod erasure;
 mod host;
 mod platform;
 
-use std::sync::Arc;
+#[cfg(target_os = "windows")]
+pub use platform::windows::{
+    detach_privileged_environment_update, finalize_privileged_environment_registrations,
+    install_privileged_environment_registration,
+};
+
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
-    ContentScope, Engine, EngineEvent, Partition, Shortcut, UserContent,
+    ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationRequestId,
+    Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
 };
 use zephium_core::split::Pane;
 
 /// Runs a closure on the main thread (where the webviews live). Provided by the
 /// composition root over the event loop, so this crate stays Tauri-free.
-pub type MainThreadDispatch = Arc<dyn Fn(Box<dyn FnOnce() + Send + 'static>) + Send + Sync>;
+pub type MainThreadDispatch = Arc<dyn Fn(Box<dyn FnOnce() + Send + 'static>) -> bool + Send + Sync>;
+
+/// Renderer-layer guard for WebView2's currently un-interceptable
+/// page-initiated print surface. Install as the first document-start script
+/// in every raw and privileged WebView, including subframes. This does not
+/// replace packaged hostile testing or a future native cancellation API.
+pub const PAGE_PRINT_DENY_SCRIPT: &str = r#"(function(){
+  'use strict';
+  try {
+    var apply = Reflect.apply;
+    var defineProperty = Object.defineProperty;
+    var getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+    var string = String;
+    var trim = String.prototype.trim;
+    var toLowerCase = String.prototype.toLowerCase;
+    var deny = function() {};
+    var descriptor = {value: deny, writable: false, configurable: false, enumerable: false};
+    try { apply(defineProperty, Object, [Window.prototype, 'print', descriptor]); } catch (_) {}
+    try { apply(defineProperty, Object, [globalThis, 'print', descriptor]); } catch (_) {}
+
+    var execDescriptor = apply(getOwnPropertyDescriptor, Object, [Document.prototype, 'execCommand']);
+    var execCommand = execDescriptor && execDescriptor.value;
+    var guardedExecCommand = function(command) {
+      var primitive;
+      var normalized;
+      try {
+        primitive = apply(string, undefined, [command]);
+        normalized = apply(toLowerCase, apply(trim, primitive, []), []);
+      } catch (_) {
+        return false;
+      }
+      if (normalized === 'print') return false;
+      if (typeof execCommand !== 'function') return false;
+      switch (arguments.length) {
+        case 0: return apply(execCommand, this, []);
+        case 1: return apply(execCommand, this, [primitive]);
+        case 2: return apply(execCommand, this, [primitive, arguments[1]]);
+        default: return apply(execCommand, this, [primitive, arguments[1], arguments[2]]);
+      }
+    };
+    var execGuard = {
+      value: guardedExecCommand,
+      writable: false,
+      configurable: false,
+      enumerable: !!(execDescriptor && execDescriptor.enumerable)
+    };
+    try { apply(defineProperty, Object, [Document.prototype, 'execCommand', execGuard]); } catch (_) {}
+    try { apply(defineProperty, Object, [document, 'execCommand', execGuard]); } catch (_) {}
+  } catch (_) {}
+})()"#;
+
+const MAX_TRACKED_ITEMS: usize = zephium_core::session::MAX_SESSION_ITEMS;
+// Deleting more profiles than there can be live items in one process is not a
+// normal browser workload. Saturation must still fail closed: switching to a
+// global retirement bit preserves every tombstone without unbounded memory.
+const MAX_RETIRED_PROFILE_TOMBSTONES: usize = zephium_core::session::MAX_SESSION_PROFILES;
+
+thread_local! {
+    static EVENT_DELIVERY_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[derive(Default)]
+struct DeliveryState {
+    active_deliveries: usize,
+    waiting_transitions: usize,
+    transition_active: bool,
+    sealed: bool,
+}
+
+#[derive(Default)]
+struct EventDeliveryGate {
+    state: Mutex<DeliveryState>,
+    changed: Condvar,
+}
+
+impl EventDeliveryGate {
+    fn begin_delivery(self: &Arc<Self>) -> Option<EventDeliveryGuard> {
+        let nested = EVENT_DELIVERY_DEPTH.with(|depth| depth.get() != 0);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Once a lifecycle writer declares intent, new native facts cannot
+        // overtake it. They wait and are filtered against the lifecycle state
+        // installed by that writer; dropping an unrelated crash would leave
+        // the shell logically attached to a physically missing view.
+        while !nested
+            && !state.sealed
+            && (state.transition_active || state.waiting_transitions != 0)
+        {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        if state.sealed {
+            return None;
+        }
+        // A same-thread nested callback is already inside the finite reader
+        // cohort a writer is waiting on. Let it join that cohort rather than
+        // waiting on itself or losing a terminal native fact.
+        let Some(next_active_deliveries) = state.active_deliveries.checked_add(1) else {
+            state.sealed = true;
+            self.changed.notify_all();
+            return None;
+        };
+        let Some(next_depth) = EVENT_DELIVERY_DEPTH.with(|depth| depth.get().checked_add(1)) else {
+            state.sealed = true;
+            self.changed.notify_all();
+            return None;
+        };
+        state.active_deliveries = next_active_deliveries;
+        EVENT_DELIVERY_DEPTH.with(|depth| depth.set(next_depth));
+        Some(EventDeliveryGuard { gate: self.clone() })
+    }
+
+    fn begin_transition(self: &Arc<Self>) -> Option<EventTransitionGuard> {
+        if EVENT_DELIVERY_DEPTH.with(|depth| depth.get() != 0) {
+            self.seal();
+            return None;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.sealed {
+            return None;
+        }
+        let Some(waiting_transitions) = state.waiting_transitions.checked_add(1) else {
+            state.sealed = true;
+            self.changed.notify_all();
+            return None;
+        };
+        state.waiting_transitions = waiting_transitions;
+        while state.transition_active || state.active_deliveries != 0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        if state.sealed {
+            state.waiting_transitions = state.waiting_transitions.saturating_sub(1);
+            self.changed.notify_all();
+            return None;
+        }
+        let Some(waiting_transitions) = state.waiting_transitions.checked_sub(1) else {
+            state.sealed = true;
+            self.changed.notify_all();
+            return None;
+        };
+        state.waiting_transitions = waiting_transitions;
+        state.transition_active = true;
+        Some(EventTransitionGuard { gate: self.clone() })
+    }
+
+    fn seal(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.sealed = true;
+        self.changed.notify_all();
+    }
+}
+
+struct EventDeliveryGuard {
+    gate: Arc<EventDeliveryGate>,
+}
+
+impl Drop for EventDeliveryGuard {
+    fn drop(&mut self) {
+        let depth_valid = EVENT_DELIVERY_DEPTH.with(|depth| {
+            let Some(next) = depth.get().checked_sub(1) else {
+                depth.set(0);
+                return false;
+            };
+            depth.set(next);
+            true
+        });
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !depth_valid {
+            state.sealed = true;
+        }
+        let Some(active_deliveries) = state.active_deliveries.checked_sub(1) else {
+            state.sealed = true;
+            self.gate.changed.notify_all();
+            return;
+        };
+        state.active_deliveries = active_deliveries;
+        self.gate.changed.notify_all();
+    }
+}
+
+struct EventTransitionGuard {
+    gate: Arc<EventDeliveryGate>,
+}
+
+impl Drop for EventTransitionGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.transition_active = false;
+        self.gate.changed.notify_all();
+    }
+}
+
+#[derive(Clone)]
+struct ItemBinding {
+    profile: ProfileId,
+    active: Arc<AtomicBool>,
+}
+
+pub(crate) struct EngineEventIngress {
+    pub(crate) event: EngineEvent,
+    pub(crate) item_token: Option<Arc<AtomicBool>>,
+}
+
+impl EngineEventIngress {
+    pub(crate) fn for_item(event: EngineEvent, item_token: Arc<AtomicBool>) -> Self {
+        Self {
+            event,
+            item_token: Some(item_token),
+        }
+    }
+
+    pub(crate) fn global(event: EngineEvent) -> Self {
+        Self {
+            event,
+            item_token: None,
+        }
+    }
+}
+
+pub(crate) type EngineEventIngressSink = Arc<dyn Fn(EngineEventIngress) + Send + Sync>;
+
+#[derive(Default)]
+struct RetirementGate {
+    retired_profiles: HashSet<ProfileId>,
+    tracked_items: HashMap<ItemId, ItemBinding>,
+    closing_items: HashSet<ItemId>,
+    erasure_attempts: HashMap<ProfileId, Arc<AtomicBool>>,
+    retire_all_profiles: bool,
+    runtime_restart_required: bool,
+}
+
+enum ErasureAdmission {
+    Admitted(Arc<AtomicBool>),
+    Duplicate,
+    TerminalCapacity,
+}
+
+impl RetirementGate {
+    fn retire(&mut self, profile: ProfileId) {
+        if !self.retire_all_profiles
+            && !self.retired_profiles.contains(&profile)
+            && self.retired_profiles.len() >= MAX_RETIRED_PROFILE_TOMBSTONES
+        {
+            self.retire_all_profiles = true;
+            self.retired_profiles.clear();
+        }
+        if !self.retire_all_profiles {
+            self.retired_profiles.insert(profile);
+        }
+        // Unknown item ids are rejected by `allows_item`, so removing these
+        // bindings cannot make a retired native view reachable again.
+        self.tracked_items.retain(|_, binding| {
+            let keep = binding.profile != profile;
+            if !keep {
+                binding.active.store(false, Ordering::Release);
+            }
+            keep
+        });
+    }
+
+    fn seal_all_profiles(&mut self) {
+        self.retire_all_profiles = true;
+        self.retired_profiles.clear();
+        for binding in self.tracked_items.values() {
+            binding.active.store(false, Ordering::Release);
+        }
+        self.tracked_items.clear();
+        self.closing_items.clear();
+    }
+
+    fn profile_is_active(&self, profile: ProfileId) -> bool {
+        !self.retire_all_profiles && !self.retired_profiles.contains(&profile)
+    }
+
+    fn has_retired_profiles(&self) -> bool {
+        self.retire_all_profiles || !self.retired_profiles.is_empty()
+    }
+
+    fn reserve_item(&mut self, id: ItemId, profile: ProfileId) -> Option<Arc<AtomicBool>> {
+        if !self.profile_is_active(profile)
+            || self.tracked_items.contains_key(&id)
+            || self.closing_items.contains(&id)
+            || self.tracked_items.len() >= MAX_TRACKED_ITEMS
+        {
+            return None;
+        }
+        let active = Arc::new(AtomicBool::new(true));
+        self.tracked_items.insert(
+            id,
+            ItemBinding {
+                profile,
+                active: active.clone(),
+            },
+        );
+        Some(active)
+    }
+
+    fn allows_reserved_item(
+        &self,
+        id: ItemId,
+        profile: ProfileId,
+        active: &Arc<AtomicBool>,
+    ) -> bool {
+        self.profile_is_active(profile)
+            && active.load(Ordering::Acquire)
+            && self.tracked_items.get(&id).is_some_and(|binding| {
+                binding.profile == profile && Arc::ptr_eq(&binding.active, active)
+            })
+    }
+
+    fn allows_item(&self, id: ItemId) -> bool {
+        self.tracked_items.get(&id).is_some_and(|binding| {
+            binding.active.load(Ordering::Acquire) && self.profile_is_active(binding.profile)
+        })
+    }
+
+    fn active_item(&self, id: ItemId) -> Option<Arc<AtomicBool>> {
+        let binding = self.tracked_items.get(&id)?;
+        (binding.active.load(Ordering::Acquire) && self.profile_is_active(binding.profile))
+            .then(|| binding.active.clone())
+    }
+
+    fn active_profile(&self, id: ItemId) -> Option<ProfileId> {
+        self.tracked_items
+            .get(&id)
+            .filter(|binding| {
+                binding.active.load(Ordering::Acquire) && self.profile_is_active(binding.profile)
+            })
+            .map(|binding| binding.profile)
+    }
+
+    fn allows_item_token(&self, id: ItemId, active: &Arc<AtomicBool>) -> bool {
+        active.load(Ordering::Acquire)
+            && self.tracked_items.get(&id).is_some_and(|binding| {
+                Arc::ptr_eq(&binding.active, active) && self.profile_is_active(binding.profile)
+            })
+    }
+
+    fn allows_items(&self, ids: &[ItemId]) -> bool {
+        ids.len() <= MAX_TRACKED_ITEMS && ids.iter().all(|id| self.allows_item(*id))
+    }
+
+    fn active_item_tokens(&self, ids: &[ItemId]) -> Option<Vec<(ItemId, Arc<AtomicBool>)>> {
+        if ids.len() > MAX_TRACKED_ITEMS {
+            return None;
+        }
+        ids.iter()
+            .map(|id| self.active_item(*id).map(|token| (*id, token)))
+            .collect()
+    }
+
+    fn allows_item_tokens(&self, items: &[(ItemId, Arc<AtomicBool>)]) -> bool {
+        items.len() <= MAX_TRACKED_ITEMS
+            && items
+                .iter()
+                .all(|(id, token)| self.allows_item_token(*id, token))
+    }
+
+    fn allows_scope(&self, scope: ContentScope) -> bool {
+        match scope {
+            ContentScope::Global => true,
+            ContentScope::Profile(profile) => self.profile_is_active(profile),
+        }
+    }
+
+    fn forget_item(&mut self, id: ItemId) {
+        if let Some(binding) = self.tracked_items.remove(&id) {
+            binding.active.store(false, Ordering::Release);
+        }
+    }
+
+    fn forget_item_if_token(&mut self, id: ItemId, active: &Arc<AtomicBool>) {
+        if self
+            .tracked_items
+            .get(&id)
+            .is_some_and(|binding| Arc::ptr_eq(&binding.active, active))
+        {
+            self.forget_item(id);
+        }
+    }
+
+    /// Marks an ordinary live item as closing before native-thread dispatch.
+    /// Unknown/terminal ids remain cleanup-capable without poisoning same-id
+    /// crash recovery; their native object was already retired by the host.
+    fn begin_close(&mut self, id: ItemId) {
+        if let Some(binding) = self.tracked_items.remove(&id) {
+            binding.active.store(false, Ordering::Release);
+            self.closing_items.insert(id);
+        }
+    }
+
+    fn finish_close(&mut self, id: ItemId) {
+        self.closing_items.remove(&id);
+    }
+
+    fn admit_erasure_attempt(&mut self, profile: ProfileId) -> ErasureAdmission {
+        if self
+            .erasure_attempts
+            .get(&profile)
+            .is_some_and(|active| active.load(Ordering::Acquire))
+        {
+            return ErasureAdmission::Duplicate;
+        }
+        if !self.erasure_attempts.contains_key(&profile)
+            && self.erasure_attempts.len() >= zephium_core::session::MAX_SESSION_PROFILES
+        {
+            self.seal_all_profiles();
+            return ErasureAdmission::TerminalCapacity;
+        }
+        let active = Arc::new(AtomicBool::new(true));
+        self.erasure_attempts.insert(profile, active.clone());
+        ErasureAdmission::Admitted(active)
+    }
+
+    fn filter_event(&mut self, ingress: EngineEventIngress) -> Option<EngineEvent> {
+        let EngineEventIngress { event, item_token } = ingress;
+        match event {
+            EngineEvent::RuntimeRestartRequired => {
+                if self.runtime_restart_required {
+                    None
+                } else {
+                    self.runtime_restart_required = true;
+                    Some(EngineEvent::RuntimeRestartRequired)
+                }
+            }
+            event @ EngineEvent::TitleChanged { id, .. }
+            | event @ EngineEvent::UrlChanged { id, .. }
+            | event @ EngineEvent::NavigationFailed { id, .. }
+            | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::FaviconPixels { id, .. }
+            | event @ EngineEvent::DiscardSafety { id, .. }
+            | event @ EngineEvent::NavState { id, .. }
+            | event @ EngineEvent::NewWindowRequested { id, .. }
+            | event @ EngineEvent::PermissionRequested { id, .. }
+            | event @ EngineEvent::DownloadRequested { id, .. }
+            | event @ EngineEvent::Captured { id, .. }
+            | event @ EngineEvent::HtmlExtracted { id, .. }
+            | event @ EngineEvent::ShortcutPressed { item: id, .. } => item_token
+                .as_ref()
+                .is_some_and(|active| self.allows_item_token(id, active))
+                .then_some(event),
+            EngineEvent::ViewCreationFailed { id } => {
+                // Decide before forgetting: the failure is the terminal event
+                // for a currently tracked create, but a late failure from a
+                // synchronously retired profile must not re-enter the shell.
+                let allowed = item_token
+                    .as_ref()
+                    .is_some_and(|active| self.allows_item_token(id, active));
+                if allowed {
+                    self.forget_item(id);
+                }
+                allowed.then_some(EngineEvent::ViewCreationFailed { id })
+            }
+            EngineEvent::Crashed { id } => {
+                // A renderer crash is terminal for that native object. Decide
+                // before forgetting so late retired events stay suppressed;
+                // releasing an active binding lets the shell queue close then
+                // recreate the same logical item without a false duplicate.
+                let allowed = item_token
+                    .as_ref()
+                    .is_some_and(|active| self.allows_item_token(id, active));
+                if allowed {
+                    self.forget_item(id);
+                }
+                allowed.then_some(EngineEvent::Crashed { id })
+            }
+            EngineEvent::ProfileProcessExited { profile, ids } => {
+                if !self.profile_is_active(profile) {
+                    return None;
+                }
+                let mut active_ids: Vec<ItemId> = ids
+                    .into_iter()
+                    .filter(|id| {
+                        self.tracked_items
+                            .get(id)
+                            .is_some_and(|binding| binding.profile == profile)
+                    })
+                    .collect();
+                active_ids.sort();
+                active_ids.dedup();
+                for id in &active_ids {
+                    self.forget_item(*id);
+                }
+                (!active_ids.is_empty()).then_some(EngineEvent::ProfileProcessExited {
+                    profile,
+                    ids: active_ids,
+                })
+            }
+            EngineEvent::SplitChanged { window, tree } => self
+                .allows_items(&tree.tabs())
+                .then_some(EngineEvent::SplitChanged { window, tree }),
+            EngineEvent::ViewDiscarded { id, profile, probe } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::ViewDiscarded { id, profile, probe }),
+        }
+    }
+}
+
+fn lock_retirement_gate(gate: &Mutex<RetirementGate>) -> MutexGuard<'_, RetirementGate> {
+    gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn mutate_lifecycle_gate<T>(
+    event_delivery: &Arc<EventDeliveryGate>,
+    retirement: &Mutex<RetirementGate>,
+    mutate: impl FnOnce(&mut RetirementGate) -> T,
+) -> Option<T> {
+    // Writers wait for every caller-sink delivery that linearized earlier to
+    // finish, then exclude new deliveries until the tombstone is visible.
+    let _transition = event_delivery.begin_transition()?;
+    Some(mutate(&mut lock_retirement_gate(retirement)))
+}
+
+fn seal_lifecycle_gate_terminally(
+    event_delivery: &EventDeliveryGate,
+    retirement: &Mutex<RetirementGate>,
+) {
+    event_delivery.seal();
+    lock_retirement_gate(retirement).seal_all_profiles();
+}
+
+fn fail_native_host_admission(
+    event_delivery: &Arc<EventDeliveryGate>,
+    retirement: &Arc<Mutex<RetirementGate>>,
+    fatal: &Arc<dyn Fn(&'static str) + Send + Sync>,
+    reason: &'static str,
+) {
+    // Main-loop admission and EngineHost admission are separate on Windows:
+    // WebView2 construction can pump a nested native message loop while the
+    // host is mutably borrowed. Losing an already-accepted task at the second
+    // queue would let logical and native state diverge. Once that bounded
+    // queue refuses work, make all content authority terminal before invoking
+    // the composition root's mandatory fatal path.
+    if mutate_lifecycle_gate(event_delivery, retirement, |gate| gate.seal_all_profiles()).is_none()
+    {
+        seal_lifecycle_gate_terminally(event_delivery, retirement);
+    }
+    fatal(reason);
+}
+
+fn invoke_fatal_once(invoked: &AtomicBool, fatal: &dyn Fn(&'static str), reason: &'static str) {
+    if !invoked.swap(true, Ordering::AcqRel) {
+        fatal(reason);
+    }
+}
+
+fn dispatch_erasure_done(
+    done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
+    outcome: ProfileDataErasureOutcome,
+) {
+    let _ = std::thread::Builder::new()
+        .name("zephium-erasure-caller".into())
+        .spawn(move || done(outcome));
+}
+
+fn retirement_filtering_sink(
+    retirement: Arc<Mutex<RetirementGate>>,
+    event_delivery: Arc<EventDeliveryGate>,
+    caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync>,
+) -> EngineEventIngressSink {
+    Arc::new(move |event| {
+        // Keep the read side across external delivery. A retirement/close
+        // that returns has therefore waited for all earlier deliveries, and
+        // every later delivery observes the lifecycle mutation.
+        let Some(_delivery) = event_delivery.begin_delivery() else {
+            return;
+        };
+        let event = lock_retirement_gate(&retirement).filter_event(event);
+        if let Some(event) = event {
+            // Never invoke external code while holding the retirement mutex.
+            // The sink may synchronously use ordinary engine operations, but
+            // lifecycle reentry (`close`/`erase_profile_data`) is forbidden by
+            // `install`'s enqueue-only callback contract.
+            caller_sink(event);
+        }
+    })
+}
 
 pub struct WebviewEngine {
     dispatch: MainThreadDispatch,
+    sink: EngineEventIngressSink,
+    retirement: Arc<Mutex<RetirementGate>>,
+    event_delivery: Arc<EventDeliveryGate>,
+    fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 }
 
 /// Install on the main thread at startup. `parent` is the app window the child
@@ -24,110 +637,1458 @@ pub struct WebviewEngine {
 pub fn install(
     parent: RawWindowHandle,
     dispatch: MainThreadDispatch,
+    data_root: PathBuf,
     sink: impl Fn(EngineEvent) + Send + Sync + 'static,
-) -> WebviewEngine {
-    host::install(parent, Arc::new(sink));
-    WebviewEngine { dispatch }
+    fatal_security_failure: impl Fn(&'static str) + Send + Sync + 'static,
+) -> Result<WebviewEngine, String> {
+    let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+    let event_delivery = Arc::new(EventDeliveryGate::default());
+    let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = Arc::new(sink);
+    let sink = retirement_filtering_sink(retirement.clone(), event_delivery.clone(), caller_sink);
+    host::install(parent, data_root, sink.clone())?;
+    Ok(WebviewEngine {
+        dispatch,
+        sink,
+        retirement,
+        event_delivery,
+        fatal_security_failure: Arc::new(fatal_security_failure),
+    })
 }
 
 /// Linux only: wry positions child webviews only inside a gtk::Fixed, so the
 /// composition root hands one over before any view is created.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn install_container(fixed: gtk::Fixed) {
-    platform::imp::install_container(fixed);
+pub fn install_container(fixed: gtk::Fixed) -> Result<(), String> {
+    platform::imp::install_container(fixed)
+}
+
+/// Reject an obsolete dynamically supplied WebKitGTK before any privileged
+/// or untrusted WebView is constructed.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn enforce_runtime_security_floor() -> Result<(), String> {
+    platform::imp::enforce_runtime_security_floor()
 }
 
 impl WebviewEngine {
-    fn run(&self, f: impl FnOnce() + Send + 'static) {
-        (self.dispatch)(Box::new(f));
+    /// Feed an update signal from a privileged environment into the same
+    /// sticky, deduplicated gate used by raw environments. This does not
+    /// restart or rebuild anything; the shell owns user notification and the
+    /// composition root retains its ordered whole-process shutdown path.
+    pub fn notify_runtime_restart_required(&self) {
+        (self.sink)(EngineEventIngress::global(
+            EngineEvent::RuntimeRestartRequired,
+        ));
+    }
+
+    fn run(&self, f: impl FnOnce() + Send + 'static) -> bool {
+        (self.dispatch)(Box::new(f))
+    }
+
+    fn run_for_active_item(
+        &self,
+        id: ItemId,
+        f: impl FnOnce(&mut host::EngineHost) + Send + 'static,
+    ) -> NativeDispatch {
+        let Some(active) = lock_retirement_gate(&self.retirement).active_item(id) else {
+            return NativeDispatch::Rejected;
+        };
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        NativeDispatch::from_scheduled(self.run(move || {
+            if lock_retirement_gate(&queued_retirement).allows_item_token(id, &active) {
+                let host_active = active.clone();
+                let admitted = host::try_with(move |host| {
+                    if host_active.load(Ordering::Acquire) {
+                        f(host);
+                    }
+                });
+                if !admitted
+                    && lock_retirement_gate(&queued_retirement).allows_item_token(id, &active)
+                {
+                    fail_native_host_admission(
+                        &queued_delivery,
+                        &queued_retirement,
+                        &queued_fatal,
+                        "active-item task was not admitted by the engine host",
+                    );
+                }
+            }
+        }))
     }
 }
 
 impl Engine for WebviewEngine {
-    fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) {
-        let url = url.to_owned();
-        self.run(move || host::with(|h| h.create_view(id, partition, &url, bounds)));
+    fn runtime_restart_required(&self) -> bool {
+        lock_retirement_gate(&self.retirement).runtime_restart_required
     }
 
-    fn navigate(&self, id: ItemId, url: &str) {
+    fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool {
+        let profile = partition.profile();
+        let Some(active) = lock_retirement_gate(&self.retirement).reserve_item(id, profile) else {
+            return false;
+        };
         let url = url.to_owned();
-        self.run(move || host::with(|h| h.navigate(id, &url)));
+        let queued_sink = self.sink.clone();
+        let queued_retirement = self.retirement.clone();
+        let queued_active = active.clone();
+        let dispatched = self.run(move || {
+            if !lock_retirement_gate(&queued_retirement).allows_reserved_item(
+                id,
+                profile,
+                &queued_active,
+            ) {
+                return;
+            }
+            let failure_token = queued_active.clone();
+            if !host::try_with(move |h| h.create_view(id, partition, &url, bounds, queued_active)) {
+                queued_sink(EngineEventIngress::for_item(
+                    EngineEvent::ViewCreationFailed { id },
+                    failure_token,
+                ));
+            }
+        });
+        if !dispatched {
+            lock_retirement_gate(&self.retirement).forget_item_if_token(id, &active);
+        }
+        dispatched
+    }
+
+    fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
+        let Some(active) = lock_retirement_gate(&self.retirement).active_item(id) else {
+            return false;
+        };
+        let url = url.to_owned();
+        let queued_sink = self.sink.clone();
+        let queued_retirement = self.retirement.clone();
+        self.run(move || {
+            if !lock_retirement_gate(&queued_retirement).allows_item_token(id, &active) {
+                return;
+            }
+            let failure_token = active.clone();
+            let host_token = active.clone();
+            if !host::try_with(move |h| h.navigate(id, &url, request, host_token)) {
+                queued_sink(EngineEventIngress::for_item(
+                    EngineEvent::NavigationFailed { id, request },
+                    failure_token,
+                ));
+            }
+        })
     }
 
     fn warm_spare(&self, partition: Partition) {
-        self.run(move || host::with(|h| h.ensure_spare(partition)));
+        let profile = partition.profile();
+        if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+            return;
+        }
+        let queued_retirement = self.retirement.clone();
+        self.run(move || {
+            if lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
+                // A spare is only a latency optimization; a later load can
+                // construct its own view if this bounded admission is lost.
+                host::best_effort_with(move |h| h.ensure_spare(partition));
+            }
+        });
     }
 
     fn set_dormant(&self, ids: Vec<ItemId>) {
-        self.run(move || host::with(|h| h.set_dormant(ids)));
+        // `set_dormant` replaces the host's desired set. Once any profile is
+        // retired, even an empty or filtered replacement could resume one of
+        // its surviving controllers after a teardown failure, so suppress the
+        // global transition for the rest of this engine process.
+        let gate = lock_retirement_gate(&self.retirement);
+        let Some(item_tokens) = (!gate.has_retired_profiles())
+            .then(|| gate.active_item_tokens(&ids))
+            .flatten()
+        else {
+            return;
+        };
+        drop(gate);
+        let queued_retirement = self.retirement.clone();
+        self.run(move || {
+            let gate = lock_retirement_gate(&queued_retirement);
+            if !gate.has_retired_profiles() && gate.allows_item_tokens(&item_tokens) {
+                drop(gate);
+                // The shell continually recomputes this desired resource
+                // state; losing one sample cannot authorize or acknowledge a
+                // user mutation and the next maintenance pass retries it.
+                host::best_effort_with(move |h| {
+                    if item_tokens
+                        .iter()
+                        .all(|(_, token)| token.load(Ordering::Acquire))
+                    {
+                        h.set_dormant(ids);
+                    }
+                });
+            }
+        });
     }
 
-    fn reload(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.reload(id)));
+    fn reload(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.reload(id))
     }
 
-    fn stop(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.stop(id)));
+    fn stop(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.stop(id))
     }
 
-    fn go_back(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.history(id, "history.back()")));
+    fn go_back(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.go_back(id))
     }
 
-    fn go_forward(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.history(id, "history.forward()")));
+    fn go_forward(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.go_forward(id))
     }
 
-    fn close(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.close(id)));
+    fn close(&self, id: ItemId) -> NativeDispatch {
+        // The lifecycle write is the public close linearization point. It
+        // deactivates the old native generation and suppresses its queued
+        // callbacks before close returns to the shell.
+        if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
+            gate.begin_close(id)
+        })
+        .is_none()
+        {
+            seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
+            (self.fatal_security_failure)(
+                "caller sink synchronously re-entered close during event delivery",
+            );
+            return NativeDispatch::Rejected;
+        }
+
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        let dispatched = self.run(move || {
+            let close_retirement = queued_retirement.clone();
+            if !host::try_with_close(id, move |h| {
+                h.close(id);
+                // The old token was revoked synchronously at `begin_close`,
+                // so releasing the same-id reuse guard needs no delivery
+                // transition and cannot deadlock through sink reentry.
+                lock_retirement_gate(&close_retirement).finish_close(id);
+            }) {
+                if mutate_lifecycle_gate(&queued_delivery, &queued_retirement, |gate| {
+                    gate.seal_all_profiles()
+                })
+                .is_none()
+                {
+                    seal_lifecycle_gate_terminally(&queued_delivery, &queued_retirement);
+                }
+                queued_fatal("native close was not admitted by the engine host");
+            }
+        });
+        if !dispatched {
+            if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
+                gate.seal_all_profiles()
+            })
+            .is_none()
+            {
+                seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
+            }
+            (self.fatal_security_failure)("native close was not admitted by the main event loop");
+        }
+        NativeDispatch::from_scheduled(dispatched)
     }
 
-    fn set_content(&self, window: WindowId, tree: Option<Pane>, region: Option<Rect>) {
-        self.run(move || host::with(|h| h.set_content(window, tree, region)));
+    fn set_content(
+        &self,
+        window: WindowId,
+        tree: Option<Pane>,
+        region: Option<Rect>,
+    ) -> NativeDispatch {
+        // Hiding content is cleanup and remains available. Any operation that
+        // could show views must prove every leaf is a currently active item.
+        let visible_ids = if region.is_some() {
+            tree.as_ref().map(Pane::tabs).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let Some(item_tokens) =
+            lock_retirement_gate(&self.retirement).active_item_tokens(&visible_ids)
+        else {
+            return NativeDispatch::Rejected;
+        };
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        NativeDispatch::from_scheduled(self.run(move || {
+            if lock_retirement_gate(&queued_retirement).allows_item_tokens(&item_tokens) {
+                let host_item_tokens = item_tokens.clone();
+                let admitted = host::try_with(move |h| {
+                    if host_item_tokens
+                        .iter()
+                        .all(|(_, token)| token.load(Ordering::Acquire))
+                    {
+                        h.set_content(window, tree, region);
+                    }
+                });
+                if !admitted
+                    && lock_retirement_gate(&queued_retirement).allows_item_tokens(&item_tokens)
+                {
+                    fail_native_host_admission(
+                        &queued_delivery,
+                        &queued_retirement,
+                        &queued_fatal,
+                        "content layout was not admitted by the engine host",
+                    );
+                }
+            }
+        }))
     }
 
-    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) {
-        self.run(move || host::with(|h| h.set_drop_indicator(window, zone)));
+    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        NativeDispatch::from_scheduled(self.run(move || {
+            if !host::try_with(move |h| h.set_drop_indicator(window, zone)) {
+                fail_native_host_admission(
+                    &queued_delivery,
+                    &queued_retirement,
+                    &queued_fatal,
+                    "drop-indicator update was not admitted by the engine host",
+                );
+            }
+        }))
     }
 
-    fn zoom(&self, id: ItemId, scale: f64) {
-        self.run(move || host::with(|h| h.zoom(id, scale)));
+    fn zoom(&self, id: ItemId, scale: f64) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.zoom(id, scale))
     }
 
-    fn set_muted(&self, id: ItemId, muted: bool) {
-        self.run(move || host::with(|h| h.set_muted(id, muted)));
+    fn set_muted(&self, _id: ItemId, _muted: bool) -> NativeDispatch {
+        NativeDispatch::Unsupported
     }
 
-    fn find(&self, id: ItemId, query: Option<&str>) {
-        let query = query.map(ToOwned::to_owned);
-        self.run(move || host::with(|h| h.find(id, query.as_deref())));
+    fn find(&self, _id: ItemId, _query: Option<&str>) -> NativeDispatch {
+        NativeDispatch::Unsupported
     }
 
-    fn capture(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.capture(id)));
+    fn capture(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
     }
 
-    fn extract_html(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.extract_html(id)));
+    fn extract_html(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.extract_html(id))
     }
 
-    fn discover_favicon(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.discover_favicon(id)));
+    fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.discover_favicon(id))
     }
 
-    fn print(&self, id: ItemId) {
-        self.run(move || host::with(|h| h.print(id)));
+    fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        let Some(active) = lock_retirement_gate(&self.retirement).active_item(id) else {
+            return false;
+        };
+        let queued_retirement = self.retirement.clone();
+        self.run(move || {
+            if lock_retirement_gate(&queued_retirement).allows_item_token(id, &active) {
+                let host_active = active.clone();
+                // Missing this probe produces no positive result, so the
+                // shell's bounded timeout keeps the page live and retries
+                // resource maintenance later.
+                host::best_effort_with(move |host| {
+                    if host_active.load(Ordering::Acquire) {
+                        host.probe_discard_safety(id, probe);
+                    }
+                });
+            }
+        })
+    }
+
+    fn discard_view(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        let Some(profile) = lock_retirement_gate(&self.retirement).active_profile(id) else {
+            return false;
+        };
+        if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
+            gate.begin_close(id)
+        })
+        .is_none()
+        {
+            seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
+            (self.fatal_security_failure)(
+                "caller sink synchronously re-entered discard during event delivery",
+            );
+            return false;
+        }
+
+        let queued_sink = self.sink.clone();
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        let dispatched = self.run(move || {
+            let close_retirement = queued_retirement.clone();
+            if !host::try_with_close(id, move |host| {
+                host.close(id);
+                lock_retirement_gate(&close_retirement).finish_close(id);
+                queued_sink(EngineEventIngress::global(EngineEvent::ViewDiscarded {
+                    id,
+                    profile,
+                    probe,
+                }));
+            }) {
+                if mutate_lifecycle_gate(&queued_delivery, &queued_retirement, |gate| {
+                    gate.seal_all_profiles()
+                })
+                .is_none()
+                {
+                    seal_lifecycle_gate_terminally(&queued_delivery, &queued_retirement);
+                }
+                queued_fatal("native discard was not admitted by the engine host");
+            }
+        });
+        if !dispatched {
+            if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
+                gate.seal_all_profiles()
+            })
+            .is_none()
+            {
+                seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
+            }
+            (self.fatal_security_failure)("native discard was not admitted by the main event loop");
+        }
+        dispatched
+    }
+
+    fn print(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.print(id))
     }
 
     fn set_user_content(&self, scope: ContentScope, content: UserContent) {
-        self.run(move || host::with(|h| h.set_user_content(scope, content)));
+        if !lock_retirement_gate(&self.retirement).allows_scope(scope) {
+            return;
+        }
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        let dispatched_retirement = queued_retirement.clone();
+        let dispatched_delivery = queued_delivery.clone();
+        let dispatched_fatal = queued_fatal.clone();
+        if !self.run(move || {
+            if lock_retirement_gate(&queued_retirement).allows_scope(scope)
+                && !host::try_with(move |h| h.set_user_content(scope, content))
+                && lock_retirement_gate(&queued_retirement).allows_scope(scope)
+            {
+                fail_native_host_admission(
+                    &queued_delivery,
+                    &queued_retirement,
+                    &queued_fatal,
+                    "user-content policy was not admitted by the engine host",
+                );
+            }
+        }) {
+            fail_native_host_admission(
+                &dispatched_delivery,
+                &dispatched_retirement,
+                &dispatched_fatal,
+                "user-content policy was not admitted by the main event loop",
+            );
+        }
     }
 
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {
-        self.run(move || host::with(|h| h.set_shortcuts(shortcuts)));
+        if lock_retirement_gate(&self.retirement).retire_all_profiles {
+            return;
+        }
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        let dispatched_retirement = queued_retirement.clone();
+        let dispatched_delivery = queued_delivery.clone();
+        let dispatched_fatal = queued_fatal.clone();
+        if !self.run(move || {
+            if !lock_retirement_gate(&queued_retirement).retire_all_profiles
+                && !host::try_with(move |h| h.set_shortcuts(shortcuts))
+            {
+                fail_native_host_admission(
+                    &queued_delivery,
+                    &queued_retirement,
+                    &queued_fatal,
+                    "shortcut policy was not admitted by the engine host",
+                );
+            }
+        }) {
+            fail_native_host_admission(
+                &dispatched_delivery,
+                &dispatched_retirement,
+                &dispatched_fatal,
+                "shortcut policy was not admitted by the main event loop",
+            );
+        }
     }
 
     fn set_content_rules(&self, profile: ProfileId, compiled: String) {
-        self.run(move || host::with(|h| h.set_content_rules(profile, compiled)));
+        if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+            return;
+        }
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        let dispatched_retirement = queued_retirement.clone();
+        let dispatched_delivery = queued_delivery.clone();
+        let dispatched_fatal = queued_fatal.clone();
+        if !self.run(move || {
+            if lock_retirement_gate(&queued_retirement).profile_is_active(profile)
+                && !host::try_with(move |h| h.set_content_rules(profile, compiled))
+                && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
+            {
+                fail_native_host_admission(
+                    &queued_delivery,
+                    &queued_retirement,
+                    &queued_fatal,
+                    "content-rule policy was not admitted by the engine host",
+                );
+            }
+        }) {
+            fail_native_host_admission(
+                &dispatched_delivery,
+                &dispatched_retirement,
+                &dispatched_fatal,
+                "content-rule policy was not admitted by the main event loop",
+            );
+        }
+    }
+
+    fn erase_profile_data(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
+    ) {
+        // This is the public retirement linearization point. It deliberately
+        // waits for earlier event delivery, precedes completion allocation and
+        // UI dispatch, and blocks later delivery behind the visible tombstone.
+        let admission = mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
+            gate.retire(profile);
+            gate.admit_erasure_attempt(profile)
+        });
+        let Some(admission) = admission else {
+            seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
+            dispatch_erasure_done(done, ProfileDataErasureOutcome::Failed);
+            (self.fatal_security_failure)(
+                "caller sink synchronously re-entered profile erasure during event delivery",
+            );
+            return;
+        };
+        let attempt = match admission {
+            ErasureAdmission::Admitted(attempt) => attempt,
+            ErasureAdmission::Duplicate => {
+                // Duplicate in-flight attempts fail before allocating a
+                // watchdog or consuming the host's reserved erasure cohort.
+                done(ProfileDataErasureOutcome::Failed);
+                return;
+            }
+            ErasureAdmission::TerminalCapacity => {
+                dispatch_erasure_done(done, ProfileDataErasureOutcome::Failed);
+                (self.fatal_security_failure)(
+                    "profile-erasure admission exceeded the bounded process cohort",
+                );
+                return;
+            }
+        };
+        let fatal_once = Arc::new(AtomicBool::new(false));
+        let timeout_retirement = self.retirement.clone();
+        let timeout_delivery = self.event_delivery.clone();
+        let timeout_fatal = self.fatal_security_failure.clone();
+        let timeout_fatal_once = fatal_once.clone();
+        let completion = erasure::Completion::start(
+            Box::new(move |outcome| {
+                if outcome == ProfileDataErasureOutcome::TimedOut {
+                    // A bounded caller timeout cannot prove that existing
+                    // pages stopped. Seal content ingress behind the same
+                    // delivery barrier used by explicit retirement.
+                    if mutate_lifecycle_gate(&timeout_delivery, &timeout_retirement, |gate| {
+                        gate.seal_all_profiles()
+                    })
+                    .is_none()
+                    {
+                        seal_lifecycle_gate_terminally(&timeout_delivery, &timeout_retirement);
+                    }
+                }
+                if outcome == ProfileDataErasureOutcome::TimedOut {
+                    dispatch_erasure_done(done, outcome);
+                    invoke_fatal_once(
+                        &timeout_fatal_once,
+                        timeout_fatal.as_ref(),
+                        "profile erasure timed out with native content still unproven",
+                    );
+                } else {
+                    done(outcome);
+                }
+            }),
+            attempt,
+        );
+        let dispatched = completion.clone();
+        let dispatched_retirement = self.retirement.clone();
+        let dispatched_delivery = self.event_delivery.clone();
+        let dispatched_fatal = self.fatal_security_failure.clone();
+        let dispatched_fatal_once = fatal_once.clone();
+        if !self.run(move || {
+            let for_host = dispatched.clone();
+            if !host::try_with_profile_erasure(move |host| {
+                host.erase_profile_data(profile, for_host)
+            }) {
+                // Host unavailability or exhaustion of the dedicated erasure
+                // band is terminal for content access: native controllers may
+                // still exist, so no profile may continue through this engine.
+                if mutate_lifecycle_gate(&dispatched_delivery, &dispatched_retirement, |gate| {
+                    gate.seal_all_profiles()
+                })
+                .is_none()
+                {
+                    seal_lifecycle_gate_terminally(&dispatched_delivery, &dispatched_retirement);
+                }
+                dispatched.finish_detached(ProfileDataErasureOutcome::Failed);
+                invoke_fatal_once(
+                    &dispatched_fatal_once,
+                    dispatched_fatal.as_ref(),
+                    "profile erasure was not admitted by the engine host",
+                );
+            }
+        }) {
+            if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
+                gate.seal_all_profiles()
+            })
+            .is_none()
+            {
+                seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
+            }
+            completion.finish_detached(ProfileDataErasureOutcome::Failed);
+            invoke_fatal_once(
+                &fatal_once,
+                self.fatal_security_failure.as_ref(),
+                "profile erasure was not admitted by the main event loop",
+            );
+        }
+    }
+
+    fn shutdown(&self, done: Box<dyn FnOnce(bool) + Send>) {
+        let completion = Arc::new(std::sync::Mutex::new(Some(done)));
+        let dispatched_completion = completion.clone();
+        if !self.run(move || {
+            if let Some(done) = dispatched_completion
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                host::shutdown(done);
+            }
+        }) {
+            if let Some(done) = completion
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                done(false);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    #[test]
+    fn delivery_counter_overflow_seals_instead_of_panicking() {
+        EVENT_DELIVERY_DEPTH.with(|depth| depth.set(0));
+        let gate = Arc::new(EventDeliveryGate::default());
+        gate.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_deliveries = usize::MAX;
+        assert!(gate.begin_delivery().is_none());
+        assert!(
+            gate.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .sealed
+        );
+    }
+
+    #[test]
+    fn lifecycle_writer_overflow_seals_instead_of_panicking() {
+        EVENT_DELIVERY_DEPTH.with(|depth| depth.set(0));
+        let gate = Arc::new(EventDeliveryGate::default());
+        gate.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .waiting_transitions = usize::MAX;
+        assert!(gate.begin_transition().is_none());
+        assert!(
+            gate.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .sealed
+        );
+    }
+
+    #[test]
+    fn delivery_guard_underflow_seals_instead_of_panicking() {
+        EVENT_DELIVERY_DEPTH.with(|depth| depth.set(0));
+        let gate = Arc::new(EventDeliveryGate::default());
+        drop(EventDeliveryGuard { gate: gate.clone() });
+        assert!(
+            gate.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .sealed
+        );
+    }
+
+    #[test]
+    fn rejected_erasure_dispatch_completes_failed_exactly_once() {
+        let event_delivery = Arc::new(EventDeliveryGate::default());
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: Arc::new(|_| {}),
+            retirement: Arc::new(Mutex::new(RetirementGate::default())),
+            event_delivery,
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+        let profile = ProfileId::from(88);
+        let (tx, rx) = mpsc::channel();
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .unwrap(),
+            ProfileDataErasureOutcome::Failed
+        );
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        assert!(!lock_retirement_gate(&engine.retirement).profile_is_active(profile));
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn fatal_erasure_dispatch_never_waits_for_blocking_public_completion() {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let blocked_release = release.clone();
+        let (done_entered_tx, done_entered_rx) = mpsc::channel();
+        let (fatal_tx, fatal_rx) = mpsc::channel();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: Arc::new(|_| {}),
+            retirement: Arc::new(Mutex::new(RetirementGate::default())),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(move |_| {
+                fatal_tx.send(()).unwrap();
+            }),
+        };
+
+        engine.erase_profile_data(
+            ProfileId::from(89),
+            Box::new(move |_| {
+                done_entered_tx.send(()).unwrap();
+                let (lock, changed) = &*blocked_release;
+                let mut released = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                while !*released {
+                    released = changed
+                        .wait(released)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            }),
+        );
+
+        fatal_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect("fatal callback must not depend on public completion returning");
+        done_entered_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        let (lock, changed) = &*release;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        changed.notify_all();
+    }
+
+    #[test]
+    fn rejected_erasure_dispatch_blocks_create_navigation_and_spare_synchronously() {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+
+        let reject = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let pending = Arc::new(Mutex::new(Vec::<Task>::new()));
+        let dispatch: MainThreadDispatch = {
+            let reject = reject.clone();
+            let attempts = attempts.clone();
+            let pending = pending.clone();
+            Arc::new(move |task| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                if reject.load(Ordering::Acquire) {
+                    false
+                } else {
+                    pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(task);
+                    true
+                }
+            })
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = {
+            let events = events.clone();
+            Arc::new(move |event| {
+                let label = match event {
+                    EngineEvent::ViewCreationFailed { .. } => "create",
+                    EngineEvent::NavigationFailed { .. } => "navigate",
+                    _ => "other",
+                };
+                events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(label);
+            })
+        };
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let event_delivery = Arc::new(EventDeliveryGate::default());
+        let sink = retirement_filtering_sink(retirement.clone(), event_delivery.clone(), sink);
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            dispatch,
+            sink,
+            retirement,
+            event_delivery,
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+        let profile = ProfileId::from(91);
+        let id = ItemId::from(1);
+        let partition = Partition::Persistent(profile);
+
+        // Both operations are admitted but deliberately held before the UI
+        // thread. Retirement must invalidate them as well as future calls.
+        assert!(engine.create_view(id, partition, "https://example.test", Rect::default()));
+        assert!(engine.navigate(id, "https://example.test/queued", NavigationRequestId(1)));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+
+        reject.store(true, Ordering::Release);
+        let (tx, rx) = mpsc::channel();
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .unwrap(),
+            ProfileDataErasureOutcome::Failed
+        );
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+
+        assert!(!engine.create_view(
+            ItemId::from(2),
+            partition,
+            "https://example.test/new",
+            Rect::default()
+        ));
+        assert!(!engine.create_view(
+            ItemId::from(3),
+            Partition::Persistent(ProfileId::from(999)),
+            "https://example.test/other-profile",
+            Rect::default()
+        ));
+        assert!(!engine.navigate(id, "https://example.test/blocked", NavigationRequestId(2)));
+        engine.warm_spare(partition);
+        assert_eq!(engine.reload(id), NativeDispatch::Rejected);
+        assert_eq!(engine.stop(id), NativeDispatch::Rejected);
+        assert_eq!(engine.go_back(id), NativeDispatch::Rejected);
+        assert_eq!(engine.go_forward(id), NativeDispatch::Rejected);
+        assert_eq!(engine.zoom(id, 1.25), NativeDispatch::Rejected);
+        assert_eq!(engine.set_muted(id, true), NativeDispatch::Unsupported);
+        assert_eq!(engine.find(id, Some("secret")), NativeDispatch::Unsupported);
+        assert_eq!(engine.capture(id), NativeDispatch::Unsupported);
+        assert_eq!(engine.extract_html(id), NativeDispatch::Rejected);
+        assert_eq!(engine.discover_favicon(id), NativeDispatch::Rejected);
+        assert_eq!(engine.print(id), NativeDispatch::Rejected);
+        assert_eq!(
+            engine.set_content(
+                1,
+                Some(Pane::leaf(id)),
+                Some(Rect::new(0.0, 0.0, 100.0, 100.0)),
+            ),
+            NativeDispatch::Rejected
+        );
+        engine.set_dormant(vec![id]);
+        engine.set_user_content(ContentScope::Profile(profile), UserContent::default());
+        engine.set_content_rules(profile, "[]".into());
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+
+        // Close is never denied by retirement; it remains available for
+        // best-effort cleanup even when this dispatcher rejects the task.
+        assert_eq!(engine.close(id), NativeDispatch::Rejected);
+        assert_eq!(attempts.load(Ordering::Relaxed), 4);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 2);
+
+        for task in pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            task();
+        }
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn event_filter_forwards_only_active_sources_and_forgets_terminal_views() {
+        let profile = ProfileId::from(94);
+        let other_profile = ProfileId::from(95);
+        let failed = ItemId::from(11);
+        let exited = ItemId::from(12);
+        let foreign = ItemId::from(13);
+        let crashed = ItemId::from(14);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let (failed_token, exited_token, foreign_token, crashed_token) = {
+            let mut gate = lock_retirement_gate(&retirement);
+            (
+                gate.reserve_item(failed, profile).unwrap(),
+                gate.reserve_item(exited, profile).unwrap(),
+                gate.reserve_item(foreign, other_profile).unwrap(),
+                gate.reserve_item(crashed, profile).unwrap(),
+            )
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = {
+            let events = events.clone();
+            Arc::new(move |event| {
+                events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
+            })
+        };
+        let sink = retirement_filtering_sink(
+            retirement.clone(),
+            Arc::new(EventDeliveryGate::default()),
+            caller_sink,
+        );
+
+        sink(EngineEventIngress::for_item(
+            EngineEvent::TitleChanged {
+                id: failed,
+                title: "active".into(),
+            },
+            failed_token.clone(),
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::ShortcutPressed {
+                item: failed,
+                command: "reload".into(),
+            },
+            failed_token.clone(),
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::ViewCreationFailed { id: failed },
+            failed_token.clone(),
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::UrlChanged {
+                id: failed,
+                url: "https://late.invalid".into(),
+            },
+            failed_token,
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::Crashed { id: crashed },
+            crashed_token.clone(),
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::LoadingChanged {
+                id: crashed,
+                loading: true,
+            },
+            crashed_token,
+        ));
+        sink(EngineEventIngress::global(EngineEvent::SplitChanged {
+            window: 1,
+            tree: Pane::leaf(exited),
+        }));
+        sink(EngineEventIngress::global(
+            EngineEvent::ProfileProcessExited {
+                profile,
+                ids: vec![foreign, exited, exited],
+            },
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::Crashed { id: exited },
+            exited_token,
+        ));
+        drop(foreign_token);
+
+        let events = events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(events.len(), 6);
+        assert!(matches!(&events[0], EngineEvent::TitleChanged { id, .. } if *id == failed));
+        assert!(matches!(
+            &events[1],
+            EngineEvent::ShortcutPressed { item, .. } if *item == failed
+        ));
+        assert!(matches!(
+            &events[2],
+            EngineEvent::ViewCreationFailed { id } if *id == failed
+        ));
+        assert!(matches!(
+            &events[3],
+            EngineEvent::Crashed { id } if *id == crashed
+        ));
+        assert!(matches!(
+            &events[4],
+            EngineEvent::SplitChanged { tree, .. } if tree == &Pane::leaf(exited)
+        ));
+        assert!(matches!(
+            &events[5],
+            EngineEvent::ProfileProcessExited { profile: event_profile, ids }
+                if *event_profile == profile && ids == &[exited]
+        ));
+        drop(events);
+        let gate = lock_retirement_gate(&retirement);
+        assert!(!gate.allows_item(failed));
+        assert!(!gate.allows_item(exited));
+        assert!(!gate.allows_item(crashed));
+        assert!(gate.allows_item(foreign));
+    }
+
+    #[test]
+    fn runtime_restart_event_is_process_global_sticky_and_deduplicated() {
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = {
+            let events = events.clone();
+            Arc::new(move |event| {
+                events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
+            })
+        };
+        let sink = retirement_filtering_sink(
+            retirement.clone(),
+            Arc::new(EventDeliveryGate::default()),
+            caller_sink,
+        );
+
+        sink(EngineEventIngress::global(
+            EngineEvent::RuntimeRestartRequired,
+        ));
+        sink(EngineEventIngress::global(
+            EngineEvent::RuntimeRestartRequired,
+        ));
+
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![EngineEvent::RuntimeRestartRequired]
+        );
+        assert!(
+            lock_retirement_gate(&retirement).runtime_restart_required,
+            "the queryable backend state must remain sticky after delivery"
+        );
+    }
+
+    #[test]
+    fn rejected_erasure_dispatch_suppresses_every_late_retired_event() {
+        let profile = ProfileId::from(96);
+        let id = ItemId::from(21);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let item_token = lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = {
+            let events = events.clone();
+            Arc::new(move |event| {
+                events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
+            })
+        };
+        let event_delivery = Arc::new(EventDeliveryGate::default());
+        let sink =
+            retirement_filtering_sink(retirement.clone(), event_delivery.clone(), caller_sink);
+        let engine = WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: sink.clone(),
+            retirement,
+            event_delivery,
+            fatal_security_failure: Arc::new(|_| {}),
+        };
+        let (tx, rx) = mpsc::channel();
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .unwrap(),
+            ProfileDataErasureOutcome::Failed
+        );
+
+        let late_events = [
+            EngineEvent::TitleChanged {
+                id,
+                title: "late".into(),
+            },
+            EngineEvent::UrlChanged {
+                id,
+                url: "https://late.invalid".into(),
+            },
+            EngineEvent::NavigationFailed {
+                id,
+                request: NavigationRequestId(7),
+            },
+            EngineEvent::LoadingChanged { id, loading: true },
+            EngineEvent::FaviconPixels {
+                id,
+                page_url: "https://late.invalid".into(),
+                rgba: vec![0; zephium_core::icon::RGBA32_BYTES],
+            },
+            EngineEvent::DiscardSafety {
+                id,
+                probe: DiscardProbeId(9),
+                can_discard: true,
+            },
+            EngineEvent::ViewDiscarded {
+                id,
+                profile,
+                probe: DiscardProbeId(9),
+            },
+            EngineEvent::NavState {
+                id,
+                can_go_back: true,
+                can_go_forward: false,
+            },
+            EngineEvent::NewWindowRequested {
+                id,
+                url: "https://late.invalid/popup".into(),
+            },
+            EngineEvent::PermissionRequested {
+                id,
+                origin: "https://late.invalid".into(),
+                kind: zephium_core::ports::engine::PermissionKind::Camera,
+            },
+            EngineEvent::DownloadRequested {
+                id,
+                url: "https://late.invalid/file".into(),
+            },
+            EngineEvent::ViewCreationFailed { id },
+            EngineEvent::Crashed { id },
+            EngineEvent::Captured {
+                id,
+                png: vec![1, 2, 3],
+            },
+            EngineEvent::HtmlExtracted {
+                id,
+                html: "<p>late</p>".into(),
+                truncated: false,
+            },
+            EngineEvent::SplitChanged {
+                window: 1,
+                tree: Pane::leaf(id),
+            },
+            EngineEvent::ShortcutPressed {
+                item: id,
+                command: "reload".into(),
+            },
+            EngineEvent::ProfileProcessExited {
+                profile,
+                ids: vec![id],
+            },
+        ];
+        for event in late_events {
+            let ingress = if matches!(
+                &event,
+                EngineEvent::SplitChanged { .. }
+                    | EngineEvent::ProfileProcessExited { .. }
+                    | EngineEvent::ViewDiscarded { .. }
+            ) {
+                EngineEventIngress::global(event)
+            } else {
+                EngineEventIngress::for_item(event, item_token.clone())
+            };
+            sink(ingress);
+        }
+        assert!(events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+    }
+
+    #[test]
+    fn item_profile_tracking_is_bounded_and_retirement_releases_capacity() {
+        let retired = ProfileId::from(92);
+        let active = ProfileId::from(93);
+        let mut gate = RetirementGate::default();
+        for value in 0..MAX_TRACKED_ITEMS {
+            assert!(gate
+                .reserve_item(ItemId::from(value as u128 + 1), retired)
+                .is_some());
+        }
+        assert!(gate
+            .reserve_item(ItemId::from(MAX_TRACKED_ITEMS as u128 + 1), active)
+            .is_none());
+
+        gate.retire(retired);
+        assert!(gate.tracked_items.is_empty());
+        assert!(!gate.profile_is_active(retired));
+        assert!(gate.reserve_item(ItemId::from(10_000), active).is_some());
+    }
+
+    #[test]
+    fn pending_lifecycle_writer_blocks_new_events_and_waits_for_prior_delivery() {
+        let profile = ProfileId::from(101);
+        let id = ItemId::from(31);
+        let other_profile = ProfileId::from(104);
+        let crashed_id = ItemId::from(33);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let (item_token, crashed_token) = {
+            let mut gate = lock_retirement_gate(&retirement);
+            (
+                gate.reserve_item(id, profile).unwrap(),
+                gate.reserve_item(crashed_id, other_profile).unwrap(),
+            )
+        };
+        let event_delivery = Arc::new(EventDeliveryGate::default());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = {
+            let release = release.clone();
+            let delivered = delivered.clone();
+            Arc::new(move |_| {
+                delivered.fetch_add(1, Ordering::Relaxed);
+                entered_tx.send(()).unwrap();
+                let (lock, changed) = &*release;
+                let mut released = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                while !*released {
+                    released = changed
+                        .wait(released)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            })
+        };
+        let sink =
+            retirement_filtering_sink(retirement.clone(), event_delivery.clone(), caller_sink);
+
+        let first_sink = sink.clone();
+        let first_token = item_token.clone();
+        let first_delivery = std::thread::spawn(move || {
+            first_sink(EngineEventIngress::for_item(
+                EngineEvent::TitleChanged {
+                    id,
+                    title: "first".into(),
+                },
+                first_token,
+            ));
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let writer_retirement = retirement.clone();
+        let writer_delivery = event_delivery.clone();
+        let (writer_done_tx, writer_done_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            mutate_lifecycle_gate(&writer_delivery, &writer_retirement, |gate| {
+                gate.retire(profile)
+            })
+            .unwrap();
+            writer_done_tx.send(()).unwrap();
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let waiting = event_delivery
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .waiting_transitions;
+            if waiting != 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer did not declare intent"
+            );
+            std::thread::yield_now();
+        }
+        assert!(writer_done_rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+
+        // Writer intent is fair: this later reader waits behind the writer
+        // rather than extending the earlier reader cohort indefinitely. It is
+        // then filtered against the newly installed retirement state.
+        let second_sink = sink.clone();
+        let second_token = crashed_token;
+        let (second_done_tx, second_done_rx) = mpsc::channel();
+        let second_delivery = std::thread::spawn(move || {
+            second_sink(EngineEventIngress::for_item(
+                EngineEvent::Crashed { id: crashed_id },
+                second_token,
+            ));
+            second_done_tx.send(()).unwrap();
+        });
+        assert!(second_done_rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        assert_eq!(delivered.load(Ordering::Relaxed), 1);
+
+        let (lock, changed) = &*release;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        changed.notify_all();
+        first_delivery.join().unwrap();
+        writer_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        writer.join().unwrap();
+        second_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        second_delivery.join().unwrap();
+        assert_eq!(delivered.load(Ordering::Relaxed), 2);
+        assert!(!lock_retirement_gate(&retirement).allows_item(crashed_id));
+
+        sink(EngineEventIngress::for_item(
+            EngineEvent::TitleChanged {
+                id,
+                title: "late".into(),
+            },
+            item_token,
+        ));
+        assert_eq!(delivered.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn lifecycle_reentry_from_delivery_fails_terminally_without_waiting_on_itself() {
+        let event_delivery = Arc::new(EventDeliveryGate::default());
+        let retirement = Mutex::new(RetirementGate::default());
+        let delivery = event_delivery.begin_delivery().unwrap();
+
+        assert!(mutate_lifecycle_gate(&event_delivery, &retirement, |gate| {
+            gate.seal_all_profiles()
+        })
+        .is_none());
+        assert!(
+            event_delivery
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .sealed
+        );
+        drop(delivery);
+    }
+
+    #[test]
+    fn rejected_close_dispatch_revokes_item_and_invokes_fatal_once() {
+        let profile = ProfileId::from(102);
+        let id = ItemId::from(32);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let token = lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .unwrap();
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: Arc::new(|_| {}),
+            retirement: retirement.clone(),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+
+        assert_eq!(engine.close(id), NativeDispatch::Rejected);
+
+        assert!(!token.load(Ordering::Acquire));
+        assert!(!lock_retirement_gate(&retirement).allows_item(id));
+        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn second_stage_host_refusal_is_terminal_instead_of_silent() {
+        host::make_unavailable_for_test();
+        let profile = ProfileId::from(104);
+        let id = ItemId::from(33);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let token = lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .unwrap();
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            // The outer native-event-loop admission succeeds and executes
+            // immediately, while the deliberately absent host rejects its
+            // independent bounded admission.
+            dispatch: Arc::new(|task| {
+                task();
+                true
+            }),
+            sink: Arc::new(|_| {}),
+            retirement: retirement.clone(),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+
+        assert_eq!(engine.reload(id), NativeDispatch::Scheduled);
+        assert!(!token.load(Ordering::Acquire));
+        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn public_erasure_admission_is_per_profile_and_bounded() {
+        let mut gate = RetirementGate::default();
+        let profile = ProfileId::from(103);
+        let first = match gate.admit_erasure_attempt(profile) {
+            ErasureAdmission::Admitted(active) => active,
+            _ => panic!("first erasure attempt must be admitted"),
+        };
+        assert!(matches!(
+            gate.admit_erasure_attempt(profile),
+            ErasureAdmission::Duplicate
+        ));
+        assert_eq!(gate.erasure_attempts.len(), 1);
+        first.store(false, Ordering::Release);
+        assert!(matches!(
+            gate.admit_erasure_attempt(profile),
+            ErasureAdmission::Admitted(_)
+        ));
+
+        for value in 1..zephium_core::session::MAX_SESSION_PROFILES {
+            assert!(matches!(
+                gate.admit_erasure_attempt(ProfileId::from(value as u128 + 10_000)),
+                ErasureAdmission::Admitted(_)
+            ));
+        }
+        assert_eq!(
+            gate.erasure_attempts.len(),
+            zephium_core::session::MAX_SESSION_PROFILES
+        );
+        assert!(matches!(
+            gate.admit_erasure_attempt(ProfileId::from(99_999)),
+            ErasureAdmission::TerminalCapacity
+        ));
+        assert!(gate.retire_all_profiles);
+        assert_eq!(
+            gate.erasure_attempts.len(),
+            zephium_core::session::MAX_SESSION_PROFILES
+        );
     }
 }
