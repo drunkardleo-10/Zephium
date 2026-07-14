@@ -32,6 +32,7 @@ struct State {
     views: HashMap<ItemId, webkit2gtk::WebView>,
     visible: Vec<ItemId>,
     indicator: Option<gtk::Window>,
+    revision: u64,
 }
 
 #[derive(Clone)]
@@ -52,6 +53,7 @@ impl Stage {
                 views: HashMap::new(),
                 visible: Vec::new(),
                 indicator: None,
+                revision: 0,
             })),
         }
     }
@@ -60,7 +62,9 @@ impl Stage {
     /// the whole stage.
     pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) {
         {
-            let mut s = self.state.borrow_mut();
+            let Ok(mut s) = self.state.try_borrow_mut() else {
+                return;
+            };
             s.hidden = region.is_none();
             if let Some(r) = region {
                 s.origin = (r.x, r.y);
@@ -68,42 +72,74 @@ impl Stage {
             }
             s.tree = tree;
             s.visible = visible.to_vec();
+            s.revision = s.revision.wrapping_add(1).max(1);
         }
         sync(&self.state);
     }
 
     pub fn has_view(&self, id: ItemId) -> bool {
-        self.state.borrow().views.contains_key(&id)
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.views.contains_key(&id))
     }
 
     pub fn insert_view(&self, id: ItemId, view: &wry::WebView) {
-        self.state.borrow_mut().views.insert(id, view.webview());
+        let widget = view.webview();
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.views.insert(id, widget);
+            state.revision = state.revision.wrapping_add(1).max(1);
+        }
     }
 
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the widget; dropping the webview removes it from the Fixed.
-        self.state.borrow_mut().views.remove(&id);
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            if state.views.remove(&id).is_some() {
+                state.revision = state.revision.wrapping_add(1).max(1);
+            }
+        }
     }
 
     pub fn set_drop_indicator(&self, zone: Option<Rect>) {
-        let mut s = self.state.borrow_mut();
         match zone {
             None => {
-                if let Some(popup) = s.indicator.take() {
+                let popup = self
+                    .state
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut state| state.indicator.take());
+                if let Some(popup) = popup {
                     popup.close();
                 }
             }
             Some(zone) => {
-                let popup = match &s.indicator {
-                    Some(popup) => popup.clone(),
-                    None => {
-                        let popup = make_indicator(&s.fixed);
-                        s.indicator = Some(popup.clone());
-                        popup
+                let Some((fixed, origin, existing)) = self
+                    .state
+                    .try_borrow()
+                    .ok()
+                    .map(|state| (state.fixed.clone(), state.origin, state.indicator.clone()))
+                else {
+                    return;
+                };
+                let popup = if let Some(popup) = existing {
+                    popup
+                } else {
+                    let candidate = make_indicator(&fixed);
+                    let Ok(mut state) = self.state.try_borrow_mut() else {
+                        candidate.close();
+                        return;
+                    };
+                    if let Some(installed) = state.indicator.as_ref() {
+                        let installed = installed.clone();
+                        drop(state);
+                        candidate.close();
+                        installed
+                    } else {
+                        state.indicator = Some(candidate.clone());
+                        candidate
                     }
                 };
-                let (ox, oy) = s
-                    .fixed
+                let (ox, oy) = fixed
                     .window()
                     .map(|w| {
                         let (_, x, y) = w.origin();
@@ -111,8 +147,8 @@ impl Stage {
                     })
                     .unwrap_or((0, 0));
                 popup.move_(
-                    ox + (s.origin.0 + zone.x) as i32,
-                    oy + (s.origin.1 + zone.y) as i32,
+                    ox + (origin.0 + zone.x) as i32,
+                    oy + (origin.1 + zone.y) as i32,
                 );
                 popup.resize(zone.width.max(1.0) as i32, zone.height.max(1.0) as i32);
                 popup.show_all();
@@ -123,32 +159,60 @@ impl Stage {
 }
 
 fn sync(state: &Rc<RefCell<State>>) {
-    let s = state.borrow();
-    let local = Rect::new(0.0, 0.0, s.size.0, s.size.1);
-    let panes = match &s.tree {
-        Some(tree) => split::layout(tree, local, s.gap),
-        None => Vec::new(),
-    };
-    let origin = s.origin;
-    for (id, view) in &s.views {
-        let pane = panes.iter().find(|(pid, _)| pid == id).map(|(_, r)| *r);
-        let show = !s.hidden && pane.is_some() && s.visible.contains(id);
-        if let Some(r) = pane {
-            s.fixed
-                .move_(view, (origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
-            view.set_size_request(r.width.max(1.0) as i32, r.height.max(1.0) as i32);
+    // GTK geometry/visibility calls may synchronously pump callbacks. Clone
+    // GObject handles and immutable model data first, then retry from the
+    // latest revision if re-entry changed ownership while this pass ran.
+    for _ in 0..4 {
+        let Some((revision, fixed, gap, origin, size, hidden, tree, views, visible)) =
+            state.try_borrow().ok().map(|state| {
+                (
+                    state.revision,
+                    state.fixed.clone(),
+                    state.gap,
+                    state.origin,
+                    state.size,
+                    state.hidden,
+                    state.tree.clone(),
+                    state
+                        .views
+                        .iter()
+                        .map(|(id, view)| (*id, view.clone()))
+                        .collect::<Vec<_>>(),
+                    state.visible.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let local = Rect::new(0.0, 0.0, size.0, size.1);
+        let panes = tree
+            .as_ref()
+            .map_or_else(Vec::new, |tree| split::layout(tree, local, gap));
+        for (id, view) in views {
+            let pane = panes.iter().find(|(pid, _)| *pid == id).map(|(_, r)| *r);
+            let show = !hidden && pane.is_some() && visible.contains(&id);
+            if let Some(r) = pane {
+                fixed.move_(&view, (origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
+                view.set_size_request(r.width.max(1.0) as i32, r.height.max(1.0) as i32);
+            }
+            if show == view.is_visible() {
+                continue;
+            }
+            if show {
+                // wry's own visibility path is show_all; a remapped webkitgtk
+                // view keeps a stale compositing surface until forced to relayout
+                view.show_all();
+                view.queue_resize();
+                view.queue_draw();
+            } else {
+                view.hide();
+            }
         }
-        if show == view.is_visible() {
-            continue;
-        }
-        if show {
-            // wry's own visibility path is show_all; a remapped webkitgtk
-            // view keeps a stale compositing surface until forced to relayout
-            view.show_all();
-            view.queue_resize();
-            view.queue_draw();
-        } else {
-            view.hide();
+        if state
+            .try_borrow()
+            .is_ok_and(|state| state.revision == revision)
+        {
+            return;
         }
     }
 }
