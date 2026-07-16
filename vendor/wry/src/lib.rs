@@ -826,8 +826,40 @@ struct WebViewAttributes<'a> {
   /// Whether all media can be played without user interaction.
   pub autoplay: bool,
 
+  /// Whether page content may enter WebKit's native fullscreen media surface.
+  ///
+  /// ## Platform-specific
+  ///
+  /// - **macOS:** Requires the `fullscreen` feature and uses WebKit private
+  ///   preferences. Embedders rendering untrusted content should disable this
+  ///   per view until they own a gesture- and origin-labelled broker.
+  /// - Other platforms: Unsupported and ignored.
+  pub fullscreen_enabled: bool,
+
+  /// Whether page content may enter WebKit's native picture-in-picture media
+  /// surface.
+  ///
+  /// ## Platform-specific
+  ///
+  /// - **macOS:** Uses a WebKit private preference. The secure default is
+  ///   disabled.
+  /// - Other platforms: Unsupported and ignored.
+  pub picture_in_picture_enabled: bool,
+
   /// Set a handler closure to process page load events.
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
+
+  /// Set a handler closure to process identity-bearing main-frame navigation events.
+  ///
+  /// Unlike [`Self::on_page_load_handler`], this preserves the native
+  /// navigation sequence across redirects, overlapping loads, and failures.
+  /// The identifier is scoped to this WebView and is opaque to the embedder.
+  pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
+
+  /// Hide the native presentation surface synchronously at each main-frame
+  /// commit, before delivering its identity event. Hardened embedders can
+  /// then update trusted chrome and explicitly reveal the exact document.
+  pub navigation_presentation_guard: Option<Box<dyn Fn()>>,
 
   /// Set a proxy configuration for the webview. Supports HTTP CONNECT and SOCKSv5 proxies
   ///
@@ -950,7 +982,11 @@ impl Default for WebViewAttributes<'_> {
       document_title_changed_handler: None,
       incognito: false,
       autoplay: true,
+      fullscreen_enabled: cfg!(feature = "fullscreen"),
+      picture_in_picture_enabled: false,
       on_page_load_handler: None,
+      navigation_event_handler: None,
+      navigation_presentation_guard: None,
       proxy_config: None,
       focused: true,
       bounds: Some(Rect {
@@ -962,6 +998,19 @@ impl Default for WebViewAttributes<'_> {
       permission_handler: None,
       general_autofill_enabled: true,
     }
+  }
+}
+
+impl WebViewAttributes<'_> {
+  /// Whether native construction must begin behind the presentation barrier.
+  ///
+  /// WebKitGTK cannot start an untrusted child unmapped without risking a
+  /// permanently missing compositing surface. Its adapter uses this fact to
+  /// keep the widget mapped but fully transparent before parenting, initial
+  /// navigation, or `show_all`. Other backends use their native hidden state.
+  #[cfg(any(gtk, test))]
+  fn guards_initial_presentation(&self) -> bool {
+    self.navigation_presentation_guard.is_some()
   }
 }
 
@@ -1054,6 +1103,25 @@ impl<'a> WebViewBuilder<'a> {
   /// Sets whether all media can be played without user interaction.
   pub fn with_autoplay(mut self, autoplay: bool) -> Self {
     self.attrs.autoplay = autoplay;
+    self
+  }
+
+  /// Enables or disables page-triggered native fullscreen media surfaces.
+  ///
+  /// This is currently implemented only on macOS and requires Wry's
+  /// `fullscreen` feature. Disable it explicitly for untrusted browser views;
+  /// feature unification can otherwise enable the private WebKit preference
+  /// process-wide at compile time.
+  pub fn with_fullscreen_enabled(mut self, enabled: bool) -> Self {
+    self.attrs.fullscreen_enabled = enabled;
+    self
+  }
+
+  /// Enables or disables page-triggered native picture-in-picture surfaces.
+  ///
+  /// This is currently implemented only on macOS. It is disabled by default.
+  pub fn with_picture_in_picture_enabled(mut self, enabled: bool) -> Self {
+    self.attrs.picture_in_picture_enabled = enabled;
     self
   }
 
@@ -1544,6 +1612,34 @@ impl<'a> WebViewBuilder<'a> {
     handler: impl Fn(PageLoadEvent, String) + 'static,
   ) -> Self {
     self.attrs.on_page_load_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Set a handler for identity-bearing main-frame navigation events.
+  ///
+  /// The same [`NavigationId`] is reported for every phase of one navigation,
+  /// including every server redirect. Different navigations may overlap, so
+  /// consumers must correlate by identifier rather than URL or callback
+  /// order. A `Committed` event is the authoritative point at which rendered
+  /// main-frame content may be attributed to its reported URL.
+  ///
+  /// Supported on Windows, macOS, iOS, and Linux. Android currently ignores
+  /// this handler.
+  pub fn with_navigation_event_handler(
+    mut self,
+    handler: impl Fn(NavigationEvent) + 'static,
+  ) -> Self {
+    self.attrs.navigation_event_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Hide each newly committed main-frame document before its identity event
+  /// reaches the embedder. `guard` runs before the native hide primitive, so
+  /// it should synchronously revoke the embedder's reveal permit without
+  /// entering native UI code. The embedder must call [`WebView::set_visible`]
+  /// only after it has acknowledged the matching trusted-chrome state.
+  pub fn with_navigation_presentation_guard(mut self, guard: impl Fn() + 'static) -> Self {
+    self.attrs.navigation_presentation_guard = Some(Box::new(guard));
     self
   }
 
@@ -2219,6 +2315,13 @@ impl WebView {
     self.webview.url()
   }
 
+  /// Get the current native top-level document title, bounded before it is
+  /// copied into Rust. `None` means the engine has no usable title yet (or the
+  /// untrusted value exceeded the native allocation limit).
+  pub fn document_title(&self) -> Result<Option<String>> {
+    self.webview.document_title()
+  }
+
   /// Evaluate and run javascript code.
   pub fn evaluate_script(&self, js: &str) -> Result<()> {
     self
@@ -2725,6 +2828,56 @@ pub enum PageLoadEvent {
   Finished,
 }
 
+/// Opaque identity of one main-frame navigation within a WebView.
+///
+/// Values are meaningful only for correlating callbacks emitted by the same
+/// WebView. They must not be persisted or compared across WebViews.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NavigationId(u64);
+
+impl NavigationId {
+  /// Construct an opaque navigation identity from a platform value.
+  ///
+  /// This is public for embedders implementing custom platform adapters and
+  /// for deterministic state-machine tests. Ordinary consumers should use
+  /// identities received through [`NavigationEvent`].
+  pub const fn from_raw(raw: u64) -> Self {
+    Self(raw)
+  }
+}
+
+/// A phase in one identity-bearing main-frame navigation sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationEventPhase {
+  /// A new provisional main-frame navigation started.
+  Started,
+  /// The same provisional navigation received a server redirect.
+  ///
+  /// Some native APIs expose the redirect phase and identity but not its
+  /// destination URL. In that case [`NavigationEvent::url`] repeats the last
+  /// safely attributed provisional URL; `Committed` always carries the
+  /// authoritative final response URL.
+  Redirected,
+  /// Main-frame content began arriving and the URL became authoritative.
+  Committed,
+  /// The committed navigation completed successfully.
+  Finished,
+  /// The navigation terminated with an error or cancellation.
+  Failed,
+}
+
+/// Identity-bearing observation of a main-frame navigation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationEvent {
+  /// Opaque per-WebView navigation identity.
+  pub id: NavigationId,
+  /// Native navigation phase.
+  pub phase: NavigationEventPhase,
+  /// Bounded URL safely attributed to this native navigation phase. See
+  /// [`NavigationEventPhase::Redirected`] for the platform fallback.
+  pub url: String,
+}
+
 /// Background throttling policy
 #[derive(Debug, Clone)]
 pub enum BackgroundThrottlingPolicy {
@@ -2843,6 +2996,61 @@ mod tests {
       opted_in.attrs.page_close_policy,
       PageClosePolicy::DestroyContainer
     );
+  }
+
+  #[test]
+  fn native_media_surfaces_are_independently_configurable_per_view() {
+    let denied = WebViewBuilder::new()
+      .with_fullscreen_enabled(false)
+      .with_picture_in_picture_enabled(false);
+    assert!(!denied.attrs.fullscreen_enabled);
+    assert!(!denied.attrs.picture_in_picture_enabled);
+
+    let allowed = WebViewBuilder::new()
+      .with_fullscreen_enabled(true)
+      .with_picture_in_picture_enabled(true);
+    assert!(allowed.attrs.fullscreen_enabled);
+    assert!(allowed.attrs.picture_in_picture_enabled);
+  }
+
+  #[test]
+  fn navigation_guard_requires_initial_presentation_concealment() {
+    let ordinary = WebViewBuilder::new();
+    assert!(!ordinary.attrs.guards_initial_presentation());
+
+    let guarded = WebViewBuilder::new().with_navigation_presentation_guard(|| {});
+    assert!(guarded.attrs.guards_initial_presentation());
+  }
+
+  #[test]
+  fn webkitgtk_conceals_guarded_construction_before_parenting_navigation_and_mapping() {
+    let source = include_str!("webkitgtk/mod.rs");
+    let constructor = source
+      .split("pub fn new_gtk<W>(")
+      .nth(1)
+      .expect("WebKitGTK constructor");
+    let conceal = constructor
+      .find("if attributes.guards_initial_presentation()")
+      .expect("construction presentation guard");
+    let opacity = constructor[conceal..]
+      .find("webview.set_opacity(0.0)")
+      .map(|offset| conceal + offset)
+      .expect("construction-time transparent surface");
+    let parenting = constructor
+      .find("Self::add_to_container(&webview")
+      .expect("WebKitGTK parenting");
+    let navigation = constructor
+      .find("web_context.load_uri(w.webview.clone()")
+      .expect("WebKitGTK initial navigation");
+    let mapping = constructor
+      .find("w.webview.show_all()")
+      .expect("WebKitGTK mapping");
+
+    assert!(conceal <= opacity);
+    assert!(opacity < parenting);
+    assert!(opacity < navigation);
+    assert!(opacity < mapping);
+    assert!(constructor.contains("if attributes.visible {\n      w.webview.show_all();"));
   }
 
   #[test]

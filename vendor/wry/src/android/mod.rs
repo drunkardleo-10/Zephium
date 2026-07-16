@@ -355,6 +355,13 @@ impl InnerWebView {
     rx.recv_timeout(MAIN_PIPE_TIMEOUT).map_err(Into::into)
   }
 
+  pub fn document_title(&self) -> crate::Result<Option<String>> {
+    // Zephium's hardened desktop title-attribution path does not ship on
+    // Android. Preserve a bounded, capability-free result until the JNI
+    // bridge has an equivalent native document-identity contract.
+    Ok(None)
+  }
+
   pub fn eval(&self, js: &str, callback: Option<impl Fn(String) + Send + 'static>) -> Result<()> {
     MainPipe::send(
       self.activity_id,

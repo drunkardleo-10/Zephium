@@ -94,7 +94,7 @@ features = [
 url = "2.5"
 dirs = "6"
 block2 = "0.6"
-dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 objc2 = { version = "0.6.4", features = [
   "exception",
   # because `NSUUID::from_bytes` needs it,

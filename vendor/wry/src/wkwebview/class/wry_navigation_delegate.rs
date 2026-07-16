@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use objc2::{define_class, msg_send, rc::Retained, runtime::NSObject, MainThreadOnly};
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol};
+use objc2_foundation::{MainThreadMarker, NSError, NSObjectProtocol};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{
   NSURLAuthenticationChallenge, NSURLAuthenticationMethodServerTrust, NSURLCredential,
@@ -26,11 +26,14 @@ use crate::{
   wkwebview::{
     download::{navigation_download_action, navigation_download_response},
     navigation::{
-      did_commit_navigation, did_finish_navigation, navigation_policy, navigation_policy_response,
-      web_content_process_did_terminate,
+      begin_programmatic_navigation, cancel_programmatic_navigation, did_commit_navigation,
+      did_fail_navigation, did_finish_navigation, did_receive_server_redirect,
+      did_start_provisional_navigation, navigation_policy, navigation_policy_response,
+      register_programmatic_navigation, web_content_process_did_terminate,
+      AppleNavigationEventState,
     },
   },
-  PageLoadEvent, WryWebView,
+  NavigationEvent, PageLoadEvent, WryWebView,
 };
 
 use super::wry_download_delegate::WryDownloadDelegate;
@@ -41,6 +44,15 @@ pub struct WryNavigationDelegateIvars {
   pub navigation_policy_function: Box<dyn Fn(String) -> bool>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
+  pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
+  pub navigation_presentation_guard: Option<Box<dyn Fn()>>,
+  // `AppleNavigationEventState` intentionally uses a non-wrapping `u128`
+  // record token, which gives it 16-byte alignment on Apple 64-bit targets.
+  // objc2 0.6 only supports Objective-C ivars aligned to at most 8 bytes, so
+  // keep the state in an alignment-aware Rust allocation and store only the
+  // Box pointer in the native object. The delegate still owns and drops the
+  // state exactly with its Objective-C lifetime.
+  pub navigation_event_state: Box<Mutex<AppleNavigationEventState>>,
   pub on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
 }
 
@@ -73,6 +85,36 @@ define_class!(
       navigation_policy_response(self, webview, response, handler);
     }
 
+    #[unsafe(method(webView:didStartProvisionalNavigation:))]
+    fn did_start_provisional_navigation(
+      &self,
+      webview: &WKWebView,
+      navigation: Option<&WKNavigation>,
+    ) {
+      if let Some(navigation) = navigation {
+        did_start_provisional_navigation(self, webview, navigation);
+      }
+    }
+
+    #[unsafe(method(webView:didReceiveServerRedirectForProvisionalNavigation:))]
+    fn did_receive_server_redirect(&self, webview: &WKWebView, navigation: Option<&WKNavigation>) {
+      if let Some(navigation) = navigation {
+        did_receive_server_redirect(self, webview, navigation);
+      }
+    }
+
+    #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
+    fn did_fail_provisional_navigation(
+      &self,
+      webview: &WKWebView,
+      navigation: Option<&WKNavigation>,
+      error: &NSError,
+    ) {
+      if let Some(navigation) = navigation {
+        did_fail_navigation(self, webview, navigation, error);
+      }
+    }
+
     #[unsafe(method(webView:didFinishNavigation:))]
     fn did_finish_navigation(&self, webview: &WKWebView, navigation: &WKNavigation) {
       did_finish_navigation(self, webview, navigation);
@@ -81,6 +123,18 @@ define_class!(
     #[unsafe(method(webView:didCommitNavigation:))]
     fn did_commit_navigation(&self, webview: &WKWebView, navigation: &WKNavigation) {
       did_commit_navigation(self, webview, navigation);
+    }
+
+    #[unsafe(method(webView:didFailNavigation:withError:))]
+    fn did_fail_navigation(
+      &self,
+      webview: &WKWebView,
+      navigation: Option<&WKNavigation>,
+      error: &NSError,
+    ) {
+      if let Some(navigation) = navigation {
+        did_fail_navigation(self, webview, navigation, error);
+      }
     }
 
     #[unsafe(method(webView:navigationAction:didBecomeDownload:))]
@@ -135,6 +189,22 @@ define_class!(
 );
 
 impl WryNavigationDelegate {
+  pub(crate) fn begin_programmatic_navigation(&self) -> bool {
+    begin_programmatic_navigation(self)
+  }
+
+  pub(crate) fn cancel_programmatic_navigation(&self) {
+    cancel_programmatic_navigation(self);
+  }
+
+  pub(crate) fn register_programmatic_navigation(
+    &self,
+    navigation: &WKNavigation,
+    url: String,
+  ) -> bool {
+    register_programmatic_navigation(self, navigation, url)
+  }
+
   #[allow(clippy::too_many_arguments)]
   pub fn new(
     webview: Retained<WryWebView>,
@@ -143,6 +213,8 @@ impl WryNavigationDelegate {
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
+    navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
+    navigation_presentation_guard: Option<Box<dyn Fn()>>,
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
@@ -179,9 +251,45 @@ impl WryNavigationDelegate {
         has_download_handler,
         download_delegate,
         on_page_load_handler,
+        navigation_event_handler,
+        navigation_presentation_guard,
+        navigation_event_state: Box::new(Mutex::new(AppleNavigationEventState::default())),
         on_web_content_process_terminate_handler,
       });
 
     unsafe { msg_send![super(delegate), init] }
+  }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+  use std::mem::{align_of, size_of};
+
+  use objc2::ClassType;
+
+  use super::*;
+
+  #[test]
+  fn navigation_delegate_ivars_register_with_a_supported_native_layout() {
+    let ivars_alignment = align_of::<WryNavigationDelegateIvars>();
+    assert!(
+      matches!(ivars_alignment, 1 | 2 | 4 | 8),
+      "objc2 cannot register an ivar with alignment {ivars_alignment}"
+    );
+
+    // `class()` executes objc2's real ClassBuilder registration path. This is
+    // the path that aborted before the navigation state was boxed.
+    let class = WryNavigationDelegate::class();
+    let ivar = class
+      .instance_variable(c"ivars")
+      .expect("defined-class ivars must be registered with Objective-C");
+    let ivar_offset = usize::try_from(ivar.offset()).expect("ivar offset must be non-negative");
+    let ivar_end = ivar_offset
+      .checked_add(size_of::<WryNavigationDelegateIvars>())
+      .expect("ivar extent must fit in usize");
+
+    assert_eq!(ivar_offset % ivars_alignment, 0);
+    assert!(ivar_end <= class.instance_size());
+    assert!(class.instance_size() >= NSObject::class().instance_size());
   }
 }

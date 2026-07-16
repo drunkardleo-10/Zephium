@@ -408,10 +408,13 @@ impl InnerWebView {
       }
 
       // NOTE: Private API — `allowsPictureInPictureMediaPlayback` is a private
-      // KVC key on WKPreferences. Keep page-triggered native PiP disabled until
-      // the embedder has an origin/gesture-labelled media-surface broker.
+      // KVC key on WKPreferences. This must be per-view: Cargo feature
+      // unification means privileged Tauri chrome and untrusted browser views
+      // share the same compiled Wry implementation.
       _preference.setValue_forKey(
-        Some(&_no),
+        Some(&NSNumber::numberWithBool(
+          attributes.picture_in_picture_enabled,
+        )),
         ns_string!("allowsPictureInPictureMediaPlayback"),
       );
 
@@ -454,7 +457,10 @@ impl InnerWebView {
 
       #[cfg(feature = "fullscreen")]
       // NOTE: Private API — `fullScreenEnabled` is a private KVC key on WKPreferences.
-      _preference.setValue_forKey(Some(&_yes), ns_string!("fullScreenEnabled"));
+      _preference.setValue_forKey(
+        Some(&NSNumber::numberWithBool(attributes.fullscreen_enabled)),
+        ns_string!("fullScreenEnabled"),
+      );
 
       #[cfg(target_os = "macos")]
       let webview = {
@@ -658,6 +664,8 @@ impl InnerWebView {
         attributes.navigation_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
+        attributes.navigation_event_handler,
+        attributes.navigation_presentation_guard,
         pl_attrs.on_web_content_process_terminate_handler,
         mtm,
       );
@@ -794,6 +802,15 @@ impl InnerWebView {
     url_from_webview(&self.webview)
   }
 
+  pub fn document_title(&self) -> crate::Result<Option<String>> {
+    Ok(unsafe {
+      self
+        .webview
+        .title()
+        .and_then(|title| bounded_nsstring(&title, crate::native_bounds::PAGE_TITLE_LIMIT))
+    })
+  }
+
   pub fn eval(&self, js: &str, callback: Option<impl Fn(String) + Send + 'static>) -> Result<()> {
     let mut pending_scripts = self
       .pending_scripts
@@ -892,18 +909,21 @@ impl InnerWebView {
   /// Reloads the current page.
   pub fn reload(&self) -> crate::Result<()> {
     // Safety: objc runtime calls are unsafe
-    unsafe { self.webview.reload() };
-    Ok(())
+    unsafe { self.webview.reload() }
+      .map(|_| ())
+      .ok_or(crate::Error::NativeObjectUnavailable("WKWebView.reload"))
   }
 
   pub fn go_forward(&self) -> Result<()> {
-    unsafe { self.webview.goForward() };
-    Ok(())
+    unsafe { self.webview.goForward() }
+      .map(|_| ())
+      .ok_or(crate::Error::NativeObjectUnavailable("WKWebView.goForward"))
   }
 
   pub fn go_back(&self) -> Result<()> {
-    unsafe { self.webview.goBack() };
-    Ok(())
+    unsafe { self.webview.goBack() }
+      .map(|_| ())
+      .ok_or(crate::Error::NativeObjectUnavailable("WKWebView.goBack"))
   }
 
   pub fn can_go_forward(&self) -> Result<bool> {
@@ -927,10 +947,19 @@ impl InnerWebView {
   }
 
   fn navigate_to_url(&self, url: &str, headers: Option<http::HeaderMap>) -> crate::Result<()> {
+    if url.len() > PAGE_URL_LIMIT.max_utf8_bytes
+      || url.encode_utf16().count() > PAGE_URL_LIMIT.max_utf16_units
+    {
+      return Err(Error::WebKitNavigationIdentityUnavailable);
+    }
     // Safety: objc runtime calls are unsafe
     unsafe {
       let url = NSURL::URLWithString(&NSString::from_str(url))
         .ok_or(Error::NativeObjectUnavailable("navigation URL"))?;
+      let absolute_url = url
+        .absoluteString()
+        .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
+        .ok_or(Error::WebKitNavigationIdentityUnavailable)?;
       let request = NSMutableURLRequest::requestWithURL(&url);
       if let Some(headers) = headers {
         for (name, value) in headers.iter() {
@@ -939,7 +968,25 @@ impl InnerWebView {
           request.addValue_forHTTPHeaderField(&value, &key);
         }
       }
-      self.webview.loadRequest(&request);
+      if !self
+        .navigation_policy_delegate
+        .begin_programmatic_navigation()
+      {
+        return Err(Error::WebKitNavigationIdentityUnavailable);
+      }
+      let Some(navigation) = self.webview.loadRequest(&request) else {
+        self
+          .navigation_policy_delegate
+          .cancel_programmatic_navigation();
+        return Err(Error::WebKitNavigationIdentityUnavailable);
+      };
+      if !self
+        .navigation_policy_delegate
+        .register_programmatic_navigation(&navigation, absolute_url)
+      {
+        self.webview.stopLoading();
+        return Err(Error::WebKitNavigationIdentityUnavailable);
+      }
     }
 
     Ok(())
@@ -1612,5 +1659,39 @@ unsafe fn wait_for_blocking_operation<T>(rx: std::sync::mpsc::Receiver<T>) -> Re
     let mode = ns_string!("NSDefaultRunLoopMode");
 
     rl.acceptInputForMode_beforeDate(mode, &limit_date);
+  }
+}
+
+#[cfg(test)]
+mod security_policy_tests {
+  #[test]
+  fn navigation_identity_gate_brackets_load_request() {
+    let source = include_str!("mod.rs");
+    let navigation = source
+      .split("fn navigate_to_url")
+      .nth(1)
+      .and_then(|source| source.split("fn navigate_to_string").next())
+      .expect("navigate_to_url implementation");
+    let begin = navigation
+      .find(".begin_programmatic_navigation()")
+      .expect("programmatic gate begins before native navigation");
+    let load = navigation
+      .find(".loadRequest(&request)")
+      .expect("native navigation request");
+    let register = navigation
+      .find(".register_programmatic_navigation(&navigation, absolute_url)")
+      .expect("exact returned identity registration");
+    assert!(begin < load);
+    assert!(load < register);
+    assert!(navigation.contains(".cancel_programmatic_navigation()"));
+  }
+
+  #[test]
+  fn native_media_kvc_values_come_from_per_view_attributes() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("attributes.picture_in_picture_enabled"));
+    assert!(source.contains("attributes.fullscreen_enabled"));
+    assert!(!source
+      .contains("_preference.setValue_forKey(Some(&_yes), ns_string!(\"fullScreenEnabled\"))"));
   }
 }

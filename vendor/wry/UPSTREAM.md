@@ -73,11 +73,14 @@ Its security-relevant deltas currently enforce these invariants:
   Destroying Wry's child container/widget is an explicit builder policy for
   embedders that can also reconcile native and logical-view ownership; a page
   cannot otherwise leave the host tracking a stale HWND or GTK widget.
-- Raw WebKit link previews, Picture-in-Picture, and WebKitGTK fullscreen are
-  disabled until the embedder has an origin/gesture-labelled native-surface
-  broker. A macOS file drag with no explicit handler is rejected before Wry
-  reads pasteboard entries; handler-enabled drags cap both file count and each
-  native file-URL string before allocating Rust paths.
+- Raw WebKit link previews, Picture-in-Picture, macOS fullscreen, and
+  WebKitGTK fullscreen are disabled until the embedder has an
+  origin/gesture-labelled native-surface broker. The macOS fullscreen and PiP
+  preferences are per-view attributes: Cargo feature unification may make the
+  private fullscreen API available to privileged chrome without granting it
+  to untrusted child views. A macOS file drag with no explicit handler is
+  rejected before Wry reads pasteboard entries; handler-enabled drags cap both
+  file count and each native file-URL string before allocating Rust paths.
 - Asynchronous custom-protocol responders are structurally `Send`; the fork has
   no blanket unsafe `Send` implementation for them. Apartment/main-thread-only
   WKWebView and WebView2 objects remain in UI-thread registries while workers
@@ -91,6 +94,27 @@ Its security-relevant deltas currently enforce these invariants:
   creation. Disabling browser accelerator keys is a construction postcondition:
   the fork requires `ICoreWebView2Settings3`, applies the setting, and reads it
   back before an untrusted page can load.
+- Desktop navigation callbacks expose one opaque per-WebView identity across
+  provisional start, every redirect, commit, successful finish, and failure.
+  WebView2 retains its native `NavigationId` and a bounded map of the last
+  admitted URL instead of reading mutable global `Source` during overlapping
+  callbacks. WebKitGTK assigns a non-wrapping identity to its documented
+  ordered load sequence. For programmatic WKWebView loads, the adapter binds
+  the exact `WKNavigation` returned by `loadRequest` to the requested URL
+  before any asynchronous lifecycle callback can be accepted. Apple does not
+  expose an action/response-to-`WKNavigation` correlation for page-driven
+  loads, so those loads are not guessed through a global pending slot: their
+  exact callback identity and the now-current bounded `WKWebView.URL` are
+  emitted together at `didCommit`. `WKWebView.URL` is never treated as a
+  provisional-navigation URL. All retained identity state is bounded and
+  native-policy admission remains fail-closed when the bound is exhausted.
+- The same identity callback owns a commit-time presentation guard. Before the
+  embedder sees `Committed`, WebView2 hides both controller and child HWND,
+  WebKitGTK keeps its mapped compositor surface transparent, and WKWebView
+  hides the native view. The embedder's synchronous callback can revoke its
+  own per-view permit before those native calls pump re-entrant layout. Wry
+  also exposes a bounded current-document title query so the embedder can
+  attribute title only after its exact navigation lifecycle is complete.
 
 The standalone `Cargo.lock` is intentional. Fork CI invokes this manifest with
 `--locked` so it cannot silently resolve a graph different from the reviewed
@@ -109,7 +133,9 @@ reference on entry so reentrant removal cannot free it while USER32 is still
 executing the callback. Wry no longer injects/registers its web-message IPC
 surface when no IPC handler was supplied, malformed WebMessage source data is
 dropped instead of panicking, and a popup callback with a missing native sender
-is denied instead of unwrapped. These changes make the fork expose a staged
+is denied instead of unwrapped. No-callback popup denial sets `Handled` before
+reading metadata or taking a deferral, and the process-wide posted-closure
+registry has an exact bound. These changes make the fork expose a staged
 native-ownership boundary without adding a page capability.
 
 The same no-handler rule applies to WebKitGTK: raw views no longer register an
@@ -120,8 +146,9 @@ a manager/WebView retention cycle. Malformed/missing native URI or message
 values (including load notifications) are dropped/defaulted rather than
 unwrapped in the UI process.
 
-When updating Wry, diff the complete upstream range, reapply or retire every
-entry in `FORK.toml` explicitly, regenerate both lockfiles deliberately, run
-native hostile-page tests on all three platforms, update the immutable
-revision, and rerun dependency, license, and provenance gates. A version bump
-without that review is not an accepted update procedure.
+Every Wry update follows the complete [`REBASE.md`](REBASE.md) procedure: diff
+the full upstream range, disposition every `FORK.toml` patch set explicitly,
+regenerate both lockfiles deliberately, run native hostile-page tests on all
+three platforms, update the immutable revision, and rerun dependency, license,
+and provenance gates. A version bump without that review is not an accepted
+update procedure.

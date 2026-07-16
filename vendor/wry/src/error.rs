@@ -114,6 +114,9 @@ pub enum Error {
   #[cfg(any(target_os = "macos", target_os = "ios"))]
   #[error("internal WebKit state lock was poisoned: {0}")]
   WebKitStatePoisoned(&'static str),
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  #[error("WebKit could not establish a bounded native navigation identity")]
+  WebKitNavigationIdentityUnavailable,
   #[error("WebKit rejected the cookie properties")]
   InvalidCookie,
   #[cfg(target_os = "android")]

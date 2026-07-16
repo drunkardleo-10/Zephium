@@ -29,6 +29,7 @@ use std::ffi::c_ulong;
 #[cfg(any(debug_assertions, feature = "devtools"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
+  cell::Cell,
   collections::HashMap,
   rc::Rc,
   sync::{Arc, Mutex},
@@ -63,8 +64,9 @@ use crate::{
   },
   proxy::ProxyConfig,
   web_context::WebContext,
-  Error, NewWindowFeatures, NewWindowOpener, NewWindowResponse, PageLoadEvent, PermissionKind,
-  PermissionResponse, Rect, Result, WebViewAttributes, RGBA,
+  Error, NavigationEvent, NavigationEventPhase, NavigationId, NewWindowFeatures, NewWindowOpener,
+  NewWindowResponse, PageLoadEvent, PermissionKind, PermissionResponse, Rect, Result,
+  WebViewAttributes, RGBA,
 };
 
 use self::web_context::WebContextExt;
@@ -199,6 +201,121 @@ fn bounded_webview_uri(webview: &WebView) -> Option<String> {
 fn bounded_request_uri(request: &URIRequest) -> Option<String> {
   // SAFETY: WebKit owns the request and returned URI pointer through this call.
   unsafe { bounded_utf8_c_string(webkit_uri_request_get_uri(request.as_ptr()), PAGE_URL_LIMIT) }
+}
+
+/// WebKitGTK exposes one ordered main-frame load sequence per WebView but no
+/// public navigation token. Allocate one non-wrapping identity at
+/// `WEBKIT_LOAD_STARTED` and retain it through redirects, commit, and the
+/// mandatory terminal `WEBKIT_LOAD_FINISHED` event. A load failure is emitted
+/// before that terminal event, so `failed` suppresses a false success.
+#[derive(Clone, Copy, Default)]
+struct GtkNavigationSequence {
+  next: u64,
+  active: Option<GtkActiveNavigation>,
+  exhausted: bool,
+}
+
+#[derive(Clone, Copy)]
+struct GtkActiveNavigation {
+  id: NavigationId,
+  failed: bool,
+  committed: bool,
+}
+
+impl GtkNavigationSequence {
+  fn started(&mut self) -> Option<NavigationId> {
+    if self.exhausted {
+      return None;
+    }
+    let Some(next) = self.next.checked_add(1) else {
+      self.exhausted = true;
+      self.active = None;
+      return None;
+    };
+    self.next = next;
+    let id = NavigationId::from_raw(next);
+    self.active = Some(GtkActiveNavigation {
+      id,
+      failed: false,
+      committed: false,
+    });
+    Some(id)
+  }
+
+  fn active(&self) -> Option<NavigationId> {
+    self
+      .active
+      .filter(|active| !active.failed)
+      .map(|active| active.id)
+  }
+
+  fn redirected(&self) -> Option<NavigationId> {
+    self
+      .active
+      .filter(|active| !active.failed && !active.committed)
+      .map(|active| active.id)
+  }
+
+  fn committed(&mut self) -> Option<NavigationId> {
+    let active = self.active.as_mut()?;
+    if active.failed || active.committed {
+      return None;
+    }
+    active.committed = true;
+    Some(active.id)
+  }
+
+  fn failed(&mut self) -> Option<NavigationId> {
+    let active = self.active.as_mut()?;
+    if active.failed {
+      return None;
+    }
+    active.failed = true;
+    Some(active.id)
+  }
+
+  fn finished(&mut self) -> Option<NavigationId> {
+    self
+      .active
+      .take()
+      .filter(|active| !active.failed)
+      .map(|active| active.id)
+  }
+}
+
+#[cfg(test)]
+mod navigation_sequence_tests {
+  use super::*;
+
+  #[test]
+  fn redirects_keep_one_identity_and_failure_suppresses_success() {
+    let mut sequence = GtkNavigationSequence::default();
+    let first = sequence.started().unwrap();
+    assert_eq!(sequence.active(), Some(first));
+    assert_eq!(sequence.failed(), Some(first));
+    assert_eq!(sequence.active(), None);
+    assert_eq!(sequence.finished(), None);
+
+    let second = sequence.started().unwrap();
+    assert_ne!(first, second);
+    assert_eq!(sequence.active(), Some(second));
+    assert_eq!(sequence.redirected(), Some(second));
+    assert_eq!(sequence.committed(), Some(second));
+    assert_eq!(sequence.committed(), None);
+    assert_eq!(sequence.redirected(), None);
+    assert_eq!(sequence.finished(), Some(second));
+  }
+
+  #[test]
+  fn identity_exhaustion_is_terminal_instead_of_wrapping() {
+    let mut sequence = GtkNavigationSequence {
+      next: u64::MAX,
+      ..Default::default()
+    };
+    assert_eq!(sequence.started(), None);
+    sequence.next = 0;
+    assert_eq!(sequence.started(), None);
+  }
 }
 
 mod drag_drop;
@@ -461,6 +578,16 @@ impl InnerWebView {
 
     let webview = Self::create_webview(web_context, &attributes, &pl_attrs);
 
+    // A guarded untrusted view must remain mapped so WebKitGTK creates and
+    // maintains its compositing surface, but it must not paint the engine's
+    // construction-time blank document. Conceal immediately after allocation,
+    // before the widget is parented, initial navigation starts, or either GTK
+    // construction path calls `show_all`. The host's exact navigation permit
+    // is the only later authority that may restore opacity.
+    if attributes.guards_initial_presentation() {
+      webview.set_opacity(0.0);
+    }
+
     // Transparent
     if attributes.transparent {
       webview.set_background_color(&gtk::gdk::RGBA::new(0., 0., 0., 0.));
@@ -663,7 +790,69 @@ impl InnerWebView {
       });
     }
 
-    // Page load handler. A transiently absent native URI is not a page with an
+    // Identity-bearing main-frame navigation handler. WebKitGTK's
+    // `load-changed` contract defines Started -> zero or more Redirected ->
+    // Committed -> Finished as one ordered load operation. Keep a synthetic
+    // non-wrapping identity for that native sequence; URL equality is not an
+    // identity and the committed URI is intentionally the final redirect.
+    if let Some(navigation_event_handler) = attributes.navigation_event_handler.take() {
+      let navigation_presentation_guard = attributes.navigation_presentation_guard.take();
+      let navigation_event_handler = Rc::new(navigation_event_handler);
+      let sequence = Rc::new(Cell::new(GtkNavigationSequence::default()));
+      let changed_sequence = sequence.clone();
+      let changed_handler = navigation_event_handler.clone();
+      webview.connect_load_changed(move |webview, load_event| {
+        let mut sequence = changed_sequence.get();
+        let transition = match load_event {
+          LoadEvent::Started => sequence
+            .started()
+            .map(|id| (id, NavigationEventPhase::Started)),
+          LoadEvent::Redirected => sequence
+            .redirected()
+            .map(|id| (id, NavigationEventPhase::Redirected)),
+          LoadEvent::Committed => sequence
+            .committed()
+            .map(|id| (id, NavigationEventPhase::Committed)),
+          LoadEvent::Finished => sequence
+            .finished()
+            .map(|id| (id, NavigationEventPhase::Finished)),
+          _ => None,
+        };
+        changed_sequence.set(sequence);
+        if let (Some(guard), Some((_, NavigationEventPhase::Committed))) =
+          (navigation_presentation_guard.as_ref(), transition)
+        {
+          // Keep the already-mapped WebKit compositing surface but make the
+          // newly committed document non-painting before embedder dispatch.
+          // Revoke the reveal permit first because set_opacity can pump GTK.
+          guard();
+          webview.set_opacity(0.0);
+        }
+        if let (Some((id, phase)), Some(url)) = (transition, bounded_webview_uri(webview)) {
+          changed_handler(NavigationEvent { id, phase, url });
+        }
+      });
+
+      let failed_handler = navigation_event_handler.clone();
+      webview.connect_load_failed(move |_webview, _load_event, failing_uri, _error| {
+        let mut current = sequence.get();
+        let id = current.failed();
+        sequence.set(current);
+        let url = bounded_utf8_bytes(failing_uri.as_bytes(), PAGE_URL_LIMIT);
+        if let (Some(id), Some(url)) = (id, url) {
+          failed_handler(NavigationEvent {
+            id,
+            phase: NavigationEventPhase::Failed,
+            url,
+          });
+        }
+        // Preserve WebKit's ordinary error-page behavior. The identity event
+        // is observational and does not weaken the navigation policy.
+        false
+      });
+    }
+
+    // Legacy page load handler. A transiently absent native URI is not a page with an
     // empty origin, so do not manufacture an event for it.
     if let Some(on_page_load_handler) = attributes.on_page_load_handler.take() {
       webview.connect_load_changed(move |webview, load_event| match load_event {
@@ -1036,6 +1225,10 @@ impl InnerWebView {
 
   pub fn url(&self) -> Result<String> {
     Ok(bounded_webview_uri(&self.webview).unwrap_or_default())
+  }
+
+  pub fn document_title(&self) -> Result<Option<String>> {
+    Ok(bounded_webview_title(&self.webview))
   }
 
   pub fn eval(

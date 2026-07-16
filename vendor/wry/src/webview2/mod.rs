@@ -52,8 +52,9 @@ use crate::{
   },
   native_cleanup::{CleanupPlan, CleanupStep},
   proxy::ProxyConfig,
-  Error, MemoryUsageLevel, NewWindowFeatures, NewWindowOpener, NewWindowResponse, PageLoadEvent,
-  PermissionKind, PermissionResponse, Rect, RequestAsyncResponder, Result, WebViewAttributes, RGBA,
+  Error, MemoryUsageLevel, NavigationEvent, NavigationEventPhase, NavigationId, NewWindowFeatures,
+  NewWindowOpener, NewWindowResponse, PageLoadEvent, PermissionKind, PermissionResponse, Rect,
+  RequestAsyncResponder, Result, WebViewAttributes, RGBA,
 };
 
 type EventRegistrationToken = i64;
@@ -66,6 +67,17 @@ static EXEC_MSG_ID: Lazy<u32> = Lazy::new(|| unsafe { RegisterWindowMessageA(s!(
 // be reconstructed by the window procedure.
 static PENDING_DISPATCHES: Lazy<Mutex<HashMap<usize, isize>>> =
   Lazy::new(|| Mutex::new(HashMap::new()));
+// This registry owns heap allocations referenced by posted window messages.
+// USER32's message queue is much larger than the amount of work Wry should
+// retain, and hostile page events can otherwise make memory grow until that
+// OS queue saturates. Rejection is fail-closed at every current call site:
+// popup deferral guards deny in Drop, while response callbacks retain their
+// own bounded native admission/timeout lifecycle.
+const PENDING_DISPATCH_LIMIT: usize = 1024;
+// WebView2 permits navigation event sequences with different IDs to overlap.
+// Retain only a small bounded set of admitted main-frame identities so
+// ContentLoading never has to derive an event URL from mutable global Source.
+const IN_FLIGHT_NAVIGATION_LIMIT: usize = 64;
 static NEXT_WEB_RESOURCE_RESPONSE: AtomicUsize = AtomicUsize::new(1);
 // A custom-protocol handler is application code and may fail to answer, while
 // posting its answer back to the UI queue may also fail. Never retain a
@@ -277,6 +289,38 @@ fn next_cleanup_incident_id() -> Option<NonZeroU64> {
 
 fn cleanup_registry_has_capacity(current: usize) -> bool {
   current < MAX_ORPHANED_CLEANUP_DEBTS
+}
+
+fn dispatch_registry_has_capacity(current: usize) -> bool {
+  current < PENDING_DISPATCH_LIMIT
+}
+
+#[derive(Default)]
+struct InFlightNavigationUrls {
+  urls: HashMap<u64, String>,
+  committed: HashSet<u64>,
+}
+
+impl InFlightNavigationUrls {
+  fn admit(&mut self, id: u64, url: String) -> bool {
+    if !self.urls.contains_key(&id) && self.urls.len() >= IN_FLIGHT_NAVIGATION_LIMIT {
+      return false;
+    }
+    self.urls.insert(id, url);
+    true
+  }
+
+  fn commit(&mut self, id: u64) -> Option<String> {
+    if !self.urls.contains_key(&id) || !self.committed.insert(id) {
+      return None;
+    }
+    self.urls.get(&id).cloned()
+  }
+
+  fn finish(&mut self, id: u64) -> Option<String> {
+    self.committed.remove(&id);
+    self.urls.remove(&id)
+  }
 }
 
 fn retain_orphaned_cleanup_debt(debt: NativeCleanupDebt) -> Option<NonZeroU64> {
@@ -1300,7 +1344,7 @@ impl InnerWebView {
     unsafe { Self::set_webview_settings(&webview, &attributes, &pl_attrs)? };
 
     // Webview handlers
-    unsafe { Self::attach_handlers(hwnd, &webview, &mut attributes, &mut token, env)? };
+    unsafe { Self::attach_handlers(hwnd, controller, &webview, &mut attributes, &mut token, env)? };
 
     // IPC handler
     if attributes.ipc_handler.is_some() {
@@ -1533,6 +1577,7 @@ impl InnerWebView {
   #[inline]
   unsafe fn attach_handlers(
     hwnd: HWND,
+    controller: &ICoreWebView2Controller,
     webview: &ICoreWebView2,
     attributes: &mut WebViewAttributes,
     token: &mut EventRegistrationToken,
@@ -1574,7 +1619,85 @@ impl InnerWebView {
       )?;
     }
 
-    // Page load handler
+    // Identity-bearing main-frame navigation handler. WebView2 explicitly
+    // guarantees that redirects retain the original NavigationId and that
+    // different navigation IDs may overlap. Preserve those native facts
+    // instead of deriving document identity from the mutable Source value.
+    let navigation_event_handler = attributes.navigation_event_handler.take().map(Rc::new);
+    let navigation_presentation_guard = attributes.navigation_presentation_guard.take();
+    // Never hold this lock across a COM call or embedder callback. A mutex
+    // avoids RefCell panics in page-facing callbacks while its poison recovery
+    // keeps malformed/re-entrant native activity from aborting the process.
+    let in_flight_navigation_urls = Rc::new(Mutex::new(InFlightNavigationUrls::default()));
+    if let Some(handler) = navigation_event_handler.as_ref() {
+      let committed_urls = in_flight_navigation_urls.clone();
+      let committed_handler = handler.clone();
+      let committed_controller = controller.clone();
+      webview.add_ContentLoading(
+        &ContentLoadingEventHandler::create(Box::new(move |_, args| {
+          let Some(args) = args else {
+            return Ok(());
+          };
+          let mut navigation_id = 0;
+          args.NavigationId(&mut navigation_id)?;
+          let url = committed_urls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .commit(navigation_id);
+          if let Some(url) = url {
+            if let Some(guard) = navigation_presentation_guard.as_ref() {
+              // ContentLoading precedes document script/content presentation.
+              // Revoke the embedder's exact reveal permit before any native
+              // hide call can pump re-entrant stage work, then hide the child
+              // HWND and controller once per navigation identity.
+              guard();
+              let _ = ShowWindow(hwnd, SW_HIDE);
+              let _ = committed_controller.SetIsVisible(false);
+            }
+            committed_handler(NavigationEvent {
+              id: NavigationId::from_raw(navigation_id),
+              phase: NavigationEventPhase::Committed,
+              url,
+            });
+          }
+          Ok(())
+        })),
+        token,
+      )?;
+
+      let completed_urls = in_flight_navigation_urls.clone();
+      let completed_handler = handler.clone();
+      webview.add_NavigationCompleted(
+        &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+          let Some(args) = args else {
+            return Ok(());
+          };
+          let mut navigation_id = 0;
+          let mut succeeded = BOOL::default();
+          args.NavigationId(&mut navigation_id)?;
+          args.IsSuccess(&mut succeeded)?;
+          let url = completed_urls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish(navigation_id);
+          if let Some(url) = url {
+            completed_handler(NavigationEvent {
+              id: NavigationId::from_raw(navigation_id),
+              phase: if succeeded.as_bool() {
+                NavigationEventPhase::Finished
+              } else {
+                NavigationEventPhase::Failed
+              },
+              url,
+            });
+          }
+          Ok(())
+        })),
+        token,
+      )?;
+    }
+
+    // Legacy page load handler.
     if let Some(on_page_load_handler) = attributes.on_page_load_handler.take() {
       let on_page_load_handler = Rc::new(on_page_load_handler);
       let on_page_load_handler_ = on_page_load_handler.clone();
@@ -1609,15 +1732,23 @@ impl InnerWebView {
       )?;
     }
 
-    // Navigation handler
-    if let Some(nav_callback) = attributes.navigation_handler.take() {
+    // Navigation policy and identity start/redirect observation share one
+    // callback so a denied or malformed target can never be reported as an
+    // admitted navigation. Read every identity field while cancellation is
+    // still dominant; a getter failure therefore remains fail-closed.
+    let nav_callback = attributes.navigation_handler.take();
+    if nav_callback.is_some() || navigation_event_handler.is_some() {
+      let starting_handler = navigation_event_handler.clone();
+      let starting_urls = in_flight_navigation_urls.clone();
       webview.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |_, args| {
           let Some(args) = args else {
             return Ok(());
           };
-          // A missing/malformed URI must never bypass the navigation callback.
-          args.SetCancel(true)?;
+          if nav_callback.is_some() || starting_handler.is_some() {
+            // A missing/malformed URI must never bypass the navigation callback.
+            args.SetCancel(true)?;
+          }
 
           let uri = {
             let mut uri = PWSTR::null();
@@ -1625,8 +1756,65 @@ impl InnerWebView {
             take_pwstr_bounded(uri, PAGE_URL_LIMIT)
           };
 
-          if uri.is_some_and(&nav_callback) {
+          let admitted = match (&nav_callback, uri.as_ref()) {
+            (Some(callback), Some(uri)) => callback(uri.clone()),
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => false,
+          };
+          if !admitted {
+            return Ok(());
+          }
+
+          let mut tracking_failed = false;
+          let event = if starting_handler.is_some() {
+            let mut navigation_id = 0;
+            let mut redirected = BOOL::default();
+            args.NavigationId(&mut navigation_id)?;
+            args.IsRedirected(&mut redirected)?;
+            uri.map(|url| {
+              tracking_failed = !starting_urls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .admit(navigation_id, url.clone());
+              NavigationEvent {
+                id: NavigationId::from_raw(navigation_id),
+                phase: if redirected.as_bool() {
+                  NavigationEventPhase::Redirected
+                } else {
+                  NavigationEventPhase::Started
+                },
+                url,
+              }
+            })
+          } else {
+            None
+          };
+
+          if starting_handler.is_some() && event.is_none() {
+            // Identity tracking is mandatory when requested. Capacity or
+            // malformed native state leaves cancellation in force.
+            return Ok(());
+          }
+          if tracking_failed {
+            // The native navigation is still canceled. Complete the observed
+            // start synthetically so an embedder can roll back an explicit
+            // pending navigation instead of waiting for a completion whose
+            // identity was deliberately not retained.
+            if let (Some(handler), Some(event)) = (starting_handler.as_ref(), event.as_ref()) {
+              handler(event.clone());
+              handler(NavigationEvent {
+                phase: NavigationEventPhase::Failed,
+                ..event.clone()
+              });
+            }
+            return Ok(());
+          }
+          if nav_callback.is_some() || starting_handler.is_some() {
             args.SetCancel(false)?;
+          }
+          if let (Some(handler), Some(event)) = (starting_handler.as_ref(), event) {
+            handler(event);
           }
 
           Ok(())
@@ -2204,6 +2392,11 @@ impl InnerWebView {
       drop(Box::from_raw(raw));
       return false;
     };
+    if !dispatch_registry_has_capacity(pending.len()) {
+      drop(pending);
+      drop(Box::from_raw(raw));
+      return false;
+    }
     pending.insert(capability, hwnd.0 as isize);
     drop(pending);
 
@@ -2507,6 +2700,12 @@ impl InnerWebView {
 
   pub fn url(&self) -> Result<String> {
     Self::url_from_webview(&self.webview).map_err(Into::into)
+  }
+
+  pub fn document_title(&self) -> Result<Option<String>> {
+    let mut title = PWSTR::null();
+    unsafe { self.webview.DocumentTitle(&mut title) }?;
+    Ok(take_pwstr_bounded(title, PAGE_TITLE_LIMIT))
   }
 
   pub fn zoom(&self, scale_factor: f64) -> Result<()> {
@@ -3127,6 +3326,62 @@ mod tests {
     ));
     assert!(!cleanup_registry_has_capacity(MAX_ORPHANED_CLEANUP_DEBTS));
     assert!(!cleanup_registry_has_capacity(usize::MAX));
+  }
+
+  #[test]
+  fn ui_dispatch_registry_has_an_exact_fail_closed_bound() {
+    assert!(dispatch_registry_has_capacity(0));
+    assert!(dispatch_registry_has_capacity(PENDING_DISPATCH_LIMIT - 1));
+    assert!(!dispatch_registry_has_capacity(PENDING_DISPATCH_LIMIT));
+    assert!(!dispatch_registry_has_capacity(usize::MAX));
+  }
+
+  #[test]
+  fn navigation_identity_urls_are_bounded_and_redirects_replace_in_place() {
+    let mut urls = InFlightNavigationUrls::default();
+    for id in 0..IN_FLIGHT_NAVIGATION_LIMIT as u64 {
+      assert!(urls.admit(id, format!("https://{id}.example/")));
+    }
+    assert!(!urls.admit(
+      IN_FLIGHT_NAVIGATION_LIMIT as u64,
+      "https://overflow.example/".into()
+    ));
+    assert!(urls.admit(0, "https://redirect.example/".into()));
+    assert_eq!(urls.commit(0).as_deref(), Some("https://redirect.example/"));
+    assert_eq!(
+      urls.commit(0),
+      None,
+      "one navigation gates presentation once"
+    );
+    assert_eq!(urls.finish(0).as_deref(), Some("https://redirect.example/"));
+    assert!(urls.admit(
+      IN_FLIGHT_NAVIGATION_LIMIT as u64,
+      "https://reused.example/".into()
+    ));
+  }
+
+  #[test]
+  fn popup_no_callback_path_denies_before_metadata_or_deferral() {
+    let source = include_str!("mod.rs");
+    let handler = source
+      .split("webview.add_NewWindowRequested(")
+      .nth(1)
+      .expect("new-window event registration")
+      .split("Self::attach_main_thread_dispatcher(hwnd)?")
+      .next()
+      .expect("new-window event body");
+    let deny = handler
+      .find("args.SetHandled(true)?")
+      .expect("dominant denial");
+    let callback = handler
+      .find("if let Some(new_window_req_handler)")
+      .expect("optional metadata callback");
+    let metadata = handler.find("args.Uri(&mut uri)?").expect("URI read");
+    let deferral = handler.find("args.GetDeferral()?").expect("deferral read");
+    assert!(deny < callback);
+    assert!(callback < metadata);
+    assert!(metadata < deferral);
+    assert_eq!(handler.matches("args.GetDeferral()?").count(), 1);
   }
 
   #[test]
