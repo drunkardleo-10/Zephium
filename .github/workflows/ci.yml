@@ -1,33 +1,78 @@
 name: CI
 
 on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: Exact reviewed commit to test when called by the release workflow
+        required: false
+        type: string
   pull_request:
     branches: [main]
   push:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A release call is pinned to a reviewed commit and must not be cancelled by
+  # a later push to main. Ordinary push/PR runs still coalesce by ref.
+  group: ci-${{ inputs.checkout_ref || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.5"
+
 jobs:
-  frontend:
-    runs-on: ubuntu-latest
+  workflow-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          node-version: 24
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Enforce immutable workflow action and container sources
+        run: ruby scripts/release/test_workflow_sources.rb
+
+      - name: Validate every GitHub Actions workflow with pinned actionlint
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/actionlint-1.7.12.tar.gz"
+          destination="${RUNNER_TEMP}/actionlint-1.7.12"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            --output "${archive}" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  '"${archive}" | \
+            sha256sum --check --strict
+          mkdir -p "${destination}"
+          tar --extract --gzip --file "${archive}" --directory "${destination}"
+          shellcheck --version
+          "${destination}/actionlint" -color
+
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Audit (advisory)
-        run: pnpm audit --prod --audit-level high
-        continue-on-error: true
+      - name: Audit the complete frontend/build dependency graph
+        # Build/dev tools execute while producing signed release artifacts, so
+        # Vite, TypeScript, the Tauri CLI, and their transitives are in scope.
+        run: pnpm audit --audit-level high
 
       - name: Type-check
         run: pnpm --dir frame run check
@@ -38,7 +83,10 @@ jobs:
   rust:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         run: |
@@ -49,18 +97,28 @@ jobs:
             librsvg2-dev \
             libssl-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
         with:
           components: clippy, rustfmt
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - uses: taiki-e/install-action@v2
+      - name: Enforce native-engine security-floor review deadlines
+        run: cargo xtask check-engine-floors
+
+      - name: Enforce advisory-exception owners and expiry
+        run: cargo xtask check-advisory-exceptions
+
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
-          tool: cargo-nextest,cargo-machete,cargo-deny
+          tool: cargo-nextest@0.9.137,cargo-machete@0.9.2,cargo-deny@0.20.2
+          fallback: none
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
+
+      - name: Format vendored Wry security adapter directly
+        run: cargo fmt --manifest-path vendor/wry/Cargo.toml -- --check
 
       - name: cargo check
         run: cargo check --all-targets --locked
@@ -68,16 +126,26 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Check vendored Wry security adapter directly
+        run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
+
+      - name: Clippy vendored Wry security adapter directly
+        run: >-
+          cargo clippy --manifest-path vendor/wry/Cargo.toml
+          --locked --all-targets -- -D warnings
+
       - name: Unused crates (advisory)
         run: cargo machete
         continue-on-error: true
 
-      - name: Licenses, advisories, sources (advisory)
+      - name: Enforce licenses, advisories, and sources policy
         run: cargo deny check
-        continue-on-error: true
 
       - name: cargo nextest
         run: cargo nextest run --locked
+
+      - name: Test vendored Wry security adapter directly
+        run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
       - name: Bindings drift
         run: git diff --exit-code frame/src/ipc/bindings.ts
@@ -90,30 +158,180 @@ jobs:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: swatinem/rust-cache@v2
-
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          tool: cargo-nextest
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        with:
+          tool: cargo-nextest@0.9.137
+          fallback: none
 
       - name: cargo check
         run: cargo check --all-targets --locked
 
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Check vendored Wry security adapter directly
+        run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
+
+      - name: Clippy vendored Wry security adapter directly
+        run: >-
+          cargo clippy --manifest-path vendor/wry/Cargo.toml
+          --locked --all-targets -- -D warnings
+
       # The desktop test binary needs the WebView2 loader at run time, which
-      # plain runners do not provide; its only test (bindings export) runs on
-      # the ubuntu job.
-      - name: cargo nextest
+      # plain Windows runners do not provide. macOS must run the full native
+      # desktop tests, including Objective-C class/delegate registration.
+      - name: cargo nextest (Windows)
+        if: runner.os == 'Windows'
         run: cargo nextest run --locked --retries 2 --workspace --exclude zephium-desktop
+
+      - name: Windows bounded diagnostic-log policy tests
+        if: runner.os == 'Windows'
+        # This loader-independent target exercises rotation, preservation,
+        # process locking, legacy bounding, and privacy-expiry behavior.
+        run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
+
+      - name: cargo nextest (macOS)
+        if: runner.os == 'macOS'
+        run: cargo nextest run --locked --retries 2 --workspace
+
+      - name: Test vendored Wry security adapter directly
+        run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
+
+  linux-native-security:
+    # Ubuntu's currently published WebKitGTK is below WSA-2026-0004's fixed
+    # boundary. Fedora 44 updates-testing currently carries Fedora's signed
+    # 2.52.5 build while stable promotion is pending, so this non-artifact job
+    # opts in only for the exact WebKitGTK/JSC package family. Release builds
+    # remain stable-repository-only and fail closed until promotion. The
+    # ordinary Ubuntu job still verifies the oldest supported build ABI and
+    # every platform-independent test.
+    runs-on: ubuntu-24.04
+    container:
+      # Official Fedora 44 OCI index digest returned by Fedora's registry on
+      # 2026-07-14. The tag is retained only for human readability.
+      image: registry.fedoraproject.org/fedora:44@sha256:e70db1fd517c7d6990715fb200b1aae95ef6a1ef1492dc12c8ca25cc129a5094
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install supported WebKitGTK and native test dependencies
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "${ID}" = "fedora"
+          test "${VERSION_ID}" = "44"
+          dnf upgrade -y
+          if dnf repolist --enabled | grep -Eiq 'rawhide|updates-testing'; then
+            echo "::error title=Unexpected Fedora repository::updates-testing must be enabled only for the explicit WebKitGTK transaction."
+            exit 1
+          fi
+          dnf install -y \
+            bubblewrap \
+            curl \
+            gcc \
+            gcc-c++ \
+            git \
+            gtk3-devel \
+            libseccomp \
+            make \
+            openssl-devel \
+            pkgconf-pkg-config \
+            tar \
+            webkit2gtk4.1-devel \
+            xorg-x11-server-Xvfb
+          dnf upgrade -y --refresh --enablerepo=updates-testing \
+            javascriptcoregtk4.1 \
+            javascriptcoregtk4.1-devel \
+            webkit2gtk4.1 \
+            webkit2gtk4.1-devel
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+
+      - name: Prove native WebKitGTK sandbox package prerequisites
+        run: |
+          set -euo pipefail
+          installed="$(pkg-config --modversion webkit2gtk-4.1)"
+          packaged="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
+          required="${ZEPHIUM_MIN_WEBKITGTK_VERSION}"
+          echo "Native WebKitGTK under test: package=${packaged}; pkg-config=${installed}; required >= ${required}"
+          if [[ ! "${packaged}" =~ ^2\.52\.([0-9]+)$ ]]; then
+            echo "::error title=Unreviewed WebKitGTK release line::Native security evidence is accepted only for the reviewed stable 2.52.x line, not ${packaged}."
+            exit 1
+          fi
+          packaged_patch="${BASH_REMATCH[1]}"
+          if (( 10#${packaged_patch} < 5 )); then
+            echo "::error title=Unsupported WebKitGTK patch::Native security evidence requires WebKitGTK 2.52.5 or newer, not ${packaged}."
+            exit 1
+          fi
+          if ! rpm -q --whatprovides "webkit2gtk4.1 >= ${required}" >/dev/null || \
+             [[ "${installed}" != "${packaged}" ]]; then
+            echo "::error title=Unproven WebKitGTK runtime::Fedora package ${packaged} and pkg-config ${installed} do not prove the required engine ${required}."
+            exit 1
+          fi
+          webkit_requires="$(rpm -q --requires webkit2gtk4.1)"
+          if ! grep -Fx 'bubblewrap' <<<"${webkit_requires}" >/dev/null; then
+            echo "::error title=Missing WebKitGTK sandbox dependency::Fedora's WebKitGTK package does not require bubblewrap."
+            exit 1
+          fi
+          if ! grep -Eq '^libseccomp\.so\.2' <<<"${webkit_requires}"; then
+            echo "::error title=Missing WebKitGTK seccomp dependency::Fedora's WebKitGTK package does not require libseccomp.so.2."
+            exit 1
+          fi
+          command -v bwrap >/dev/null
+          bwrap_path="$(command -v bwrap)"
+          if [[ "$(rpm -qf --qf '%{NAME}' "${bwrap_path}")" != "bubblewrap" ]]; then
+            echo "::error title=Unexpected bubblewrap provider::${bwrap_path} is not owned by Fedora's bubblewrap package."
+            exit 1
+          fi
+          for package in webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp; do
+            vendor="$(rpm -q --qf '%{VENDOR}' "${package}")"
+            if [[ "${vendor}" != "Fedora Project" ]]; then
+              echo "::error title=Unexpected Fedora package vendor::${package} reports vendor '${vendor}'."
+              exit 1
+            fi
+            signature="$(rpm -q --qf '%|DSAHEADER?{%{DSAHEADER:pgpsig}}:{%|RSAHEADER?{%{RSAHEADER:pgpsig}}:{%|SIGGPG?{%{SIGGPG:pgpsig}}:{%|SIGPGP?{%{SIGPGP:pgpsig}}:{(none)}|}|}|}|' "${package}")"
+            if [[ -z "${signature}" || "${signature}" == "(none)" ]]; then
+              echo "::error title=Unsigned Fedora package::${package} has no retained RPM signature metadata."
+              exit 1
+            fi
+          done
+          rpm -V webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp
+
+      # This launches a real renderer and fails unless the process has
+      # no-new-privileges, seccomp filtering, distinct mount/user/PID
+      # namespaces, and denial of a host-only path. Context properties alone
+      # are not accepted as evidence that WebKit's renderer confinement
+      # actually engaged.
+      - name: Prove Wry WebKitWebProcess confinement
+        run: >-
+          xvfb-run -a cargo test --locked -p zephium-engine
+          wry_contexts_enable_sandbox_and_cross_site_process_swap
+          -- --ignored
 
   coverage:
     runs-on: ubuntu-22.04
     needs: rust
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         run: |
@@ -124,23 +342,24 @@ jobs:
             librsvg2-dev \
             libssl-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
         with:
           components: llvm-tools-preview
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: coverage
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
-          tool: cargo-llvm-cov,cargo-nextest
+          tool: cargo-llvm-cov@0.8.6,cargo-nextest@0.9.137
+          fallback: none
 
       - name: Generate coverage
         run: cargo llvm-cov nextest --locked --lcov --output-path lcov.info
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: lcov-report
           path: lcov.info

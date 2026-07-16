@@ -6,3 +6,5 @@ license.workspace = true
 publish = false
 
 [dependencies]
+zephium-core.workspace = true
+toml = "0.9"

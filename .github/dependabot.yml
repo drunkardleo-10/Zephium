@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    # Wry is excluded from the root workspace and owns an independent lockfile.
+    directory: /vendor/wry
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    # pnpm-lock.yaml is owned by the repository-root workspace and covers
+    # both frame/ and desktop/. Updating only /frame would miss the Tauri CLI
+    # and can leave Dependabot without the authoritative lockfile boundary.
+    directory: /
+    schedule:
+      interval: weekly
