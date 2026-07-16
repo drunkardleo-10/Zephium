@@ -2,6 +2,14 @@
 //! enter through a queue (UI intents and engine events alike), effects leave
 //! through ports, projections go to the UI.
 
+mod store_reads;
+
+#[doc(hidden)]
+pub use store_reads::StoreReadResult;
+#[cfg(test)]
+use store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
+use store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderStopGuard};
+
 use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -9,13 +17,14 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ItemId, ProfileId, SpaceId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::item::{Lifecycle, Placement, SpaceSection, TabState};
 use zephium_core::items::{Effect, Items};
 use zephium_core::layout;
-use zephium_core::ports::chrome::{Chrome, ChromeFrame};
+use zephium_core::ports::chrome::{Chrome as GeometryChrome, ChromeFrame};
 use zephium_core::ports::engine::{
-    DiscardProbeId, Engine, EngineEvent, NativeDispatch, Partition, ProfileDataErasureOutcome,
+    DiscardProbeId, Engine, EngineEvent, NativeAction, NativeDispatch, NavigationPresentationId,
+    Partition, ProfileDataErasureOutcome, ZoomRequestId,
 };
 use zephium_core::ports::net::Net;
 use zephium_core::ports::store::{
@@ -36,8 +45,45 @@ use zephium_ipc::{
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
 pub type SharedNet = Arc<dyn Net + Send + Sync>;
-pub type SharedChrome = Arc<dyn Chrome + Send + Sync>;
+pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
 pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
+
+/// Exact privileged-chrome work that must complete before one raw document
+/// can become visible. The tab projection is carried in the same native eval
+/// as the acknowledgement, avoiding an ordering assumption between generic
+/// projection delivery and native content presentation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChromePresentation {
+    pub id: ItemId,
+    pub navigation: NavigationPresentationId,
+    pub url: String,
+    pub tab: TabView,
+    pub active: Option<ItemId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChromePresentationDispatch {
+    /// The adapter applied and verified the projection synchronously. Used by
+    /// deterministic embedders/tests; production native adapters are async.
+    Applied,
+    /// Callback ownership was accepted. It must report verification success
+    /// or failure without blocking its native UI thread.
+    Scheduled,
+    /// No callback ownership transfer occurred.
+    Rejected,
+}
+
+pub type ChromePresentationCallback = Box<dyn FnOnce(bool) + Send>;
+
+/// Geometry plus the privileged DOM acknowledgement required by the raw-view
+/// anti-spoof boundary.
+pub trait PresentationChrome: GeometryChrome {
+    fn apply_tab_for_presentation(
+        &self,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch;
+}
 
 /// Terminal result of the ordered application shutdown protocol.
 ///
@@ -100,7 +146,12 @@ pub enum Command {
         x: f64,
         y: f64,
     },
-    DividerRelease,
+    DividerRelease {
+        /// Final pointer position, folded into the same ordered mutation as
+        /// release so separate IPC deliveries cannot persist a stale ratio.
+        x: Option<f64>,
+        y: Option<f64>,
+    },
     Run(String),
     Search(String),
     OpenUrl(String),
@@ -117,6 +168,27 @@ pub enum Command {
         id: ItemId,
         attempt: u8,
     },
+    /// Bounded admission retry for one exact committed navigation. Normal
+    /// presentation is requested immediately after its URL reaches chrome;
+    /// stale identities can never reveal overlapping content.
+    PresentationFallback {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        /// Absolute dispatch-admission bound. Retries and overlapping
+        /// navigations cannot move it later.
+        hard_deadline: std::time::Instant,
+    },
+    /// Result of one privileged eval-with-callback presentation barrier. The
+    /// callback is untrusted lifecycle timing: the actor revalidates every
+    /// field against its current exact pending obligation.
+    ChromePresentationApplied {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        url: String,
+        active: Option<ItemId>,
+        projection_revision: String,
+        applied: bool,
+    },
     /// Fail-closed deadline for one exact renderer discard-safety probe.
     DiscardProbeTimeout {
         id: ItemId,
@@ -132,6 +204,10 @@ pub enum Command {
         profile: ProfileId,
         generation: u64,
     },
+    /// Completion from the bounded storage-read worker. Every result carries
+    /// the exact request generation and is revalidated against current shell
+    /// state before it can affect privileged projections.
+    StoreRead(StoreReadResult),
     /// Internal one-shot debounce fired by the queue's single timer thread.
     Persist,
     /// Periodic maintenance heartbeat; idle tabs suspend or hibernate even
@@ -167,6 +243,7 @@ struct WorkerThreads {
 struct WorkerThreadState {
     actor: Option<WorkerThread>,
     timer: Option<WorkerThread>,
+    store_reader: Option<WorkerThread>,
 }
 
 struct WorkerThread {
@@ -178,6 +255,7 @@ struct WorkerThread {
 pub enum SpawnError {
     Actor(std::io::Error),
     Timer(std::io::Error),
+    StoreReader(std::io::Error),
 }
 
 impl std::fmt::Display for SpawnError {
@@ -185,6 +263,9 @@ impl std::fmt::Display for SpawnError {
         match self {
             Self::Actor(error) => write!(formatter, "could not start shell actor: {error}"),
             Self::Timer(error) => write!(formatter, "could not start shell timer: {error}"),
+            Self::StoreReader(error) => {
+                write!(formatter, "could not start shell storage reader: {error}")
+            }
         }
     }
 }
@@ -192,7 +273,7 @@ impl std::fmt::Display for SpawnError {
 impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Actor(error) | Self::Timer(error) => Some(error),
+            Self::Actor(error) | Self::Timer(error) | Self::StoreReader(error) => Some(error),
         }
     }
 }
@@ -249,6 +330,13 @@ impl WorkerThreads {
             .timer = Some(worker);
     }
 
+    fn install_store_reader(&self, worker: WorkerThread) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .store_reader = Some(worker);
+    }
+
     fn join_until(&self, deadline: std::time::Instant) -> bool {
         let mut state = self
             .state
@@ -256,7 +344,8 @@ impl WorkerThreads {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let actor_clean = join_worker_until(&mut state.actor, deadline);
         let timer_clean = join_worker_until(&mut state.timer, deadline);
-        actor_clean && timer_clean
+        let store_reader_clean = join_worker_until(&mut state.store_reader, deadline);
+        actor_clean && timer_clean && store_reader_clean
     }
 }
 
@@ -442,10 +531,18 @@ enum CoalescedKey {
     Loading(ItemId),
     Favicon(ItemId),
     FaviconPoll(ItemId),
+    Presentation(ItemId),
+    ChromePresentation(ItemId),
+    PresentationFallback(ItemId),
     DiscardProbeTimeout(ItemId),
     ProfileDeletionReady(ProfileId),
     ProfileDeletionRetry(ProfileId),
+    StoreHistory,
+    StoreFavicon(ItemId),
+    StoreFaviconBatch,
     Navigation(ItemId),
+    Zoom(ItemId),
+    NativeAction(ItemId),
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
@@ -464,7 +561,11 @@ impl CoalescedKey {
             EngineEvent::UrlChanged { id, .. } => Self::Url(*id),
             EngineEvent::LoadingChanged { id, .. } => Self::Loading(*id),
             EngineEvent::FaviconPixels { id, .. } => Self::Favicon(*id),
+            EngineEvent::PresentationPending { id, .. }
+            | EngineEvent::PresentationReady { id, .. } => Self::Presentation(*id),
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
+            EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
+            EngineEvent::NativeActionFailed { id, .. } => Self::NativeAction(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             _ => return None,
         })
@@ -476,13 +577,14 @@ impl CoalescedKey {
 // profile/split/runtime-update facts and the final shutdown barrier. A shared WebKit process
 // may terminate all 1,024 live views in one native callback burst.
 const NORMAL_COMMAND_CAPACITY: usize = 960;
-// Each tracked tab can have one latest URL, one navigation failure, and one
-// terminal view-state fact. Each profile can independently have one process-
+// Each tracked tab can have one latest URL, presentation, navigation failure,
+// terminal view-state, zoom settlement, and native-action failure fact. Each
+// profile can independently have one process-
 // exit fact and one durable-deletion callback wakeup. The current single-
 // window shell can have one native split fact, and the process can have one
 // sticky runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
-const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 3
+const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
     + zephium_core::session::MAX_SESSION_PROFILES * 2
     + 2;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
@@ -504,6 +606,21 @@ const FAVICON_POLL_DELAYS: [std::time::Duration; 7] = [
     std::time::Duration::from_millis(2500),
     std::time::Duration::from_secs(4),
 ];
+// A committed document is acknowledged as soon as privileged chrome verifies
+// its exact revision-bearing URL projection. This deadline bounds only
+// callback/native-dispatch admission retries; it is never an intentional
+// first-paint delay or authority for a timeout reveal.
+const PRESENTATION_ADMISSION_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+const PRESENTATION_ADMISSION_RETRY_DELAYS: [std::time::Duration; 7] = [
+    std::time::Duration::from_millis(25),
+    std::time::Duration::from_millis(50),
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(400),
+    std::time::Duration::from_millis(800),
+    std::time::Duration::from_secs(1),
+];
+const MAX_PRESENTATION_ADMISSION_REJECTIONS: u8 = 12;
 const MAX_OPERATION_ID_BYTES: usize = 64;
 const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 const PERSIST_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -524,11 +641,16 @@ const DISCARD_PROTECTED_RETRY: std::time::Duration = std::time::Duration::from_s
 const PROFILE_DELETION_STORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const PROFILE_DELETION_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
 const PROFILE_DELETION_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_ASYNC_SEARCH_QUERY_BYTES: usize = 4 * 1024;
+const STORE_READ_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+// URL-only native observations are recoverability checkpoints, not structural
+// mutations. Structural changes retain the fast debounce; URL churn is
+// globally coalesced to one full snapshot per five minutes.
+const URL_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const URL_CHECKPOINT_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(not(test))]
-// This is one process-boundary budget, measured when the caller admits the
-// shutdown barrier. FIFO wait, snapshot construction, storage queue admission,
-// SQLite durability, native teardown, private-data verification, and actor
-// acknowledgement all consume the same deadline.
+// FIFO wait, storage-reader quiescence, snapshot construction, durability,
+// native teardown, and thread joins consume this one caller-owned deadline.
 const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 #[cfg(test)]
 const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
@@ -598,7 +720,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::SplitWith { .. }
             | Command::Unsplit
             | Command::DropTab { .. }
-            | Command::DividerRelease
+            | Command::DividerRelease { .. }
             | Command::Run(_)
             | Command::OpenUrl(_)
             | Command::SetAppSetting { .. }
@@ -623,16 +745,38 @@ struct TimerState {
     stopped: bool,
     persist_deadline: Option<std::time::Instant>,
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
+    presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
     discard_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, DiscardProbeId)>,
     profile_deletion_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PresentationDeadline {
+    wake: std::time::Instant,
+    hard: std::time::Instant,
+    navigation: NavigationPresentationId,
 }
 
 enum TimerWake {
     Maintenance,
     Persist,
-    Favicon { id: ItemId, attempt: u8 },
-    DiscardProbe { id: ItemId, probe: DiscardProbeId },
-    ProfileDeletion { profile: ProfileId, generation: u64 },
+    Favicon {
+        id: ItemId,
+        attempt: u8,
+    },
+    Presentation {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        hard_deadline: std::time::Instant,
+    },
+    DiscardProbe {
+        id: ItemId,
+        probe: DiscardProbeId,
+    },
+    ProfileDeletion {
+        profile: ProfileId,
+        generation: u64,
+    },
     Stopped,
 }
 
@@ -658,8 +802,12 @@ enum TryPushError {
 enum RecoveryKey {
     RuntimeRestart,
     Url(ItemId),
+    Presentation(ItemId),
+    ChromePresentation(ItemId),
     ViewState(ItemId),
     NavigationFailure(ItemId),
+    Zoom(ItemId),
+    NativeAction(ItemId),
     Profile(ProfileId),
     ProfileDeletion(ProfileId),
     Split(zephium_core::ids::WindowId),
@@ -669,8 +817,16 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
     match command {
         Command::Engine(EngineEvent::RuntimeRestartRequired) => Some(RecoveryKey::RuntimeRestart),
         Command::Engine(EngineEvent::UrlChanged { id, .. }) => Some(RecoveryKey::Url(*id)),
+        Command::Engine(
+            EngineEvent::PresentationPending { id, .. } | EngineEvent::PresentationReady { id, .. },
+        ) => Some(RecoveryKey::Presentation(*id)),
+        Command::ChromePresentationApplied { id, .. } => Some(RecoveryKey::ChromePresentation(*id)),
         Command::Engine(EngineEvent::NavigationFailed { id, .. }) => {
             Some(RecoveryKey::NavigationFailure(*id))
+        }
+        Command::Engine(EngineEvent::ZoomSettled { id, .. }) => Some(RecoveryKey::Zoom(*id)),
+        Command::Engine(EngineEvent::NativeActionFailed { id, .. }) => {
+            Some(RecoveryKey::NativeAction(*id))
         }
         Command::Engine(
             EngineEvent::ViewCreationFailed { id }
@@ -882,6 +1038,7 @@ impl CommandQueue {
         timer.stopped = true;
         timer.persist_deadline = None;
         timer.favicon_deadlines.clear();
+        timer.presentation_deadlines.clear();
         timer.discard_deadlines.clear();
         timer.profile_deletion_deadlines.clear();
         self.inner.timer_ready.notify_all();
@@ -929,6 +1086,102 @@ impl CommandQueue {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         timer.favicon_deadlines.remove(&id);
+    }
+
+    fn schedule_presentation(
+        &self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        wake: std::time::Instant,
+        hard: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        // One native generation has at most one initially hidden epoch. Keep
+        // the earliest deadline for a duplicate token so same-document URL
+        // churn cannot postpone presentation indefinitely.
+        match timer.presentation_deadlines.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if entry.get().navigation == navigation =>
+            {
+                let current = entry.get_mut();
+                current.wake = current.wake.min(wake);
+                current.hard = current.hard.min(hard);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                // A hidden page can commit a chain of cross-document
+                // navigations before first presentation. Advance the exact
+                // token, but retain both original absolute bounds so hostile
+                // navigation churn cannot restart either grace period.
+                let current = *entry.get();
+                entry.insert(PresentationDeadline {
+                    wake: current.wake.min(wake),
+                    hard: current.hard.min(hard),
+                    navigation,
+                });
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(PresentationDeadline {
+                    wake,
+                    hard,
+                    navigation,
+                });
+            }
+        }
+        self.inner.timer_ready.notify_one();
+    }
+
+    fn cancel_presentation(&self, id: ItemId) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        timer.presentation_deadlines.remove(&id);
+    }
+
+    /// Re-arms a fallback that could not enter the actor queue without
+    /// allowing an escaped wake for an older navigation to replace a newer
+    /// native presentation obligation for the same logical tab.
+    fn retry_presentation(
+        &self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        wake: std::time::Instant,
+        hard: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        match timer.presentation_deadlines.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if entry.get().navigation == navigation =>
+            {
+                let current = entry.get_mut();
+                current.wake = current.wake.min(wake);
+                current.hard = current.hard.min(hard);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => return,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(PresentationDeadline {
+                    wake,
+                    hard,
+                    navigation,
+                });
+            }
+        }
+        self.inner.timer_ready.notify_one();
     }
 
     fn schedule_discard_probe(
@@ -1019,6 +1272,21 @@ impl CommandQueue {
                     return TimerWake::Favicon { id, attempt };
                 }
             }
+            let next_presentation = timer
+                .presentation_deadlines
+                .iter()
+                .min_by_key(|(_, deadline)| deadline.wake)
+                .map(|(id, deadline)| (*id, *deadline));
+            if let Some((id, deadline)) = next_presentation {
+                if now >= deadline.wake {
+                    timer.presentation_deadlines.remove(&id);
+                    return TimerWake::Presentation {
+                        id,
+                        navigation: deadline.navigation,
+                        hard_deadline: deadline.hard,
+                    };
+                }
+            }
             let next_discard = timer
                 .discard_deadlines
                 .iter()
@@ -1054,6 +1322,9 @@ impl CommandQueue {
                 });
             if let Some((_, favicon, _)) = next_favicon {
                 deadline = deadline.min(favicon);
+            }
+            if let Some((_, presentation)) = next_presentation {
+                deadline = deadline.min(presentation.wake);
             }
             if let Some((_, discard, _)) = next_discard {
                 deadline = deadline.min(discard);
@@ -1159,10 +1430,15 @@ fn command_is_critical(command: &Command) -> bool {
     matches!(
         command,
         Command::ProfileDeletionReady(_)
+            | Command::ChromePresentationApplied { .. }
             | Command::Engine(
                 EngineEvent::UrlChanged { .. }
+                    | EngineEvent::PresentationPending { .. }
+                    | EngineEvent::PresentationReady { .. }
                     | EngineEvent::RuntimeRestartRequired
                     | EngineEvent::NavigationFailed { .. }
+                    | EngineEvent::ZoomSettled { .. }
+                    | EngineEvent::NativeActionFailed { .. }
                     | EngineEvent::ViewCreationFailed { .. }
                     | EngineEvent::ProfileProcessExited { .. }
                     | EngineEvent::Crashed { .. }
@@ -1182,12 +1458,23 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
         Command::Search(_) => Some(CoalescedKey::Search),
         Command::FaviconPoll { id, .. } => Some(CoalescedKey::FaviconPoll(*id)),
+        Command::PresentationFallback { id, .. } => Some(CoalescedKey::PresentationFallback(*id)),
+        Command::ChromePresentationApplied { id, .. } => {
+            Some(CoalescedKey::ChromePresentation(*id))
+        }
         Command::DiscardProbeTimeout { id, .. } => Some(CoalescedKey::DiscardProbeTimeout(*id)),
         Command::ProfileDeletionReady(profile) => {
             Some(CoalescedKey::ProfileDeletionReady(*profile))
         }
         Command::ProfileDeletionRetry { profile, .. } => {
             Some(CoalescedKey::ProfileDeletionRetry(*profile))
+        }
+        Command::StoreRead(StoreReadResult::History { .. }) => Some(CoalescedKey::StoreHistory),
+        Command::StoreRead(StoreReadResult::Favicon { id, .. }) => {
+            Some(CoalescedKey::StoreFavicon(*id))
+        }
+        Command::StoreRead(StoreReadResult::FaviconBatch { .. }) => {
+            Some(CoalescedKey::StoreFaviconBatch)
         }
         Command::Persist => Some(CoalescedKey::Persist),
         Command::Tick => Some(CoalescedKey::Tick),
@@ -1230,19 +1517,37 @@ pub fn spawn(
     let queue = CommandQueue::new();
     let workers = Arc::new(WorkerThreads::default());
     let handle = Handle::with_workers(queue.clone(), workers.clone());
+    let store_reads = StoreReadQueue::new();
+    let store_reader = spawn_worker("zephium-store-reader", {
+        let reader_store = store.clone();
+        let reader_queue = store_reads.clone();
+        let callback = handle.callback_handle();
+        move || run_store_reader(reader_store, reader_queue, callback)
+    })
+    .map_err(SpawnError::StoreReader)?;
+    workers.install_store_reader(store_reader);
     let actor_queue = queue.clone();
-    let mut shell = Shell::new(engine, store, chrome, net, emit);
+    let actor_store_reads = store_reads.clone();
+    let mut shell = Shell::with_store_reads(engine, store, chrome, net, emit, store_reads.clone());
     shell.self_queue = Some(queue.clone());
-    let actor = spawn_worker("zephium-shell", move || {
+    let actor = match spawn_worker("zephium-shell", move || {
         let _exit_guard = ActorExitGuard(actor_queue.clone());
+        let _store_reader_guard = StoreReaderStopGuard::new(actor_store_reads);
         while let Some(command) = actor_queue.recv() {
             shell.handle(command);
             if shell.shutdown_result.is_some() {
                 break;
             }
         }
-    })
-    .map_err(SpawnError::Actor)?;
+    }) {
+        Ok(actor) => actor,
+        Err(error) => {
+            store_reads.stop();
+            let _ =
+                workers.join_until(std::time::Instant::now() + std::time::Duration::from_secs(1));
+            return Err(SpawnError::Actor(error));
+        }
+    };
     workers.install_actor(actor);
     let timer_queue = queue.clone();
     let timer = match spawn_worker("zephium-timer", move || {
@@ -1270,6 +1575,26 @@ pub fn spawn(
                             id,
                             attempt,
                             std::time::Instant::now() + std::time::Duration::from_millis(25),
+                        ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
+                TimerWake::Presentation {
+                    id,
+                    navigation,
+                    hard_deadline,
+                } => {
+                    match timer_queue.try_push(Command::PresentationFallback {
+                        id,
+                        navigation,
+                        hard_deadline,
+                    }) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue.retry_presentation(
+                            id,
+                            navigation,
+                            std::time::Instant::now() + std::time::Duration::from_millis(25),
+                            hard_deadline,
                         ),
                         Err(TryPushError::Closed(_)) => break,
                     }
@@ -1311,6 +1636,7 @@ pub fn spawn(
             for pending in queue.close_and_drain() {
                 finish_shutdown(pending, ShutdownOutcome::Unclean);
             }
+            store_reads.stop();
             let _ =
                 workers.join_until(std::time::Instant::now() + std::time::Duration::from_secs(1));
             return Err(SpawnError::Timer(error));
@@ -1325,6 +1651,29 @@ struct IconAttempt {
     profile: ProfileId,
     origin: String,
     next_attempt: u8,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PendingFaviconStoreRead {
+    generation: u64,
+    profile: ProfileId,
+    origin: String,
+}
+
+struct PendingFaviconBatch {
+    generation: u64,
+    profile: ProfileId,
+    space: SpaceId,
+    requested: std::collections::HashSet<String>,
+}
+
+struct PendingSearch {
+    generation: u64,
+    profile: ProfileId,
+    lookup_query: String,
+    display_query: String,
+    open_urls: std::collections::HashSet<String>,
+    base_results: Vec<SearchResult>,
 }
 
 #[derive(Clone)]
@@ -1393,6 +1742,29 @@ impl ProfileDeletionState {
 type ProfileDeletionInbox =
     Arc<Mutex<std::collections::HashMap<ProfileId, (u64, ProfileDataErasureOutcome)>>>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingPresentation {
+    navigation: NavigationPresentationId,
+    url: String,
+    hard_deadline: std::time::Instant,
+    admission_rejections: u8,
+    chrome_applied: bool,
+    chrome_request_in_flight: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingZoom {
+    request: ZoomRequestId,
+    desired_scale: f64,
+}
+
+#[derive(Clone, Debug)]
+struct GrabbedDivider {
+    window: WindowId,
+    topology: Pane,
+    divider: split::Divider,
+}
+
 pub struct Shell {
     profiles: Profiles,
     spaces: Spaces,
@@ -1404,7 +1776,27 @@ pub struct Shell {
     icon_cache_order: VecDeque<(ProfileId, String)>,
     icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
     icon_load_completion_pending: std::collections::HashMap<ItemId, (ProfileId, String)>,
-    divider: Option<split::Divider>,
+    favicon_store_reads: std::collections::HashMap<ItemId, PendingFaviconStoreRead>,
+    favicon_store_generation: u64,
+    pending_favicon_batch: Option<PendingFaviconBatch>,
+    favicon_batch_generation: u64,
+    pending_search: Option<PendingSearch>,
+    search_generation: u64,
+    pending_presentations: std::collections::HashMap<ItemId, PendingPresentation>,
+    presented_navigations: std::collections::HashMap<ItemId, (NavigationPresentationId, String)>,
+    /// A fresh tab keeps its real privileged New Tab document until the first
+    /// exact committed-URL presentation eval replaces and verifies it. Native
+    /// content geometry is admitted only after that callback.
+    deferred_first_content_layout: std::collections::HashSet<ItemId>,
+    /// Last revision actually offered to privileged chrome for each item.
+    /// Exact eval callbacks must still match this value when the actor
+    /// receives them; a newer masked or full projection invalidates an older
+    /// success without unrelated-tab churn causing starvation.
+    last_tab_projection_revision: std::cell::RefCell<std::collections::HashMap<ItemId, String>>,
+    projection_sequence: std::cell::Cell<u128>,
+    next_zoom_request: u64,
+    pending_zooms: std::collections::HashMap<ItemId, PendingZoom>,
+    divider: Option<GrabbedDivider>,
     recent: Vec<ItemId>,
     last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
@@ -1421,6 +1813,7 @@ pub struct Shell {
     window_visible: bool,
     runtime_restart_required: bool,
     crashes: std::collections::HashMap<ItemId, std::time::Instant>,
+    crash_presentations: std::collections::HashSet<ItemId>,
     bootstrapped: bool,
     /// Monotonic process-local identity for the session state represented by
     /// persistence scheduling. A u128 wrap would require more mutations than
@@ -1428,6 +1821,8 @@ pub struct Shell {
     /// in release builds while preserving a fail-safe practical bound.
     session_revision: u128,
     persist_first_dirty: Option<std::time::Instant>,
+    url_checkpoint_dirty: std::collections::HashSet<ItemId>,
+    last_url_checkpoint: std::time::Instant,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
     profile_deletions: std::collections::HashMap<ProfileId, ProfileDeletionState>,
@@ -1439,18 +1834,31 @@ pub struct Shell {
     profile_deletion_batch_deadline: Option<std::time::Instant>,
     engine: SharedEngine,
     store: SharedStore,
+    store_reads: Option<StoreReadQueue>,
     chrome: SharedChrome,
     _net: SharedNet,
     emit: EmitFn,
 }
 
 impl Shell {
+    #[cfg(test)]
     pub fn new(
         engine: SharedEngine,
         store: SharedStore,
         chrome: SharedChrome,
         net: SharedNet,
         emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(engine, store, chrome, net, emit, None)
+    }
+
+    fn with_store_reads(
+        engine: SharedEngine,
+        store: SharedStore,
+        chrome: SharedChrome,
+        net: SharedNet,
+        emit: EmitFn,
+        store_reads: impl Into<Option<StoreReadQueue>>,
     ) -> Self {
         Self {
             profiles: Profiles::default(),
@@ -1463,6 +1871,19 @@ impl Shell {
             icon_cache_order: VecDeque::new(),
             icon_attempts: std::collections::HashMap::new(),
             icon_load_completion_pending: std::collections::HashMap::new(),
+            favicon_store_reads: std::collections::HashMap::new(),
+            favicon_store_generation: 0,
+            pending_favicon_batch: None,
+            favicon_batch_generation: 0,
+            pending_search: None,
+            search_generation: 0,
+            pending_presentations: std::collections::HashMap::new(),
+            presented_navigations: std::collections::HashMap::new(),
+            deferred_first_content_layout: std::collections::HashSet::new(),
+            last_tab_projection_revision: std::cell::RefCell::new(std::collections::HashMap::new()),
+            projection_sequence: std::cell::Cell::new(0),
+            next_zoom_request: 0,
+            pending_zooms: std::collections::HashMap::new(),
             divider: None,
             recent: Vec::new(),
             last_focus: std::collections::HashMap::new(),
@@ -1480,9 +1901,12 @@ impl Shell {
             window_visible: true,
             runtime_restart_required: false,
             crashes: std::collections::HashMap::new(),
+            crash_presentations: std::collections::HashSet::new(),
             bootstrapped: false,
             session_revision: 0,
             persist_first_dirty: None,
+            url_checkpoint_dirty: std::collections::HashSet::new(),
+            last_url_checkpoint: std::time::Instant::now(),
             shutdown_result: None,
             self_queue: None,
             profile_deletions: std::collections::HashMap::new(),
@@ -1491,6 +1915,7 @@ impl Shell {
             profile_deletion_batch_deadline: None,
             engine,
             store,
+            store_reads: store_reads.into(),
             chrome,
             _net: net,
             emit,
@@ -1586,6 +2011,9 @@ impl Shell {
                     // use when the window minimized. The ordinary idle grace
                     // still applies after every content view becomes hidden.
                     if !visible {
+                        // OS pointer capture cannot remain authoritative while
+                        // its window is hidden/minimized.
+                        self.divider = None;
                         if let Some(active) = self.windows.focused().and_then(|w| w.active) {
                             self.touch(active);
                         }
@@ -1611,8 +2039,8 @@ impl Shell {
             }
             Command::DividerGrab { x, y } => self.divider = self.locate_divider(x, y),
             Command::DividerDrag { x, y } => self.divider_drag(x, y),
-            Command::DividerRelease => {
-                let _ = self.operation_divider_release();
+            Command::DividerRelease { x, y } => {
+                let _ = self.operation_divider_release(x.zip(y));
             }
             Command::Run(id) => {
                 let _ = self.operation_run_command(&id);
@@ -1628,6 +2056,26 @@ impl Shell {
             // so every foreground request has one truthful terminal identity.
             Command::DeleteProfile(_) => {}
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
+            Command::PresentationFallback {
+                id,
+                navigation,
+                hard_deadline,
+            } => self.on_presentation_fallback(id, navigation, hard_deadline),
+            Command::ChromePresentationApplied {
+                id,
+                navigation,
+                url,
+                active,
+                projection_revision,
+                applied,
+            } => self.on_chrome_presentation_applied(
+                id,
+                navigation,
+                url,
+                active,
+                projection_revision,
+                applied,
+            ),
             Command::DiscardProbeTimeout { id, probe } => self.on_discard_probe_timeout(id, probe),
             Command::ProfileDeletionReady(profile) => {
                 self.consume_profile_deletion_outcome(profile)
@@ -1644,6 +2092,7 @@ impl Shell {
                     self.drive_profile_deletion(profile);
                 }
             }
+            Command::StoreRead(result) => self.on_store_read(result),
             Command::Persist => self.persist(),
             Command::Tick => {
                 self.drain_profile_deletion_inbox();
@@ -1658,6 +2107,15 @@ impl Shell {
                     self.retryable_shutdown_failure(ack);
                     return;
                 }
+                if self
+                    .store_reads
+                    .as_ref()
+                    .is_some_and(|reads| !reads.quiesce_until(deadline))
+                {
+                    self.retryable_shutdown_failure(ack);
+                    return;
+                }
+                self.clear_pending_store_reads();
                 self.persist();
                 match self.store.shutdown_until(deadline) {
                     StoreShutdownOutcome::Clean => {}
@@ -1677,10 +2135,16 @@ impl Shell {
                         eprintln!(
                             "shutdown: storage actor termination was not proven before the deadline"
                         );
+                        if let Some(reads) = &self.store_reads {
+                            reads.stop();
+                        }
                         self.shutdown_result = Some(ShutdownOutcome::Unclean);
                         let _ = ack.send(ShutdownOutcome::Unclean);
                         return;
                     }
+                }
+                if let Some(reads) = &self.store_reads {
+                    reads.stop();
                 }
                 let (native_done, native_wait) = sync_channel(1);
                 self.engine.shutdown(Box::new(move |clean| {
@@ -1721,6 +2185,36 @@ impl Shell {
         for command in recovered {
             self.handle(command);
         }
+        if let Some(queue) = &self.self_queue {
+            // A timer wake removes its entry before trying to enter the actor.
+            // If it raced the shutdown barrier it was truthfully rejected as
+            // sealed, so explicitly restore every still-live exact reveal
+            // obligation when the retryable barrier reopens. Both maps remain
+            // bounded to one entry per logical item.
+            let now = std::time::Instant::now();
+            for (id, pending) in &self.pending_presentations {
+                queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
+            }
+        }
+        if let Some(reads) = &self.store_reads {
+            reads.resume();
+        }
+        // A failed terminal storage admission may have invalidated pending
+        // presentation reads. Restart only currently visible leaves (at most
+        // the split ceiling), never all restored tabs.
+        let visible = self
+            .pane_tree()
+            .map(|tree| tree.tabs())
+            .or_else(|| {
+                self.windows
+                    .focused()
+                    .and_then(|window| window.active)
+                    .map(|id| vec![id])
+            })
+            .unwrap_or_default();
+        for id in visible {
+            self.maybe_discover_favicon(id);
+        }
         let _ = ack.send(ShutdownOutcome::RetryableFailure);
     }
 
@@ -1736,7 +2230,7 @@ impl Shell {
             Command::SplitWith { other, axis } => self.operation_split(other, axis),
             Command::Unsplit => self.operation_unsplit(),
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
-            Command::DividerRelease => self.operation_divider_release(),
+            Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
             Command::OpenUrl(input) => self.operation_open_url(input),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
@@ -1947,6 +2441,12 @@ impl Shell {
         });
         let effects = self.items.ensure_view(other);
         let mut native = self.apply(effects);
+        if !self.items.tab(other).is_some_and(TabState::has_view) {
+            // A synchronous create-dispatch refusal already rolled back the
+            // optimistic view bit. Do not install a split whose new leaf can
+            // never be represented by the native layout admitted below.
+            return mutation_result(native);
+        }
         self.touch(other);
         if !tree.split(active, other, axis, false) {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
@@ -1991,7 +2491,16 @@ impl Shell {
         result
     }
 
-    fn operation_divider_release(&mut self) -> OperationDisposition {
+    fn operation_divider_release(
+        &mut self,
+        final_pointer: Option<(f64, f64)>,
+    ) -> OperationDisposition {
+        if self.divider.is_none() {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
+        if let Some((x, y)) = final_pointer {
+            self.divider_drag(x, y);
+        }
         if self.divider.take().is_none() {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
@@ -2085,9 +2594,13 @@ impl Shell {
         let Some(active) = self.windows.focused().and_then(|window| window.active) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
         };
-        let Some(current) = self.items.tab(active).map(|tab| tab.zoom) else {
+        let Some(settled) = self.items.tab(active).map(|tab| tab.zoom) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
+        let current = self
+            .pending_zooms
+            .get(&active)
+            .map_or(settled, |pending| pending.desired_scale);
         let zoom = match delta {
             Some(delta) => (current + delta).clamp(0.3, 3.0),
             None => 1.0,
@@ -2095,18 +2608,76 @@ impl Shell {
         if (zoom - current).abs() < f64::EPSILON {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
-        self.items.set_zoom(active, zoom);
-        let admission = self.engine.zoom(active, zoom);
-        if admission != NativeDispatch::Scheduled {
-            // The authoritative projection/persistence value must not claim a
-            // zoom that never reached the native queue.
-            self.items.set_zoom(active, current);
-        } else {
-            self.schedule_persist();
-        }
+        // `Items.zoom` is durable authoritative state. Keep the responsive
+        // desired value in a separate bounded map until the exact native view
+        // generation reports what it actually applied; otherwise any
+        // unrelated session save could persist an optimistic lie.
+        let admission = self.request_zoom(active, zoom);
         let mut native = NativeWork::default();
         native.record(admission);
         mutation_result(native)
+    }
+
+    fn request_zoom(&mut self, id: ItemId, desired_scale: f64) -> NativeDispatch {
+        let Some(next) = self.next_zoom_request.checked_add(1) else {
+            // Reusing an identity could let a late result settle a newer
+            // request. Saturation permanently rejects new zoom work.
+            return NativeDispatch::Rejected;
+        };
+        self.next_zoom_request = next;
+        let request = ZoomRequestId(next);
+        let admission = self.engine.zoom(id, desired_scale, request);
+        if admission == NativeDispatch::Scheduled {
+            self.pending_zooms.insert(
+                id,
+                PendingZoom {
+                    request,
+                    desired_scale,
+                },
+            );
+        }
+        admission
+    }
+
+    fn on_zoom_settled(
+        &mut self,
+        id: ItemId,
+        request: ZoomRequestId,
+        applied_scale: f64,
+        succeeded: bool,
+    ) {
+        let Some(pending) = self.pending_zooms.get(&id).copied() else {
+            return;
+        };
+        if pending.request != request {
+            // A newest-per-item native settlement contains the cumulative
+            // applied scale. Older results cannot settle a newer desired
+            // value and are deliberately ignored.
+            return;
+        }
+        // This exact terminal result owns the obligation even when its native
+        // payload is malformed. Retire it before validation so a corrupt or
+        // incompatible engine response cannot leave all future zoom input
+        // based on a value that will never settle.
+        self.pending_zooms.remove(&id);
+        if !applied_scale.is_finite() || !(0.3..=3.0).contains(&applied_scale) {
+            eprintln!("engine: rejected malformed native zoom settlement");
+            return;
+        }
+        if !succeeded {
+            eprintln!("engine: native zoom request was not applied");
+        } else if (applied_scale - pending.desired_scale).abs() > f64::EPSILON {
+            eprintln!("engine: native zoom settled at an unexpected scale");
+        }
+        let Some(previous) = self.items.tab(id).map(|tab| tab.zoom) else {
+            return;
+        };
+        if (previous - applied_scale).abs() <= f64::EPSILON {
+            return;
+        }
+        self.items.set_zoom(id, applied_scale);
+        self.schedule_persist();
+        self.project_tab(id);
     }
 
     fn begin_profile_deletion(
@@ -2265,6 +2836,11 @@ impl Shell {
                 .iter()
                 .filter_map(|(id, (item_profile, _))| (*item_profile == profile).then_some(*id)),
         );
+        favicon_items.extend(
+            self.favicon_store_reads
+                .iter()
+                .filter_map(|(id, pending)| (pending.profile == profile).then_some(*id)),
+        );
         for id in favicon_items {
             self.cancel_favicon_attempt(id);
         }
@@ -2294,16 +2870,34 @@ impl Shell {
         self.discard_protected_until
             .retain(|id, _| self.items.tab(*id).is_some());
         self.crashes.retain(|id, _| self.items.tab(*id).is_some());
+        self.crash_presentations
+            .retain(|id| self.items.tab(*id).is_some());
         self.icons_checked
             .retain(|(item_profile, _)| *item_profile != profile);
         self.icon_values
             .retain(|(item_profile, _), _| *item_profile != profile);
         self.icon_cache_order
             .retain(|(item_profile, _)| *item_profile != profile);
+        if self
+            .pending_favicon_batch
+            .as_ref()
+            .is_some_and(|pending| pending.profile == profile)
+        {
+            self.pending_favicon_batch = None;
+        }
+        if self
+            .pending_search
+            .as_ref()
+            .is_some_and(|pending| pending.profile == profile)
+        {
+            self.pending_search = None;
+        }
 
         // The authorization transaction already published the exact session.
         // An older debounce must never later overwrite that barrier.
         self.persist_first_dirty = None;
+        self.url_checkpoint_dirty.clear();
+        self.last_url_checkpoint = std::time::Instant::now();
         if let Some(queue) = &self.self_queue {
             queue.cancel_persist();
         }
@@ -2944,6 +3538,7 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return NativeWork::default();
         }
+        self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
         if matches!(
             self.discard_probes.get(&id),
@@ -2982,6 +3577,49 @@ impl Shell {
         self.commit(fx)
     }
 
+    /// Removes a failed native leaf from the retained split immediately. A
+    /// create failure may arrive after `operation_split`/`apply_drop` has
+    /// committed its optimistic topology; retaining that leaf would let a
+    /// later single-tab retry silently resurrect the old group.
+    fn collapse_failed_split_leaf(&mut self, id: ItemId) -> bool {
+        let Some((tree, failed_was_active)) = self.windows.focused().and_then(|window| {
+            window
+                .splits
+                .as_ref()
+                .filter(|tree| tree.contains(id))
+                .cloned()
+                .map(|tree| (tree, window.active == Some(id)))
+        }) else {
+            return false;
+        };
+        self.divider = None;
+        let remaining = tree.remove(id);
+        let replacement = failed_was_active
+            .then(|| {
+                remaining.as_ref().and_then(|tree| {
+                    tree.tabs().into_iter().find(|candidate| {
+                        self.items.tab(*candidate).is_some_and(TabState::has_view)
+                    })
+                })
+            })
+            .flatten();
+        if let Some(window) = self.windows.focused_mut() {
+            window.splits = remaining;
+            if replacement.is_some() {
+                // `focus_tab` owns lifecycle/recent bookkeeping below.
+                window.active = None;
+            }
+        }
+        if let Some(replacement) = replacement {
+            // The replacement was selected from live split leaves, so this
+            // normally emits no construction effect. Keep the invariant even
+            // if future lifecycle states add another recoverable resident.
+            let effects = self.focus_tab(replacement);
+            let _ = self.apply(effects);
+        }
+        true
+    }
+
     fn apply_drop(&mut self, target: ItemId, dropped: ItemId, edge: Edge) -> OperationDisposition {
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
@@ -3012,6 +3650,11 @@ impl Shell {
         }
         let effects = self.items.ensure_view(dropped);
         let mut native = self.apply(effects);
+        if !self.items.tab(dropped).is_some_and(TabState::has_view) {
+            // Match `operation_split`: synchronous native refusal must leave
+            // the previously rendered topology authoritative.
+            return mutation_result(native);
+        }
         self.touch(dropped);
         if !tree.split(target, dropped, edge.axis(), edge.before()) {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
@@ -3031,6 +3674,535 @@ impl Shell {
             layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
         let local = Rect::new(0.0, 0.0, region.width, region.height);
         split::drop_target(&tree, local, win.metrics.gap, x - region.x, y - region.y)
+    }
+
+    fn track_pending_presentation(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        url: String,
+        now: std::time::Instant,
+    ) -> PendingPresentation {
+        let candidate_hard = now
+            .checked_add(PRESENTATION_ADMISSION_HARD_LIMIT)
+            .unwrap_or(now);
+        let pending = match self.pending_presentations.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                // A hidden view may commit another navigation before the
+                // first one presents. Advance the exact identity but preserve
+                // the original absolute cap so navigation churn cannot keep
+                // trusted backing over executable content indefinitely.
+                let hard_deadline = entry.get().hard_deadline.min(candidate_hard);
+                let admission_rejections = entry.get().admission_rejections;
+                let same_fact = entry.get().navigation == navigation && entry.get().url == url;
+                let pending = PendingPresentation {
+                    navigation,
+                    url,
+                    hard_deadline,
+                    admission_rejections,
+                    chrome_applied: same_fact && entry.get().chrome_applied,
+                    chrome_request_in_flight: same_fact && entry.get().chrome_request_in_flight,
+                };
+                entry.insert(pending.clone());
+                pending
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let pending = PendingPresentation {
+                    navigation,
+                    url,
+                    hard_deadline: candidate_hard,
+                    admission_rejections: 0,
+                    chrome_applied: false,
+                    chrome_request_in_flight: false,
+                };
+                entry.insert(pending.clone());
+                pending
+            }
+        };
+        pending
+    }
+
+    fn cancel_pending_presentation(&mut self, id: ItemId) {
+        self.pending_presentations.remove(&id);
+        self.presented_navigations.remove(&id);
+        self.deferred_first_content_layout.remove(&id);
+        if let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() {
+            revisions.remove(&id);
+        }
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_presentation(id);
+        }
+    }
+
+    fn cancel_exact_pending_presentation(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> bool {
+        if !self
+            .pending_presentations
+            .get(&id)
+            .is_some_and(|pending| pending.navigation == navigation)
+        {
+            return false;
+        }
+        self.pending_presentations.remove(&id);
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_presentation(id);
+        }
+        true
+    }
+
+    fn presentation_matches_current_url(&self, id: ItemId, pending: &PendingPresentation) -> bool {
+        self.items.tab(id).is_some_and(|tab| {
+            tab.has_view()
+                && tab
+                    .url
+                    .as_ref()
+                    .is_some_and(|url| url.as_str() == pending.url)
+        })
+    }
+
+    fn schedule_exact_presentation_retry(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        reason: &'static str,
+    ) {
+        let now = std::time::Instant::now();
+        let Some(current) = self
+            .pending_presentations
+            .get_mut(&id)
+            .filter(|current| current.navigation == navigation)
+        else {
+            return;
+        };
+        current.chrome_request_in_flight = false;
+        current.admission_rejections = current.admission_rejections.saturating_add(1);
+        if now >= current.hard_deadline
+            || current.admission_rejections >= MAX_PRESENTATION_ADMISSION_REJECTIONS
+        {
+            self.fail_exact_pending_presentation(id, navigation, reason);
+            return;
+        }
+        let retry_index = usize::from(current.admission_rejections.saturating_sub(1))
+            .min(PRESENTATION_ADMISSION_RETRY_DELAYS.len() - 1);
+        let wake = now
+            .checked_add(PRESENTATION_ADMISSION_RETRY_DELAYS[retry_index])
+            .unwrap_or(now)
+            .min(current.hard_deadline);
+        let hard_deadline = current.hard_deadline;
+        if let Some(queue) = &self.self_queue {
+            queue.retry_presentation(id, navigation, wake, hard_deadline);
+        } else {
+            self.fail_exact_pending_presentation(
+                id,
+                navigation,
+                "privileged presentation retry queue is unavailable",
+            );
+        }
+    }
+
+    /// Applies the exact tab projection inside privileged chrome and waits for
+    /// its eval callback before allowing the raw child to reveal. This method
+    /// never blocks the shell actor or a native UI thread.
+    fn request_chrome_presentation(&mut self, id: ItemId, navigation: NavigationPresentationId) {
+        let Some(pending) = self
+            .pending_presentations
+            .get(&id)
+            .cloned()
+            .filter(|pending| pending.navigation == navigation)
+        else {
+            return;
+        };
+        if !self.presentation_matches_current_url(id, &pending) {
+            self.cancel_exact_pending_presentation(id, navigation);
+            return;
+        }
+        if pending.chrome_applied {
+            let _ = self.admit_pending_presentation(id, navigation);
+            return;
+        }
+        if pending.chrome_request_in_flight {
+            return;
+        }
+        if std::time::Instant::now() >= pending.hard_deadline {
+            self.fail_exact_pending_presentation(
+                id,
+                navigation,
+                "privileged chrome did not verify the committed URL before its deadline",
+            );
+            return;
+        }
+
+        let Some(tab) = self.items.tab(id) else {
+            self.cancel_exact_pending_presentation(id, navigation);
+            return;
+        };
+        let projection =
+            self.presentation_tab_view(id, tab, self.favicon_key(tab, self.profile_of_item(id)));
+        let projection_revision = projection.projection_revision.clone();
+        self.record_tab_projection_revision(id, &projection_revision);
+        let active = self.windows.focused().and_then(|window| window.active);
+        let Some(queue) = self.self_queue.clone() else {
+            let synchronous_projection = projection.clone();
+            let dispatch = self.chrome.apply_tab_for_presentation(
+                ChromePresentation {
+                    id,
+                    navigation,
+                    url: pending.url.clone(),
+                    tab: projection,
+                    active,
+                },
+                Box::new(|_| {}),
+            );
+            if dispatch == ChromePresentationDispatch::Applied {
+                // A synchronous adapter already applied this exact revision;
+                // mirror it to non-chrome projection observers afterward.
+                // Privileged chrome ignores the equal-revision duplicate.
+                (self.emit)(Projection::Tab(synchronous_projection));
+                self.on_chrome_presentation_applied(
+                    id,
+                    navigation,
+                    pending.url,
+                    active,
+                    projection_revision,
+                    true,
+                );
+            } else {
+                self.fail_exact_pending_presentation(
+                    id,
+                    navigation,
+                    "asynchronous privileged presentation has no callback ingress",
+                );
+            }
+            return;
+        };
+        let callback = CallbackHandle {
+            queue: Arc::downgrade(&queue.inner),
+        };
+        let callback_url = pending.url.clone();
+        let callback_active = active;
+        let callback_projection_revision = projection_revision.clone();
+        if let Some(current) = self
+            .pending_presentations
+            .get_mut(&id)
+            .filter(|current| current.navigation == navigation)
+        {
+            current.chrome_request_in_flight = true;
+        }
+        let synchronous_projection = projection.clone();
+        let dispatch = self.chrome.apply_tab_for_presentation(
+            ChromePresentation {
+                id,
+                navigation,
+                url: pending.url.clone(),
+                tab: projection,
+                active,
+            },
+            Box::new(move |applied| {
+                let _ = callback.dispatch(Command::ChromePresentationApplied {
+                    id,
+                    navigation,
+                    url: callback_url,
+                    active: callback_active,
+                    projection_revision: callback_projection_revision,
+                    applied,
+                });
+            }),
+        );
+        match dispatch {
+            ChromePresentationDispatch::Applied => {
+                (self.emit)(Projection::Tab(synchronous_projection));
+                self.on_chrome_presentation_applied(
+                    id,
+                    navigation,
+                    pending.url,
+                    active,
+                    projection_revision,
+                    true,
+                );
+            }
+            ChromePresentationDispatch::Scheduled => {
+                // Callback loss and a full callback queue are both covered by
+                // this exact timer. A retry can duplicate an in-flight eval,
+                // but stale results cannot pass actor revalidation.
+                let retry_index = usize::from(pending.admission_rejections)
+                    .min(PRESENTATION_ADMISSION_RETRY_DELAYS.len() - 1);
+                let now = std::time::Instant::now();
+                let wake = now
+                    .checked_add(PRESENTATION_ADMISSION_RETRY_DELAYS[retry_index])
+                    .unwrap_or(now)
+                    .min(pending.hard_deadline);
+                queue.retry_presentation(id, navigation, wake, pending.hard_deadline);
+            }
+            ChromePresentationDispatch::Rejected => self.schedule_exact_presentation_retry(
+                id,
+                navigation,
+                "privileged chrome presentation admission remained unavailable",
+            ),
+        }
+    }
+
+    fn on_chrome_presentation_applied(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        url: String,
+        active: Option<ItemId>,
+        projection_revision: String,
+        applied: bool,
+    ) {
+        let pending_exact = self.pending_presentations.get(&id).is_some_and(|pending| {
+            pending.navigation == navigation
+                && pending.url == url
+                && self.presentation_matches_current_url(id, pending)
+        });
+        if !pending_exact {
+            return;
+        }
+        let revision_exact = self
+            .last_tab_projection_revision
+            .try_borrow()
+            .is_ok_and(|revisions| revisions.get(&id) == Some(&projection_revision));
+        let active_exact = self.windows.focused().and_then(|window| window.active) == active;
+        if !revision_exact || !active_exact {
+            // The original exact timer remains armed. It will clear the
+            // in-flight bit and issue a newer projection; this stale callback
+            // cannot reveal content under a later masked/full tab state.
+            return;
+        }
+        if !applied {
+            self.schedule_exact_presentation_retry(
+                id,
+                navigation,
+                "privileged chrome rejected the exact committed URL projection",
+            );
+            return;
+        }
+        if let Some(pending) = self.pending_presentations.get_mut(&id) {
+            pending.chrome_applied = true;
+            pending.chrome_request_in_flight = false;
+        }
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_presentation(id);
+        }
+        let _ = self.admit_pending_presentation(id, navigation);
+    }
+
+    /// Retains the exact hidden-document obligation until the native reveal
+    /// task has actually entered its owning UI queue. Public dispatcher
+    /// overload is recoverable, so a rejection gets one bounded per-tab timer
+    /// with capped backoff instead of becoming a permanently hidden page.
+    fn admit_pending_presentation(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        let Some(pending) = self
+            .pending_presentations
+            .get(&id)
+            .cloned()
+            .filter(|pending| pending.navigation == navigation)
+        else {
+            return NativeDispatch::Rejected;
+        };
+
+        // Actor ordering is not enough: the privileged renderer must have
+        // completed and verified the exact revision-bearing tab projection.
+        if !pending.chrome_applied || !self.presentation_matches_current_url(id, &pending) {
+            self.cancel_exact_pending_presentation(id, navigation);
+            return NativeDispatch::Rejected;
+        }
+
+        // On a fresh tab the exact eval is also the first projection allowed
+        // to remove the real New Tab surface. Queue privileged frame + raw
+        // content geometry only afterward, on the same ordered native
+        // dispatcher used by presentation. Refusal retains the hidden exact
+        // obligation and follows the ordinary bounded retry path.
+        if self.deferred_first_content_layout.contains(&id) {
+            let layout = self.relayout();
+            if layout != NativeDispatch::Scheduled {
+                self.schedule_exact_presentation_retry(
+                    id,
+                    navigation,
+                    "first content layout was not admitted after privileged chrome verification",
+                );
+                return layout;
+            }
+        }
+
+        let admission = self.engine.present_navigation(id, navigation);
+        match admission {
+            NativeDispatch::Scheduled => {
+                // The native task is generation/epoch checked again when it
+                // executes. Clear only the same obligation: a re-entrant newer
+                // commit must retain its own hidden-document gate and timer.
+                self.presented_navigations
+                    .insert(id, (navigation, pending.url.clone()));
+                self.deferred_first_content_layout.remove(&id);
+                self.cancel_exact_pending_presentation(id, navigation);
+            }
+            NativeDispatch::Rejected => {
+                self.schedule_exact_presentation_retry(
+                    id,
+                    navigation,
+                    "native presentation dispatcher remained unavailable",
+                );
+            }
+            NativeDispatch::Unsupported => {
+                // Emitting Pending/Ready proves this exact native surface is
+                // gated. Claiming the matching acknowledgement is unsupported
+                // is therefore a lifecycle invariant failure, not permission
+                // to forget a potentially permanently hidden document.
+                self.fail_exact_pending_presentation(
+                    id,
+                    navigation,
+                    "gated native presentation acknowledgement is unsupported",
+                );
+            }
+        }
+        admission
+    }
+
+    fn fail_exact_pending_presentation(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        reason: &'static str,
+    ) {
+        if !self
+            .pending_presentations
+            .get(&id)
+            .is_some_and(|pending| pending.navigation == navigation)
+        {
+            return;
+        }
+        eprintln!("engine: {reason}; retiring exact hidden view");
+        // `close` revokes the engine's item token synchronously before its
+        // native cleanup is dispatched. If that dispatch is itself rejected,
+        // the production engine seals native authority and invokes its fatal
+        // lifecycle callback; either way this id cannot silently keep using
+        // the hidden generation after the shell marks it failed.
+        let _ = self.engine.close(id);
+        self.on_view_creation_failed(id);
+    }
+
+    fn on_view_creation_failed(&mut self, id: ItemId) {
+        self.pending_zooms.remove(&id);
+        self.cancel_pending_presentation(id);
+        self.cancel_discard_probe(id);
+        self.items.view_creation_failed(id);
+        let split_collapsed = self.collapse_failed_split_leaf(id);
+        if split_collapsed {
+            self.schedule_persist();
+        }
+        let _ = self.relayout();
+        if split_collapsed {
+            self.project_items();
+        } else {
+            self.project_tab(id);
+        }
+    }
+
+    fn on_presentation_fallback(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        hard_deadline: std::time::Instant,
+    ) {
+        let Some(pending) = self.pending_presentations.get(&id).cloned() else {
+            return;
+        };
+        if pending.navigation != navigation || pending.hard_deadline != hard_deadline {
+            // The timer wake escaped before a newer navigation/ready/close
+            // replaced this exact obligation.
+            return;
+        }
+        let Some(_tab) = self.items.tab(id).filter(|tab| tab.has_view()) else {
+            self.cancel_pending_presentation(id);
+            return;
+        };
+        let now = std::time::Instant::now();
+        if now >= hard_deadline {
+            self.fail_exact_pending_presentation(
+                id,
+                navigation,
+                "exact presentation barrier exceeded its hard deadline",
+            );
+            return;
+        }
+        if pending.chrome_request_in_flight {
+            if let Some(current) = self.pending_presentations.get_mut(&id) {
+                current.chrome_request_in_flight = false;
+                current.admission_rejections = current.admission_rejections.saturating_add(1);
+                if current.admission_rejections >= MAX_PRESENTATION_ADMISSION_REJECTIONS {
+                    self.fail_exact_pending_presentation(
+                        id,
+                        navigation,
+                        "privileged chrome presentation callback remained unavailable",
+                    );
+                    return;
+                }
+            }
+        }
+        // Page loading state is irrelevant. Re-drive the missing chrome or
+        // native admission, but never turn the deadline into a timeout reveal.
+        self.request_chrome_presentation(id, navigation);
+    }
+
+    fn on_presentation_fact(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        url: String,
+    ) {
+        let Ok(url) = url::Url::parse(&url) else {
+            eprintln!("engine: rejected malformed native presentation URL");
+            return;
+        };
+        if !navigation::is_allowed(&url)
+            || !self.items.tab(id).is_some_and(|tab| {
+                tab.has_view() && tab.url.as_ref().is_some_and(|current| current == &url)
+            })
+        {
+            // A newer URL may already have replaced this coalesced native
+            // fact. Do not cancel its obligation and never acknowledge the
+            // stale token against whichever URL happens to be current.
+            return;
+        }
+        if self
+            .presented_navigations
+            .get(&id)
+            .is_some_and(|(presented, presented_url)| {
+                *presented == navigation && presented_url == url.as_str()
+            })
+        {
+            // Native Finished re-emits the same exact fact so a coalesced-away
+            // Pending can still present. Once admission was already proven,
+            // the duplicate is an idempotent no-op rather than another native
+            // visibility/layout pass.
+            return;
+        }
+        if self
+            .pending_presentations
+            .get(&id)
+            .is_some_and(|pending| pending.navigation != navigation)
+        {
+            // Replace the retained shell obligation and its one timer as one
+            // logical transition. An already-escaped old wake remains safe:
+            // `on_presentation_fallback` checks both token and hard deadline.
+            if let Some(queue) = &self.self_queue {
+                queue.cancel_presentation(id);
+            }
+        }
+        let pending = self.track_pending_presentation(
+            id,
+            navigation,
+            url.as_str().to_owned(),
+            std::time::Instant::now(),
+        );
+        self.request_chrome_presentation(id, pending.navigation);
     }
 
     fn on_engine_event(&mut self, event: EngineEvent) {
@@ -3090,6 +4262,16 @@ impl Shell {
             }
             EngineEvent::PermissionRequested { .. } => {}
             EngineEvent::DownloadRequested { .. } => {}
+            EngineEvent::PresentationPending {
+                id,
+                navigation,
+                url,
+            }
+            | EngineEvent::PresentationReady {
+                id,
+                navigation,
+                url,
+            } => self.on_presentation_fact(id, navigation, url),
             EngineEvent::NavigationFailed { id, request } => {
                 // Only the matching latest intent is affected. The displayed
                 // URL was never changed optimistically, so a stale native
@@ -3098,11 +4280,27 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
+            EngineEvent::ZoomSettled {
+                id,
+                request,
+                applied_scale,
+                succeeded,
+            } => self.on_zoom_settled(id, request, applied_scale, succeeded),
+            EngineEvent::NativeActionFailed { id, action } => {
+                if self.items.tab(id).is_some_and(TabState::has_view) {
+                    let action = match action {
+                        NativeAction::Reload => "reload",
+                        NativeAction::GoBack => "back",
+                        NativeAction::GoForward => "forward",
+                    };
+                    // The engine separately re-observes authoritative
+                    // source/history. Keep this diagnostic bounded and never
+                    // include a page-derived URL or native error string.
+                    eprintln!("engine: native {action} action failed");
+                }
+            }
             EngineEvent::ViewCreationFailed { id } => {
-                self.cancel_discard_probe(id);
-                self.items.view_creation_failed(id);
-                let _ = self.relayout();
-                self.project_tab(id);
+                self.on_view_creation_failed(id);
             }
             EngineEvent::ProfileProcessExited { profile, ids } => {
                 self.on_profile_process_exit(profile, ids)
@@ -3112,12 +4310,14 @@ impl Shell {
             EngineEvent::HtmlExtracted { .. } => {}
             EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
+                self.crash_presentations.remove(&id);
                 self.items.set_title(id, title);
                 self.project_tab(id);
             }
             EngineEvent::LoadingChanged { id, loading } => {
                 if loading {
                     self.cancel_discard_probe(id);
+                    self.crash_presentations.remove(&id);
                 }
                 self.items.set_loading(id, loading);
                 self.project_tab(id);
@@ -3131,9 +4331,31 @@ impl Shell {
             }
             EngineEvent::UrlChanged { id, url } => {
                 self.cancel_discard_probe(id);
-                if !self.items.set_committed_url_str(id, &url) {
+                let Ok(committed_url) = url::Url::parse(&url) else {
                     eprintln!("engine: rejected invalid or unknown committed URL event");
                     return;
+                };
+                if !navigation::is_allowed(&committed_url) {
+                    eprintln!("engine: rejected invalid or unknown committed URL event");
+                    return;
+                }
+                let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
+                let replace_stale_title = self
+                    .items
+                    .tab(id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .is_none_or(|previous| !same_browser_origin(previous, &committed_url));
+                if !self.items.set_committed_url(id, committed_url.clone()) {
+                    eprintln!("engine: rejected invalid or unknown committed URL event");
+                    return;
+                }
+                if replace_stale_title {
+                    // Browser chrome may be projected before the new document
+                    // publishes a title. Never carry a prior origin's trusted
+                    // label across the exact URL acknowledgement that unlocks
+                    // presentation; use a neutral URL-derived label meanwhile.
+                    self.items
+                        .set_title(id, neutral_title_for_url(&committed_url));
                 }
                 self.maybe_discover_favicon(id);
                 // History is attributed to the profile that owns the item,
@@ -3151,20 +4373,38 @@ impl Shell {
                         .unwrap_or_default();
                     self.store.record_visit(profile, url, title);
                 }
-                self.schedule_persist();
-                self.project_tab(id);
+                self.schedule_url_checkpoint(id);
+                if first_committed_url {
+                    // Keep the real privileged New Tab projection and native
+                    // frame until the exact presentation eval replaces it.
+                    // All generic projections remain URL-free for this item,
+                    // so they cannot create an empty gap ahead of that eval.
+                    self.deferred_first_content_layout.insert(id);
+                } else {
+                    self.project_tab(id);
+                }
             }
         }
     }
 
-    fn search(&self, query: &str) {
-        let Some(win) = self.windows.focused() else {
+    fn search(&mut self, query: &str) {
+        let Some((profile, space)) = self
+            .windows
+            .focused()
+            .map(|window| (window.profile, window.space))
+        else {
             return;
         };
         let q = query.trim();
         let needle = q.to_lowercase();
-        let tabs = self.today_tabs(win.space);
+        let tabs = self.today_tabs(space);
         let mut results = Vec::new();
+        self.search_generation = self.search_generation.wrapping_add(1);
+        if self.search_generation == 0 {
+            self.search_generation = 1;
+        }
+        let generation = self.search_generation;
+        self.pending_search = None;
 
         if q.is_empty() {
             results.extend(
@@ -3172,7 +4412,7 @@ impl Shell {
                     .filter_map(|id| {
                         self.items
                             .tab(*id)
-                            .map(|t| tab_result(*id, t, self.favicon_key(t, Some(win.profile))))
+                            .map(|t| tab_result(*id, t, self.favicon_key(t, Some(profile))))
                     })
                     .take(8),
             );
@@ -3195,7 +4435,7 @@ impl Shell {
             results.extend(
                 matched
                     .iter()
-                    .map(|(id, t)| tab_result(*id, t, self.favicon_key(t, Some(win.profile)))),
+                    .map(|(id, t)| tab_result(*id, t, self.favicon_key(t, Some(profile)))),
             );
 
             if let Some(url) = navigation::classify(q) {
@@ -3214,7 +4454,7 @@ impl Shell {
                         kind: "url".into(),
                         title: format!("Open {url}"),
                         detail: "New Tab".into(),
-                        favicon: self.favicon_key_for_url(win.profile, url.as_str()),
+                        favicon: self.favicon_key_for_url(profile, url.as_str()),
                         action: SearchAction::OpenUrl {
                             url: url.to_string(),
                         },
@@ -3237,24 +4477,50 @@ impl Shell {
                     }),
             );
 
-            results.extend(
-                self.store
-                    .search_history(win.profile, q, 6)
-                    .into_iter()
-                    .filter(|hit| !open_urls.contains(&hit.url))
-                    .map(|hit| SearchResult {
-                        kind: "history".into(),
-                        title: if hit.title.is_empty() {
-                            hit.url.clone()
-                        } else {
-                            hit.title
-                        },
-                        detail: hit.url.clone(),
-                        favicon: self.favicon_key_for_url(win.profile, &hit.url),
-                        action: SearchAction::OpenUrl { url: hit.url },
-                    }),
-            );
             results.truncate(10);
+
+            // Project local tab/URL/command matches immediately. History is
+            // presentation-only and arrives asynchronously; the exact query
+            // generation below prevents a slow old result replacing newer UI.
+            (self.emit)(Projection::Search(SearchResults {
+                query: query.into(),
+                results: results.clone(),
+            }));
+            if q.len() > MAX_ASYNC_SEARCH_QUERY_BYTES {
+                return;
+            }
+            self.pending_search = Some(PendingSearch {
+                generation,
+                profile,
+                lookup_query: q.to_owned(),
+                display_query: query.to_owned(),
+                open_urls,
+                base_results: results,
+            });
+            if let Some(reads) = &self.store_reads {
+                if !reads.request_history(generation, profile, q.to_owned()) {
+                    self.pending_search = None;
+                }
+            } else {
+                #[cfg(test)]
+                {
+                    let hits = self.store.search_history(profile, q, 6);
+                    self.on_store_read(StoreReadResult::History {
+                        generation,
+                        profile,
+                        query: q.to_owned(),
+                        hits,
+                    });
+                }
+                #[cfg(not(test))]
+                {
+                    // Production construction always installs the reader.
+                    // Keep this defensive branch nonblocking if a future
+                    // internal constructor violates that invariant.
+                    self.pending_search = None;
+                }
+            }
+            return;
         }
 
         (self.emit)(Projection::Search(SearchResults {
@@ -3295,20 +4561,206 @@ impl Shell {
         if origins.is_empty() {
             return;
         }
-
-        // The storage boundary is not trusted to preserve cardinality or
-        // requested-origin membership. Revalidate both before values enter
-        // privileged projection state.
-        let mut accepted = std::collections::HashSet::new();
-        for (origin, rgba) in self
-            .store
-            .favicon_rasters(profile, &origins)
-            .into_iter()
-            .take(MAX_FAVICON_BATCH_ORIGINS)
-        {
-            if requested.contains(&origin) && accepted.insert(origin.clone()) {
-                let _ = self.cache_icon((profile, origin), &rgba);
+        self.favicon_batch_generation = self.favicon_batch_generation.wrapping_add(1);
+        if self.favicon_batch_generation == 0 {
+            self.favicon_batch_generation = 1;
+        }
+        let generation = self.favicon_batch_generation;
+        self.pending_favicon_batch = Some(PendingFaviconBatch {
+            generation,
+            profile,
+            space,
+            requested,
+        });
+        if let Some(reads) = &self.store_reads {
+            if !reads.request_favicon_batch(generation, profile, space, origins) {
+                self.pending_favicon_batch = None;
             }
+        } else {
+            #[cfg(test)]
+            {
+                let rasters = self.store.favicon_rasters(profile, &origins);
+                self.on_store_read(StoreReadResult::FaviconBatch {
+                    generation,
+                    profile,
+                    space,
+                    origins,
+                    rasters,
+                });
+            }
+            #[cfg(not(test))]
+            {
+                self.pending_favicon_batch = None;
+            }
+        }
+    }
+
+    fn clear_pending_store_reads(&mut self) {
+        self.pending_search = None;
+        self.pending_favicon_batch = None;
+        self.favicon_store_reads.clear();
+    }
+
+    fn on_store_read(&mut self, result: StoreReadResult) {
+        match result {
+            StoreReadResult::History {
+                generation,
+                profile,
+                query,
+                hits,
+            } => self.on_history_read(generation, profile, query, hits),
+            StoreReadResult::Favicon {
+                generation,
+                id,
+                profile,
+                origin,
+                rgba,
+            } => self.on_favicon_read(generation, id, profile, origin, rgba),
+            StoreReadResult::FaviconBatch {
+                generation,
+                profile,
+                space,
+                origins,
+                rasters,
+            } => self.on_favicon_batch_read(generation, profile, space, origins, rasters),
+        }
+    }
+
+    fn on_history_read(
+        &mut self,
+        generation: u64,
+        profile: ProfileId,
+        query: String,
+        hits: Vec<zephium_core::ports::store::HistoryHit>,
+    ) {
+        let exact = self.pending_search.as_ref().is_some_and(|pending| {
+            pending.generation == generation
+                && pending.profile == profile
+                && pending.lookup_query == query
+        });
+        if !exact {
+            return;
+        }
+        let Some(pending) = self.pending_search.take() else {
+            return;
+        };
+        if self
+            .windows
+            .focused()
+            .is_none_or(|window| window.profile != profile)
+        {
+            return;
+        }
+
+        // Treat even our own store adapter as a serialization boundary: cap
+        // cardinality, revalidate URLs, sanitize titles, and deduplicate before
+        // values reach privileged launcher markup.
+        let mut results = pending.base_results;
+        let mut seen = pending.open_urls;
+        for hit in hits.into_iter().take(6) {
+            if !navigation::is_allowed_str(&hit.url) || !seen.insert(hit.url.clone()) {
+                continue;
+            }
+            let title = zephium_core::item::sanitize_page_title(&hit.title);
+            results.push(SearchResult {
+                kind: "history".into(),
+                title: if title.is_empty() {
+                    hit.url.clone()
+                } else {
+                    title
+                },
+                detail: hit.url.clone(),
+                favicon: self.favicon_key_for_url(profile, &hit.url),
+                action: SearchAction::OpenUrl { url: hit.url },
+            });
+        }
+        results.truncate(10);
+        (self.emit)(Projection::Search(SearchResults {
+            query: pending.display_query,
+            results,
+        }));
+    }
+
+    fn on_favicon_read(
+        &mut self,
+        generation: u64,
+        id: ItemId,
+        profile: ProfileId,
+        origin: String,
+        rgba: Option<Vec<u8>>,
+    ) {
+        let exact = self.favicon_store_reads.get(&id).is_some_and(|pending| {
+            pending.generation == generation
+                && pending.profile == profile
+                && pending.origin == origin
+        });
+        if !exact {
+            return;
+        }
+        self.favicon_store_reads.remove(&id);
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_favicon(id);
+        }
+        if self.item_origin(id) != Some((profile, origin.clone())) {
+            return;
+        }
+        let key = (profile, origin.clone());
+        if rgba
+            .as_deref()
+            .is_some_and(|bytes| self.cache_icon(key.clone(), bytes))
+        {
+            self.icons_checked.insert(key);
+            self.project_tab(id);
+        } else {
+            self.start_favicon_discovery(id, profile, origin);
+        }
+    }
+
+    fn on_favicon_batch_read(
+        &mut self,
+        generation: u64,
+        profile: ProfileId,
+        space: SpaceId,
+        origins: Vec<String>,
+        rasters: Vec<(String, Vec<u8>)>,
+    ) {
+        let exact = self.pending_favicon_batch.as_ref().is_some_and(|pending| {
+            pending.generation == generation && pending.profile == profile && pending.space == space
+        });
+        if !exact {
+            return;
+        }
+        let Some(pending) = self.pending_favicon_batch.take() else {
+            return;
+        };
+        let origin_set: std::collections::HashSet<_> = origins.iter().cloned().collect();
+        if origins.len() > MAX_FAVICON_BATCH_ORIGINS
+            || origin_set.len() != origins.len()
+            || origin_set != pending.requested
+            || self
+                .spaces
+                .get(space)
+                .is_none_or(|candidate| candidate.profile != profile)
+        {
+            return;
+        }
+
+        let mut accepted = std::collections::HashSet::new();
+        let mut changed = false;
+        for (origin, rgba) in rasters.into_iter().take(MAX_FAVICON_BATCH_ORIGINS) {
+            if origin_set.contains(&origin) && accepted.insert(origin.clone()) {
+                let key = (profile, origin);
+                if self.cache_icon(key, &rgba) {
+                    // Batch hydration intentionally does not mark freshness:
+                    // it restores an immediate sidebar image, while the next
+                    // live navigation still performs the one-query age check
+                    // and refreshes an old raster through the renderer.
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.project_items();
         }
     }
 
@@ -3316,8 +4768,7 @@ impl Shell {
         let Some((profile, origin)) = self.item_origin(id) else {
             return;
         };
-        let key = (profile, origin.clone());
-        if self.icons_checked.contains(&key) {
+        if self.icons_checked.contains(&(profile, origin.clone())) {
             return;
         }
         if self.icons_checked.len() >= TRACKED_ICON_ORIGIN_CAPACITY {
@@ -3331,21 +4782,74 @@ impl Shell {
             .profiles
             .get(profile)
             .is_some_and(|profile| profile.kind == ProfileKind::Incognito);
-        const WEEK: i64 = 7 * 24 * 3600;
-        if !incognito
-            && self
-                .store
-                .favicon_age(profile, &origin)
-                .is_some_and(|age| age < WEEK)
-        {
-            if let Some((_content_type, bytes)) = self.store.favicon_bytes(profile, &origin) {
-                if self.cache_icon(key.clone(), &bytes) {
-                    self.icons_checked.insert(key);
-                    return;
-                }
-            }
+        if incognito {
+            self.start_favicon_discovery(id, profile, origin);
+            return;
         }
 
+        let exact_pending = self
+            .favicon_store_reads
+            .get(&id)
+            .is_some_and(|pending| pending.profile == profile && pending.origin == origin);
+        if exact_pending {
+            return;
+        }
+        self.cancel_favicon_attempt(id);
+        self.favicon_store_generation = self.favicon_store_generation.wrapping_add(1);
+        if self.favicon_store_generation == 0 {
+            self.favicon_store_generation = 1;
+        }
+        let generation = self.favicon_store_generation;
+        self.favicon_store_reads.insert(
+            id,
+            PendingFaviconStoreRead {
+                generation,
+                profile,
+                origin: origin.clone(),
+            },
+        );
+        if let Some(reads) = &self.store_reads {
+            if reads.request_favicon(generation, id, profile, origin.clone()) {
+                if let Some(queue) = &self.self_queue {
+                    queue.schedule_favicon(
+                        id,
+                        0,
+                        std::time::Instant::now() + STORE_READ_RESULT_TIMEOUT,
+                    );
+                }
+                return;
+            }
+            self.favicon_store_reads.remove(&id);
+        } else {
+            #[cfg(test)]
+            {
+                let rgba = self.store.fresh_favicon_raster(
+                    profile,
+                    &origin,
+                    FAVICON_CACHE_MAX_AGE_SECONDS,
+                );
+                self.on_store_read(StoreReadResult::Favicon {
+                    generation,
+                    id,
+                    profile,
+                    origin,
+                    rgba,
+                });
+                return;
+            }
+            #[cfg(not(test))]
+            {
+                self.favicon_store_reads.remove(&id);
+            }
+        }
+        // Store-read pressure must not make favicons permanently disappear;
+        // fall back to the already-bounded renderer discovery pipeline.
+        if let Some((current_profile, current_origin)) = self.item_origin(id) {
+            self.start_favicon_discovery(id, current_profile, current_origin);
+        }
+    }
+
+    fn start_favicon_discovery(&mut self, id: ItemId, profile: ProfileId, origin: String) {
         if self
             .icon_attempts
             .get(&id)
@@ -3388,6 +4892,10 @@ impl Shell {
     fn cancel_favicon_attempt(&mut self, id: ItemId) {
         self.icon_attempts.remove(&id);
         self.icon_load_completion_pending.remove(&id);
+        self.favicon_store_reads.remove(&id);
+        if let Some(reads) = &self.store_reads {
+            reads.cancel_favicon(id);
+        }
         if let Some(queue) = &self.self_queue {
             queue.cancel_favicon(id);
         }
@@ -3407,6 +4915,18 @@ impl Shell {
     }
 
     fn poll_favicon(&mut self, id: ItemId, attempt: u8) {
+        if attempt == 0 {
+            let Some(pending) = self.favicon_store_reads.remove(&id) else {
+                return;
+            };
+            if let Some(reads) = &self.store_reads {
+                reads.cancel_favicon(id);
+            }
+            if self.item_origin(id) == Some((pending.profile, pending.origin.clone())) {
+                self.start_favicon_discovery(id, pending.profile, pending.origin);
+            }
+            return;
+        }
         let Some(current) = self.icon_attempts.get(&id).cloned() else {
             return;
         };
@@ -3588,6 +5108,11 @@ impl Shell {
     }
 
     fn commit(&mut self, effects: Vec<Effect>) -> NativeWork {
+        // Every ordinary committed mutation may change focus, view
+        // residency, or split topology. A captured divider path cannot cross
+        // that boundary; resize/sidebar geometry updates deliberately bypass
+        // `commit` and remain draggable through path-based recomputation.
+        self.divider = None;
         let mut native = self.apply(effects);
         self.schedule_persist();
         // Visibility has to land before dormancy. WebView2 only accepts a
@@ -3605,6 +5130,10 @@ impl Shell {
     // rechecks URL, loading, visibility, idle age, and the current budget.
     fn maintain_views(&mut self) -> bool {
         self.crashes.retain(|id, _| self.items.tab(*id).is_some());
+        self.crash_presentations
+            .retain(|id| self.items.tab(*id).is_some());
+        self.pending_zooms
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
         if self.windows.focused().is_none() {
             return false;
         }
@@ -3868,6 +5397,9 @@ impl Shell {
                 deferred_navigation: None,
             },
         );
+        // `discard_view` retires the exact native generation at its public
+        // boundary. Any queued zoom result is now terminally stale.
+        self.pending_zooms.remove(&id);
         if !self.engine.discard_view(id, probe) {
             // Engine dispatch failure after lifecycle retirement is terminal
             // at the native boundary. Keep the closing obligation visible;
@@ -3888,6 +5420,8 @@ impl Shell {
         if pending != probe || self.profile_of_item(id) != Some(profile) {
             return;
         }
+        self.pending_zooms.remove(&id);
+        self.cancel_pending_presentation(id);
         self.discard_probes.remove(&id);
         if !self.items.mark_view_discarded(id) {
             return;
@@ -3936,23 +5470,36 @@ impl Shell {
     // One automatic relaunch per crash burst: a second death inside the
     // window means the page kills its web process deterministically, and a
     // reload loop would peg the machine.
+    fn retire_crashed_view(&mut self, id: ItemId) {
+        self.pending_zooms.remove(&id);
+        let title = self.items.tab(id).map(|tab| tab.title.clone());
+        self.items.view_creation_failed(id);
+        if let Some(title) = title {
+            // `view_creation_failed` owns the generic create-failure label.
+            // A renderer crash is different: its label is transient chrome
+            // state and must not replace the last committed document title.
+            self.items.set_title(id, title);
+        }
+        self.crash_presentations.insert(id);
+    }
+
     fn on_crashed(&mut self, id: ItemId) {
         const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
         if self.items.tab(id).is_none() {
             return;
         }
+        self.cancel_pending_presentation(id);
         self.cancel_discard_probe(id);
         // `Crashed` is emitted only after the engine has physically removed
         // and revoked the exact native-view generation. Sending a second,
         // id-only close here could be reordered behind recovery and destroy
         // the replacement generation.
-        self.items.view_creation_failed(id);
+        self.retire_crashed_view(id);
         self.items.set_loading(id, false);
         let recent = self
             .crashes
             .insert(id, std::time::Instant::now())
             .is_some_and(|t| t.elapsed() < RETRY_WINDOW);
-        self.items.set_title(id, "Page crashed".into());
         let active = self.windows.focused().and_then(|window| window.active);
         let effects = if !recent && active == Some(id) {
             self.items.ensure_view(id)
@@ -3981,13 +5528,13 @@ impl Shell {
             if self.profile_of_item(id) != Some(profile) {
                 continue;
             }
+            self.cancel_pending_presentation(id);
             self.cancel_discard_probe(id);
             let repeated = self
                 .crashes
                 .insert(id, std::time::Instant::now())
                 .is_some_and(|time| time.elapsed() < RETRY_WINDOW);
-            self.items.view_creation_failed(id);
-            self.items.set_title(id, "Page crashed".into());
+            self.retire_crashed_view(id);
             // A browser-process loss can report hundreds of tabs at once.
             // Recreate every currently visible split leaf, because native
             // layout admission requires a live token for every leaf. Hidden
@@ -4061,6 +5608,7 @@ impl Shell {
             match effect {
                 Effect::CreateView { id, url } => {
                     if logical_residents >= LIVE_VIEW_ABSOLUTE_LIMIT {
+                        self.pending_zooms.remove(&id);
                         self.items.view_creation_failed(id);
                         rejected_creates.insert(id);
                         native.rejected = true;
@@ -4072,6 +5620,7 @@ impl Shell {
                     {
                         // Dispatch rejection is synchronous and must not rely
                         // on a callback entering an already-overloaded queue.
+                        self.pending_zooms.remove(&id);
                         self.items.view_creation_failed(id);
                         rejected_creates.insert(id);
                         native.rejected = true;
@@ -4082,7 +5631,16 @@ impl Shell {
                     // restored or revived views keep their zoom
                     let zoom = self.items.tab(id).map(|t| t.zoom).unwrap_or(1.0);
                     if zoom != 1.0 {
-                        native.record(self.engine.zoom(id, zoom));
+                        let admission = self.request_zoom(id, zoom);
+                        native.record(admission);
+                        if admission != NativeDispatch::Scheduled {
+                            // A newly constructed view starts at 1.0. If its
+                            // restore request never reached the native queue,
+                            // do not retain or later persist the stale scale.
+                            self.items.set_zoom(id, 1.0);
+                            self.schedule_persist();
+                            self.project_tab(id);
+                        }
                     }
                 }
                 Effect::Navigate { id, url, request } => {
@@ -4099,7 +5657,10 @@ impl Shell {
                         native.scheduled = true;
                     }
                 }
-                Effect::Close { id } => native.record(self.engine.close(id)),
+                Effect::Close { id } => {
+                    self.pending_zooms.remove(&id);
+                    native.record(self.engine.close(id));
+                }
             }
         }
         native
@@ -4115,10 +5676,29 @@ impl Shell {
         if !self.window_visible {
             l.content = None;
         }
-        self.chrome.position(ChromeFrame {
-            rect: l.chrome,
-            fill_width: l.content.is_none(),
-        });
+        // Raw native children still receive their final geometry while a
+        // first navigation is provisional, but macOS must not shrink the
+        // privileged chrome away from a fresh New Tab surface until at least
+        // one visible leaf completed its exact chrome-verification transition.
+        // The content stage itself is transparent and presentation-gated, so
+        // it can sit above this real UI without painting an artificial box.
+        let chrome_present = self.window_visible
+            && tree.as_ref().is_some_and(|tree| {
+                tree.tabs().iter().any(|id| {
+                    self.items.tab(*id).is_some_and(|tab| {
+                        tab.has_view()
+                            && tab.url.is_some()
+                            && !self.deferred_first_content_layout.contains(id)
+                    })
+                })
+            });
+        let chrome_layout = layout::compute(win.size, win.mode, win.metrics, chrome_present);
+        if !self.chrome.position(ChromeFrame {
+            rect: chrome_layout.chrome,
+            fill_width: chrome_layout.content.is_none(),
+        }) {
+            return NativeDispatch::Rejected;
+        }
         let dividers = match (&tree, l.content) {
             (Some(tree), Some(region)) => {
                 let local = Rect::new(0.0, 0.0, region.width, region.height);
@@ -4139,30 +5719,60 @@ impl Shell {
         self.engine.set_content(win.id, tree, l.content)
     }
 
-    fn locate_divider(&self, x: f64, y: f64) -> Option<split::Divider> {
+    fn locate_divider(&self, x: f64, y: f64) -> Option<GrabbedDivider> {
         let win = self.windows.focused()?;
         let tree = self.pane_tree()?;
         let region =
             layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
         let local = Rect::new(0.0, 0.0, region.width, region.height);
-        split::divider_at(&tree, local, win.metrics.gap, x - region.x, y - region.y)
+        let divider = split::divider_at(&tree, local, win.metrics.gap, x - region.x, y - region.y)?;
+        Some(GrabbedDivider {
+            window: win.id,
+            topology: tree,
+            divider,
+        })
     }
 
     fn divider_drag(&mut self, x: f64, y: f64) {
-        let Some(d) = self.divider.clone() else {
+        let Some(grabbed) = self.divider.as_ref() else {
             return;
         };
+        let grabbed_window = grabbed.window;
+        let grabbed_path = grabbed.divider.path.clone();
         let Some(win) = self.windows.focused() else {
+            self.divider = None;
             return;
         };
+        let current_tree = self.pane_tree();
+        let topology_is_current = win.id == grabbed_window
+            && current_tree
+                .as_ref()
+                .is_some_and(|tree| grabbed.topology.same_topology(tree));
+        if !topology_is_current {
+            // Focus/topology changed while the pointer was captured. The same
+            // binary path may now identify a different live branch.
+            self.divider = None;
+            return;
+        }
         let Some(region) = layout::compute(win.size, win.mode, win.metrics, true).content else {
             return;
         };
         let gap = win.metrics.gap;
-        let ratio = split::ratio_for(d.axis, d.rect, gap, x - region.x, y - region.y);
+        let Some(tree) = current_tree.as_ref() else {
+            self.divider = None;
+            return;
+        };
+        let local = Rect::new(0.0, 0.0, region.width, region.height);
+        let Some(current) = split::divider_at_path(tree, local, gap, &grabbed_path) else {
+            // The split tree changed while the pointer was captured. Its old
+            // path is no longer authority for any live branch.
+            self.divider = None;
+            return;
+        };
+        let ratio = split::ratio_for(current.axis, current.rect, gap, x - region.x, y - region.y);
         if let Some(win) = self.windows.focused_mut() {
             if let Some(tree) = win.splits.as_mut() {
-                tree.set_ratio(&d.path, ratio);
+                tree.set_ratio(&current.path, ratio);
             }
         }
         let _ = self.relayout();
@@ -4228,6 +5838,43 @@ impl Shell {
         self.schedule_current_session_persist();
     }
 
+    fn schedule_url_checkpoint(&mut self, id: ItemId) {
+        if !self.bootstrapped || self.items.tab(id).is_none() {
+            return;
+        }
+        self.session_revision = self.session_revision.wrapping_add(1);
+        let first_url_dirty = self.url_checkpoint_dirty.is_empty();
+        self.url_checkpoint_dirty.insert(id);
+        // A pending structural snapshot already includes the newest URL and
+        // retains its much shorter durability deadline.
+        if self.persist_first_dirty.is_some() || !first_url_dirty {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let interval_floor = self
+            .last_url_checkpoint
+            .checked_add(URL_CHECKPOINT_INTERVAL)
+            .unwrap_or(now + URL_CHECKPOINT_INTERVAL);
+        let deadline = interval_floor.max(now + URL_CHECKPOINT_DEBOUNCE);
+        if let Some(queue) = self.self_queue.as_ref() {
+            queue.schedule_persist(deadline);
+        } else {
+            #[cfg(test)]
+            {
+                // Deterministic unit shells do not own the production timer.
+                self.persist();
+            }
+            #[cfg(not(test))]
+            {
+                // Production construction always installs the timer before
+                // the actor can receive a URL. If that invariant changes,
+                // defer to the exact shutdown snapshot instead of restoring
+                // hostile per-URL full rewrites.
+                eprintln!("persistence: URL checkpoint timer is unavailable");
+            }
+        }
+    }
+
     /// Schedules the current authoritative state without advancing its logical
     /// revision. Used after a durable deletion barrier when mutations already
     /// counted by `schedule_persist` need a new post-barrier debounce.
@@ -4255,6 +5902,8 @@ impl Shell {
         if !self.bootstrapped {
             return;
         }
+        self.url_checkpoint_dirty.clear();
+        self.last_url_checkpoint = std::time::Instant::now();
         let win = self.windows.focused();
         let state = session::snapshot(
             &self.profiles,
@@ -4287,16 +5936,18 @@ impl Shell {
             return;
         };
         let profile = win.profile;
-        let tabs = self
+        let tabs: Vec<TabView> = self
             .today_tabs(win.space)
             .into_iter()
             .filter_map(|id| {
                 self.items
                     .tab(id)
-                    .map(|t| tab_view(id, t, self.favicon_key(t, Some(profile))))
+                    .map(|tab| self.generic_tab_view(id, tab, Some(profile)))
             })
             .collect();
+        self.record_tab_projection_revisions(&tabs);
         (self.emit)(Projection::Items(ItemsState {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
             tabs,
             active: win.active.map(|i| i.to_string()),
         }));
@@ -4305,12 +5956,67 @@ impl Shell {
     fn project_tab(&self, id: ItemId) {
         let profile = self.profile_of_item(id);
         if let Some(tab) = self.items.tab(id) {
-            (self.emit)(Projection::Tab(tab_view(
-                id,
-                tab,
-                self.favicon_key(tab, profile),
-            )));
+            let projection = self.generic_tab_view(id, tab, profile);
+            self.record_tab_projection_revision(id, &projection.projection_revision);
+            (self.emit)(Projection::Tab(projection));
         }
+    }
+
+    fn record_tab_projection_revisions(&self, tabs: &[TabView]) {
+        let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() else {
+            // The shell actor is single-threaded and these borrows never span
+            // callbacks. Retaining the older value fails closed by making an
+            // otherwise valid presentation callback stale.
+            return;
+        };
+        for tab in tabs {
+            if let Some(id) = ItemId::parse(&tab.id) {
+                revisions.insert(id, tab.projection_revision.clone());
+            }
+        }
+    }
+
+    fn record_tab_projection_revision(&self, id: ItemId, revision: &str) {
+        if let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() {
+            revisions.insert(id, revision.to_owned());
+        }
+    }
+
+    fn generic_tab_view(&self, id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
+        let mut view = self.presentation_tab_view(id, tab, self.favicon_key(tab, profile));
+        if self.deferred_first_content_layout.contains(&id) {
+            // A full Items snapshot may still be necessary for focus or tab
+            // topology. Preserve that delivery while ensuring the exact
+            // presentation eval remains the first URL-bearing projection.
+            view.url = None;
+            view.title = "New Tab".into();
+            view.loading = false;
+            view.can_go_back = false;
+            view.can_go_forward = false;
+            view.favicon = None;
+        }
+        view
+    }
+
+    fn presentation_tab_view(
+        &self,
+        id: ItemId,
+        tab: &TabState,
+        favicon: Option<String>,
+    ) -> TabView {
+        let mut view = tab_view(id, tab, favicon, self.next_projection_revision());
+        if self.crash_presentations.contains(&id) {
+            view.title = "Page crashed".into();
+        }
+        view
+    }
+
+    fn next_projection_revision(&self) -> u128 {
+        // Saturation is fail-closed: subsequent equal revisions are ignored
+        // by privileged chrome, so no older projection can become current.
+        let next = self.projection_sequence.get().saturating_add(1);
+        self.projection_sequence.set(next);
+        next
     }
 
     // Chrome receives only a fixed-shape raster value; it never constructs a
@@ -4345,9 +6051,10 @@ fn tab_result(id: ItemId, tab: &TabState, favicon: Option<String>) -> SearchResu
     }
 }
 
-fn tab_view(id: ItemId, tab: &TabState, favicon: Option<String>) -> TabView {
+fn tab_view(id: ItemId, tab: &TabState, favicon: Option<String>, revision: u128) -> TabView {
     TabView {
         id: id.to_string(),
+        projection_revision: format!("{revision:032x}"),
         title: tab.title.clone(),
         url: tab.url.as_ref().map(ToString::to_string),
         loading: tab.loading,
@@ -4367,12 +6074,34 @@ fn origin_of(url: &url::Url) -> Option<String> {
     }
 }
 
+fn same_browser_origin(left: &url::Url, right: &url::Url) -> bool {
+    match (origin_of(left), origin_of(right)) {
+        (Some(left), Some(right)) => left == right,
+        // `about:blank` is the only admitted opaque browser target. Treat it
+        // as same-document only when its canonical URL is exactly unchanged.
+        (None, None) => left.as_str() == right.as_str(),
+        _ => false,
+    }
+}
+
+fn neutral_title_for_url(url: &url::Url) -> String {
+    let Some(host) = url.host_str() else {
+        return url.as_str().to_owned();
+    };
+    match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
     use zephium_core::ids::WindowId;
-    use zephium_core::ports::engine::{ContentScope, NavigationRequestId, UserContent};
+    use zephium_core::ports::engine::{
+        ContentScope, NavigationRequestId, UserContent, ZoomRequestId,
+    };
     use zephium_core::session::{
         PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
     };
@@ -4383,11 +6112,13 @@ mod tests {
     struct FakeEngine {
         calls: Mutex<Vec<String>>,
         navigation_requests: Mutex<Vec<NavigationRequestId>>,
+        zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
         shutdown_result: Mutex<Option<bool>>,
         skip_shutdown_callback: std::sync::atomic::AtomicBool,
         reject_create_dispatch: std::sync::atomic::AtomicBool,
         reject_navigation_dispatch: std::sync::atomic::AtomicBool,
         reject_native_dispatch: std::sync::atomic::AtomicBool,
+        unsupported_presentation: std::sync::atomic::AtomicBool,
         runtime_restart_required: std::sync::atomic::AtomicBool,
         erasure_outcomes: Mutex<VecDeque<ProfileDataErasureOutcome>>,
         held_erasures: Mutex<Vec<HeldErasure>>,
@@ -4428,6 +6159,15 @@ mod tests {
                 .unwrap()
                 .last()
                 .expect("a navigation request must have been admitted")
+        }
+
+        fn last_zoom_request(&self) -> (ItemId, f64, ZoomRequestId) {
+            *self
+                .zoom_requests
+                .lock()
+                .unwrap()
+                .last()
+                .expect("a zoom request must have been admitted")
         }
 
         fn native_admission(&self) -> NativeDispatch {
@@ -4486,6 +6226,21 @@ mod tests {
             self.log(format!("navigate {id} {url}"));
             true
         }
+        fn present_navigation(
+            &self,
+            id: ItemId,
+            navigation: NavigationPresentationId,
+        ) -> NativeDispatch {
+            self.log(format!("present {id} {}", navigation.into_raw()));
+            if self
+                .unsupported_presentation
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                NativeDispatch::Unsupported
+            } else {
+                self.native_admission()
+            }
+        }
         fn reload(&self, id: ItemId) -> NativeDispatch {
             self.log(format!("reload {id}"));
             self.native_admission()
@@ -4519,9 +6274,16 @@ mod tests {
         fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
             self.native_admission()
         }
-        fn zoom(&self, id: ItemId, scale: f64) -> NativeDispatch {
+        fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
             self.log(format!("zoom {id} {scale}"));
-            self.native_admission()
+            let admission = self.native_admission();
+            if admission == NativeDispatch::Scheduled {
+                self.zoom_requests
+                    .lock()
+                    .unwrap()
+                    .push((id, scale, request));
+            }
+            admission
         }
         fn set_muted(&self, _id: ItemId, _muted: bool) -> NativeDispatch {
             NativeDispatch::Unsupported
@@ -4599,6 +6361,7 @@ mod tests {
         degraded_profiles: Mutex<Vec<ProfileId>>,
         panic_on_load: std::sync::atomic::AtomicBool,
         history: Vec<zephium_core::ports::store::HistoryHit>,
+        history_delay_ms: std::sync::atomic::AtomicU64,
         visits: Mutex<Vec<String>>,
         icon_ages: Mutex<std::collections::HashMap<String, i64>>,
         icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -4661,6 +6424,12 @@ mod tests {
             _query: &str,
             _limit: u32,
         ) -> Vec<zephium_core::ports::store::HistoryHit> {
+            let delay = self
+                .history_delay_ms
+                .load(std::sync::atomic::Ordering::Acquire);
+            if delay != 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
             self.history.clone()
         }
         fn favicon_age(&self, _profile: ProfileId, origin: &str) -> Option<i64> {
@@ -4692,6 +6461,18 @@ mod tests {
                         bytes.clone(),
                     )
                 })
+        }
+        fn fresh_favicon_raster(
+            &self,
+            profile: ProfileId,
+            origin: &str,
+            max_age_seconds: i64,
+        ) -> Option<Vec<u8>> {
+            self.favicon_age(profile, origin)
+                .is_some_and(|age| age <= max_age_seconds)
+                .then(|| self.favicon_bytes(profile, origin))
+                .flatten()
+                .map(|(_, bytes)| bytes)
         }
         fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
             if self
@@ -4782,8 +6563,70 @@ mod tests {
     }
 
     struct FakeChrome;
-    impl Chrome for FakeChrome {
-        fn position(&self, _frame: ChromeFrame) {}
+    impl GeometryChrome for FakeChrome {
+        fn position(&self, _frame: ChromeFrame) -> bool {
+            true
+        }
+    }
+    impl PresentationChrome for FakeChrome {
+        fn apply_tab_for_presentation(
+            &self,
+            _presentation: ChromePresentation,
+            _done: ChromePresentationCallback,
+        ) -> ChromePresentationDispatch {
+            ChromePresentationDispatch::Applied
+        }
+    }
+
+    #[derive(Default)]
+    struct AsyncChrome {
+        pending: Mutex<VecDeque<(ChromePresentation, ChromePresentationCallback)>>,
+        reject_admission: std::sync::atomic::AtomicBool,
+    }
+
+    impl GeometryChrome for AsyncChrome {
+        fn position(&self, _frame: ChromeFrame) -> bool {
+            true
+        }
+    }
+
+    impl PresentationChrome for AsyncChrome {
+        fn apply_tab_for_presentation(
+            &self,
+            presentation: ChromePresentation,
+            done: ChromePresentationCallback,
+        ) -> ChromePresentationDispatch {
+            if self
+                .reject_admission
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return ChromePresentationDispatch::Rejected;
+            }
+            self.pending.lock().unwrap().push_back((presentation, done));
+            ChromePresentationDispatch::Scheduled
+        }
+    }
+
+    impl AsyncChrome {
+        fn presentations(&self) -> Vec<ChromePresentation> {
+            self.pending
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(presentation, _)| presentation.clone())
+                .collect()
+        }
+
+        fn complete_next(&self, applied: bool) -> ChromePresentation {
+            let (presentation, done) = self
+                .pending
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("an exact privileged presentation must be pending");
+            done(applied);
+            presentation
+        }
     }
 
     type CannedFetch = Option<(Option<String>, Vec<u8>)>;
@@ -4841,6 +6684,7 @@ mod tests {
     fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
         let engine = Arc::new(FakeEngine::default());
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            projection_revision: String::new(),
             tabs: Vec::new(),
             active: None,
         }));
@@ -4860,6 +6704,26 @@ mod tests {
         setup_with(Arc::new(FakeStore::default()))
     }
 
+    fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Screen) {
+        let engine = Arc::new(FakeEngine::default());
+        let chrome = Arc::new(AsyncChrome::default());
+        let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            projection_revision: String::new(),
+            tabs: Vec::new(),
+            active: None,
+        }));
+        let sink = screen.clone();
+        let mut shell = Shell::new(
+            engine.clone(),
+            Arc::new(FakeStore::default()),
+            chrome.clone(),
+            Arc::new(FakeNet::default()),
+            Box::new(move |projection| apply_projection(&mut sink.lock().unwrap(), projection)),
+        );
+        shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+        (shell, engine, chrome, screen)
+    }
+
     type OperationLog = Arc<Mutex<Vec<OperationDisposition>>>;
 
     fn setup_with_operation_log(
@@ -4867,6 +6731,7 @@ mod tests {
     ) -> (Shell, Arc<FakeEngine>, Screen, OperationLog) {
         let engine = Arc::new(FakeEngine::default());
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            projection_revision: String::new(),
             tabs: Vec::new(),
             active: None,
         }));
@@ -4924,6 +6789,15 @@ mod tests {
         ItemId::parse(&last(screen).active.unwrap()).unwrap()
     }
 
+    fn persisted_zoom(store: &FakeStore, id: ItemId) -> f64 {
+        let saved = store.saved.lock().unwrap().clone().unwrap();
+        let item = saved.items.iter().find(|item| item.id == id).unwrap();
+        let PersistedKind::Tab { zoom, .. } = &item.kind else {
+            panic!("expected persisted tab")
+        };
+        *zoom
+    }
+
     fn navigate_and_commit(shell: &mut Shell, id: ItemId, input: &str) {
         let url = navigation::classify(input)
             .expect("test navigation must be valid")
@@ -4932,7 +6806,53 @@ mod tests {
             id,
             input: input.into(),
         });
-        shell.handle(Command::Engine(EngineEvent::UrlChanged { id, url }));
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: url.clone(),
+        }));
+        present_committed(shell, id, &url);
+    }
+
+    fn present_committed(shell: &mut Shell, id: ItemId, url: &str) {
+        static NEXT_PRESENTATION: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(10_000);
+        let navigation = NEXT_PRESENTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            NavigationPresentationId::from_raw(navigation),
+            url,
+        )));
+    }
+
+    fn commit_url(shell: &mut Shell, id: ItemId, url: &str) {
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: url.into(),
+        }));
+    }
+
+    fn presentation_pending(
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        url: &str,
+    ) -> EngineEvent {
+        EngineEvent::PresentationPending {
+            id,
+            navigation,
+            url: url.into(),
+        }
+    }
+
+    fn presentation_ready(
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        url: &str,
+    ) -> EngineEvent {
+        EngineEvent::PresentationReady {
+            id,
+            navigation,
+            url: url.into(),
+        }
     }
 
     fn first_probing_discard(shell: &Shell) -> (ItemId, DiscardProbeId) {
@@ -4965,6 +6885,1041 @@ mod tests {
     }
 
     #[test]
+    fn committed_url_projection_precedes_immediate_exact_presentation() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        let navigation = NavigationPresentationId::from_raw(41);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        assert!(shell.items.tab(id).is_some_and(TabState::has_view));
+        shell.items.set_loading(id, true);
+        commit_url(&mut shell, id, "https://example.test/");
+        assert_eq!(
+            last(&screen)
+                .tabs
+                .into_iter()
+                .find(|tab| tab.id == id.to_string())
+                .and_then(|tab| tab.url),
+            None,
+            "the ordinary URL fact must retain the real New Tab projection"
+        );
+
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+        assert_eq!(
+            last(&screen)
+                .tabs
+                .into_iter()
+                .find(|tab| tab.id == id.to_string())
+                .and_then(|tab| tab.url),
+            Some("https://example.test/".into())
+        );
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 41")));
+
+        // Finished is an idempotent re-drive, not a second reveal or a
+        // first-paint prerequisite.
+        shell.handle(Command::Engine(presentation_ready(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|call| *call == &format!("present {id} 41"))
+                .count(),
+            1
+        );
+        assert!(queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .is_empty());
+    }
+
+    #[test]
+    fn raw_presentation_waits_for_exact_privileged_chrome_callback() {
+        let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://verified.example/".into(),
+        });
+        assert!(shell.items.tab(id).is_some_and(TabState::has_view));
+        let layout_calls_before_commit = engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("layout@"))
+            .count();
+        commit_url(&mut shell, id, "https://verified.example/");
+        assert_eq!(
+            shell
+                .items
+                .tab(id)
+                .and_then(|tab| tab.url.as_ref())
+                .map(url::Url::as_str),
+            Some("https://verified.example/")
+        );
+        let navigation = NavigationPresentationId::from_raw(4201);
+
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://verified.example/",
+        )));
+
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("layout@"))
+                .count(),
+            layout_calls_before_commit,
+            "the real New Tab frame remains allocated until exact chrome verification"
+        );
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4201")));
+        let presentation = chrome.presentations().pop().unwrap();
+        assert_eq!(presentation.id, id);
+        assert_eq!(presentation.url, "https://verified.example/");
+        assert_eq!(presentation.active, Some(id));
+        assert_eq!(
+            presentation.tab.url.as_deref(),
+            Some("https://verified.example/")
+        );
+        assert!(queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .contains_key(&id));
+
+        chrome.complete_next(true);
+        let callback = queue
+            .try_recv()
+            .expect("callback must enter the actor queue");
+        assert!(matches!(
+            &callback,
+            Command::ChromePresentationApplied {
+                id: observed,
+                navigation: observed_navigation,
+                url,
+                active: Some(observed_active),
+                projection_revision: _,
+                applied: true,
+            } if *observed == id
+                && *observed_navigation == navigation
+                && url == "https://verified.example/"
+                && *observed_active == id
+        ));
+        shell.handle(callback);
+
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("layout@"))
+                .count(),
+            layout_calls_before_commit + 1
+        );
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4201")));
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert!(!queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .contains_key(&id));
+    }
+
+    #[test]
+    fn newer_same_tab_projection_invalidates_a_queued_chrome_success_callback() {
+        let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://ordered.example/".into(),
+        });
+        commit_url(&mut shell, id, "https://ordered.example/");
+        let navigation = NavigationPresentationId::from_raw(4_211);
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://ordered.example/",
+        )));
+        let first = chrome.presentations().into_iter().next().unwrap();
+        let hard_deadline = shell.pending_presentations[&id].hard_deadline;
+
+        // The native eval reports success, but its callback has not yet
+        // reached the actor. Model every generic projection source that may
+        // run in that interval; each remains New-Tab-masked yet advances this
+        // item's exact emitted revision.
+        chrome.complete_next(true);
+        shell.handle(Command::Engine(EngineEvent::NavState {
+            id,
+            can_go_back: true,
+            can_go_forward: false,
+        }));
+        shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+            id,
+            loading: true,
+        }));
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "New document title".into(),
+        }));
+        shell.project_items();
+        let latest_revision = shell
+            .last_tab_projection_revision
+            .borrow()
+            .get(&id)
+            .cloned()
+            .unwrap();
+        assert!(latest_revision > first.tab.projection_revision);
+        let masked = last(&screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap();
+        assert_eq!(masked.url, None);
+        assert_eq!(masked.title, "New Tab");
+
+        let stale_success = queue.try_recv().unwrap();
+        shell.handle(stale_success);
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4211")));
+        assert!(shell.pending_presentations.contains_key(&id));
+
+        // The existing exact timer reprojects the newest authoritative tab.
+        shell.on_presentation_fallback(id, navigation, hard_deadline);
+        let retry = chrome.presentations().into_iter().next().unwrap();
+        assert!(retry.tab.projection_revision > latest_revision);
+        assert_eq!(retry.tab.title, "New document title");
+        chrome.complete_next(true);
+        shell.handle(queue.try_recv().unwrap());
+
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4211")));
+        assert!(!shell.pending_presentations.contains_key(&id));
+    }
+
+    #[test]
+    fn overlapping_privileged_callbacks_cannot_acknowledge_the_newer_document() {
+        let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://first.example/".into(),
+        });
+        assert!(shell.items.tab(id).is_some_and(TabState::has_view));
+        let retired = NavigationPresentationId::from_raw(4202);
+        let current = NavigationPresentationId::from_raw(4203);
+
+        commit_url(&mut shell, id, "https://first.example/");
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            retired,
+            "https://first.example/",
+        )));
+        commit_url(&mut shell, id, "https://second.example/");
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            current,
+            "https://second.example/",
+        )));
+        assert_eq!(chrome.presentations().len(), 2);
+        let revisions = chrome
+            .presentations()
+            .into_iter()
+            .map(|presentation| presentation.tab.projection_revision)
+            .collect::<Vec<_>>();
+        assert!(revisions[0] < revisions[1]);
+
+        let first = chrome.complete_next(true);
+        assert_eq!(first.navigation, retired);
+        shell.handle(queue.try_recv().unwrap());
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4202")));
+        assert_eq!(shell.pending_presentations[&id].navigation, current);
+
+        let second = chrome.complete_next(true);
+        assert_eq!(second.navigation, current);
+        shell.handle(queue.try_recv().unwrap());
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4203")));
+    }
+
+    #[test]
+    fn lost_privileged_callback_keeps_one_exact_retry_and_never_timeout_reveals() {
+        let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://lost-callback.example/".into(),
+        });
+        assert!(shell.items.tab(id).is_some_and(TabState::has_view));
+        let navigation = NavigationPresentationId::from_raw(4204);
+        commit_url(&mut shell, id, "https://lost-callback.example/");
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://lost-callback.example/",
+        )));
+        let first = shell.pending_presentations[&id].clone();
+        assert!(first.chrome_request_in_flight);
+
+        shell.on_presentation_fallback(id, navigation, first.hard_deadline);
+        assert_eq!(chrome.presentations().len(), 2);
+        assert_eq!(shell.pending_presentations[&id].admission_rejections, 1);
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4204")));
+
+        let expired = std::time::Instant::now();
+        shell
+            .pending_presentations
+            .get_mut(&id)
+            .unwrap()
+            .hard_deadline = expired;
+        shell.on_presentation_fallback(id, navigation, expired);
+        assert!(!shell.items.tab(id).unwrap().has_view());
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("close {id}")));
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 4204")));
+    }
+
+    #[test]
+    fn cross_origin_commit_neutralizes_prior_title_before_exact_presentation_ack() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://trusted.example/account");
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "Trusted Account".into(),
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().title, "Trusted Account");
+
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://redirected.example/login".into(),
+        }));
+        let tab = shell.items.tab(id).unwrap();
+        assert_eq!(
+            tab.url.as_ref().map(url::Url::as_str),
+            Some("https://redirected.example/login")
+        );
+        assert_eq!(tab.title, "redirected.example");
+
+        let navigation = NavigationPresentationId::from_raw(410);
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://redirected.example/login",
+        )));
+        shell.handle(Command::Engine(presentation_ready(
+            id,
+            navigation,
+            "https://redirected.example/login",
+        )));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 410")));
+        assert_eq!(shell.items.tab(id).unwrap().title, "redirected.example");
+
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "Redirected Login".into(),
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().title, "Redirected Login");
+    }
+
+    #[test]
+    fn same_origin_history_url_observation_preserves_current_document_title() {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://same.example/first");
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "Same document title".into(),
+        }));
+
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://same.example/second#state".into(),
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().title, "Same document title");
+    }
+
+    #[test]
+    fn loading_state_never_delays_exact_committed_url_presentation() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        shell.items.set_loading(id, true);
+        let navigation = NavigationPresentationId::from_raw(42);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        commit_url(&mut shell, id, "https://example.test/");
+
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 42")));
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert!(queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .is_empty());
+    }
+
+    #[test]
+    fn presentation_hard_limit_retires_hidden_content_instead_of_timeout_revealing() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        shell.items.set_loading(id, true);
+        let navigation = NavigationPresentationId::from_raw(43);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        commit_url(&mut shell, id, "https://example.test/");
+        let hard_deadline = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap_or_else(std::time::Instant::now);
+        shell.pending_presentations.insert(
+            id,
+            PendingPresentation {
+                navigation,
+                url: "https://example.test/".into(),
+                hard_deadline,
+                admission_rejections: 0,
+                chrome_applied: true,
+                chrome_request_in_flight: false,
+            },
+        );
+
+        shell.on_presentation_fallback(id, navigation, hard_deadline);
+
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("present {id} 43")));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("close {id}")));
+        assert!(!shell.items.tab(id).unwrap().has_view());
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert!(!queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .contains_key(&id));
+    }
+
+    #[test]
+    fn ready_presentation_rejection_retains_and_retries_the_exact_obligation() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        let navigation = NavigationPresentationId::from_raw(431);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        engine
+            .reject_native_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+        commit_url(&mut shell, id, "https://example.test/");
+
+        // Model bounded event coalescing where Ready replaces Pending. The
+        // exact reveal obligation must still be materialized before dispatch.
+        shell.handle(Command::Engine(presentation_ready(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+
+        let pending = shell.pending_presentations[&id].clone();
+        assert_eq!(pending.navigation, navigation);
+        assert_eq!(pending.admission_rejections, 1);
+        assert_eq!(
+            queue
+                .inner
+                .timer_state
+                .lock()
+                .unwrap()
+                .presentation_deadlines[&id]
+                .navigation,
+            navigation
+        );
+
+        engine
+            .reject_native_dispatch
+            .store(false, std::sync::atomic::Ordering::Release);
+        queue.cancel_presentation(id);
+        shell.on_presentation_fallback(id, navigation, pending.hard_deadline);
+
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|call| *call == &format!("present {id} 431"))
+                .count(),
+            1,
+            "a rejected first layout must not attempt native reveal"
+        );
+    }
+
+    #[test]
+    fn fallback_presentation_rejection_retains_and_retries_the_exact_obligation() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        shell.items.set_loading(id, false);
+        let navigation = NavigationPresentationId::from_raw(432);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        commit_url(&mut shell, id, "https://example.test/");
+        engine
+            .reject_native_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+        let hard_deadline = shell.pending_presentations[&id].hard_deadline;
+
+        assert_eq!(shell.pending_presentations[&id].admission_rejections, 1);
+        assert_eq!(
+            queue
+                .inner
+                .timer_state
+                .lock()
+                .unwrap()
+                .presentation_deadlines[&id]
+                .navigation,
+            navigation
+        );
+
+        engine
+            .reject_native_dispatch
+            .store(false, std::sync::atomic::Ordering::Release);
+        queue.cancel_presentation(id);
+        shell.on_presentation_fallback(id, navigation, hard_deadline);
+
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert!(!queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .contains_key(&id));
+    }
+
+    #[test]
+    fn permanently_rejected_presentation_retires_the_exact_hidden_view() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        shell.items.set_loading(id, false);
+        let navigation = NavigationPresentationId::from_raw(433);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        commit_url(&mut shell, id, "https://example.test/");
+        engine
+            .reject_native_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+        let hard_deadline = shell.pending_presentations[&id].hard_deadline;
+
+        assert_eq!(shell.pending_presentations[&id].admission_rejections, 1);
+        for rejection in 2..=MAX_PRESENTATION_ADMISSION_REJECTIONS {
+            // Model each coalesced timer wake entering the actor. There can be
+            // only one timer and one shell obligation for this item.
+            queue.cancel_presentation(id);
+            shell.on_presentation_fallback(id, navigation, hard_deadline);
+            if rejection < MAX_PRESENTATION_ADMISSION_REJECTIONS {
+                assert_eq!(
+                    shell.pending_presentations[&id].admission_rejections,
+                    rejection
+                );
+                assert_eq!(
+                    queue
+                        .inner
+                        .timer_state
+                        .lock()
+                        .unwrap()
+                        .presentation_deadlines
+                        .len(),
+                    1
+                );
+            }
+        }
+
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert!(!shell.items.tab(id).unwrap().has_view());
+        assert!(!queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .contains_key(&id));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("close {id}")));
+    }
+
+    #[test]
+    fn unsupported_acknowledgement_is_an_exact_view_lifecycle_failure() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        let navigation = NavigationPresentationId::from_raw(434);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        engine
+            .unsupported_presentation
+            .store(true, std::sync::atomic::Ordering::Release);
+        commit_url(&mut shell, id, "https://example.test/");
+
+        shell.handle(Command::Engine(presentation_ready(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+
+        assert!(!shell.pending_presentations.contains_key(&id));
+        assert!(!shell.items.tab(id).unwrap().has_view());
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("close {id}")));
+    }
+
+    #[test]
+    fn retryable_shutdown_rearms_a_presentation_wake_rejected_by_the_barrier() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        let navigation = NavigationPresentationId::from_raw(435);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        commit_url(&mut shell, id, "https://example.test/");
+        engine
+            .reject_native_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            navigation,
+            "https://example.test/",
+        )));
+        let pending = shell.pending_presentations[&id].clone();
+
+        let (barrier_ack, _barrier_done) = sync_channel(1);
+        queue
+            .try_push(Command::Shutdown {
+                deadline: test_shutdown_deadline(),
+                ack: barrier_ack,
+            })
+            .unwrap_or_else(|_| panic!("shutdown barrier must enter its reserved slot"));
+        assert!(matches!(queue.try_recv(), Some(Command::Shutdown { .. })));
+
+        // Model wait_for_timer removing the entry before the corresponding
+        // command discovers that the actor is sealed behind the barrier.
+        queue.cancel_presentation(id);
+        assert!(matches!(
+            queue.try_push(Command::PresentationFallback {
+                id,
+                navigation,
+                hard_deadline: pending.hard_deadline,
+            }),
+            Err(TryPushError::Sealed(_))
+        ));
+        assert!(!queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .contains_key(&id));
+
+        let (retry_ack, retry_done) = sync_channel(1);
+        shell.retryable_shutdown_failure(retry_ack);
+
+        assert_eq!(
+            retry_done.recv().unwrap(),
+            ShutdownOutcome::RetryableFailure
+        );
+        assert_eq!(shell.pending_presentations[&id], pending);
+        assert_eq!(
+            queue
+                .inner
+                .timer_state
+                .lock()
+                .unwrap()
+                .presentation_deadlines[&id]
+                .navigation,
+            navigation
+        );
+    }
+
+    #[test]
+    fn escaped_stale_presentation_fallback_cannot_rearm_over_a_new_navigation() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        shell.handle(Command::Navigate {
+            id,
+            input: "https://example.test/".into(),
+        });
+        shell.items.set_loading(id, true);
+        let retired = NavigationPresentationId::from_raw(44);
+        let current = NavigationPresentationId::from_raw(45);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        engine
+            .reject_native_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        commit_url(&mut shell, id, "https://first.example/");
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            retired,
+            "https://first.example/",
+        )));
+        let retired_hard = shell.pending_presentations[&id].hard_deadline;
+        commit_url(&mut shell, id, "https://second.example/");
+        shell.handle(Command::Engine(presentation_pending(
+            id,
+            current,
+            "https://second.example/",
+        )));
+        let current_pending = shell.pending_presentations[&id].clone();
+        let calls_before_stale_wake = engine.calls().len();
+
+        shell.on_presentation_fallback(id, retired, retired_hard);
+
+        assert_eq!(shell.pending_presentations[&id], current_pending);
+        assert_eq!(
+            queue
+                .inner
+                .timer_state
+                .lock()
+                .unwrap()
+                .presentation_deadlines[&id]
+                .navigation,
+            current
+        );
+        assert_eq!(engine.calls().len(), calls_before_stale_wake);
+    }
+
+    #[test]
+    fn presentation_timer_is_bounded_per_item_and_duplicate_token_keeps_earliest_deadline() {
+        let queue = CommandQueue::new();
+        let id = ItemId::from(7);
+        let first = NavigationPresentationId::from_raw(1);
+        let second = NavigationPresentationId::from_raw(2);
+        let now = std::time::Instant::now();
+        let first_wake = now + std::time::Duration::from_secs(1);
+        let first_hard = now + std::time::Duration::from_secs(5);
+        queue.schedule_presentation(id, first, first_wake, first_hard);
+        queue.schedule_presentation(
+            id,
+            first,
+            now + std::time::Duration::from_secs(2),
+            now + std::time::Duration::from_secs(6),
+        );
+        {
+            let timer = queue.inner.timer_state.lock().unwrap();
+            assert_eq!(timer.presentation_deadlines.len(), 1);
+            assert_eq!(
+                timer.presentation_deadlines[&id],
+                PresentationDeadline {
+                    wake: first_wake,
+                    hard: first_hard,
+                    navigation: first,
+                }
+            );
+        }
+
+        queue.schedule_presentation(
+            id,
+            second,
+            now + std::time::Duration::from_secs(3),
+            now + std::time::Duration::from_secs(7),
+        );
+        assert_eq!(
+            queue
+                .inner
+                .timer_state
+                .lock()
+                .unwrap()
+                .presentation_deadlines[&id],
+            PresentationDeadline {
+                wake: first_wake,
+                hard: first_hard,
+                navigation: second,
+            }
+        );
+        let shortened_hard = now + std::time::Duration::from_secs(4);
+        queue.schedule_presentation(id, second, now, shortened_hard);
+        assert!(matches!(
+            queue.wait_for_timer(now + std::time::Duration::from_secs(1)),
+            TimerWake::Presentation {
+                id: observed,
+                navigation,
+                hard_deadline,
+            } if observed == id && navigation == second && hard_deadline == shortened_hard
+        ));
+        assert!(queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .presentation_deadlines
+            .is_empty());
+
+        // A wake for the retired navigation may escape the timer lock before
+        // the replacement is scheduled. Queue backpressure must not let that
+        // old wake overwrite the replacement obligation while re-arming.
+        let replacement_wake = now + std::time::Duration::from_secs(4);
+        let replacement_hard = now + std::time::Duration::from_secs(8);
+        queue.schedule_presentation(id, second, replacement_wake, replacement_hard);
+        queue.retry_presentation(
+            id,
+            first,
+            now + std::time::Duration::from_millis(25),
+            now + std::time::Duration::from_secs(9),
+        );
+        assert_eq!(
+            queue
+                .inner
+                .timer_state
+                .lock()
+                .unwrap()
+                .presentation_deadlines[&id],
+            PresentationDeadline {
+                wake: replacement_wake,
+                hard: replacement_hard,
+                navigation: second,
+            }
+        );
+    }
+
+    #[test]
+    fn completed_presentation_coalesces_after_its_committed_url_not_before_it() {
+        let id = ItemId::from(7);
+        let navigation = NavigationPresentationId::from_raw(9);
+        let mut commands = VecDeque::new();
+        enqueue(
+            &mut commands,
+            Command::Engine(EngineEvent::UrlChanged {
+                id,
+                url: "https://final.example/".into(),
+            }),
+            NORMAL_COMMAND_CAPACITY,
+            true,
+        )
+        .unwrap();
+        enqueue(
+            &mut commands,
+            Command::Engine(EngineEvent::PresentationPending {
+                id,
+                navigation,
+                url: "https://final.example/".into(),
+            }),
+            NORMAL_COMMAND_CAPACITY,
+            true,
+        )
+        .unwrap();
+        enqueue(
+            &mut commands,
+            Command::Engine(EngineEvent::PresentationReady {
+                id,
+                navigation,
+                url: "https://final.example/".into(),
+            }),
+            NORMAL_COMMAND_CAPACITY,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(
+            commands.pop_front(),
+            Some(Command::Engine(EngineEvent::UrlChanged { id: observed, .. }))
+                if observed == id
+        ));
+        assert!(matches!(
+            commands.pop_front(),
+            Some(Command::Engine(EngineEvent::PresentationReady {
+                id: observed,
+                navigation: observed_navigation,
+                ..
+            })) if observed == id && observed_navigation == navigation
+        ));
+    }
+
+    #[test]
+    fn stale_presentation_fallback_cannot_replace_authoritative_ready_event() {
+        let id = ItemId::from(7);
+        let retired = NavigationPresentationId::from_raw(8);
+        let current = NavigationPresentationId::from_raw(9);
+        let mut commands = VecDeque::new();
+        enqueue(
+            &mut commands,
+            Command::Engine(EngineEvent::PresentationPending {
+                id,
+                navigation: current,
+                url: "https://current.example/".into(),
+            }),
+            NORMAL_COMMAND_CAPACITY,
+            true,
+        )
+        .unwrap();
+        enqueue(
+            &mut commands,
+            Command::Engine(EngineEvent::PresentationReady {
+                id,
+                navigation: current,
+                url: "https://current.example/".into(),
+            }),
+            NORMAL_COMMAND_CAPACITY,
+            true,
+        )
+        .unwrap();
+
+        // Model the old wake escaping wait_for_timer and arriving after the
+        // replacement navigation's Pending + Ready burst.
+        enqueue(
+            &mut commands,
+            Command::PresentationFallback {
+                id,
+                navigation: retired,
+                hard_deadline: std::time::Instant::now(),
+            },
+            NORMAL_COMMAND_CAPACITY,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(
+            commands.pop_front(),
+            Some(Command::Engine(EngineEvent::PresentationReady {
+                id: observed,
+                navigation: observed_navigation,
+                ..
+            })) if observed == id && observed_navigation == current
+        ));
+        assert!(matches!(
+            commands.pop_front(),
+            Some(Command::PresentationFallback {
+                id: observed,
+                navigation: observed_navigation,
+                ..
+            }) if observed == id && observed_navigation == retired
+        ));
+    }
+
+    #[test]
     fn navigate_creates_and_shows_active_tab() {
         let (mut shell, engine, screen) = setup();
         shell.handle(Command::Bootstrap);
@@ -4993,6 +7948,7 @@ mod tests {
             id,
             url: "https://example.com/".into(),
         }));
+        present_committed(&mut shell, id, "https://example.com/");
         let tab = last(&screen)
             .tabs
             .into_iter()
@@ -5418,6 +8374,42 @@ mod tests {
             .unwrap();
         assert_eq!(tab.title, "Page crashed");
         assert!(!tab.loading);
+    }
+
+    #[test]
+    fn crash_presentation_never_overwrites_the_durable_document_title() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, _engine, screen) = setup_with(store.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "durable-title.example");
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "Last real title".into(),
+        }));
+        let profile = shell.windows.focused().unwrap().profile;
+
+        shell.handle(Command::Engine(EngineEvent::ProfileProcessExited {
+            profile,
+            ids: vec![id],
+        }));
+        let projected = last(&screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap();
+        assert_eq!(projected.title, "Page crashed");
+
+        let saved = store.saved.lock().unwrap().clone().unwrap();
+        let durable_title = saved.items.into_iter().find_map(|item| {
+            (item.id == id)
+                .then_some(item.kind)
+                .and_then(|kind| match kind {
+                    PersistedKind::Tab { title, .. } => Some(title),
+                    PersistedKind::Folder { .. } => None,
+                })
+        });
+        assert_eq!(durable_title.as_deref(), Some("Last real title"));
     }
 
     #[test]
@@ -6221,11 +9213,91 @@ mod tests {
     }
 
     #[test]
+    fn asynchronous_split_leaf_creation_failure_collapses_and_cannot_resurrect() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen) = setup_with(store.clone());
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        navigate_and_commit(&mut shell, first, "first.example");
+        shell.handle(Command::Open);
+        let failed = active_id(&screen);
+        navigate_and_commit(&mut shell, failed, "failed.example");
+        shell.handle(Command::SplitWith {
+            other: first,
+            axis: Axis::Row,
+        });
+        assert_eq!(engine.last_layout().len(), 2);
+
+        shell.handle(Command::Engine(EngineEvent::ViewCreationFailed {
+            id: failed,
+        }));
+
+        let window = shell.windows.focused().unwrap();
+        assert_eq!(window.active, Some(first));
+        assert!(window
+            .splits
+            .as_ref()
+            .is_none_or(|tree| !tree.contains(failed)));
+        assert_eq!(engine.last_layout(), vec![first.to_string()]);
+        let SessionLoad::Loaded(saved) = store.load_session() else {
+            panic!("failed-leaf collapse must be durable");
+        };
+        assert!(saved
+            .splits
+            .as_ref()
+            .is_none_or(|tree| !tree.contains(failed)));
+
+        // Retrying and activating the failed tab is an explicit single-tab
+        // transition; it must not revive the topology that owned its failed
+        // native construction.
+        shell.handle(Command::Navigate {
+            id: failed,
+            input: "failed.example".into(),
+        });
+        shell.handle(Command::Activate(failed));
+        assert_eq!(engine.last_layout(), vec![failed.to_string()]);
+        assert!(shell
+            .windows
+            .focused()
+            .unwrap()
+            .splits
+            .as_ref()
+            .is_none_or(|tree| !tree.contains(failed)));
+    }
+
+    #[test]
+    fn synchronous_create_refusal_never_commits_split_or_drop_topology() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        navigate_and_commit(&mut shell, first, "first.example");
+        shell.handle(Command::Open);
+        let failed = active_id(&screen);
+        navigate_and_commit(&mut shell, failed, "failed.example");
+        shell.items.view_creation_failed(failed);
+        shell.handle(Command::Activate(first));
+        engine
+            .reject_create_dispatch
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let split = shell.operation_split(failed, Axis::Row);
+        assert_eq!(split.outcome, OperationOutcome::NativeAdmissionFailed);
+        assert!(shell.windows.focused().unwrap().splits.is_none());
+        assert_eq!(engine.last_layout(), vec![first.to_string()]);
+
+        let drop = shell.apply_drop(first, failed, Edge::Right);
+        assert_eq!(drop.outcome, OperationOutcome::NativeAdmissionFailed);
+        assert!(shell.windows.focused().unwrap().splits.is_none());
+        assert_eq!(engine.last_layout(), vec![first.to_string()]);
+    }
+
+    #[test]
     fn divider_drag_updates_ratio_and_projects_strips() {
         let store = Arc::new(FakeStore::default());
         let engine = Arc::new(FakeEngine::default());
         let strips: Arc<Mutex<Vec<DividerView>>> = Arc::new(Mutex::new(Vec::new()));
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            projection_revision: String::new(),
             tabs: Vec::new(),
             active: None,
         }));
@@ -6258,15 +9330,22 @@ mod tests {
 
         let (cx, cy) = (before[0].x + before[0].width / 2.0, before[0].y + 10.0);
         shell.handle(Command::DividerGrab { x: cx, y: cy });
-        shell.handle(Command::DividerDrag {
-            x: cx - 100.0,
-            y: cy,
+        shell.handle(Command::SetWindowSize(Size::new(1600.0, 900.0)));
+        assert!(shell.divider.is_some(), "resize preserves pointer capture");
+        let resized = strips.lock().unwrap().clone();
+        assert_eq!(resized.len(), 1);
+        let (resized_x, resized_y) = (resized[0].x + resized[0].width / 2.0, resized[0].y + 10.0);
+        shell.handle(Command::DividerRelease {
+            x: Some(resized_x - 100.0),
+            y: Some(resized_y),
         });
-        shell.handle(Command::DividerRelease);
 
         let after = strips.lock().unwrap().clone();
         assert_eq!(after.len(), 1);
-        assert!(after[0].x < before[0].x - 50.0, "strip follows the drag");
+        assert!(
+            after[0].x < resized[0].x - 50.0,
+            "the captured path is resolved against resized geometry"
+        );
 
         let SessionLoad::Loaded(saved) = store.load_session() else {
             panic!("release persists the split")
@@ -6275,6 +9354,59 @@ mod tests {
             panic!("split persisted");
         };
         assert!(ratio < 0.5);
+    }
+
+    #[test]
+    fn topology_collapse_revokes_a_captured_divider_before_its_path_can_alias() {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        navigate_and_commit(&mut shell, first, "first.example");
+        shell.handle(Command::Open);
+        let second = active_id(&screen);
+        navigate_and_commit(&mut shell, second, "second.example");
+        shell.handle(Command::SplitWith {
+            other: first,
+            axis: Axis::Row,
+        });
+        shell.handle(Command::Open);
+        let third = active_id(&screen);
+        navigate_and_commit(&mut shell, third, "third.example");
+        shell.handle(Command::Activate(first));
+        shell.handle(Command::SplitWith {
+            other: third,
+            axis: Axis::Row,
+        });
+
+        // The outer root is [second | (first | third)]. Removing `second`
+        // promotes the nested branch to root, where the old empty path would
+        // otherwise authorize a different divider.
+        let win = shell.windows.focused().unwrap();
+        let tree = shell.pane_tree().unwrap();
+        let content = layout::compute(win.size, win.mode, win.metrics, true)
+            .content
+            .unwrap();
+        let local = Rect::new(0.0, 0.0, content.width, content.height);
+        let outer = split::divider_at_path(&tree, local, win.metrics.gap, &[]).unwrap();
+        shell.handle(Command::DividerGrab {
+            x: content.x + outer.strip.x + outer.strip.width / 2.0,
+            y: content.y + outer.strip.y + 10.0,
+        });
+        assert!(shell.divider.is_some());
+
+        shell.handle(Command::Close(second));
+        assert!(shell.divider.is_none(), "topology mutation revokes capture");
+        shell.handle(Command::DividerRelease {
+            x: Some(content.x + content.width * 0.8),
+            y: Some(content.y + 10.0),
+        });
+
+        let Pane::Branch { ratio, a, b, .. } = shell.pane_tree().unwrap() else {
+            panic!("the promoted first/third split remains live");
+        };
+        assert_eq!(ratio, 0.5, "stale root path did not mutate the new root");
+        assert_eq!(a.tabs(), vec![first]);
+        assert_eq!(b.tabs(), vec![third]);
     }
 
     #[test]
@@ -6593,6 +9725,132 @@ mod tests {
     }
 
     #[test]
+    fn zoom_stays_out_of_authoritative_state_until_exact_native_settlement() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen) = setup_with(store.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "zoom-state.example");
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
+        assert_eq!(persisted_zoom(&store, id), 1.0);
+
+        shell.handle(Command::Run("zoom.in".into()));
+        let (_, first_scale, first) = engine.last_zoom_request();
+        assert_eq!(first_scale, 1.1);
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
+        assert_eq!(persisted_zoom(&store, id), 1.0);
+
+        // Rapid input is based on the pending desired value without making
+        // that value part of a full-session snapshot.
+        shell.handle(Command::Run("zoom.in".into()));
+        let (_, second_scale, second) = engine.last_zoom_request();
+        assert!((second_scale - 1.2).abs() < 1e-12);
+        assert_ne!(first, second);
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
+
+        shell.handle(Command::Engine(EngineEvent::ZoomSettled {
+            id,
+            request: first,
+            applied_scale: 1.1,
+            succeeded: true,
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
+        assert_eq!(persisted_zoom(&store, id), 1.0);
+
+        shell.handle(Command::Engine(EngineEvent::ZoomSettled {
+            id,
+            request: second,
+            applied_scale: 1.2,
+            succeeded: true,
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.2);
+        assert_eq!(persisted_zoom(&store, id), 1.2);
+        assert!(!shell.pending_zooms.contains_key(&id));
+    }
+
+    #[test]
+    fn newest_zoom_failure_reports_the_cumulative_native_scale_after_coalescing() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen) = setup_with(store.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "zoom-coalesce.example");
+
+        shell.handle(Command::Run("zoom.in".into()));
+        let (_, _, first) = engine.last_zoom_request();
+        shell.handle(Command::Run("zoom.in".into()));
+        let (_, _, second) = engine.last_zoom_request();
+        assert_ne!(first, second);
+
+        // The first native call succeeded, but its event was coalesced before
+        // the actor observed it. The latest failure still carries 1.1 as the
+        // last actually applied native scale, so both model and disk converge.
+        shell.handle(Command::Engine(EngineEvent::ZoomSettled {
+            id,
+            request: second,
+            applied_scale: 1.1,
+            succeeded: false,
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.1);
+        assert_eq!(persisted_zoom(&store, id), 1.1);
+        assert!(!shell.pending_zooms.contains_key(&id));
+    }
+
+    #[test]
+    fn exact_malformed_zoom_settlement_retires_only_its_pending_obligation() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen) = setup_with(store.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "zoom-malformed.example");
+
+        shell.handle(Command::Run("zoom.in".into()));
+        let (_, _, request) = engine.last_zoom_request();
+        assert!(shell.pending_zooms.contains_key(&id));
+
+        shell.handle(Command::Engine(EngineEvent::ZoomSettled {
+            id,
+            request,
+            applied_scale: f64::NAN,
+            succeeded: true,
+        }));
+
+        assert!(!shell.pending_zooms.contains_key(&id));
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
+        assert_eq!(persisted_zoom(&store, id), 1.0);
+    }
+
+    #[test]
+    fn recreated_view_zoom_failure_rolls_back_and_terminal_lifecycle_clears_pending() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen) = setup_with(store.clone());
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "zoom-restore.example");
+
+        // Model a persisted scale restored into a newly recreated native view.
+        shell.items.set_zoom(id, 1.5);
+        shell.items.view_creation_failed(id);
+        let effects = shell.items.ensure_view(id);
+        shell.apply(effects);
+        let (_, requested, request) = engine.last_zoom_request();
+        assert_eq!(requested, 1.5);
+        shell.handle(Command::Engine(EngineEvent::ZoomSettled {
+            id,
+            request,
+            applied_scale: 1.0,
+            succeeded: false,
+        }));
+        assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
+        assert_eq!(persisted_zoom(&store, id), 1.0);
+
+        shell.handle(Command::Run("zoom.in".into()));
+        assert!(shell.pending_zooms.contains_key(&id));
+        shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id }));
+        assert!(!shell.pending_zooms.contains_key(&id));
+    }
+
+    #[test]
     fn url_focus_emits_ui_command() {
         let engine = Arc::new(FakeEngine::default());
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -6678,6 +9936,64 @@ mod tests {
         shell.handle(Command::Search("".into()));
         let last = seen.lock().unwrap().last().unwrap().clone();
         assert!(last.results.iter().all(|r| r.kind == "tab"));
+    }
+
+    #[test]
+    fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
+        let (seen, emit) = search_sink();
+        let mut shell = Shell::new(
+            Arc::new(FakeEngine::default()),
+            Arc::new(FakeStore::default()),
+            Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
+            emit,
+        );
+        shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+        shell.handle(Command::Bootstrap);
+        shell.store_reads = Some(StoreReadQueue::new());
+        let profile = shell.windows.focused().unwrap().profile;
+
+        shell.handle(Command::Search("old".into()));
+        let old_generation = shell.pending_search.as_ref().unwrap().generation;
+        shell.handle(Command::Search("new".into()));
+        let new_generation = shell.pending_search.as_ref().unwrap().generation;
+        shell.handle(Command::StoreRead(StoreReadResult::History {
+            generation: old_generation,
+            profile,
+            query: "old".into(),
+            hits: vec![zephium_core::ports::store::HistoryHit {
+                url: "https://old.example/".into(),
+                title: "Old".into(),
+                last_visit: 1,
+            }],
+        }));
+        assert_eq!(
+            shell
+                .pending_search
+                .as_ref()
+                .map(|pending| pending.generation),
+            Some(new_generation)
+        );
+        assert_eq!(seen.lock().unwrap().last().unwrap().query, "new");
+
+        shell.handle(Command::StoreRead(StoreReadResult::History {
+            generation: new_generation,
+            profile,
+            query: "new".into(),
+            hits: vec![zephium_core::ports::store::HistoryHit {
+                url: "https://new.example/".into(),
+                title: "New".into(),
+                last_visit: 2,
+            }],
+        }));
+        let last = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last.query, "new");
+        assert!(last.results.iter().any(|result| {
+            matches!(&result.action, SearchAction::OpenUrl { url } if url == "https://new.example/")
+        }));
+        assert!(last.results.iter().all(|result| {
+            !matches!(&result.action, SearchAction::OpenUrl { url } if url == "https://old.example/")
+        }));
     }
 
     #[test]
@@ -7325,6 +10641,7 @@ mod tests {
         let store = Arc::new(FakeStore::default());
         let net = Arc::new(FakeNet::default());
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            projection_revision: String::new(),
             tabs: Vec::new(),
             active: None,
         }));
@@ -7348,6 +10665,7 @@ mod tests {
             id,
             url: "https://example.com/".into(),
         }));
+        present_committed(&mut shell, id, "https://example.com/");
         assert!(engine
             .calls()
             .iter()
@@ -7387,6 +10705,81 @@ mod tests {
         assert!(shell
             .favicon_key_for_url(profile, "https://example.com")
             .is_some());
+    }
+
+    #[test]
+    fn stale_favicon_store_reply_cannot_cross_a_navigation_generation() {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        shell.store_reads = Some(StoreReadQueue::new());
+        let id = active_id(&screen);
+        let profile = shell.windows.focused().unwrap().profile;
+
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://first.example/".into(),
+        }));
+        let first_generation = shell.favicon_store_reads.get(&id).unwrap().generation;
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://second.example/".into(),
+        }));
+        let second_generation = shell.favicon_store_reads.get(&id).unwrap().generation;
+        let rgba = vec![91; zephium_core::icon::RGBA32_BYTES];
+
+        shell.handle(Command::StoreRead(StoreReadResult::Favicon {
+            generation: first_generation,
+            id,
+            profile,
+            origin: "https://first.example".into(),
+            rgba: Some(rgba.clone()),
+        }));
+        assert!(shell
+            .favicon_key_for_url(profile, "https://first.example/")
+            .is_none());
+        assert_eq!(
+            shell
+                .favicon_store_reads
+                .get(&id)
+                .map(|pending| pending.generation),
+            Some(second_generation)
+        );
+
+        shell.handle(Command::StoreRead(StoreReadResult::Favicon {
+            generation: second_generation,
+            id,
+            profile,
+            origin: "https://second.example".into(),
+            rgba: Some(rgba),
+        }));
+        assert!(shell
+            .favicon_key_for_url(profile, "https://second.example/")
+            .is_some());
+    }
+
+    #[test]
+    fn lost_favicon_store_completion_falls_back_instead_of_sticking_pending() {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        shell.store_reads = Some(StoreReadQueue::new());
+        shell.self_queue = Some(CommandQueue::new());
+        let id = active_id(&screen);
+        shell.handle(Command::Engine(EngineEvent::UrlChanged {
+            id,
+            url: "https://fallback.example/".into(),
+        }));
+        assert!(shell.favicon_store_reads.contains_key(&id));
+        assert!(engine
+            .calls()
+            .iter()
+            .all(|call| call != &format!("discover {id}")));
+
+        shell.handle(Command::FaviconPoll { id, attempt: 0 });
+        assert!(!shell.favicon_store_reads.contains_key(&id));
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call == &format!("discover {id}")));
     }
 
     #[test]
@@ -7464,6 +10857,7 @@ mod tests {
             id,
             url: "https://slow-icon.example/".into(),
         }));
+        present_committed(&mut shell, id, "https://slow-icon.example/");
 
         for attempt in 1..=FAVICON_POLL_DELAYS.len() as u8 {
             shell.handle(Command::FaviconPoll { id, attempt });
@@ -7559,6 +10953,7 @@ mod tests {
         let store = Arc::new(FakeStore::default());
         let net = Arc::new(FakeNet::default());
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
+            projection_revision: String::new(),
             tabs: Vec::new(),
             active: None,
         }));
@@ -7600,6 +10995,7 @@ mod tests {
             id,
             url: "https://private.example/".into(),
         }));
+        present_committed(&mut shell, id, "https://private.example/");
         shell.handle(Command::Engine(EngineEvent::FaviconPixels {
             id,
             page_url: "https://private.example/".into(),
@@ -7861,6 +11257,57 @@ mod tests {
             queue.recv(),
             Some(Command::Engine(EngineEvent::TitleChanged { title, .. })) if title == "after"
         ));
+    }
+
+    #[test]
+    fn native_operation_facts_are_bounded_latest_per_view() {
+        let id = ItemId::from(7);
+        let queue = CommandQueue::new();
+        for (request, applied_scale, succeeded) in
+            [(1, 1.0, false), (2, 1.1, true), (3, 1.1, false)]
+        {
+            queue
+                .try_push(Command::Engine(EngineEvent::ZoomSettled {
+                    id,
+                    request: ZoomRequestId(request),
+                    applied_scale,
+                    succeeded,
+                }))
+                .ok()
+                .unwrap();
+        }
+        queue
+            .try_push(Command::Engine(EngineEvent::NativeActionFailed {
+                id,
+                action: NativeAction::GoBack,
+            }))
+            .ok()
+            .unwrap();
+        queue
+            .try_push(Command::Engine(EngineEvent::NativeActionFailed {
+                id,
+                action: NativeAction::GoForward,
+            }))
+            .ok()
+            .unwrap();
+
+        assert!(matches!(
+            queue.recv(),
+            Some(Command::Engine(EngineEvent::ZoomSettled {
+                request: ZoomRequestId(3),
+                applied_scale,
+                succeeded: false,
+                ..
+            })) if applied_scale == 1.1
+        ));
+        assert!(matches!(
+            queue.recv(),
+            Some(Command::Engine(EngineEvent::NativeActionFailed {
+                action: NativeAction::GoForward,
+                ..
+            }))
+        ));
+        assert!(queue.try_recv().is_none());
     }
 
     #[test]
@@ -8242,6 +11689,46 @@ mod tests {
     }
 
     #[test]
+    fn slow_history_sqlite_read_never_blocks_shell_coordination() {
+        let store = Arc::new(FakeStore::default());
+        store
+            .history_delay_ms
+            .store(500, std::sync::atomic::Ordering::Release);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = spawn(
+            Arc::new(FakeEngine::default()),
+            store,
+            Arc::new(FakeChrome),
+            Arc::new(FakeNet::default()),
+            Box::new(move |projection| {
+                let _ = tx.send(projection);
+            }),
+        )
+        .expect("spawn test shell");
+        assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+        assert!(handle.dispatch(Command::Bootstrap));
+        assert!(
+            std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+                .any(|projection| matches!(projection, Projection::Items(_)))
+        );
+
+        let started = std::time::Instant::now();
+        assert!(handle.dispatch(Command::Search("slow".into())));
+        assert!(handle.dispatch(Command::Open));
+        let opened =
+            std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_millis(250)).ok())
+                .find_map(|projection| match projection {
+                    Projection::Items(items) if items.tabs.len() == 2 => Some(items),
+                    _ => None,
+                });
+        assert!(
+            opened.is_some(),
+            "shell actor stalled behind SQLite history"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    #[test]
     fn tracked_operation_has_exact_admission_and_actor_disposition_id() {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = spawn(
@@ -8276,7 +11763,10 @@ mod tests {
                 command: Box::new(Command::Open),
             },
         ));
-        assert!(tracked_operation_command(&Command::DividerRelease));
+        assert!(tracked_operation_command(&Command::DividerRelease {
+            x: None,
+            y: None,
+        }));
     }
 
     #[test]
@@ -8471,7 +11961,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_debounces_before_building_the_session_snapshot() {
+    fn hostile_url_churn_cannot_force_repeated_full_session_snapshots() {
         let store = Arc::new(FakeStore::default());
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = spawn(
@@ -8500,11 +11990,27 @@ mod tests {
                 url: format!("https://example.test/{value}"),
             })));
         }
+        std::thread::sleep(PERSIST_DEBOUNCE + std::time::Duration::from_millis(150));
+        assert_eq!(
+            store
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| **event == "save")
+                .count(),
+            0,
+            "URL-only churn must not use the structural persistence cadence"
+        );
+
+        // A real structural mutation still checkpoints the latest coalesced
+        // URL promptly; we do not trade SSD protection for stale clean exits.
+        assert!(handle.dispatch(Command::Open));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !store.events.lock().unwrap().contains(&"save") {
             assert!(
                 std::time::Instant::now() < deadline,
-                "debounced save did not fire"
+                "structural checkpoint did not fire"
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -8517,8 +12023,56 @@ mod tests {
                 .filter(|event| **event == "save")
                 .count(),
             1,
-            "navigation churn must construct one debounced snapshot"
+            "URL churn plus one structure change must construct one snapshot"
         );
+        let saved = store.saved.lock().unwrap().clone().unwrap();
+        assert!(saved.items.iter().any(|item| {
+            item.id == id
+                && matches!(
+                    &item.kind,
+                    PersistedKind::Tab { url, .. }
+                        if url == "https://example.test/99"
+                )
+        }));
+    }
+
+    #[test]
+    fn url_checkpoint_deadline_is_global_and_structure_preempts_it() {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let queue = CommandQueue::new();
+        shell.self_queue = Some(queue.clone());
+        let id = active_id(&screen);
+        let checkpoint_floor = std::time::Instant::now();
+        shell.last_url_checkpoint = checkpoint_floor;
+
+        for value in 0..100 {
+            shell.handle(Command::Engine(EngineEvent::UrlChanged {
+                id,
+                url: format!("https://churn.example/{value}"),
+            }));
+        }
+        let url_deadline = queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .persist_deadline
+            .unwrap();
+        assert!(url_deadline >= checkpoint_floor + URL_CHECKPOINT_INTERVAL);
+        assert_eq!(shell.url_checkpoint_dirty.len(), 1);
+
+        let structural_started = std::time::Instant::now();
+        shell.schedule_persist();
+        let structural_deadline = queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .persist_deadline
+            .unwrap();
+        assert!(structural_deadline < url_deadline);
+        assert!(structural_deadline <= structural_started + PERSIST_MAX_AGE);
     }
 
     #[test]
