@@ -7,10 +7,13 @@
 
 use std::fmt;
 
-pub const SECURITY_FLOOR: [u32; 3] = [2, 52, 4];
-pub const SECURITY_FLOOR_TEXT: &str = "2.52.4";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-06-02";
-pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://webkitgtk.org/security/WSA-2026-0003.html";
+pub const SECURITY_FLOOR: [u32; 3] = [2, 52, 5];
+pub const SECURITY_FLOOR_TEXT: &str = "2.52.5";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-07-10";
+pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://webkitgtk.org/security/WSA-2026-0004.html";
+/// 2026-07-10T00:00:00Z. A wall clock before the reviewed advisory cannot
+/// establish that the security floor was published and must fail closed.
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_783_641_600;
 
 pub const REVIEWED_STABLE_RELEASE_LINE: [u32; 2] = [2, 52];
 pub const REVIEWED_STABLE_RELEASE_LINE_TEXT: &str = "2.52";
@@ -22,9 +25,9 @@ pub const LATEST_REVIEWED_SOURCE_URL: &str =
     "https://webkitgtk.org/2026/07/09/webkitgtk2.52.5-released.html";
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-07-27";
-/// 2026-07-28T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_785_196_800;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-09";
+/// 2026-08-10T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_786_320_000;
 
 /// Environment switches that can disable/replace renderer confinement,
 /// expose a remote inspector, pause a child for a debugger, or turn off
@@ -92,7 +95,8 @@ pub fn admit_runtime(major: u32, minor: u32, micro: u32) -> Result<(), Admission
 }
 
 pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
-    unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
+    unix_seconds >= SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+        && unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
 }
 
 #[cfg(test)]
@@ -102,13 +106,12 @@ mod tests {
     #[test]
     fn admission_is_limited_to_the_reviewed_stable_release_line() {
         assert_eq!(
-            admit_runtime(2, 52, 3),
+            admit_runtime(2, 52, 4),
             Err(AdmissionError::BelowSecurityFloor {
-                found: [2, 52, 3],
+                found: [2, 52, 4],
                 required: SECURITY_FLOOR,
             })
         );
-        assert_eq!(admit_runtime(2, 52, 4), Ok(()));
         assert_eq!(admit_runtime(2, 52, 5), Ok(()));
         assert_eq!(admit_runtime(2, 52, u32::MAX), Ok(()));
 
@@ -125,6 +128,13 @@ mod tests {
 
     #[test]
     fn maintenance_deadline_is_an_exclusive_utc_boundary() {
+        assert!(!security_floor_review_is_current(0));
+        assert!(!security_floor_review_is_current(
+            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
+        ));
+        assert!(security_floor_review_is_current(
+            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+        ));
         assert!(security_floor_review_is_current(
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1
         ));

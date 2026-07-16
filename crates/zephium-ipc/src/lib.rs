@@ -8,6 +8,11 @@ use specta::Type;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct TabView {
     pub id: String,
+    /// Process-local monotonically increasing projection revision, encoded as
+    /// fixed-width hexadecimal so JavaScript can compare it without losing
+    /// integer precision. Privileged chrome rejects an older per-tab delta
+    /// after a newer presentation barrier has applied.
+    pub projection_revision: String,
     pub title: String,
     pub url: Option<String>,
     pub loading: bool,
@@ -18,6 +23,7 @@ pub struct TabView {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct ItemsState {
+    pub projection_revision: String,
     pub tabs: Vec<TabView>,
     pub active: Option<String>,
 }

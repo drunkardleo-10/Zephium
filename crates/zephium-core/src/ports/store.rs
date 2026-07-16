@@ -20,7 +20,10 @@ pub const MAX_FAVICON_BATCH_ORIGINS: usize = 512;
 /// A row is created atomically with removal from the authoritative session
 /// registry. `native_erasure_verified` becomes true only after the engine has
 /// proved its platform-owned website data absent. The store must retain the
-/// authorization until its own profile database has also been removed.
+/// authorization until its own profile database has also been removed. A
+/// platform adapter may retain an internal post-unlink tombstone beyond that
+/// point for restart-time filesystem verification; such completed rows are
+/// deliberately not returned as pending work to the current shell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingProfileDeletion {
     pub profile: ProfileId,
@@ -53,6 +56,9 @@ pub enum ProfileDeletionAuthorizeOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileDeletionFinalizeOutcome {
+    /// Native proof is durable and the exact local artifacts are absent for
+    /// this process. The store may still retain a hidden completed tombstone
+    /// until a fresh process verifies Windows filesystem recovery.
     Completed,
     NotAuthorized,
     NotAdmitted,
@@ -147,6 +153,21 @@ pub trait Store {
         bytes: Vec<u8>,
     );
     fn favicon_bytes(&self, profile: ProfileId, origin: &str) -> Option<(Option<String>, Vec<u8>)>;
+
+    /// Loads one already-decoded favicon only when it is no older than
+    /// `max_age_seconds`. Actor-backed adapters should implement this as one
+    /// bounded query rather than an age RPC followed by a bytes RPC.
+    fn fresh_favicon_raster(
+        &self,
+        profile: ProfileId,
+        origin: &str,
+        max_age_seconds: i64,
+    ) -> Option<Vec<u8>> {
+        if max_age_seconds < 0 || self.favicon_age(profile, origin)? > max_age_seconds {
+            return None;
+        }
+        self.favicon_bytes(profile, origin).map(|(_, bytes)| bytes)
+    }
 
     /// Loads already-decoded favicon rasters for a bounded authoritative set
     /// of origins. Actor-backed stores should override this to perform one

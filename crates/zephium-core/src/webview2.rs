@@ -28,6 +28,20 @@ pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_783_555_200;
 pub const SECURITY_FLOOR_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes-security";
 
+/// Microsoft reported on 2026-07-14 that the current Stable channel does not
+/// yet contain a newly disclosed Chromium security update. The latest Stable
+/// runtime remains suitable for development and is still the only runtime we
+/// can admit, but it is not a production-release baseline until Microsoft
+/// publishes the corresponding fixed Stable build and this floor is reviewed
+/// again. Keep this explicit release blocker separate from startup admission:
+/// making the application unusable cannot manufacture a patched runtime.
+pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = true;
+/// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
+pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
+pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-07-14";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-07-16";
+pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
+
 /// The last UTC date on which CI may accept this review without an update.
 pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-07-23";
 /// 2026-07-24T00:00:00Z. The human-readable review date above is inclusive.
@@ -317,6 +331,16 @@ pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
         && unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
 }
 
+/// Production release additionally requires the vendor to have published all
+/// security fixes it has publicly declared pending for the Stable channel.
+pub const fn production_release_security_is_current(unix_seconds: u64) -> bool {
+    security_floor_review_is_current(unix_seconds)
+        && !PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX
+        // Merely flipping the blocker is insufficient: the admitted floor
+        // must name a Stable release published after the vendor's notice.
+        && SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS > OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +454,20 @@ mod tests {
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
         ));
         assert!(!security_floor_review_is_current(u64::MAX));
+    }
+
+    #[test]
+    fn outstanding_vendor_security_fix_blocks_release_but_not_runtime_admission() {
+        let production_release_blocked =
+            std::hint::black_box(PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX);
+        let floor_published = std::hint::black_box(SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS);
+        let vendor_notice = std::hint::black_box(OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS);
+
+        assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
+        assert!(security_floor_review_is_current(floor_published));
+        assert!(production_release_blocked);
+        assert!(floor_published <= vendor_notice);
+        assert!(!production_release_security_is_current(floor_published));
     }
 
     #[test]

@@ -7,5 +7,8 @@ pub struct ChromeFrame {
 }
 
 pub trait Chrome {
-    fn position(&self, frame: ChromeFrame);
+    /// Admit the exact privileged-chrome frame to its native UI queue.
+    /// `false` means no task owns the transition, so raw content must remain
+    /// concealed and the caller must retry or retire it.
+    fn position(&self, frame: ChromeFrame) -> bool;
 }

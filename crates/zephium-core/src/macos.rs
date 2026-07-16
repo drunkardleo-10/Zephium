@@ -19,6 +19,9 @@ pub const SEQUOIA_SECURITY_FLOOR_TEXT: &str = "15.7.7";
 pub const TAHOE_SECURITY_FLOOR_TEXT: &str = "26.5.2";
 pub const SAFARI_SECURITY_FLOOR_TEXT: &str = "26.5.2";
 pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-06-29";
+/// 2026-06-29T00:00:00Z. A wall clock before the reviewed Apple security
+/// release cannot establish that this floor was published and must fail closed.
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_782_691_200;
 pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://support.apple.com/en-us/100100";
 pub const SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/127685";
 pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/127595";
@@ -310,7 +313,8 @@ pub fn admit_runtime(
 }
 
 pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
-    unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
+    unix_seconds >= SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+        && unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
 }
 
 #[cfg(test)]
@@ -438,6 +442,13 @@ mod tests {
 
     #[test]
     fn maintenance_deadline_is_an_exclusive_utc_boundary() {
+        assert!(!security_floor_review_is_current(0));
+        assert!(!security_floor_review_is_current(
+            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
+        ));
+        assert!(security_floor_review_is_current(
+            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+        ));
         assert!(security_floor_review_is_current(
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1
         ));

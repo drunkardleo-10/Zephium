@@ -53,6 +53,26 @@ pub enum NativeDispatch {
     Unsupported,
 }
 
+/// Opaque identity for one native main-frame navigation presentation.
+///
+/// The browser shell may return this token only to [`Engine::present_navigation`].
+/// URLs are deliberately not identities: redirects and overlapping loads can
+/// otherwise reveal content before chrome has attributed the exact commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NavigationPresentationId(u64);
+
+impl NavigationPresentationId {
+    /// Native adapters mint non-wrapping identities from their own exact
+    /// navigation epochs. Callers must treat the value as opaque.
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn into_raw(self) -> u64 {
+        self.0
+    }
+}
+
 impl NativeDispatch {
     pub fn from_scheduled(scheduled: bool) -> Self {
         if scheduled {
@@ -121,10 +141,23 @@ pub trait Engine {
     /// was not admitted at all, so the shell must roll back its live-view bit.
     fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool;
     /// Schedules a navigation on the native UI thread. `false` means the
-    /// request was not admitted. A request admitted by this method can still
-    /// fail synchronously inside the native engine; that arrives as
-    /// `EngineEvent::NavigationFailed` with the same request id.
+    /// request was not admitted. An admitted request can still fail before
+    /// its identity-bearing native commit, synchronously or asynchronously;
+    /// that arrives as `EngineEvent::NavigationFailed` with the same request
+    /// id.
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool;
+    /// Reveals an initially hidden native view only if `navigation` is still
+    /// the exact committed main-frame epoch whose URL was delivered to the
+    /// shell. The shell calls this only after privileged chrome has applied
+    /// and verified the matching revision-bearing URL projection; native
+    /// completion may re-drive the same idempotent acknowledgement.
+    fn present_navigation(
+        &self,
+        _id: ItemId,
+        _navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     fn reload(&self, id: ItemId) -> NativeDispatch;
     fn stop(&self, id: ItemId) -> NativeDispatch;
     fn go_back(&self, id: ItemId) -> NativeDispatch;
@@ -140,7 +173,10 @@ pub trait Engine {
         region: Option<Rect>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch;
-    fn zoom(&self, id: ItemId, scale: f64) -> NativeDispatch;
+    /// Requests an exact page zoom for the current native-view generation.
+    /// Queue admission is not application: the authoritative native scale
+    /// arrives as [`EngineEvent::ZoomSettled`] carrying the same `request`.
+    fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch;
     fn set_muted(&self, id: ItemId, muted: bool) -> NativeDispatch;
     /// `None` clears the current find session.
     fn find(&self, id: ItemId, query: Option<&str>) -> NativeDispatch;
@@ -212,7 +248,8 @@ pub trait Engine {
     }
 }
 
-/// Correlates an explicit shell navigation with an immediate native failure.
+/// Correlates an explicit shell navigation with a native failure before its
+/// identity-bearing main-frame commit.
 ///
 /// Successful commits intentionally do not carry this token: page-initiated
 /// navigations, redirects and same-document history changes have no shell
@@ -220,10 +257,30 @@ pub trait Engine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NavigationRequestId(pub u64);
 
+/// Process-local correlation identity for one native page-zoom request.
+///
+/// Zoom is persisted only after the exact live native generation reports its
+/// applied scale. Keeping this distinct from navigation identity prevents a
+/// late result from a replaced view from mutating the replacement tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ZoomRequestId(pub u64);
+
 /// Process-local correlation identity for one renderer-state discard probe.
 /// It is never persisted or accepted from page content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DiscardProbeId(pub u64);
+
+/// A native browser action whose synchronous platform invocation failed.
+///
+/// This does not describe page-load completion. Reload/history success still
+/// settles through the ordinary navigation callbacks; this enum exists so an
+/// HRESULT/native refusal is never silently discarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NativeAction {
+    Reload,
+    GoBack,
+    GoForward,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionKind {
@@ -249,9 +306,47 @@ pub enum EngineEvent {
         id: ItemId,
         url: String,
     },
+    /// The exact committed URL has already been delivered ahead of this
+    /// event. After applying that URL to privileged chrome, the shell returns
+    /// this opaque identity immediately to authorize the first presentation.
+    PresentationPending {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        /// Exact canonical URL emitted through `UrlChanged` immediately
+        /// before this token. The shell must match both facts before it can
+        /// acknowledge presentation; callback/queue order alone is not an
+        /// authorization boundary.
+        url: String,
+    },
+    /// Native completion re-drives the same exact presentation fact. This is
+    /// an idempotent recovery path when a bounded queue coalesced `Pending`;
+    /// it is not a prerequisite or an intentional first-paint delay.
+    PresentationReady {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        /// Same committed URL bound to `navigation`. This is repeated because
+        /// a bounded lifecycle queue may coalesce `Pending` into `Ready`.
+        url: String,
+    },
     NavigationFailed {
         id: ItemId,
         request: NavigationRequestId,
+    },
+    /// The exact native zoom invocation settled. `applied_scale` is the
+    /// adapter's last successfully applied scale for this view generation, so
+    /// the newest event remains authoritative even when intermediate results
+    /// are coalesced under pressure.
+    ZoomSettled {
+        id: ItemId,
+        request: ZoomRequestId,
+        applied_scale: f64,
+        succeeded: bool,
+    },
+    /// A reload/history platform call returned an error. An `Ok` call is only
+    /// native invocation success, never a claim that navigation completed.
+    NativeActionFailed {
+        id: ItemId,
+        action: NativeAction,
     },
     LoadingChanged {
         id: ItemId,

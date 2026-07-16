@@ -39,6 +39,34 @@ impl Pane {
         }
     }
 
+    /// Exact branch/leaf identity while deliberately ignoring mutable ratios.
+    /// A divider path remains authoritative across resize and ratio changes,
+    /// but not after a close/split/drop collapses or replaces its branch.
+    pub fn same_topology(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Pane::Leaf(left), Pane::Leaf(right)) => left == right,
+            (
+                Pane::Branch {
+                    axis: left_axis,
+                    a: left_a,
+                    b: left_b,
+                    ..
+                },
+                Pane::Branch {
+                    axis: right_axis,
+                    a: right_a,
+                    b: right_b,
+                    ..
+                },
+            ) => {
+                left_axis == right_axis
+                    && left_a.same_topology(right_a)
+                    && left_b.same_topology(right_b)
+            }
+            _ => false,
+        }
+    }
+
     pub fn split(&mut self, target: ItemId, new: ItemId, axis: Axis, before: bool) -> bool {
         match self {
             Pane::Leaf(id) if *id == target => {
@@ -169,6 +197,15 @@ pub fn divider_at(tree: &Pane, region: Rect, gap: f64, px: f64, py: f64) -> Opti
             && py >= d.strip.y
             && py <= d.strip.y + d.strip.height
     })
+}
+
+/// Resolves a previously grabbed divider against the current tree geometry.
+/// Window resize and ancestor-ratio changes can invalidate the rectangle that
+/// was captured on pointer-down; the binary path remains the stable identity.
+pub fn divider_at_path(tree: &Pane, region: Rect, gap: f64, path: &[usize]) -> Option<Divider> {
+    dividers(tree, region, gap)
+        .into_iter()
+        .find(|divider| divider.path == path)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,6 +408,33 @@ mod tests {
     }
 
     #[test]
+    fn topology_identity_ignores_ratios_but_not_axes_or_leaf_ownership() {
+        let original = nested();
+        let mut ratio_changed = original.clone();
+        ratio_changed.set_ratio(&[], 0.7);
+        ratio_changed.set_ratio(&[1], 0.25);
+        assert!(original.same_topology(&ratio_changed));
+
+        let mut axis_changed = ratio_changed.clone();
+        let Pane::Branch { axis, .. } = &mut axis_changed else {
+            unreachable!()
+        };
+        *axis = match *axis {
+            Axis::Row => Axis::Col,
+            Axis::Col => Axis::Row,
+        };
+        assert!(!original.same_topology(&axis_changed));
+
+        let replaced = Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.5,
+            a: Box::new(Pane::leaf(id(99))),
+            b: Box::new(Pane::leaf(id(2))),
+        };
+        assert!(!original.same_topology(&replaced));
+    }
+
+    #[test]
     fn remove_collapses_branch_into_sibling() {
         let mut tree = Pane::leaf(id(1));
         tree.split(id(1), id(2), Axis::Row, false);
@@ -423,6 +487,17 @@ mod tests {
         assert_eq!(inner.axis, Axis::Col);
 
         assert!(divider_at(&nested(), region, 8.0, 100.0, 400.0).is_none());
+    }
+
+    #[test]
+    fn divider_path_recomputes_geometry_after_resize() {
+        let tree = nested();
+        let before = divider_at_path(&tree, Rect::new(0.0, 0.0, 1000.0, 800.0), 8.0, &[1]).unwrap();
+        let after = divider_at_path(&tree, Rect::new(0.0, 0.0, 1400.0, 900.0), 8.0, &[1]).unwrap();
+        assert_eq!(before.path, after.path);
+        assert_ne!(before.rect, after.rect);
+        assert_ne!(before.strip, after.strip);
+        assert!(divider_at_path(&tree, before.rect, 8.0, &[2]).is_none());
     }
 
     #[test]
