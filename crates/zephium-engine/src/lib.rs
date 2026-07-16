@@ -1,5 +1,8 @@
 mod erasure;
 mod host;
+mod layout_queue;
+mod navigation_epoch;
+mod pane_geometry;
 mod platform;
 
 #[cfg(target_os = "windows")]
@@ -18,8 +21,9 @@ use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
-    ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationRequestId,
-    Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
+    ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
+    NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
+    ZoomRequestId,
 };
 use zephium_core::split::Pane;
 
@@ -389,7 +393,7 @@ impl RetirementGate {
     }
 
     fn active_item_tokens(&self, ids: &[ItemId]) -> Option<Vec<(ItemId, Arc<AtomicBool>)>> {
-        if ids.len() > MAX_TRACKED_ITEMS {
+        if self.retire_all_profiles || ids.len() > MAX_TRACKED_ITEMS {
             return None;
         }
         ids.iter()
@@ -398,7 +402,8 @@ impl RetirementGate {
     }
 
     fn allows_item_tokens(&self, items: &[(ItemId, Arc<AtomicBool>)]) -> bool {
-        items.len() <= MAX_TRACKED_ITEMS
+        !self.retire_all_profiles
+            && items.len() <= MAX_TRACKED_ITEMS
             && items
                 .iter()
                 .all(|(id, token)| self.allows_item_token(*id, token))
@@ -473,7 +478,11 @@ impl RetirementGate {
             }
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
+            | event @ EngineEvent::PresentationPending { id, .. }
+            | event @ EngineEvent::PresentationReady { id, .. }
             | event @ EngineEvent::NavigationFailed { id, .. }
+            | event @ EngineEvent::ZoomSettled { id, .. }
+            | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
             | event @ EngineEvent::FaviconPixels { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
@@ -586,6 +595,94 @@ fn fail_native_host_admission(
     fatal(reason);
 }
 
+fn require_native_layout_application(
+    applied: bool,
+    event_delivery: &Arc<EventDeliveryGate>,
+    retirement: &Arc<Mutex<RetirementGate>>,
+    fatal: &Arc<dyn Fn(&'static str) + Send + Sync>,
+) -> bool {
+    if !applied {
+        fail_native_host_admission(
+            event_delivery,
+            retirement,
+            fatal,
+            "content layout could not establish its native stage",
+        );
+    }
+    applied
+}
+
+fn dispatch_layout_turn(
+    dispatch: MainThreadDispatch,
+    updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+    retirement: Arc<Mutex<RetirementGate>>,
+    event_delivery: Arc<EventDeliveryGate>,
+    fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
+) -> bool {
+    let next_dispatch = dispatch.clone();
+    dispatch(Box::new(move || {
+        let mut host_admission_failed = false;
+        for update in updates.take_batch() {
+            if !lock_retirement_gate(&retirement).allows_item_tokens(&update.item_tokens) {
+                continue;
+            }
+            let host_item_tokens = update.item_tokens.clone();
+            let application_retirement = retirement.clone();
+            let application_delivery = event_delivery.clone();
+            let application_fatal = fatal.clone();
+            let admitted = host::try_with(move |host| {
+                if host_item_tokens
+                    .iter()
+                    .all(|(_, token)| token.load(Ordering::Acquire))
+                {
+                    let applied = host.set_content(update.window, update.tree, update.region);
+                    let _ = require_native_layout_application(
+                        applied,
+                        &application_delivery,
+                        &application_retirement,
+                        &application_fatal,
+                    );
+                }
+            });
+            if !admitted
+                && lock_retirement_gate(&retirement).allows_item_tokens(&update.item_tokens)
+            {
+                fail_native_host_admission(
+                    &event_delivery,
+                    &retirement,
+                    &fatal,
+                    "content layout was not admitted by the engine host",
+                );
+                host_admission_failed = true;
+                break;
+            }
+        }
+
+        if host_admission_failed {
+            updates.reject_scheduled();
+            return;
+        }
+
+        if updates.finish_batch()
+            && !dispatch_layout_turn(
+                next_dispatch,
+                updates.clone(),
+                retirement.clone(),
+                event_delivery.clone(),
+                fatal.clone(),
+            )
+        {
+            updates.reject_scheduled();
+            fail_native_host_admission(
+                &event_delivery,
+                &retirement,
+                &fatal,
+                "coalesced content layout was rejected by the main event loop",
+            );
+        }
+    }))
+}
+
 fn invoke_fatal_once(invoked: &AtomicBool, fatal: &dyn Fn(&'static str), reason: &'static str) {
     if !invoked.swap(true, Ordering::AcqRel) {
         fatal(reason);
@@ -630,6 +727,25 @@ pub struct WebviewEngine {
     retirement: Arc<Mutex<RetirementGate>>,
     event_delivery: Arc<EventDeliveryGate>,
     fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
+    layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+}
+
+// Layout is a replaceable native fact, not an ordered user mutation. Keep at
+// most one newest frame per bounded window and one main-loop task in flight so
+// live resize/divider bursts cannot build an arbitrarily stale Tauri queue.
+const MAX_PENDING_LAYOUT_WINDOWS: usize = 64;
+const MIN_PAGE_ZOOM: f64 = 0.3;
+const MAX_PAGE_ZOOM: f64 = 3.0;
+
+fn valid_page_zoom(scale: f64) -> bool {
+    scale.is_finite() && (MIN_PAGE_ZOOM..=MAX_PAGE_ZOOM).contains(&scale)
+}
+
+struct PendingLayout {
+    window: WindowId,
+    tree: Option<Pane>,
+    region: Option<Rect>,
+    item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
 }
 
 /// Install on the main thread at startup. `parent` is the app window the child
@@ -643,15 +759,26 @@ pub fn install(
 ) -> Result<WebviewEngine, String> {
     let retirement = Arc::new(Mutex::new(RetirementGate::default()));
     let event_delivery = Arc::new(EventDeliveryGate::default());
+    let fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync> =
+        Arc::new(fatal_security_failure);
     let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = Arc::new(sink);
     let sink = retirement_filtering_sink(retirement.clone(), event_delivery.clone(), caller_sink);
-    host::install(parent, data_root, sink.clone())?;
+    let native_terminal_failure = {
+        let retirement = retirement.clone();
+        let event_delivery = event_delivery.clone();
+        let fatal = fatal_security_failure.clone();
+        Arc::new(move |reason| {
+            fail_native_host_admission(&event_delivery, &retirement, &fatal, reason)
+        }) as Arc<dyn Fn(&'static str) + Send + Sync>
+    };
+    host::install(parent, data_root, sink.clone(), native_terminal_failure)?;
     Ok(WebviewEngine {
         dispatch,
         sink,
         retirement,
         event_delivery,
-        fatal_security_failure: Arc::new(fatal_security_failure),
+        fatal_security_failure,
+        layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
     })
 }
 
@@ -774,6 +901,14 @@ impl Engine for WebviewEngine {
                 ));
             }
         })
+    }
+
+    fn present_navigation(
+        &self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        self.run_for_active_item(id, move |host| host.present_navigation(id, navigation))
     }
 
     fn warm_spare(&self, partition: Partition) {
@@ -904,37 +1039,62 @@ impl Engine for WebviewEngine {
         } else {
             Vec::new()
         };
-        let Some(item_tokens) =
-            lock_retirement_gate(&self.retirement).active_item_tokens(&visible_ids)
-        else {
+        let (item_tokens, already_terminal) = {
+            let retirement = lock_retirement_gate(&self.retirement);
+            (
+                retirement.active_item_tokens(&visible_ids),
+                retirement.retire_all_profiles,
+            )
+        };
+        let Some(item_tokens) = item_tokens else {
+            if !already_terminal {
+                fail_native_host_admission(
+                    &self.event_delivery,
+                    &self.retirement,
+                    &self.fatal_security_failure,
+                    "content layout referenced an inactive native view",
+                );
+            }
             return NativeDispatch::Rejected;
         };
-        let queued_retirement = self.retirement.clone();
-        let queued_delivery = self.event_delivery.clone();
-        let queued_fatal = self.fatal_security_failure.clone();
-        NativeDispatch::from_scheduled(self.run(move || {
-            if lock_retirement_gate(&queued_retirement).allows_item_tokens(&item_tokens) {
-                let host_item_tokens = item_tokens.clone();
-                let admitted = host::try_with(move |h| {
-                    if host_item_tokens
-                        .iter()
-                        .all(|(_, token)| token.load(Ordering::Acquire))
-                    {
-                        h.set_content(window, tree, region);
-                    }
-                });
-                if !admitted
-                    && lock_retirement_gate(&queued_retirement).allows_item_tokens(&item_tokens)
-                {
+        let update = PendingLayout {
+            window,
+            tree,
+            region,
+            item_tokens,
+        };
+        match self.layout_updates.submit(window, update) {
+            layout_queue::Submit::Coalesced => NativeDispatch::Scheduled,
+            layout_queue::Submit::Full => {
+                self.layout_updates.reject_scheduled();
+                fail_native_host_admission(
+                    &self.event_delivery,
+                    &self.retirement,
+                    &self.fatal_security_failure,
+                    "content layout window registry exceeded its native bound",
+                );
+                NativeDispatch::Rejected
+            }
+            layout_queue::Submit::Schedule => {
+                let scheduled = dispatch_layout_turn(
+                    self.dispatch.clone(),
+                    self.layout_updates.clone(),
+                    self.retirement.clone(),
+                    self.event_delivery.clone(),
+                    self.fatal_security_failure.clone(),
+                );
+                if !scheduled {
+                    self.layout_updates.reject_scheduled();
                     fail_native_host_admission(
-                        &queued_delivery,
-                        &queued_retirement,
-                        &queued_fatal,
-                        "content layout was not admitted by the engine host",
+                        &self.event_delivery,
+                        &self.retirement,
+                        &self.fatal_security_failure,
+                        "content layout was rejected by the main event loop",
                     );
                 }
+                NativeDispatch::from_scheduled(scheduled)
             }
-        }))
+        }
     }
 
     fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
@@ -953,8 +1113,11 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    fn zoom(&self, id: ItemId, scale: f64) -> NativeDispatch {
-        self.run_for_active_item(id, move |h| h.zoom(id, scale))
+    fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
+        if !valid_page_zoom(scale) {
+            return NativeDispatch::Rejected;
+        }
+        self.run_for_active_item(id, move |h| h.zoom(id, scale, request))
     }
 
     fn set_muted(&self, _id: ItemId, _muted: bool) -> NativeDispatch {
@@ -1291,6 +1454,48 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
+    fn test_layout_updates() -> Arc<layout_queue::LatestLayouts<PendingLayout>> {
+        Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
+    }
+
+    #[test]
+    fn zoom_boundary_rejects_nonfinite_and_unsupported_scales_before_dispatch() {
+        let id = ItemId::from(1);
+        let profile = ProfileId::from(1);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        assert!(lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .is_some());
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = dispatches.clone();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            sink: Arc::new(|_| {}),
+            retirement,
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(|_| {}),
+            layout_updates: test_layout_updates(),
+        };
+
+        for scale in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.29, 3.01] {
+            assert_eq!(
+                engine.zoom(id, scale, ZoomRequestId(1)),
+                NativeDispatch::Rejected
+            );
+        }
+        assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+        for (request, scale) in [(2, 0.3), (3, 1.0), (4, 3.0)] {
+            assert_eq!(
+                engine.zoom(id, scale, ZoomRequestId(request)),
+                NativeDispatch::Scheduled
+            );
+        }
+        assert_eq!(dispatches.load(Ordering::Relaxed), 3);
+    }
+
     #[test]
     fn delivery_counter_overflow_seals_instead_of_panicking() {
         EVENT_DELIVERY_DEPTH.with(|depth| depth.set(0));
@@ -1351,6 +1556,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            layout_updates: test_layout_updates(),
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
@@ -1381,6 +1587,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 fatal_tx.send(()).unwrap();
             }),
+            layout_updates: test_layout_updates(),
         };
 
         engine.erase_profile_data(
@@ -1460,6 +1667,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            layout_updates: test_layout_updates(),
         };
         let profile = ProfileId::from(91);
         let id = ItemId::from(1);
@@ -1500,13 +1708,21 @@ mod tests {
         assert_eq!(engine.stop(id), NativeDispatch::Rejected);
         assert_eq!(engine.go_back(id), NativeDispatch::Rejected);
         assert_eq!(engine.go_forward(id), NativeDispatch::Rejected);
-        assert_eq!(engine.zoom(id, 1.25), NativeDispatch::Rejected);
+        assert_eq!(
+            engine.zoom(id, 1.25, ZoomRequestId(1)),
+            NativeDispatch::Rejected
+        );
         assert_eq!(engine.set_muted(id, true), NativeDispatch::Unsupported);
         assert_eq!(engine.find(id, Some("secret")), NativeDispatch::Unsupported);
         assert_eq!(engine.capture(id), NativeDispatch::Unsupported);
         assert_eq!(engine.extract_html(id), NativeDispatch::Rejected);
         assert_eq!(engine.discover_favicon(id), NativeDispatch::Rejected);
         assert_eq!(engine.print(id), NativeDispatch::Rejected);
+        assert_eq!(
+            engine.set_content(1, None, None),
+            NativeDispatch::Rejected,
+            "an empty layout cannot bypass a terminal retirement gate"
+        );
         assert_eq!(
             engine.set_content(
                 1,
@@ -1591,6 +1807,22 @@ mod tests {
             failed_token.clone(),
         ));
         sink(EngineEventIngress::for_item(
+            EngineEvent::ZoomSettled {
+                id: failed,
+                request: ZoomRequestId(1),
+                applied_scale: 1.25,
+                succeeded: true,
+            },
+            failed_token.clone(),
+        ));
+        sink(EngineEventIngress::for_item(
+            EngineEvent::NativeActionFailed {
+                id: failed,
+                action: zephium_core::ports::engine::NativeAction::Reload,
+            },
+            failed_token.clone(),
+        ));
+        sink(EngineEventIngress::for_item(
             EngineEvent::ViewCreationFailed { id: failed },
             failed_token.clone(),
         ));
@@ -1631,7 +1863,7 @@ mod tests {
         let events = events
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 8);
         assert!(matches!(&events[0], EngineEvent::TitleChanged { id, .. } if *id == failed));
         assert!(matches!(
             &events[1],
@@ -1639,18 +1871,27 @@ mod tests {
         ));
         assert!(matches!(
             &events[2],
-            EngineEvent::ViewCreationFailed { id } if *id == failed
+            EngineEvent::ZoomSettled { id, request, .. }
+                if *id == failed && *request == ZoomRequestId(1)
         ));
         assert!(matches!(
             &events[3],
-            EngineEvent::Crashed { id } if *id == crashed
+            EngineEvent::NativeActionFailed { id, .. } if *id == failed
         ));
         assert!(matches!(
             &events[4],
-            EngineEvent::SplitChanged { tree, .. } if tree == &Pane::leaf(exited)
+            EngineEvent::ViewCreationFailed { id } if *id == failed
         ));
         assert!(matches!(
             &events[5],
+            EngineEvent::Crashed { id } if *id == crashed
+        ));
+        assert!(matches!(
+            &events[6],
+            EngineEvent::SplitChanged { tree, .. } if tree == &Pane::leaf(exited)
+        ));
+        assert!(matches!(
+            &events[7],
             EngineEvent::ProfileProcessExited { profile: event_profile, ids }
                 if *event_profile == profile && ids == &[exited]
         ));
@@ -1727,6 +1968,7 @@ mod tests {
             retirement,
             event_delivery,
             fatal_security_failure: Arc::new(|_| {}),
+            layout_updates: test_layout_updates(),
         };
         let (tx, rx) = mpsc::channel();
         engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
@@ -1748,6 +1990,16 @@ mod tests {
             EngineEvent::NavigationFailed {
                 id,
                 request: NavigationRequestId(7),
+            },
+            EngineEvent::ZoomSettled {
+                id,
+                request: ZoomRequestId(8),
+                applied_scale: 1.5,
+                succeeded: false,
+            },
+            EngineEvent::NativeActionFailed {
+                id,
+                action: zephium_core::ports::engine::NativeAction::GoBack,
             },
             EngineEvent::LoadingChanged { id, loading: true },
             EngineEvent::FaviconPixels {
@@ -2009,6 +2261,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            layout_updates: test_layout_updates(),
         };
 
         assert_eq!(engine.close(id), NativeDispatch::Rejected);
@@ -2016,6 +2269,168 @@ mod tests {
         assert!(!token.load(Ordering::Acquire));
         assert!(!lock_retirement_gate(&retirement).allows_item(id));
         assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn rejected_initial_layout_dispatch_seals_content_authority_and_invokes_fatal_once() {
+        let profile = ProfileId::from(105);
+        let id = ItemId::from(35);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let token = lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .unwrap();
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: Arc::new(|_| {}),
+            retirement: retirement.clone(),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+            layout_updates: test_layout_updates(),
+        };
+
+        assert_eq!(
+            engine.set_content(
+                1,
+                Some(Pane::leaf(id)),
+                Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            ),
+            NativeDispatch::Rejected
+        );
+
+        assert!(!token.load(Ordering::Acquire));
+        assert!(!lock_retirement_gate(&retirement).allows_item(id));
+        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert!(engine.layout_updates.take_batch().is_empty());
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn native_stage_application_failure_is_terminal_instead_of_silent() {
+        let profile = ProfileId::from(107);
+        let id = ItemId::from(37);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let token = lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .unwrap();
+        let event_delivery = Arc::new(EventDeliveryGate::default());
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let fatal: Arc<dyn Fn(&'static str) + Send + Sync> = Arc::new(move |_| {
+            counted_fatal.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(!require_native_layout_application(
+            false,
+            &event_delivery,
+            &retirement,
+            &fatal,
+        ));
+
+        assert!(!token.load(Ordering::Acquire));
+        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn layout_referencing_an_inactive_view_is_terminal_before_dispatch() {
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let counted_dispatch = dispatch_calls.clone();
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(move |_| {
+                counted_dispatch.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            sink: Arc::new(|_| {}),
+            retirement: retirement.clone(),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+            layout_updates: test_layout_updates(),
+        };
+
+        assert_eq!(
+            engine.set_content(
+                1,
+                Some(Pane::leaf(ItemId::from(99))),
+                Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            ),
+            NativeDispatch::Rejected
+        );
+
+        assert_eq!(dispatch_calls.load(Ordering::Relaxed), 0);
+        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn bounded_layout_window_registry_overflow_is_terminal() {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+
+        let profile = ProfileId::from(106);
+        let id = ItemId::from(36);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        let token = lock_retirement_gate(&retirement)
+            .reserve_item(id, profile)
+            .unwrap();
+        let pending = Arc::new(Mutex::new(Vec::<Task>::new()));
+        let queued = pending.clone();
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
+        let counted_fatal = fatal_calls.clone();
+        let engine = WebviewEngine {
+            dispatch: Arc::new(move |task| {
+                queued
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(task);
+                true
+            }),
+            sink: Arc::new(|_| {}),
+            retirement: retirement.clone(),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(move |_| {
+                counted_fatal.fetch_add(1, Ordering::Relaxed);
+            }),
+            layout_updates: test_layout_updates(),
+        };
+
+        for window in 0..MAX_PENDING_LAYOUT_WINDOWS as u64 {
+            assert_eq!(
+                engine.set_content(
+                    window,
+                    Some(Pane::leaf(id)),
+                    Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+                ),
+                NativeDispatch::Scheduled
+            );
+        }
+        assert_eq!(
+            engine.set_content(
+                MAX_PENDING_LAYOUT_WINDOWS as u64,
+                Some(Pane::leaf(id)),
+                Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            ),
+            NativeDispatch::Rejected
+        );
+
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1
+        );
+        assert!(!token.load(Ordering::Acquire));
+        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
+        assert!(engine.layout_updates.take_batch().is_empty());
         assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
     }
 
@@ -2044,6 +2459,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            layout_updates: test_layout_updates(),
         };
 
         assert_eq!(engine.reload(id), NativeDispatch::Scheduled);

@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use gtk::glib::prelude::{ObjectExt, ObjectType};
 use gtk::glib::signal::{connect_raw, SignalHandlerId};
+use gtk::prelude::WidgetExt as _;
 use webkit2gtk::{DownloadExt, WebContextExt, WebViewExt, WebsiteDataManagerExt};
 use wry::WebViewExtUnix;
 use zephium_core::ports::engine::Partition;
@@ -71,6 +72,12 @@ fn enforce_runtime_preconditions(
     if let Some(name) = security_override() {
         return Err(format!(
             "security-relevant WebKitGTK/JavaScriptCore environment override {name} is present; unset it before starting Zephium"
+        ));
+    }
+    if unix_seconds < zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
+        return Err(format!(
+            "system clock predates the reviewed WebKitGTK security release {}; correct the clock before browsing",
+            zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_ON,
         ));
     }
     if !zephium_core::webkitgtk::security_floor_review_is_current(unix_seconds) {
@@ -359,6 +366,15 @@ pub fn current_url(view: &wry::WebView) -> Option<String> {
     const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
     let uri = view.webview().uri()?;
     (uri.as_str().len() <= PAGE_URL_UTF8_LIMIT).then(|| uri.to_string())
+}
+
+pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
+    // Keep WebKitGTK mapped so its compositing surface survives the gate;
+    // opacity is the native non-painting primitive used by the stage and by
+    // Wry's synchronous commit guard.
+    let widget = view.webview();
+    widget.set_opacity(0.0);
+    widget.opacity() == 0.0
 }
 
 /// Strong native storage handles that must outlive every view created from
@@ -750,7 +766,7 @@ mod tests {
     #[test]
     fn webkitgtk_floor_matches_the_reviewed_security_advisory() {
         assert!(enforce_runtime_version((2, 52, 3)).is_err());
-        assert!(enforce_runtime_version((2, 52, 4)).is_ok());
+        assert!(enforce_runtime_version((2, 52, 4)).is_err());
         assert!(enforce_runtime_version((2, 52, 5)).is_ok());
         assert!(enforce_runtime_version((2, 53, 0)).is_err());
         assert!(enforce_runtime_version((2, 54, 0)).is_err());
@@ -759,6 +775,17 @@ mod tests {
 
     #[test]
     fn runtime_preconditions_reject_sandbox_override_and_expired_review() {
+        assert!(enforce_runtime_preconditions(
+            zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1,
+            || None,
+        )
+        .unwrap_err()
+        .contains("system clock predates"));
+        assert!(enforce_runtime_preconditions(
+            zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS,
+            || None,
+        )
+        .is_ok());
         let before_deadline =
             zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1;
         assert!(enforce_runtime_preconditions(before_deadline, || None).is_ok());

@@ -39,6 +39,10 @@ pub fn current_url(view: &wry::WebView) -> Option<String> {
     (value.len() <= PAGE_URL_UTF8_LIMIT).then_some(value)
 }
 
+pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
+    view.set_visible(false).is_ok()
+}
+
 pub(crate) type WebsiteDataStore = Retained<WKWebsiteDataStore>;
 
 /// Allocate one non-persistent store for a private profile. The host retains

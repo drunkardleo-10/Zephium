@@ -8,14 +8,15 @@ use std::sync::{Arc, Mutex, Weak};
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
-use wry::{DownloadPolicy, NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder};
+use wry::{DownloadPolicy, WebView, WebViewBuilder};
 
+use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::navigation;
 use zephium_core::ports::engine::{
-    ContentScope, DiscardProbeId, EngineEvent, NavigationRequestId, Partition, Shortcut,
-    UserContent, UserScript, World,
+    ContentScope, DiscardProbeId, EngineEvent, NativeAction, NavigationPresentationId,
+    NavigationRequestId, Partition, Shortcut, UserContent, UserScript, World, ZoomRequestId,
 };
 use zephium_core::split::Pane;
 
@@ -63,6 +64,14 @@ enum HostTaskKey {
     // view; an explicit close supersedes both. Priority prevents a later
     // lower-level callback from replacing the stronger transition.
     View(ItemId),
+    // Replaceable source/history facts must never overwrite an adjacent
+    // terminal navigation settlement or discard-safety phase for the same
+    // view merely because they share an ItemId.
+    Source(ItemId),
+    Title(ItemId),
+    NavigationCommit(ItemId),
+    NavigationSettlement(ItemId),
+    Discard(ItemId),
     #[cfg(target_os = "windows")]
     Profile(ProfileId, crate::platform::imp::BrowserProcessGeneration),
     #[cfg(target_os = "windows")]
@@ -103,12 +112,21 @@ const MAX_WINDOWS_CLEANUP_DEBTS: usize =
 // therefore never create around any failed teardown obligation.
 const MAX_NATIVE_VIEW_RESOURCES: usize = 48;
 const _: () = assert!(MAX_NATIVE_VIEW_RESOURCES >= 32 + 1 + 8);
+// One globally coalesced commit gate per native view remains admissible even
+// if ordinary observations/lifecycle work fill their band. The native view
+// resource ceiling proves no more distinct live commit keys can exist while
+// the host is re-entrantly borrowed.
+const NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize = MAX_NATIVE_VIEW_RESOURCES;
+const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 // A distinct WebView2 environment/UDF owns its own browser/network process
 // group. This is separate from the 64-profile persistence format limit and
 // from the per-view ceiling above: retaining zero-view environments for every
 // historical profile must not turn profile count into unbounded process/RAM
-// growth. Exact idle-group retirement is future profile-UX work; until then,
-// refuse construction before a ninth native group can be created.
+// growth. Closing a profile's final controller also closes its same-profile
+// warm spare; Environment5 then proves whole-group exit before the retained
+// native generation stops counting here. Refuse construction during that
+// bounded asynchronous overlap rather than briefly creating a ninth group.
 #[cfg(any(target_os = "windows", test))]
 const MAX_NATIVE_PROFILE_PROCESS_GROUPS: usize = 8;
 static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
@@ -498,6 +516,18 @@ fn renderer_report_allows_discard(result: &str) -> bool {
     result == "1"
 }
 
+fn should_seed_stage_readiness(
+    inserted: bool,
+    presentable: bool,
+    presentation_permitted: bool,
+) -> bool {
+    // Existing stage children retain readiness across geometry-only layouts.
+    // Re-seeding them would synchronously rerun a full GTK/macOS stage pass
+    // once per visible split leaf during every resize. A newly attached child
+    // alone needs to inherit an already-presentable document's retained fact.
+    inserted && presentable && presentation_permitted
+}
+
 fn discard_probe_identity_matches(
     current_permit: &EventPermit,
     current_navigation: &NavigationEpochTracker,
@@ -687,19 +717,25 @@ fn bounded_title(title: &str) -> String {
 }
 
 fn decode_favicon_eval_result(result: &str) -> Option<Vec<u8>> {
-    if result.len() != zephium_core::icon::RGBA32_BASE64_BYTES + 2 {
+    // Wry returns a JSON serialization of the primitive JavaScript string.
+    // Foundation is allowed to spell every base64 solidus as `\/`, while
+    // JavaScriptCore/Chromium commonly leave it unescaped. Bound the raw JSON
+    // before parsing, then require the exact canonical base64 payload and
+    // fixed decoded raster. This accepts both native spellings without
+    // widening the callback to objects or attacker-sized strings.
+    const MAX_RESULT_BYTES: usize = zephium_core::icon::RGBA32_BASE64_BYTES * 2 + 2;
+    if result.len() > MAX_RESULT_BYTES {
         return None;
     }
-    let encoded = result
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))?;
-    zephium_core::icon::decode_rgba32(encoded)
+    let encoded = serde_json::from_str::<String>(result).ok()?;
+    zephium_core::icon::decode_rgba32(&encoded)
 }
 
 pub(crate) fn install(
     parent: RawWindowHandle,
     data_root: PathBuf,
     sink: crate::EngineEventIngressSink,
+    native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
     HOST_SEALED.with(|sealed| sealed.set(false));
     PENDING.with(|pending| {
@@ -723,6 +759,8 @@ pub(crate) fn install(
     .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
     #[cfg(target_os = "macos")]
     let _ = &data_root;
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let _ = &native_terminal_failure;
     HOST.with(|cell| {
         let mut host = cell
             .try_borrow_mut()
@@ -746,6 +784,8 @@ pub(crate) fn install(
             user_content: HashMap::new(),
             shortcuts: Vec::new(),
             stages: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_terminal_failure,
             #[cfg(target_os = "macos")]
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(target_os = "windows")]
@@ -889,22 +929,66 @@ where
     with_priority(HostTaskPriority::Close, Some(HostTaskKey::View(id)), f)
 }
 
-fn with_observation<F>(id: ItemId, f: F)
+fn with_source_observation<F>(id: ItemId, f: F)
 where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     let _ = with_priority(
         HostTaskPriority::Observation,
-        Some(HostTaskKey::View(id)),
+        Some(HostTaskKey::Source(id)),
         f,
     );
 }
 
-fn with_renderer_exit<F>(id: ItemId, f: F)
+fn with_title_observation<F>(id: ItemId, f: F)
 where
     F: FnOnce(&mut EngineHost) + 'static,
 {
-    let _ = with_priority(HostTaskPriority::Lifecycle, Some(HostTaskKey::View(id)), f);
+    let _ = with_priority(
+        HostTaskPriority::Observation,
+        Some(HostTaskKey::Title(id)),
+        f,
+    );
+}
+
+fn with_navigation_commit<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::NavigationCommit(id)),
+        f,
+    )
+}
+
+fn with_navigation_settlement<F>(id: ItemId, f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::NavigationSettlement(id)),
+        f,
+    );
+}
+
+fn with_discard_observation<F>(id: ItemId, f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Observation,
+        Some(HostTaskKey::Discard(id)),
+        f,
+    );
+}
+
+fn with_renderer_exit<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::Lifecycle, Some(HostTaskKey::View(id)), f)
 }
 
 #[cfg(target_os = "windows")]
@@ -1076,6 +1160,16 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         return false;
     }
     if let Some(key) = queued.key {
+        if matches!(key, HostTaskKey::NavigationCommit(_)) {
+            // A newer exact commit makes an older still-queued commit task a
+            // stale no-op. Coalesce globally (not merely adjacently), keeping
+            // at most one reserved security gate per bounded native view.
+            if let Some(index) = pending.iter().rposition(|task| task.key == Some(key)) {
+                pending.remove(index);
+                pending.push_back(queued);
+                return true;
+            }
+        }
         if let Some(back) = pending.back().filter(|task| task.key == Some(key)) {
             // Coalesce only an adjacent callback. Crossing an intervening host
             // task can invert native facts around a create/navigation (most
@@ -1096,7 +1190,10 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
     let capacity = match queued.priority {
         HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
-        _ => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
+        _ if matches!(queued.key, Some(HostTaskKey::NavigationCommit(_))) => {
+            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+        }
+        _ => NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY,
     };
     if pending.len() < capacity {
         pending.push_back(queued);
@@ -1341,254 +1438,6 @@ impl EventPermit {
     }
 }
 
-/// A native WebView generation can perform many navigations. Generation-only
-/// callback checks are therefore insufficient for a warm spare: callbacks
-/// queued by its bootstrap `about:blank` load can arrive after the same native
-/// object has been bound to a real item. Keep a non-wrapping navigation epoch
-/// beside the generation permit and require both identities at every
-/// page-state callback boundary.
-#[derive(Clone)]
-struct NavigationEpochTracker {
-    state: Arc<Mutex<NavigationEpochState>>,
-}
-
-#[derive(Debug)]
-struct NavigationEpochState {
-    next: u64,
-    current: Option<CurrentNavigation>,
-    revoked: bool,
-}
-
-#[derive(Clone, Debug)]
-struct CurrentNavigation {
-    epoch: NavigationEpoch,
-    target: String,
-    phase: NavigationPhase,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct NavigationEpoch(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NavigationPhase {
-    AwaitingStart,
-    Started,
-    Committed,
-}
-
-impl NavigationEpochTracker {
-    fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(NavigationEpochState {
-                next: 0,
-                current: None,
-                revoked: false,
-            })),
-        }
-    }
-
-    fn begin(&self, target: &str) -> Option<NavigationEpoch> {
-        let target = canonical_navigation_target(target)?;
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Self::begin_locked(&mut state, &target)
-    }
-
-    fn begin_locked(state: &mut NavigationEpochState, target: &str) -> Option<NavigationEpoch> {
-        if state.revoked {
-            return None;
-        }
-        let Some(next) = state.next.checked_add(1) else {
-            // A wrapping epoch could make a callback from the first
-            // navigation indistinguishable from the newest one. Permanently
-            // retire this tracker instead of panicking in a native callback.
-            state.revoked = true;
-            state.current = None;
-            return None;
-        };
-        state.next = next;
-        let epoch = NavigationEpoch(next);
-        state.current = Some(CurrentNavigation {
-            epoch,
-            target: target.to_owned(),
-            phase: NavigationPhase::AwaitingStart,
-        });
-        Some(epoch)
-    }
-
-    /// Apply navigation policy without deriving epoch identity from this
-    /// callback. Some engines invoke the policy hook for subframes, and none
-    /// exposes a portable navigation identifier here. Epochs advance at
-    /// explicit host navigation and main-frame page-load start instead.
-    fn admit_target(&self, permit: &EventPermit, target: &str) -> bool {
-        if !permit.allows_navigation(target) || canonical_navigation_target(target).is_none() {
-            return false;
-        }
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        !state.revoked
-    }
-
-    /// Attribute a page-load event only when its URL is the exact target of
-    /// the current epoch. This is the critical warm-spare barrier: a delayed
-    /// `about:blank` completion cannot acquire the adopted item's epoch.
-    fn observe_load(&self, target: &str, event: &PageLoadEvent) -> Option<NavigationEpoch> {
-        let target = canonical_navigation_target(target)?;
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.revoked {
-            return None;
-        }
-        let current = state.current.as_mut()?;
-        match event {
-            PageLoadEvent::Started => match current.phase {
-                NavigationPhase::AwaitingStart => {
-                    if current.target != target {
-                        return None;
-                    }
-                    current.phase = NavigationPhase::Started;
-                    Some(current.epoch)
-                }
-                NavigationPhase::Started => {
-                    if current.target == target {
-                        return Some(current.epoch);
-                    }
-                    // A warm spare's only predecessor is `about:blank`.
-                    // Never reinterpret its late start as a redirect of the
-                    // adopted page after that page has already started.
-                    if target == "about:blank" && current.target != "about:blank" {
-                        return None;
-                    }
-                    let epoch = Self::begin_locked(&mut state, &target)?;
-                    state.current.as_mut()?.phase = NavigationPhase::Started;
-                    Some(epoch)
-                }
-                NavigationPhase::Committed => {
-                    let epoch = Self::begin_locked(&mut state, &target)?;
-                    state.current.as_mut()?.phase = NavigationPhase::Started;
-                    Some(epoch)
-                }
-            },
-            PageLoadEvent::Finished => {
-                if current.target != target {
-                    return None;
-                }
-                current.phase = NavigationPhase::Committed;
-                Some(current.epoch)
-            }
-        }
-    }
-
-    fn current(&self) -> Option<NavigationEpoch> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (!state.revoked)
-            .then(|| state.current.as_ref().map(|current| current.epoch))
-            .flatten()
-    }
-
-    fn current_committed(&self) -> Option<NavigationEpoch> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (!state.revoked)
-            .then(|| {
-                state.current.as_ref().and_then(|current| {
-                    (current.phase == NavigationPhase::Committed).then_some(current.epoch)
-                })
-            })
-            .flatten()
-    }
-
-    fn committed_snapshot(&self) -> Option<(NavigationEpoch, String)> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.revoked {
-            return None;
-        }
-        let current = state.current.as_ref()?;
-        (current.phase == NavigationPhase::Committed)
-            .then(|| (current.epoch, current.target.clone()))
-    }
-
-    fn matches_committed_snapshot(&self, epoch: NavigationEpoch, target: &str) -> bool {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        !state.revoked
-            && state.current.as_ref().is_some_and(|current| {
-                current.phase == NavigationPhase::Committed
-                    && current.epoch == epoch
-                    && current.target == target
-            })
-    }
-
-    fn is_current(&self, epoch: NavigationEpoch) -> bool {
-        self.current() == Some(epoch)
-    }
-
-    fn same_generation(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.state, &other.state)
-    }
-
-    /// Validate the source queried from the native view for a queued source or
-    /// history callback. Before commit it must equal the epoch's policy target;
-    /// after commit, an allowed same-document History API URL remains in the
-    /// same epoch and becomes the new observed target.
-    fn observe_source(&self, epoch: NavigationEpoch, source: &str) -> bool {
-        let Some(source) = canonical_navigation_target(source) else {
-            return false;
-        };
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.revoked {
-            return false;
-        }
-        let Some(current) = state.current.as_mut() else {
-            return false;
-        };
-        if current.epoch != epoch {
-            return false;
-        }
-        if current.phase != NavigationPhase::Committed && current.target != source {
-            return false;
-        }
-        current.target = source;
-        current.phase = NavigationPhase::Committed;
-        true
-    }
-
-    fn revoke(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.revoked = true;
-        state.current = None;
-    }
-}
-
-fn canonical_navigation_target(target: &str) -> Option<String> {
-    if !navigation::is_allowed_str(target) {
-        return None;
-    }
-    url::Url::parse(target).ok().map(|url| url.to_string())
-}
-
 fn navigation_callback_matches(
     view_permit: &EventPermit,
     view_navigation: &NavigationEpochTracker,
@@ -1599,6 +1448,71 @@ fn navigation_callback_matches(
     view_permit.same_generation(source_permit)
         && view_navigation.same_generation(source_navigation)
         && view_navigation.is_current(epoch)
+}
+
+fn queue_navigation_commit(
+    id: ItemId,
+    permit: &EventPermit,
+    navigation: &NavigationEpochTracker,
+    epoch: NavigationEpoch,
+) {
+    if permit.active_token().is_none() {
+        return;
+    }
+    let queued_permit = permit.clone();
+    let queued_navigation = navigation.clone();
+    let admitted = with_navigation_commit(id, move |host| {
+        if host.rearm_navigation_presentation(id, &queued_permit, &queued_navigation, epoch) {
+            host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
+        }
+    });
+    if !admitted {
+        // Wry has already hidden the committed native surface before invoking
+        // this callback. Reserved globally-coalesced capacity proves ordinary
+        // overload cannot reach this branch; shutdown/sealed-host rejection
+        // terminally revokes the orphaned callback generation.
+        permit.revoke();
+        navigation.revoke();
+        eprintln!("security: committed-document presentation gate was not admitted");
+    }
+}
+
+fn queue_navigation_completion(
+    id: ItemId,
+    permit: &EventPermit,
+    navigation: &NavigationEpochTracker,
+    epoch: NavigationEpoch,
+) {
+    if permit.active_token().is_none() {
+        return;
+    }
+    let queued_permit = permit.clone();
+    let queued_navigation = navigation.clone();
+    with_navigation_settlement(id, move |host| {
+        if host.rearm_navigation_presentation(id, &queued_permit, &queued_navigation, epoch)
+            && host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch)
+        {
+            host.complete_title_attribution(id, &queued_permit, &queued_navigation, epoch);
+            host.emit_navigation_ready(id, &queued_permit, &queued_navigation, epoch);
+        }
+    });
+}
+
+fn queue_navigation_failure(
+    id: ItemId,
+    permit: &EventPermit,
+    navigation: &NavigationEpochTracker,
+    failed: NavigationEpoch,
+    restored: Option<NavigationEpoch>,
+) {
+    if permit.active_token().is_none() {
+        return;
+    }
+    let queued_permit = permit.clone();
+    let queued_navigation = navigation.clone();
+    with_navigation_settlement(id, move |host| {
+        host.settle_navigation_failure(id, &queued_permit, &queued_navigation, failed, restored);
+    });
 }
 
 struct ParentHandle(RawWindowHandle);
@@ -1624,6 +1538,34 @@ struct Spare {
 struct ObservedView {
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
+    // Shared with every stage that can reveal this exact physical view.
+    // Wry's commit guard flips it false synchronously before any native hide
+    // can re-enter layout; verified exact privileged-chrome application is
+    // the sole true transition for this generation.
+    presentation_permit: Arc<AtomicBool>,
+    // Native page zoom is per-view state. This is advanced only after Wry's
+    // platform call succeeds and is returned with every settlement, making a
+    // newest-per-item result authoritative even if intermediate results are
+    // coalesced before the shell processes them.
+    applied_zoom: f64,
+    // False until privileged chrome has applied and verified this exact
+    // committed main-frame URL/revision and the shell returns the same opaque
+    // epoch. It is reset
+    // when a warm spare is adopted, so the spare's old about:blank surface
+    // can never be revealed.
+    presentable: bool,
+    // Emitted at most once for the initially hidden navigation. Native finish
+    // may idempotently re-drive the same fact if queue coalescing replaced the
+    // original commit notification.
+    presentation_announced: Option<NavigationEpoch>,
+    // Page titles have no portable native navigation identifier. They become
+    // admissible only after this exact identity-bearing navigation finished;
+    // transitional callbacks are discarded and the finished document's
+    // current native title is queried under URL/epoch revalidation instead.
+    title_ready: Option<NavigationEpoch>,
+    // A warm spare's private about:blank commit predates logical ownership
+    // and can never be used as a recovery surface for its adopted tab.
+    nonpresentable_bootstrap: Option<NavigationEpoch>,
     #[cfg(target_os = "windows")]
     _crash_observer: crate::platform::imp::CrashObserver,
     #[cfg(target_os = "windows")]
@@ -1710,17 +1652,45 @@ fn classify_observed_url(url: Option<String>) -> ObservedUrl {
     }
 }
 
+fn resolve_committed_observed_url(
+    navigation: &NavigationEpochTracker,
+    epoch: NavigationEpoch,
+    url: Option<String>,
+) -> ObservedUrl {
+    match classify_observed_url(url) {
+        ObservedUrl::Unavailable => navigation
+            .committed_snapshot()
+            .filter(|(committed, _)| *committed == epoch)
+            .map_or(ObservedUrl::Unavailable, |(_, target)| {
+                ObservedUrl::Allowed(target)
+            }),
+        ObservedUrl::Allowed(url) => {
+            if !navigation.observe_source(epoch, &url) {
+                return ObservedUrl::Unavailable;
+            }
+            navigation
+                .committed_snapshot()
+                .filter(|(committed, _)| *committed == epoch)
+                .map_or(ObservedUrl::Unavailable, |(_, target)| {
+                    ObservedUrl::Allowed(target)
+                })
+        }
+        ObservedUrl::Forbidden => ObservedUrl::Forbidden,
+    }
+}
+
 fn navigation_observation_events(
     id: ItemId,
     previous: &mut NavigationSnapshot,
-    url: Option<String>,
+    url: Option<&str>,
     history: Option<(bool, bool)>,
 ) -> Vec<EngineEvent> {
     // A single native notification produces at most these two bounded events,
     // and duplicate Source/History/KVO notifications become no-ops.
     let mut events = Vec::with_capacity(2);
     if let Some(url) = url.filter(|url| navigation::is_allowed_str(url)) {
-        if previous.url.as_deref() != Some(url.as_str()) {
+        if previous.url.as_deref() != Some(url) {
+            let url = url.to_owned();
             previous.url = Some(url.clone());
             events.push(EngineEvent::UrlChanged { id, url });
         }
@@ -1743,6 +1713,22 @@ enum RendererCrashTarget {
     Spare,
     Live,
     Retired,
+}
+
+fn restored_navigation_can_present(
+    already_presentable: bool,
+    nonpresentable_bootstrap: Option<NavigationEpoch>,
+    restored: NavigationEpoch,
+) -> bool {
+    already_presentable || nonpresentable_bootstrap != Some(restored)
+}
+
+fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
+    if succeeded {
+        requested
+    } else {
+        previous
+    }
 }
 
 fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> RendererCrashTarget {
@@ -1941,6 +1927,11 @@ pub(crate) struct EngineHost {
     stages: HashMap<WindowId, Retained<ContentStage>>,
     #[cfg(not(target_os = "macos"))]
     stages: HashMap<WindowId, crate::platform::imp::Stage>,
+    // Exhausted native stage retries are no longer recoverable inside Wry's
+    // UI-thread adapter. Admission failure or an unverifiable teardown must
+    // seal outer lifecycle/event authority before the mandatory fatal path.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     // A private profile owns exactly one non-persistent WKWebsiteDataStore for
     // its entire host lifetime. Each tab gets a fresh configuration pointing
     // at this retained store; distinct profile ids can never share one.
@@ -2055,7 +2046,7 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
-        if let Some(spare) = self.spare.take_if(|s| s.partition == partition) {
+        if let Some(mut spare) = self.spare.take_if(|s| s.partition == partition) {
             // Update the logical id before binding. Neither this Cell write,
             // binding, nor epoch advance enters native code, so a queued
             // bootstrap callback cannot observe a half-adopted state.
@@ -2069,16 +2060,27 @@ impl EngineHost {
                     .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
                 return;
             }
-            if spare.view.navigation.begin(url).is_none() {
+            let Some(epoch) = spare.view.navigation.begin(url) else {
                 eprintln!("engine: could not establish adopted-view navigation epoch");
                 self.sink
                     .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
                 return;
-            }
+            };
+            // A spare may have completed its private about:blank bootstrap.
+            // Adoption starts a fresh presentation obligation even though
+            // the underlying native WebView generation is reused.
+            spare.view.presentable = false;
+            spare
+                .view
+                .presentation_permit
+                .store(false, Ordering::Release);
+            spare.view.presentation_announced = None;
+            spare.view.title_ready = None;
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
             }
             if let Err(error) = spare.view.load_url(url) {
+                spare.view.navigation.fail_synchronous(epoch);
                 eprintln!("engine: spare navigation failed: {error}");
                 self.sink
                     .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
@@ -2091,6 +2093,7 @@ impl EngineHost {
             }
             self.partitions.insert(id, partition);
             self.views.insert(id, spare.view);
+            self.finish_new_view_insertion(id, &event_token);
             return;
         }
         let cell = Rc::new(Cell::new(id));
@@ -2109,7 +2112,146 @@ impl EngineHost {
             }
             self.partitions.insert(id, partition);
             self.views.insert(id, view);
+            self.finish_new_view_insertion(id, &event_token);
         }
+    }
+
+    /// A latest-value layout can occupy an earlier main-loop queue position
+    /// than a native view construction that was accepted later. Reconcile the
+    /// newly-owned view against every stage's retained authoritative tree so
+    /// it cannot remain absent (or, on mapped WebKitGTK, visible at stale
+    /// construction bounds) until an unrelated future resize.
+    fn finish_new_view_insertion(&mut self, id: ItemId, event_token: &Arc<AtomicBool>) {
+        let reconciled = self.reconcile_new_view_with_stages(id);
+
+        // Stage attachment enters native UI code and may pump callbacks. A
+        // close accepted during that re-entry owns the logical item now; tear
+        // down this just-inserted generation without publishing a failure for
+        // its already-retired token.
+        if !event_token.load(Ordering::Acquire) {
+            self.close(id);
+            return;
+        }
+        if reconciled {
+            return;
+        }
+
+        eprintln!("engine: native view could not catch up to retained stage layout");
+        self.close(id);
+        self.sink
+            .emit_for(event_token.clone(), EngineEvent::ViewCreationFailed { id });
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reconcile_new_view_with_stages(&self, id: ItemId) -> bool {
+        let expected = self
+            .stages
+            .values()
+            .filter(|stage| stage.contains_item(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if expected.is_empty() {
+            // Raw WKWebViews start hidden, so an unstaged background view is
+            // already fail-closed until a later authoritative layout owns it.
+            return true;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(native_view) = webview_nsview(view) else {
+            return false;
+        };
+        let presentable = view.presentable && view.presentation_permit.load(Ordering::Acquire);
+        let presentation_permit = view.presentation_permit.clone();
+        let mut reconciled = true;
+        for stage in expected {
+            if !stage.has_view(id) {
+                stage.insert_view(id, native_view.clone(), presentation_permit.clone());
+            }
+            if !stage.has_view(id) {
+                reconciled = false;
+                continue;
+            }
+            if presentable && !stage.set_ready(id) {
+                reconciled = false;
+            }
+        }
+        reconciled
+    }
+
+    #[cfg(target_os = "windows")]
+    fn reconcile_new_view_with_stages(&self, id: ItemId) -> bool {
+        let expected = self
+            .stages
+            .values()
+            .filter(|stage| stage.contains_item(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if expected.is_empty() {
+            // The controller and its child HWND were constructed hidden.
+            return true;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(generation) = view.event_permit.active_token() else {
+            return false;
+        };
+        let presentable = view.presentable && view.presentation_permit.load(Ordering::Acquire);
+        let presentation_permit = view.presentation_permit.clone();
+        let mut reconciled = true;
+        for stage in expected {
+            if !stage.has_view(id) {
+                stage.insert_view(id, view, generation.clone(), presentation_permit.clone());
+            }
+            if !stage.has_view(id) {
+                reconciled = false;
+                continue;
+            }
+            if presentable && !stage.set_ready(id) {
+                reconciled = false;
+            }
+        }
+        reconciled
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn reconcile_new_view_with_stages(&self, id: ItemId) -> bool {
+        let expected = self
+            .stages
+            .values()
+            .filter(|stage| stage.contains_item(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        if expected.is_empty() {
+            // WebKitGTK must be mapped during construction, but a layout that
+            // has already moved on must not leave that widget painted at its
+            // builder bounds. A later stage insertion remaps and redraws it.
+            crate::platform::imp::Stage::exclude_unstaged(view);
+            return true;
+        }
+        let presentable = view.presentable && view.presentation_permit.load(Ordering::Acquire);
+        let presentation_permit = view.presentation_permit.clone();
+        let mut reconciled = true;
+        for stage in expected {
+            if !stage.has_view(id) {
+                stage.insert_view(id, view, presentation_permit.clone());
+            }
+            if !stage.has_view(id) {
+                reconciled = false;
+                continue;
+            }
+            if presentable && !stage.set_ready(id) {
+                reconciled = false;
+            }
+        }
+        if !reconciled {
+            crate::platform::imp::Stage::exclude_unstaged(view);
+        }
+        reconciled
     }
 
     // Rebuilt after adoption from a page-load-finished hook, when the spawn
@@ -2121,7 +2263,12 @@ impl EngineHost {
         // would otherwise churn processes, CPU and private working sets while
         // neither profile opens a tab. The matching profile eventually adopts
         // the spare; a later completed load can then replenish its partition.
-        if self.erasure_tombstones.contains(&partition.profile()) {
+        let profile = partition.profile();
+        // Page-load completion can queue this optimization immediately before
+        // the last real tab closes. Revalidate physical ownership on the host
+        // thread so a late task cannot resurrect an otherwise idle native
+        // process group solely to hold about:blank.
+        if !self.has_live_profile_view(profile) || self.erasure_tombstones.contains(&profile) {
             return;
         }
         if !bind_profile_persistence_class(&mut self.profile_persistence_classes, partition) {
@@ -2520,13 +2667,15 @@ impl EngineHost {
             }
             return None;
         }
-        let on_title = self.sink.clone();
         let title_permit = event_permit.clone();
         let navigation = NavigationEpochTracker::new();
         let title_navigation = navigation.clone();
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
         let load_navigation = navigation.clone();
+        let presentation_permit = Arc::new(AtomicBool::new(false));
+        let guard_presentation_permit = presentation_permit.clone();
+        let load_presentation_permit = presentation_permit.clone();
         let crash_permit = event_permit.clone();
         let crash_id = id.clone();
         let navigation_permit = event_permit.clone();
@@ -2713,21 +2862,39 @@ impl EngineHost {
             }
         };
 
-        // No custom background color: the scrollbar gutter and unpainted
-        // regions show the webview background, and anything but the engine
-        // default reads as a detached strip along the page edge. The spawn
-        // flash fix belongs to the theme->engine channel, not a hardcode.
+        // No custom page background or native placeholder. Fresh navigations
+        // keep the real privileged New Tab surface until its exact URL
+        // projection is verified; the transparent presentation-gated stage
+        // then reveals only the attributed document.
         let mut builder = builder
             .with_bounds(to_wry(bounds))
+            // Construction itself may enter a native message loop. On
+            // WKWebView/WebView2 start hidden so their default white backing
+            // store cannot paint before the host installs the view in its
+            // presentation-gated stage. WebKitGTK must remain mapped while loading
+            // or it can fail to allocate a compositing surface permanently.
+            .with_visible(cfg!(all(unix, not(target_os = "macos"))))
+            // Native construction must never steal keyboard focus from the
+            // privileged chrome. This is especially important for hidden
+            // WebView2 warm spares; focus is granted only by explicit user
+            // interaction with a presented content view.
+            .with_focused(false)
             .with_devtools(cfg!(debug_assertions))
             .with_autoplay(false)
+            // Tauri's macos-private-api feature enables Wry's fullscreen
+            // support through Cargo feature unification. Raw child views must
+            // override both native media surfaces per view; compile-time
+            // availability is not page authority.
+            .with_fullscreen_enabled(false)
+            .with_picture_in_picture_enabled(false)
             // WebView2 otherwise enables its address/contact suggestions by
             // default. Raw content should not silently inherit ambient form
             // data before Zephium has an explicit, profile-scoped autofill
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                policy_navigation.admit_target(&navigation_permit, &target)
+                navigation_permit.allows_navigation(&target)
+                    && policy_navigation.admits_target(&target)
             })
             // Raw content starts with no device or ambient capabilities. The
             // pinned Wry revision carries this callback consistently across
@@ -2743,27 +2910,40 @@ impl EngineHost {
             // DOM close requests must not destroy a native child behind the
             // host's view/controller accounting.
             .with_page_close_policy(wry::PageClosePolicy::Ignore)
+            // Wry hides at the native commit boundary before invoking the
+            // identity callback. Host/stage readiness then remains the only
+            // path that can reveal the exact URL-acknowledged document.
+            .with_navigation_presentation_guard(move || {
+                guard_presentation_permit.store(false, Ordering::Release);
+            })
             .with_document_title_changed_handler(move |title| {
                 // Title callbacks carry no navigation identifier. Do not let
-                // an inactive spare or an adopted-but-uncommitted target emit
-                // its bootstrap title under the new logical item id.
+                // an inactive spare, transitional document, or callback
+                // queued by the prior document publish directly into chrome.
                 if let Some(epoch) = title_navigation.current_committed() {
                     if title_navigation.is_current(epoch) {
-                        title_permit.emit(
-                            &on_title,
-                            EngineEvent::TitleChanged {
-                                id: title_id.get(),
-                                title: bounded_title(&title),
-                            },
-                        );
+                        let id = title_id.get();
+                        let queued_permit = title_permit.clone();
+                        let queued_navigation = title_navigation.clone();
+                        let title = bounded_title(&title);
+                        with_title_observation(id, move |host| {
+                            host.emit_title_observation(
+                                id,
+                                &queued_permit,
+                                &queued_navigation,
+                                epoch,
+                                title,
+                            );
+                        });
                     }
                 }
-            })
-            // A native popup is denied and must not be translated into a shell
-            // tab. Wry does not expose enough trustworthy user-gesture and
-            // opener metadata to distinguish an intentional link from popup
-            // abuse. Keep the EngineEvent API for a future broker that can.
-            .with_new_window_req_handler(|_url, _features| NewWindowResponse::Deny);
+            });
+
+        // Intentionally do not install a new-window callback. Wry's native
+        // no-callback path denies synchronously before reading the URI/window
+        // metadata or acquiring a deferral. An always-Deny callback would be
+        // observably equivalent but would retain attacker-controlled COM
+        // state and enqueue one UI closure for every popup request.
 
         // This host-owned guard must precede page/user content so its captured
         // platform intrinsics and event registrations cannot be replaced
@@ -2847,34 +3027,56 @@ impl EngineHost {
             Partition::Ephemeral(_) => builder.with_incognito(true),
         };
 
-        builder = builder.with_on_page_load_handler(move |event, url| {
+        builder = builder.with_navigation_event_handler(move |event| {
             let id = load_id.get();
-            let Some(epoch) = load_navigation.observe_load(&url, &event) else {
+            if event.phase == wry::NavigationEventPhase::Committed {
+                // Wry already revoked this permit before its native hide. Do
+                // it again at the public identity boundary so a future port
+                // cannot accidentally weaken the stage-side invariant.
+                load_presentation_permit.store(false, Ordering::Release);
+            }
+            let Some(transition) = load_navigation.observe_navigation(&event) else {
                 return;
             };
-            match event {
-                PageLoadEvent::Started => {
+            match transition {
+                NavigationTransition::Started(epoch) => {
                     if load_navigation.is_current(epoch) {
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
                 }
-                PageLoadEvent::Finished => {
+                NavigationTransition::Redirected(_) => {}
+                NavigationTransition::Committed(epoch) => {
+                    // This identity-bearing native commit, not URL equality or
+                    // SourceChanged ordering, authorizes rendered-content
+                    // attribution to the final redirect destination.
+                    if load_navigation.is_current(epoch) {
+                        queue_navigation_commit(id, &load_permit, &load_navigation, epoch);
+                    }
+                }
+                NavigationTransition::Finished(epoch) => {
                     if load_navigation.is_current(epoch) {
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: false });
+                        // Completion is a presentation signal, but it is not
+                        // an attribution shortcut: the queued host task emits
+                        // or verifies the exact committed URL before reveal.
+                        queue_navigation_completion(id, &load_permit, &load_navigation, epoch);
                     }
-                    // Native source/history observers normally emit earlier,
-                    // at commit time. This host-owned query is also the
-                    // completion fallback; the callback never retains the
-                    // WebView it observes.
-                    let permit = load_permit.clone();
-                    let navigation = load_navigation.clone();
-                    if permit.active_token().is_some() {
-                        with_observation(id, move |host| {
-                            host.emit_navigation_observation(id, &permit, &navigation, epoch)
-                        });
+                }
+                NavigationTransition::Failed {
+                    failed,
+                    restored,
+                    request,
+                } => {
+                    // The transition was current when accepted. End its
+                    // loading state even when a provisional failure restored
+                    // the still-visible previous committed document.
+                    load_permit.emit(&on_load, EngineEvent::LoadingChanged { id, loading: false });
+                    if let Some(request) = request {
+                        load_permit.emit(&on_load, EngineEvent::NavigationFailed { id, request });
                     }
+                    queue_navigation_failure(id, &load_permit, &load_navigation, failed, restored);
                 }
             }
         });
@@ -3206,8 +3408,8 @@ impl EngineHost {
             let id = observation_id.get();
             let queued_permit = observation_permit.clone();
             let queued_navigation = observation_navigation.clone();
-            with_observation(id, move |host| {
-                host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch)
+            with_source_observation(id, move |host| {
+                host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
             });
         }) {
             Ok(observer) => observer,
@@ -3230,14 +3432,15 @@ impl EngineHost {
             // the first content load after the outer generation was retired.
             return None;
         }
-        if navigation.begin(url).is_none() {
+        let Some(epoch) = navigation.begin(url) else {
             eprintln!("engine: could not establish initial navigation epoch");
             if report_failure {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
             }
             return None;
-        }
+        };
         if let Err(error) = view.load_url(url) {
+            navigation.fail_synchronous(epoch);
             eprintln!("engine: initial navigation failed: {error}");
             if report_failure {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
@@ -3252,6 +3455,12 @@ impl EngineHost {
         Some(ObservedView {
             event_permit,
             navigation,
+            presentation_permit,
+            applied_zoom: 1.0,
+            presentable: false,
+            presentation_announced: None,
+            title_ready: None,
+            nonpresentable_bootstrap: (!report_failure).then_some(epoch),
             #[cfg(target_os = "windows")]
             _crash_observer: crash_observer,
             #[cfg(target_os = "windows")]
@@ -3265,16 +3474,163 @@ impl EngineHost {
         })
     }
 
-    fn emit_navigation_observation(
+    /// Re-arm the native presentation gate for one exact identity-bearing
+    /// main-frame commit. Provisional loads leave the prior document visible;
+    /// this transition runs only at commit, before the new document is allowed
+    /// to borrow the prior epoch's chrome acknowledgement.
+    fn rearm_navigation_presentation(
+        &mut self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+    ) -> bool {
+        let Some((needs_rearm, token)) = self.views.get(&id).map(|view| {
+            (
+                navigation_callback_matches(
+                    &view.event_permit,
+                    &view.navigation,
+                    source_permit,
+                    source_navigation,
+                    epoch,
+                ) && view.navigation.current_committed() == Some(epoch)
+                    && view.presentation_announced != Some(epoch),
+                view.event_permit.active_token(),
+            )
+        }) else {
+            return false;
+        };
+        if !needs_rearm {
+            return self.views.get(&id).is_some_and(|view| {
+                navigation_callback_matches(
+                    &view.event_permit,
+                    &view.navigation,
+                    source_permit,
+                    source_navigation,
+                    epoch,
+                ) && view.navigation.current_committed() == Some(epoch)
+            });
+        }
+
+        if let Some(view) = self.views.get_mut(&id) {
+            // Change the Rust-owned authority before any native call can pump
+            // callbacks. A re-entrant acknowledgement for the previous epoch
+            // therefore cannot reveal this committed document.
+            view.presentable = false;
+            view.presentation_permit.store(false, Ordering::Release);
+            view.title_ready = None;
+        }
+        let mut stages_pending = true;
+        for stage in self.stages.values() {
+            // Do not short-circuit: every retained stage must lose the old
+            // readiness bit even if an earlier stage reported re-entry.
+            if !stage.set_pending(id) {
+                stages_pending = false;
+            }
+        }
+        let native_hidden = self
+            .views
+            .get(&id)
+            .is_some_and(|view| crate::platform::imp::enforce_navigation_pending(view));
+
+        let still_current = self.views.get(&id).is_some_and(|view| {
+            navigation_callback_matches(
+                &view.event_permit,
+                &view.navigation,
+                source_permit,
+                source_navigation,
+                epoch,
+            ) && view.navigation.current_committed() == Some(epoch)
+        });
+        if !still_current {
+            // Native calls can pump a newer navigation. The newer epoch owns
+            // the now-hidden surface and will issue its own exact reveal.
+            return false;
+        }
+        if stages_pending && native_hidden {
+            return true;
+        }
+
+        // An unretained gate or a failed native hide could expose a committed
+        // document under stale privileged chrome. Retire this exact generation
+        // instead of degrading to best-effort presentation.
+        eprintln!("security: could not re-arm committed-document presentation gate");
+        self.close(id);
+        if let Some(token) = token {
+            self.sink
+                .emit_for(token, EngineEvent::ViewCreationFailed { id });
+        }
+        false
+    }
+
+    fn complete_title_attribution(
         &mut self,
         id: ItemId,
         source_permit: &EventPermit,
         source_navigation: &NavigationEpochTracker,
         epoch: NavigationEpoch,
     ) {
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
+            return;
+        }
+        // Every desktop backend reads the current native document title in
+        // this call and bounds it before allocating Rust data. Doing this only
+        // after the exact navigation Finished event avoids trusting callback
+        // payload/order from the document that was replaced at commit.
+        let title = self
+            .views
+            .get(&id)
+            .and_then(|view| view.document_title().ok().flatten())
+            .map(|title| bounded_title(&title));
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if !navigation_callback_matches(
+            &view.event_permit,
+            &view.navigation,
+            source_permit,
+            source_navigation,
+            epoch,
+        ) || view.navigation.current_committed() != Some(epoch)
+        {
+            return;
+        }
+        view.title_ready = Some(epoch);
+        if let Some(title) = title {
+            source_permit.emit(&self.sink, EngineEvent::TitleChanged { id, title });
+        }
+    }
+
+    fn emit_title_observation(
+        &self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+        title: String,
+    ) {
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
+            return;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        if !view.presentable || view.title_ready != Some(epoch) {
+            return;
+        }
+        source_permit.emit(&self.sink, EngineEvent::TitleChanged { id, title });
+    }
+
+    fn emit_navigation_observation(
+        &mut self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+    ) -> bool {
         let (event_permit, navigation, url, history) = {
-            let Some(view) = self.views.get(&id) else {
-                return;
+            let Some(view) = self.views.get_mut(&id) else {
+                return false;
             };
             if !navigation_callback_matches(
                 &view.event_permit,
@@ -3283,7 +3639,14 @@ impl EngineHost {
                 source_navigation,
                 epoch,
             ) {
-                return;
+                return false;
+            }
+            if view.navigation.current_committed() != Some(epoch) {
+                // Source/KVO notifications can precede the identity-bearing
+                // main-frame commit. They may query useful provisional state,
+                // but can never authorize either chrome attribution or first
+                // presentation.
+                return false;
             }
             let url = crate::platform::imp::current_url(view);
             let history = match (view.can_go_back(), view.can_go_forward()) {
@@ -3297,23 +3660,30 @@ impl EngineHost {
                 history,
             )
         };
-        let url = match classify_observed_url(url) {
+        let url = match resolve_committed_observed_url(&navigation, epoch, url) {
             ObservedUrl::Unavailable => {
-                // Source can transiently be unavailable during navigation.
-                // History facts are attributable only after this exact epoch
-                // has committed an allowed source.
-                if navigation.current_committed() != Some(epoch) {
-                    return;
-                }
-                None
+                // Neither the native view nor the exact committed tracker can
+                // identify an allowed source. Keep this generation hidden and
+                // withhold its history facts until a later valid observation.
+                return false;
             }
-            ObservedUrl::Allowed(url) => {
-                if !navigation.observe_source(epoch, &url) {
-                    return;
-                }
-                Some(url)
-            }
+            ObservedUrl::Allowed(url) => url,
             ObservedUrl::Forbidden => {
+                // A native getter may pump the run loop. Revalidate the exact
+                // physical generation and committed epoch before closing so a
+                // stale observation can never tear down its replacement.
+                let still_current = self.views.get(&id).is_some_and(|view| {
+                    navigation_callback_matches(
+                        &view.event_permit,
+                        &view.navigation,
+                        &event_permit,
+                        &navigation,
+                        epoch,
+                    ) && view.navigation.current_committed() == Some(epoch)
+                });
+                if !still_current {
+                    return false;
+                }
                 // Navigation callbacks should have prevented this. A History
                 // API mutation can still create an overlong same-document URL
                 // without a navigation callback, so never leave trusted
@@ -3327,15 +3697,275 @@ impl EngineHost {
                     self.sink
                         .emit_for(token, EngineEvent::ViewCreationFailed { id });
                 }
-                return;
+                return false;
             }
         };
-        if !navigation.is_current(epoch) {
+        let became_presentable = {
+            let Some(view) = self.views.get_mut(&id) else {
+                return false;
+            };
+            if !navigation_callback_matches(
+                &view.event_permit,
+                &view.navigation,
+                &event_permit,
+                &navigation,
+                epoch,
+            ) || !view.navigation.matches_committed_snapshot(epoch, &url)
+            {
+                return false;
+            }
+            let announce = !view.presentable && view.presentation_announced != Some(epoch);
+            if announce {
+                view.presentation_announced = Some(epoch);
+            }
+            announce
+        };
+        let previous = self.navigation_snapshots.entry(id).or_default();
+        for event in navigation_observation_events(id, previous, Some(&url), history) {
+            event_permit.emit(&self.sink, event);
+        }
+        if became_presentable {
+            // The URL event above enters the shell's ordered critical band
+            // before this exact acknowledgement token. The shell presents as
+            // soon as it has applied that URL; it never waits for Finished.
+            event_permit.emit(
+                &self.sink,
+                EngineEvent::PresentationPending {
+                    id,
+                    navigation: epoch.presentation_id(),
+                    url: url.clone(),
+                },
+            );
+        }
+        self.navigation_snapshots
+            .get(&id)
+            .and_then(|snapshot| snapshot.url.as_deref())
+            == Some(url.as_str())
+    }
+
+    fn navigation_is_attributed(
+        &self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+    ) -> bool {
+        let Some((target_epoch, target)) = self
+            .views
+            .get(&id)
+            .and_then(|view| view.navigation.committed_snapshot())
+        else {
+            return false;
+        };
+        if target_epoch != epoch
+            || self
+                .navigation_snapshots
+                .get(&id)
+                .and_then(|snapshot| snapshot.url.as_deref())
+                != Some(target.as_str())
+        {
+            return false;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        navigation_callback_matches(
+            &view.event_permit,
+            &view.navigation,
+            source_permit,
+            source_navigation,
+            epoch,
+        ) && view.navigation.current_committed() == Some(epoch)
+    }
+
+    fn emit_navigation_ready(
+        &self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+    ) {
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
             return;
         }
-        let previous = self.navigation_snapshots.entry(id).or_default();
-        for event in navigation_observation_events(id, previous, url, history) {
-            event_permit.emit(&self.sink, event);
+        let Some((committed, url)) = source_navigation.committed_snapshot() else {
+            return;
+        };
+        if committed != epoch {
+            return;
+        }
+        source_permit.emit(
+            &self.sink,
+            EngineEvent::PresentationReady {
+                id,
+                navigation: epoch.presentation_id(),
+                url,
+            },
+        );
+    }
+
+    fn present_navigation_epoch(
+        &mut self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+    ) {
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
+            return;
+        }
+        // Install every stage's logical readiness while the shared physical
+        // permit is still false. A RefCell/COM admission failure can then be
+        // retired without any sibling stage briefly revealing the document.
+        let mut prepared = true;
+        for stage in self.stages.values() {
+            if stage.has_view(id) && !stage.set_ready(id) {
+                prepared = false;
+            }
+        }
+        if !prepared {
+            self.fail_navigation_presentation_application(
+                id,
+                source_permit,
+                source_navigation,
+                epoch,
+            );
+            return;
+        }
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
+            return;
+        }
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        view.presentable = true;
+        view.nonpresentable_bootstrap = None;
+        // Publish only after every stage retained the exact readiness fact.
+        // A re-entrant newer commit flips this same atomic false before any
+        // native reveal primitive can execute.
+        view.presentation_permit.store(true, Ordering::Release);
+        let mut applied = true;
+        for stage in self.stages.values() {
+            if stage.has_view(id) && !stage.set_ready(id) {
+                applied = false;
+            }
+        }
+        if !applied {
+            self.fail_navigation_presentation_application(
+                id,
+                source_permit,
+                source_navigation,
+                epoch,
+            );
+        }
+    }
+
+    fn fail_navigation_presentation_application(
+        &mut self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+    ) {
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
+            return;
+        }
+        let token = source_permit.active_token();
+        if let Some(view) = self.views.get_mut(&id) {
+            view.presentable = false;
+            view.presentation_permit.store(false, Ordering::Release);
+        }
+        for stage in self.stages.values() {
+            let _ = stage.set_pending(id);
+        }
+        eprintln!("security: exact native presentation could not be applied");
+        self.close(id);
+        if let Some(token) = token {
+            self.sink
+                .emit_for(token, EngineEvent::ViewCreationFailed { id });
+        }
+    }
+
+    pub(crate) fn present_navigation(
+        &mut self,
+        id: ItemId,
+        presentation: NavigationPresentationId,
+    ) {
+        let Some((permit, navigation, epoch)) = self.views.get(&id).and_then(|view| {
+            view.navigation
+                .committed_epoch_for_presentation(presentation)
+                .map(|epoch| (view.event_permit.clone(), view.navigation.clone(), epoch))
+        }) else {
+            return;
+        };
+        self.present_navigation_epoch(id, &permit, &navigation, epoch);
+    }
+
+    fn settle_navigation_failure(
+        &mut self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        failed: NavigationEpoch,
+        restored: Option<NavigationEpoch>,
+    ) {
+        let Some((same_generation, current, current_committed, presentable, bootstrap, token)) =
+            self.views.get(&id).map(|view| {
+                (
+                    view.event_permit.same_generation(source_permit)
+                        && view.navigation.same_generation(source_navigation),
+                    view.navigation.current(),
+                    view.navigation.current_committed(),
+                    view.presentable,
+                    view.nonpresentable_bootstrap,
+                    view.event_permit.active_token(),
+                )
+            })
+        else {
+            return;
+        };
+        if !same_generation {
+            return;
+        }
+
+        // A failure after commit may leave a native error/partial document.
+        // It is still bound to the exact attributed epoch and is safe to
+        // present. A provisional first-load failure has no renderable browser
+        // document and must become a terminal creation failure instead of a
+        // permanently hidden white tab.
+        if restored == Some(failed) {
+            if current_committed != Some(failed) {
+                return;
+            }
+            if self.rearm_navigation_presentation(id, source_permit, source_navigation, failed)
+                && self.emit_navigation_observation(id, source_permit, source_navigation, failed)
+            {
+                self.emit_navigation_ready(id, source_permit, source_navigation, failed);
+            }
+            return;
+        }
+
+        if current != restored {
+            return;
+        }
+        if let Some(restored) = restored
+            .filter(|restored| restored_navigation_can_present(presentable, bootstrap, *restored))
+        {
+            let attributed =
+                self.emit_navigation_observation(id, source_permit, source_navigation, restored);
+            if attributed {
+                // Re-drive even when the prior document was logically
+                // presentable: a rejected/stale overlapping commit may have
+                // synchronously revoked the shared native reveal permit.
+                self.emit_navigation_ready(id, source_permit, source_navigation, restored);
+            }
+            return;
+        }
+
+        self.close(id);
+        if let Some(token) = token {
+            self.sink
+                .emit_for(token, EngineEvent::ViewCreationFailed { id });
         }
     }
 
@@ -3404,23 +4034,22 @@ impl EngineHost {
             // displaced while a native message loop was reentrant.
             return;
         }
-        if view.navigation.begin(url).is_none() {
+        let Some(epoch) = view.navigation.begin_request(url, request) else {
             eprintln!("engine: could not establish navigation epoch");
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
-        }
+        };
         if let Err(error) = view.load_url(url) {
+            view.navigation.fail_synchronous(epoch);
             eprintln!("engine: navigation failed: {error}");
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
         }
     }
 
-    pub(crate) fn reload(&self, id: ItemId) {
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.reload();
-        }
+    pub(crate) fn reload(&mut self, id: ItemId) {
+        self.invoke_navigation_action(id, NativeAction::Reload);
     }
 
     pub(crate) fn stop(&self, id: ItemId) {
@@ -3429,22 +4058,71 @@ impl EngineHost {
         }
     }
 
-    pub(crate) fn go_back(&self, id: ItemId) {
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.go_back();
+    pub(crate) fn go_back(&mut self, id: ItemId) {
+        self.invoke_navigation_action(id, NativeAction::GoBack);
+    }
+
+    pub(crate) fn go_forward(&mut self, id: ItemId) {
+        self.invoke_navigation_action(id, NativeAction::GoForward);
+    }
+
+    fn invoke_navigation_action(&mut self, id: ItemId, action: NativeAction) {
+        let Some((permit, navigation, failed)) = self.views.get(&id).map(|view| {
+            let result = match action {
+                NativeAction::Reload => view.reload(),
+                NativeAction::GoBack => view.go_back(),
+                NativeAction::GoForward => view.go_forward(),
+            };
+            (
+                view.event_permit.clone(),
+                view.navigation.clone(),
+                result.is_err(),
+            )
+        }) else {
+            return;
+        };
+        if !failed {
+            return;
+        }
+
+        // Platform errors and action names are bounded native facts; never
+        // surface a page-derived URL or native error string through privileged
+        // IPC. Revalidate the exact view generation before reporting or
+        // querying source/history because the platform call may pump.
+        let current = self.views.get(&id).is_some_and(|view| {
+            view.event_permit.same_generation(&permit)
+                && view.navigation.same_generation(&navigation)
+        });
+        if !current {
+            return;
+        }
+        eprintln!("engine: native reload/history invocation failed");
+        permit.emit(&self.sink, EngineEvent::NativeActionFailed { id, action });
+        if let Some(epoch) = navigation.current_committed() {
+            let _ = self.emit_navigation_observation(id, &permit, &navigation, epoch);
         }
     }
 
-    pub(crate) fn go_forward(&self, id: ItemId) {
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.go_forward();
+    pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
+        let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
+            let succeeded = view.zoom(scale).is_ok();
+            view.applied_zoom = settled_zoom_scale(view.applied_zoom, scale, succeeded);
+            (view.event_permit.clone(), view.applied_zoom, succeeded)
+        }) else {
+            return;
+        };
+        if !succeeded {
+            eprintln!("engine: native zoom invocation failed");
         }
-    }
-
-    pub(crate) fn zoom(&self, id: ItemId, scale: f64) {
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.zoom(scale);
-        }
+        permit.emit(
+            &self.sink,
+            EngineEvent::ZoomSettled {
+                id,
+                request,
+                applied_scale,
+                succeeded,
+            },
+        );
     }
 
     pub(crate) fn extract_html(&self, id: ItemId) {
@@ -3504,9 +4182,10 @@ impl EngineHost {
                     return;
                 }
                 // Native engines JSON-serialize the primitive callback value.
-                // Base64 uses no characters requiring JSON escaping, so the
-                // only accepted non-null form is exactly 5464 bytes enclosed
-                // by two quotes. No page object/toJSON hook is traversed.
+                // The bounded decoder accepts both ordinary JSON and
+                // Foundation's escaped-solidus spelling, then requires one
+                // canonical 5464-byte base64 value and exact 32x32 RGBA
+                // output. No page object/toJSON hook is traversed.
                 let Some(rgba) = decode_favicon_eval_result(&result) else {
                     return;
                 };
@@ -3543,7 +4222,7 @@ impl EngineHost {
             let renderer_safe = renderer_report_allows_discard(&result);
             let completion_permit = queued_permit.clone();
             let completion_navigation = queued_navigation.clone();
-            with_observation(id, move |host| {
+            with_discard_observation(id, move |host| {
                 host.complete_discard_probe(
                     id,
                     probe,
@@ -3596,7 +4275,7 @@ impl EngineHost {
         let activity_permit = permit.clone();
         let activity_navigation = navigation.clone();
         let started = crate::platform::imp::query_document_activity(view, move |native_allows| {
-            with_observation(id, move |host| {
+            with_discard_observation(id, move |host| {
                 host.finish_discard_probe(
                     id,
                     probe,
@@ -3764,8 +4443,40 @@ impl EngineHost {
         }
     }
 
-    pub(crate) fn close(&mut self, id: ItemId) {
+    fn has_live_profile_view(&self, profile: ProfileId) -> bool {
+        self.partitions
+            .iter()
+            .any(|(id, partition)| partition.profile() == profile && self.views.contains_key(id))
+    }
+
+    fn close_idle_spare(&mut self, profile: ProfileId) {
+        if self.has_live_profile_view(profile) {
+            return;
+        }
+        let Some(spare) = self
+            .spare
+            .take_if(|spare| spare.partition.profile() == profile)
+        else {
+            return;
+        };
+
         #[cfg(target_os = "windows")]
+        {
+            // Controller::Close is the documented trigger for normal
+            // BrowserProcessExited once no same-environment controls remain.
+            // Keep the Environment5 observer and exact process HANDLE until
+            // that event independently proves the process group released its
+            // UDF; only the path-only Wry context can be retired immediately.
+            self.web_contexts.remove(&profile);
+            if let Some(debt) = spare.view.close_explicit() {
+                self.retain_windows_cleanup_debt(profile, debt);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        drop(spare);
+    }
+
+    pub(crate) fn close(&mut self, id: ItemId) {
         let profile = self
             .partitions
             .get(&id)
@@ -3792,6 +4503,9 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "windows"))]
         drop(removed);
+        if let Some(profile) = profile {
+            self.close_idle_spare(profile);
+        }
     }
 
     pub(crate) fn erase_profile_data(
@@ -4074,6 +4788,26 @@ impl EngineHost {
             // the resulting state transition, so a retired id is a no-op.
             RendererCrashTarget::Retired => {}
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn on_stage_placement_failure(&mut self, id: ItemId, generation: &Arc<AtomicBool>) {
+        let token = self.views.get(&id).and_then(|view| {
+            view.event_permit
+                .matches_token(generation)
+                .then(|| view.event_permit.active_token())
+                .flatten()
+        });
+        let Some(token) = token else {
+            return;
+        };
+        eprintln!("engine: WebView2 stage placement failed after bounded retries");
+        // A controller whose HWND/bounds/visibility contract cannot be
+        // established must not remain logically live behind a permanent
+        // placeholder. Retire the exact generation before reporting failure.
+        self.close(id);
+        self.sink
+            .emit_for(token, EngineEvent::ViewCreationFailed { id });
     }
 
     #[cfg(target_os = "windows")]
@@ -4456,47 +5190,91 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
-    ) {
+    ) -> bool {
         let Some(stage) = self.ensure_stage(window) else {
-            return;
+            return false;
         };
-        match region {
-            None => stage.setHidden(true),
-            Some(r) => {
-                stage_set_frame(&stage, &self.parent, r);
-                let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
-                let mut invalid_views = Vec::new();
-                for id in &tabs {
-                    if !stage.has_view(*id) {
-                        if let Some(view) = self.views.get(id) {
-                            if let Some(native_view) = webview_nsview(view) {
-                                stage.insert_view(*id, native_view);
-                            } else {
-                                invalid_views.push(*id);
-                            }
-                        }
+        // Reserve this layout before the first AppKit call. Any nested newer
+        // layout invalidates `update_epoch`, so this outer stack frame can no
+        // longer re-show an obsolete stage container when it resumes.
+        let Some(update_epoch) = stage.begin_content_update(region.is_some()) else {
+            return false;
+        };
+        let Some(r) = region else {
+            return stage.finish_content_update(update_epoch);
+        };
+        if !stage_set_frame(&stage, &self.parent, r) {
+            stage.abort_content_update(update_epoch);
+            return false;
+        }
+        if !stage.content_update_is_current(update_epoch) {
+            return !stage.has_terminal_failure();
+        }
+        let tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
+        let mut invalid_views = Vec::new();
+        for id in &tabs {
+            let Some(view) = self.views.get(id) else {
+                stage.abort_content_update(update_epoch);
+                return false;
+            };
+            let mut inserted = false;
+            if !stage.has_view(*id) {
+                if let Some(native_view) = webview_nsview(view) {
+                    if !stage.insert_view(*id, native_view, view.presentation_permit.clone()) {
+                        stage.abort_content_update(update_epoch);
+                        return false;
                     }
+                    inserted = true;
+                } else {
+                    invalid_views.push(*id);
                 }
-                if !invalid_views.is_empty() {
-                    stage.setHidden(true);
-                    for id in invalid_views {
-                        let token = self
-                            .views
-                            .get(&id)
-                            .and_then(|view| view.event_permit.active_token());
-                        self.close(id);
-                        if let Some(token) = token {
-                            self.sink
-                                .emit_for(token, EngineEvent::ViewCreationFailed { id });
-                        }
-                    }
-                    return;
-                }
-                stage.set_tree(tree);
-                stage.set_visible(&tabs);
-                stage.setHidden(false);
+            }
+            if !stage.content_update_is_current(update_epoch) {
+                return !stage.has_terminal_failure();
+            }
+            if should_seed_stage_readiness(
+                inserted,
+                view.presentable,
+                view.presentation_permit.load(Ordering::Acquire),
+            ) && !stage.set_ready(*id)
+            {
+                stage.abort_content_update(update_epoch);
+                return false;
+            }
+            if !stage.content_update_is_current(update_epoch) {
+                return !stage.has_terminal_failure();
             }
         }
+        if !invalid_views.is_empty() {
+            stage.abort_content_update(update_epoch);
+            for id in invalid_views {
+                let token = self
+                    .views
+                    .get(&id)
+                    .and_then(|view| view.event_permit.active_token());
+                self.close(id);
+                if let Some(token) = token {
+                    self.sink
+                        .emit_for(token, EngineEvent::ViewCreationFailed { id });
+                }
+            }
+            return !stage.has_terminal_failure();
+        }
+        if !stage.set_tree(tree) {
+            stage.abort_content_update(update_epoch);
+            return false;
+        }
+        if !stage.content_update_is_current(update_epoch) {
+            return !stage.has_terminal_failure();
+        }
+        if !stage.set_visible(&tabs) {
+            stage.abort_content_update(update_epoch);
+            return false;
+        }
+        if !stage.content_update_is_current(update_epoch) {
+            return !stage.has_terminal_failure();
+        }
+        stage.finish_content_update(update_epoch)
     }
 
     #[cfg(target_os = "macos")]
@@ -4512,24 +5290,51 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
-    ) {
+    ) -> bool {
         let Some(stage) = self.ensure_stage(window) else {
-            return;
+            return false;
         };
         let tabs = match region {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
         for id in &tabs {
+            let Some(view) = self.views.get(id) else {
+                return false;
+            };
+            let mut inserted = false;
             if !stage.has_view(*id) {
-                if let Some(view) = self.views.get(id) {
-                    stage.insert_view(*id, view);
+                #[cfg(target_os = "windows")]
+                {
+                    let Some(generation) = view.event_permit.active_token() else {
+                        return false;
+                    };
+                    if !stage.insert_view(*id, view, generation, view.presentation_permit.clone()) {
+                        return false;
+                    }
+                    inserted = true;
                 }
+                #[cfg(all(unix, not(target_os = "macos")))]
+                if !stage.insert_view(*id, view, view.presentation_permit.clone()) {
+                    return false;
+                } else {
+                    inserted = true;
+                }
+            }
+            if should_seed_stage_readiness(
+                inserted,
+                view.presentable,
+                view.presentation_permit.load(Ordering::Acquire),
+            ) && !stage.set_ready(*id)
+            {
+                return false;
             }
         }
         // one native pass: frame, tree and visibility land atomically, so a
         // switch can never flash the previous pane
-        stage.apply(region, tree, &tabs);
+        if !stage.apply(region, tree, &tabs) {
+            return false;
+        }
         // Off-screen views drop to the low-memory hint (reversible, nothing
         // freezes); actual suspension waits for the shell's idle verdict.
         // Becoming visible resumes a suspended view natively.
@@ -4554,6 +5359,7 @@ impl EngineHost {
                 }
             }
         }
+        true
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -4572,7 +5378,18 @@ impl EngineHost {
             return None;
         };
         let parent = HWND(h.hwnd.get() as *mut _);
-        let stage = Stage::new(parent, GAP);
+        let native_terminal_failure = self.native_terminal_failure.clone();
+        let stage = Stage::new(parent, GAP, move |id, generation| {
+            let admitted = with_renderer_exit(id, move |host| {
+                host.on_stage_placement_failure(id, &generation)
+            });
+            if !admitted {
+                HOST_SEALED.with(|sealed| sealed.set(true));
+                native_terminal_failure(
+                    "terminal Windows stage failure was not admitted by the engine host",
+                );
+            }
+        });
         self.stages.insert(window, stage.clone());
         Some(stage)
     }
@@ -4589,13 +5406,75 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
+    fn on_macos_stage_failure(&mut self, window: WindowId, failed_identity: usize) {
+        let Some(stage) = self.stages.get(&window) else {
+            return;
+        };
+        if Retained::as_ptr(stage) as usize != failed_identity {
+            return;
+        }
+        // Prove the full attached-id set while the exact failed stage remains
+        // mapped. A temporary RefCell conflict must never be canonicalized to
+        // an empty set and then retire native ownership without its views.
+        let Some(ids) = stage.attached_items() else {
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            (self.native_terminal_failure)(
+                "terminal macOS stage could not prove its attached native views",
+            );
+            return;
+        };
+        let Some(stage) = self.stages.remove(&window) else {
+            return;
+        };
+        if Retained::as_ptr(&stage) as usize != failed_identity {
+            // No native call occurs between identity proof and removal, but
+            // keep this invariant fail-closed if that ever changes.
+            self.stages.insert(window, stage);
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            (self.native_terminal_failure)(
+                "terminal macOS stage identity changed during retirement",
+            );
+            return;
+        }
+        stage.retire();
+        for id in ids {
+            let token = self
+                .views
+                .get(&id)
+                .and_then(|view| view.event_permit.active_token());
+            self.close(id);
+            if let Some(token) = token {
+                self.sink
+                    .emit_for(token, EngineEvent::ViewCreationFailed { id });
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn ensure_stage(&mut self, window: WindowId) -> Option<Retained<ContentStage>> {
         if let Some(stage) = self.stages.get(&window) {
             return Some(stage.clone());
         }
         let mtm = MainThreadMarker::new()?;
         let content = content_view(&self.parent)?;
-        let stage = ContentStage::new(mtm, GAP);
+        let native_terminal_failure = self.native_terminal_failure.clone();
+        let stage = ContentStage::new(
+            mtm,
+            GAP,
+            Box::new(move |failed_identity| {
+                let admitted = with_priority(HostTaskPriority::Close, None, move |host| {
+                    host.on_macos_stage_failure(window, failed_identity)
+                });
+                if !admitted {
+                    HOST_SEALED.with(|sealed| sealed.set(true));
+                    native_terminal_failure(
+                        "terminal macOS stage failure was not admitted by the engine host",
+                    );
+                }
+            }),
+        );
+        use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+        stage.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
         let sink = self.sink.clone();
         stage.set_on_ratio(Box::new(move |tree| {
             sink.emit(EngineEvent::SplitChanged { window, tree })
@@ -4636,19 +5515,26 @@ fn webview_nsview(view: &WebView) -> Option<Retained<NSView>> {
 }
 
 #[cfg(target_os = "macos")]
-fn stage_set_frame(stage: &ContentStage, parent: &ParentHandle, r: Rect) {
-    use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+fn stage_set_frame(stage: &ContentStage, parent: &ParentHandle, r: Rect) -> bool {
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let Some(content) = content_view(parent) else {
-        return;
+        return false;
     };
     let h = content.bounds().size.height;
-    stage.setFrame(NSRect::new(
+    let frame = NSRect::new(
         NSPoint::new(r.x, h - r.y - r.height),
         NSSize::new(r.width, r.height),
-    ));
-    stage.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
+    );
+    let current = stage.frame();
+    if current.origin.x != frame.origin.x
+        || current.origin.y != frame.origin.y
+        || current.size.width != frame.size.width
+        || current.size.height != frame.size.height
+    {
+        stage.setFrame(frame);
+    }
+    true
 }
 
 fn to_wry(r: Rect) -> wry::Rect {
@@ -4781,47 +5667,6 @@ mod tests {
     }
 
     #[test]
-    fn adopted_spare_rejects_late_bootstrap_navigation_callbacks() {
-        let token = Arc::new(AtomicBool::new(true));
-        let permit = EventPermit::inactive();
-        let navigation = NavigationEpochTracker::new();
-
-        let bootstrap = navigation
-            .begin("about:blank")
-            .expect("bootstrap navigation epoch");
-        assert_eq!(
-            navigation.observe_load("about:blank", &PageLoadEvent::Started),
-            Some(bootstrap)
-        );
-
-        assert!(permit.bind_once(&token));
-        let adopted = navigation
-            .begin("https://example.com/")
-            .expect("adopted navigation epoch");
-        assert_ne!(bootstrap, adopted);
-        assert_eq!(navigation.current_committed(), None);
-
-        // These callbacks belong to the spare's already-retired blank load.
-        // Binding the native generation to a real item must not let them
-        // acquire the adopted navigation epoch.
-        assert!(navigation.admit_target(&permit, "about:blank"));
-        assert!(navigation.is_current(adopted));
-        assert_eq!(
-            navigation.observe_load("about:blank", &PageLoadEvent::Finished),
-            None
-        );
-        assert!(!navigation.observe_source(adopted, "about:blank"));
-        assert!(navigation.is_current(adopted));
-
-        assert_eq!(
-            navigation.observe_load("https://example.com/", &PageLoadEvent::Started),
-            Some(adopted)
-        );
-        assert!(navigation.observe_source(adopted, "https://example.com/"));
-        assert_eq!(navigation.current_committed(), Some(adopted));
-    }
-
-    #[test]
     fn navigation_callbacks_require_generation_tracker_and_epoch_identity() {
         let token = Arc::new(AtomicBool::new(true));
         let permit = EventPermit::bound(&token);
@@ -4919,7 +5764,7 @@ mod tests {
             &mut pending,
             queued(HostTaskPriority::Normal)
         ));
-        for _ in pending.len()..NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
+        for _ in pending.len()..NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
                 &mut pending,
                 queued(HostTaskPriority::Observation)
@@ -4931,9 +5776,23 @@ mod tests {
         ));
         assert_eq!(
             pending.len(),
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+            NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(pending.back().unwrap().priority, HostTaskPriority::Close);
+
+        for raw in 1..=NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                keyed(
+                    HostTaskPriority::Lifecycle,
+                    HostTaskKey::NavigationCommit(ItemId::from(raw as u128))
+                )
+            ));
+        }
+        assert_eq!(
+            pending.len(),
+            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+        );
 
         for _ in 0..PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
@@ -4964,7 +5823,7 @@ mod tests {
     #[test]
     fn erasure_and_shutdown_slots_survive_full_lifecycle_saturation() {
         let mut pending = VecDeque::new();
-        for _ in 0..NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
+        for _ in 0..NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
                 &mut pending,
                 queued(HostTaskPriority::Lifecycle)
@@ -4974,6 +5833,20 @@ mod tests {
             &mut pending,
             queued(HostTaskPriority::Lifecycle)
         ));
+
+        for raw in 1..=NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                keyed(
+                    HostTaskPriority::Lifecycle,
+                    HostTaskKey::NavigationCommit(ItemId::from(raw as u128))
+                )
+            ));
+        }
+        assert_eq!(
+            pending.len(),
+            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+        );
 
         for _ in 0..PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
@@ -5064,6 +5937,84 @@ mod tests {
     }
 
     #[test]
+    fn source_settlement_and_discard_obligations_do_not_replace_each_other() {
+        let id = ItemId::from(7);
+        let mut pending = VecDeque::new();
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Observation, HostTaskKey::Source(id))
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(
+                HostTaskPriority::Lifecycle,
+                HostTaskKey::NavigationSettlement(id)
+            )
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Observation, HostTaskKey::Discard(id))
+        ));
+
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending[0].key, Some(HostTaskKey::Source(id)));
+        assert_eq!(pending[1].key, Some(HostTaskKey::NavigationSettlement(id)));
+        assert_eq!(pending[2].key, Some(HostTaskKey::Discard(id)));
+    }
+
+    #[test]
+    fn committed_document_gate_has_one_reserved_globally_coalesced_slot_per_native_view() {
+        let id = ItemId::from(7);
+        let commit = HostTaskKey::NavigationCommit(id);
+        let mut pending = VecDeque::new();
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, commit)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(
+                HostTaskPriority::Lifecycle,
+                HostTaskKey::NavigationSettlement(id)
+            )
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, commit)
+        ));
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.key == Some(commit))
+                .count(),
+            1
+        );
+        assert_eq!(pending.back().and_then(|task| task.key), Some(commit));
+
+        while pending.len() < NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::Lifecycle)
+            ));
+        }
+        for raw in 1..NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
+            let other = HostTaskKey::NavigationCommit(ItemId::from(100 + raw as u128));
+            assert!(enqueue_pending(
+                &mut pending,
+                keyed(HostTaskPriority::Lifecycle, other)
+            ));
+        }
+        // Replacing this view's existing commit remains admitted at the
+        // ordinary ceiling and never grows the reserved key cohort.
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, commit)
+        ));
+        assert!(pending.len() <= NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY);
+    }
+
+    #[test]
     fn keyed_coalescing_never_crosses_intervening_host_work_below_capacity() {
         let key = HostTaskKey::View(ItemId::from(7));
         let mut pending = VecDeque::new();
@@ -5099,7 +6050,7 @@ mod tests {
             &mut pending,
             queued(HostTaskPriority::Normal)
         ));
-        while pending.len() < NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
+        while pending.len() < NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
                 &mut pending,
                 queued(HostTaskPriority::Observation)
@@ -5112,7 +6063,7 @@ mod tests {
         ));
         assert_eq!(
             pending.len(),
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+            NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(pending.front().unwrap().priority, HostTaskPriority::Normal);
         assert_eq!(pending.back().unwrap().key, Some(key));
@@ -5586,7 +6537,7 @@ mod tests {
         let initial = navigation_observation_events(
             id,
             &mut previous,
-            Some("https://example.com/".to_owned()),
+            Some("https://example.com/"),
             Some((false, false)),
         );
         assert_eq!(initial.len(), 2);
@@ -5607,7 +6558,7 @@ mod tests {
         assert!(navigation_observation_events(
             id,
             &mut previous,
-            Some("https://example.com/".to_owned()),
+            Some("https://example.com/"),
             Some((false, false)),
         )
         .is_empty());
@@ -5615,7 +6566,7 @@ mod tests {
         let same_document = navigation_observation_events(
             id,
             &mut previous,
-            Some("https://example.com/#state".to_owned()),
+            Some("https://example.com/#state"),
             Some((true, false)),
         );
         assert_eq!(same_document.len(), 2);
@@ -5623,7 +6574,7 @@ mod tests {
         let forbidden = navigation_observation_events(
             id,
             &mut previous,
-            Some("file:///etc/passwd".to_owned()),
+            Some("file:///etc/passwd"),
             Some((true, true)),
         );
         assert_eq!(forbidden.len(), 1);
@@ -5655,6 +6606,114 @@ mod tests {
         );
     }
 
+    fn commit_test_navigation(
+        tracker: &NavigationEpochTracker,
+        native_id: u64,
+        target: &str,
+    ) -> NavigationEpoch {
+        let epoch = tracker.begin(target).expect("allowed test URL");
+        for phase in [
+            wry::NavigationEventPhase::Started,
+            wry::NavigationEventPhase::Committed,
+        ] {
+            assert!(tracker
+                .observe_navigation(&wry::NavigationEvent {
+                    id: wry::NavigationId::from_raw(native_id),
+                    phase,
+                    url: target.to_owned(),
+                })
+                .is_some());
+        }
+        epoch
+    }
+
+    #[test]
+    fn unavailable_native_url_uses_only_the_exact_committed_snapshot() {
+        let tracker = NavigationEpochTracker::new();
+        let epoch = commit_test_navigation(&tracker, 71, "https://committed.example/path");
+        assert_eq!(
+            resolve_committed_observed_url(&tracker, epoch, None),
+            ObservedUrl::Allowed("https://committed.example/path".to_owned())
+        );
+
+        let pending = tracker.begin("https://pending.example/").unwrap();
+        assert_eq!(
+            resolve_committed_observed_url(&tracker, pending, None),
+            ObservedUrl::Unavailable
+        );
+        assert_eq!(
+            resolve_committed_observed_url(&tracker, epoch, None),
+            ObservedUrl::Unavailable
+        );
+    }
+
+    #[test]
+    fn provisional_failure_can_restore_real_hidden_commit_but_not_spare_bootstrap() {
+        let tracker = NavigationEpochTracker::new();
+        let bootstrap = tracker.begin("about:blank").unwrap();
+        let real = tracker.begin("https://real.example/").unwrap();
+
+        assert!(!restored_navigation_can_present(
+            false,
+            Some(bootstrap),
+            bootstrap
+        ));
+        assert!(restored_navigation_can_present(
+            false,
+            Some(bootstrap),
+            real
+        ));
+        assert!(restored_navigation_can_present(
+            true,
+            Some(bootstrap),
+            bootstrap
+        ));
+    }
+
+    #[test]
+    fn failed_navigation_cannot_reveal_its_stale_epoch() {
+        let tracker = NavigationEpochTracker::new();
+        let visible = commit_test_navigation(&tracker, 81, "https://visible.example/");
+        let failed = tracker.begin("https://failed.example/").unwrap();
+        assert!(tracker
+            .observe_navigation(&wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(82),
+                phase: wry::NavigationEventPhase::Started,
+                url: "https://failed.example/".to_owned(),
+            })
+            .is_some());
+        assert!(tracker
+            .observe_navigation(&wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(82),
+                phase: wry::NavigationEventPhase::Failed,
+                url: "https://failed.example/".to_owned(),
+            })
+            .is_some());
+
+        assert_eq!(
+            resolve_committed_observed_url(&tracker, failed, None),
+            ObservedUrl::Unavailable
+        );
+        assert_eq!(
+            resolve_committed_observed_url(&tracker, visible, None),
+            ObservedUrl::Allowed("https://visible.example/".to_owned())
+        );
+    }
+
+    #[test]
+    fn forbidden_native_url_never_falls_back_to_trusted_chrome() {
+        let tracker = NavigationEpochTracker::new();
+        let epoch = commit_test_navigation(&tracker, 91, "https://trusted.example/");
+        assert_eq!(
+            resolve_committed_observed_url(&tracker, epoch, Some("file:///etc/passwd".to_owned())),
+            ObservedUrl::Forbidden
+        );
+        assert_eq!(
+            tracker.committed_snapshot(),
+            Some((epoch, "https://trusted.example/".to_owned()))
+        );
+    }
+
     #[test]
     fn discard_report_accepts_only_the_exact_safe_primitive_mask() {
         assert!(renderer_report_allows_discard("1"));
@@ -5669,6 +6728,22 @@ mod tests {
         assert!(DISCARD_SAFETY_BOOTSTRAP_JS.contains("localUncertain ? 256 : 0"));
         assert!(DISCARD_SAFETY_QUERY_JS.contains("return 256"));
         assert!(!DISCARD_SAFETY_QUERY_JS.contains("return {"));
+    }
+
+    #[test]
+    fn unchanged_layout_does_not_reseed_retained_stage_readiness() {
+        assert!(should_seed_stage_readiness(true, true, true));
+        assert!(!should_seed_stage_readiness(false, true, true));
+        assert!(!should_seed_stage_readiness(true, false, true));
+        assert!(!should_seed_stage_readiness(true, true, false));
+
+        let source = include_str!("host.rs");
+        assert!(
+            source
+                .matches("should_seed_stage_readiness(\n                inserted,")
+                .count()
+                >= 2
+        );
     }
 
     #[test]
@@ -5767,6 +6842,671 @@ mod tests {
     }
 
     #[test]
+    fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
+        let source = include_str!("host.rs");
+        let raw_policy = source
+            .split("let mut builder = builder")
+            .nth(1)
+            .expect("raw view policy builder")
+            .split("// This host-owned guard")
+            .next()
+            .expect("pre-script raw view policy");
+        assert!(!raw_policy.contains("with_new_window_req_handler"));
+        assert!(raw_policy.contains("Intentionally do not install a new-window callback"));
+    }
+
+    #[test]
+    fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
+        let source = include_str!("host.rs");
+        let create_view = source
+            .split("pub(crate) fn create_view(")
+            .nth(1)
+            .expect("view creation implementation")
+            .split("// Rebuilt after adoption")
+            .next()
+            .expect("bounded view creation implementation");
+
+        // One call follows warm-spare adoption and one follows a fresh native
+        // build. Keeping both prevents latest-layout coalescing from stranding
+        // either construction path behind an earlier queued layout task.
+        assert_eq!(
+            create_view
+                .matches("self.finish_new_view_insertion")
+                .count(),
+            2
+        );
+        assert!(source.contains("filter(|stage| stage.contains_item(id))"));
+        assert!(source.contains("Stage::exclude_unstaged(view)"));
+    }
+
+    #[test]
+    fn windows_superseded_native_placement_requeues_without_spending_failure_budget() {
+        let source = include_str!("platform/windows/stage.rs");
+        let application = source
+            .split("fn apply_native_placement(")
+            .nth(1)
+            .expect("Windows placement application")
+            .split("fn conceal_superseded_placement")
+            .next()
+            .expect("bounded Windows placement application");
+        for (start, end, primitive) in [
+            (
+                "if placement.delta.container_rect",
+                "if placement.delta.rounded",
+                "SetWindowPos(",
+            ),
+            (
+                "if placement.delta.rounded",
+                "if placement.delta.controller_size",
+                "SetWindowRgn(",
+            ),
+            (
+                "if placement.delta.controller_size",
+                "if placement.delta.notify_parent_position",
+                "SetBounds(",
+            ),
+            (
+                "if placement.delta.notify_parent_position",
+                "// COM can re-enter the message pump",
+                "NotifyParentWindowPositionChanged()",
+            ),
+        ] {
+            let boundary = application
+                .split(start)
+                .nth(1)
+                .expect("native geometry boundary")
+                .split(end)
+                .next()
+                .expect("bounded native geometry boundary");
+            assert!(
+                boundary.find(primitive).unwrap()
+                    < boundary.find("if !placement_is_current").unwrap()
+            );
+            assert!(boundary.contains("conceal_superseded_placement"));
+        }
+        let conceal = source
+            .split("fn conceal_superseded_placement")
+            .nth(1)
+            .expect("superseded geometry concealment")
+            .split("fn finish_native_placement")
+            .next()
+            .expect("bounded superseded geometry concealment");
+        assert!(conceal.contains("SW_HIDE"));
+        assert!(conceal.contains("SetIsVisible(false)"));
+        assert!(conceal.contains("finish_native_placement(state, placement, applied, false)"));
+
+        let settlement = source
+            .split("fn finish_native_placement(")
+            .nth(1)
+            .expect("Windows placement settlement")
+            .split("fn draw_indicator(")
+            .next()
+            .expect("bounded Windows placement settlement");
+
+        assert!(settlement.contains("state.revision != placement.revision"));
+        assert!(settlement.contains("if superseded || failed"));
+        let superseded = settlement
+            .split("if superseded {")
+            .nth(1)
+            .expect("superseded placement branch")
+            .split("} else if failed {")
+            .next()
+            .expect("bounded superseded placement branch");
+        assert!(superseded.contains("retry = true"));
+        assert!(!superseded.contains("consecutive_failures"));
+    }
+
+    #[test]
+    fn windows_reentrant_hide_preserves_newer_cache_and_forces_an_exact_redrive() {
+        let source = include_str!("platform/windows/stage.rs");
+        let hide = source
+            .split("fn hide_views(")
+            .nth(1)
+            .expect("Windows immediate hide")
+            .split("fn hide_is_current")
+            .next()
+            .expect("bounded Windows immediate hide");
+        assert!(hide.contains("revision: state.revision"));
+        for primitive in ["ShowWindow(hide.container, SW_HIDE)", "SetIsVisible(false)"] {
+            let boundary = hide.find(primitive).expect("native hide boundary");
+            assert!(hide[boundary..].contains("hide_is_current("));
+            assert!(hide[boundary..].contains("redrive_uncertain_visibility("));
+        }
+
+        let settlement = source
+            .split("fn finish_native_placement(")
+            .nth(1)
+            .expect("Windows placement settlement")
+            .split("fn draw_indicator(")
+            .next()
+            .expect("bounded Windows placement settlement");
+        let superseded = settlement
+            .split("if superseded {")
+            .nth(1)
+            .expect("superseded cache branch")
+            .split("} else if failed {")
+            .next()
+            .expect("bounded superseded cache branch");
+        assert!(!superseded.contains("view.applied.set"));
+        assert!(settlement.contains("state.visibility_uncertain.insert(placement.id)"));
+    }
+
+    #[test]
+    fn collapsed_split_leaves_hide_without_invalid_native_bounds_and_reappear_on_resize() {
+        // The shared pure helper has collapse/grow unit coverage. These
+        // platform-boundary assertions ensure every stage uses that decision
+        // before its native geometry/reveal primitive.
+        let windows = include_str!("platform/windows/stage.rs");
+        let windows_layout = windows
+            .split("let pane_rects = tree")
+            .nth(1)
+            .expect("Windows pane geometry")
+            .split("let mut parent_screen")
+            .next()
+            .expect("bounded Windows pane geometry");
+        assert!(windows_layout.contains(".filter_map"));
+        assert!(windows_layout.contains("rounded_native_size"));
+        assert!(!windows_layout.contains(".max(0)"));
+
+        let linux = include_str!("platform/linux/stage.rs");
+        let linux_placement = linux
+            .split("let placements = views")
+            .nth(1)
+            .expect("Linux pane placement")
+            .split("// Fail closed")
+            .next()
+            .expect("bounded Linux pane placement");
+        assert!(linux_placement.contains("rounded_native_size"));
+        assert!(linux_placement.contains("pane.is_some()"));
+        let linux_geometry = linux
+            .split("// Position and map only transparent widgets")
+            .nth(1)
+            .expect("Linux native geometry")
+            .split("for (id, view, _, mapped)")
+            .next()
+            .expect("bounded Linux native geometry");
+        assert!(!linux_geometry.contains("max(1.0)"));
+
+        let mac = include_str!("platform/macos/stage.rs");
+        let resize = mac
+            .split("fn resize_subviews")
+            .nth(1)
+            .expect("macOS resize callback")
+            .split("fn mouse_down")
+            .next()
+            .expect("bounded macOS resize callback");
+        assert!(resize.contains("self.bump_layout_epoch()"));
+        assert!(resize.contains("self.sync_visibility()"));
+        let visibility = mac
+            .split("fn sync_visibility(&self)")
+            .nth(1)
+            .expect("macOS visibility pass")
+            .split("fn defer_stage_retry")
+            .next()
+            .expect("bounded macOS visibility pass");
+        assert!(visibility.contains("paintable.contains(id)"));
+    }
+
+    #[test]
+    fn terminal_native_stage_failures_have_exact_retirement_and_mandatory_fatal_handoff() {
+        let host = include_str!("host.rs");
+        let mac_failure = host
+            .split("fn on_macos_stage_failure(")
+            .nth(1)
+            .expect("macOS terminal stage handler")
+            .split("fn ensure_stage(")
+            .next()
+            .expect("bounded macOS terminal stage handler");
+        assert!(mac_failure.contains("Retained::as_ptr(stage) as usize != failed_identity"));
+        assert!(
+            mac_failure.find("attached_items()").unwrap()
+                < mac_failure.find("stages.remove").unwrap()
+        );
+        assert!(mac_failure.contains("self.native_terminal_failure"));
+
+        let mac_stage = include_str!("platform/macos/stage.rs");
+        assert!(mac_stage.contains("pub fn attached_items(&self) -> Option<Vec<ItemId>>"));
+        let container = mac_stage
+            .split("fn sync_container_visibility(&self)")
+            .nth(1)
+            .expect("macOS container reveal")
+            .split("fn bump_layout_epoch")
+            .next()
+            .expect("bounded macOS container reveal");
+        let reveal = container.find("self.setHidden(false)").unwrap();
+        assert!(container[..reveal].contains("stage_retry_terminal"));
+        assert!(container[reveal..].contains("stage_retry_terminal"));
+
+        for reason in [
+            "terminal Windows stage failure was not admitted by the engine host",
+            "terminal macOS stage failure was not admitted by the engine host",
+        ] {
+            let failure = host.find(reason).expect("terminal admission handoff");
+            assert!(host[..failure].rfind("if !admitted").is_some());
+            assert!(host[..failure].rfind("native_terminal_failure").is_some());
+        }
+    }
+
+    #[test]
+    fn macos_divider_capture_survives_geometry_only_relayout_but_not_topology_change() {
+        let source = include_str!("platform/macos/stage.rs");
+        let set_tree = source
+            .split("pub fn set_tree(&self, tree: Option<Pane>)")
+            .nth(1)
+            .expect("macOS stage tree setter")
+            .split("pub fn set_on_ratio")
+            .next()
+            .expect("bounded macOS stage tree setter");
+
+        assert!(set_tree.contains("!current.same_topology(next)"));
+        let geometry_only = set_tree
+            .split("if drag_active && !topology_changed")
+            .nth(1)
+            .expect("geometry-only drag guard")
+            .split("if topology_changed")
+            .next()
+            .expect("bounded geometry-only drag guard");
+        assert!(geometry_only.contains("return true;"));
+        let topology_change = set_tree
+            .split("if topology_changed")
+            .nth(1)
+            .expect("topology-change capture revocation");
+        assert!(topology_change.contains("drag.take()"));
+        assert!(
+            topology_change.find("drag.take()").unwrap()
+                < topology_change.find("*current = next").unwrap()
+        );
+
+        let begin_update = source
+            .split("pub fn begin_content_update(&self, visible: bool)")
+            .nth(1)
+            .expect("macOS stage content-update reservation")
+            .split("pub fn content_update_is_current")
+            .next()
+            .expect("bounded content-update reservation");
+        let hidden = begin_update
+            .split("if !visible")
+            .nth(1)
+            .expect("hidden-stage capture revocation");
+        assert!(hidden.contains("drag.take()"));
+    }
+
+    #[test]
+    fn linux_stage_exhaustion_retains_one_coalesced_idle_redrive() {
+        let source = include_str!("platform/linux/stage.rs");
+        let sync = source
+            .split("fn sync(")
+            .nth(1)
+            .expect("Linux stage sync")
+            .split("fn schedule_sync")
+            .next()
+            .expect("bounded Linux stage sync");
+        assert!(sync.matches("schedule_sync(state, sync_scheduled)").count() >= 2);
+        assert!(sync.contains("conceal_views_until_retry(state)"));
+
+        let retry = source
+            .split("fn schedule_sync")
+            .nth(1)
+            .expect("Linux stage retry driver")
+            .split("fn make_indicator")
+            .next()
+            .expect("bounded Linux stage retry driver");
+        assert!(retry.contains("sync_scheduled.replace(true)"));
+        assert!(retry.contains("glib::idle_add_local_once"));
+        assert!(retry.contains("Rc::downgrade(state)"));
+        assert!(retry.contains("sync_scheduled.set(false)"));
+        assert!(retry.contains("sync(&state, &sync_scheduled)"));
+        assert!(retry.contains("view.set_opacity(0.0)"));
+    }
+
+    #[test]
+    fn raw_native_views_never_request_focus_during_construction() {
+        let source = include_str!("host.rs");
+        let raw_policy = source
+            .split("let mut builder = builder")
+            .nth(1)
+            .expect("raw view policy builder")
+            .split("// This host-owned guard")
+            .next()
+            .expect("pre-script raw view policy");
+        assert_eq!(raw_policy.matches(".with_focused(false)").count(), 1);
+    }
+
+    #[test]
+    fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
+        let source = include_str!("host.rs");
+        let completion = source
+            .split("fn queue_navigation_completion(")
+            .nth(1)
+            .expect("navigation completion queue")
+            .split("fn queue_navigation_failure(")
+            .next()
+            .expect("bounded navigation completion queue");
+        assert!(completion.contains("emit_navigation_observation"));
+        assert!(completion.contains("emit_navigation_ready"));
+        assert!(!completion.contains("present_navigation_epoch"));
+
+        let ready = source
+            .split("fn emit_navigation_ready(")
+            .nth(1)
+            .expect("navigation-ready emitter")
+            .split("fn present_navigation_epoch(")
+            .next()
+            .expect("bounded navigation-ready emitter");
+        assert!(ready.contains("EngineEvent::PresentationReady"));
+    }
+
+    #[test]
+    fn every_identity_bearing_commit_rearms_presentation_but_history_observation_does_not() {
+        let source = include_str!("host.rs");
+        let native_handler = source
+            .split("builder = builder.with_navigation_event_handler")
+            .nth(1)
+            .expect("raw navigation identity handler")
+            .split("#[cfg(target_os = \"windows\")]")
+            .next()
+            .expect("bounded raw navigation identity handler");
+        let committed = native_handler
+            .split("NavigationTransition::Committed(epoch)")
+            .nth(1)
+            .expect("identity-bearing commit branch")
+            .split("NavigationTransition::Finished(epoch)")
+            .next()
+            .expect("bounded identity-bearing commit branch");
+        assert!(committed.contains("queue_navigation_commit"));
+
+        let commit_queue = source
+            .split("fn queue_navigation_commit(")
+            .nth(1)
+            .expect("commit presentation queue")
+            .split("fn queue_navigation_completion(")
+            .next()
+            .expect("bounded commit presentation queue");
+        assert!(commit_queue.contains("rearm_navigation_presentation"));
+        assert!(commit_queue.contains("emit_navigation_observation"));
+
+        let source_observer = source
+            .split("let observer = match crate::platform::imp::install_navigation_observer")
+            .nth(1)
+            .expect("same-document source observer")
+            .split("// Not on Linux")
+            .next()
+            .expect("bounded same-document source observer");
+        assert!(source_observer.contains("emit_navigation_observation"));
+        assert!(!source_observer.contains("rearm_navigation_presentation"));
+
+        // Reload, history traversal, explicit navigation and page-driven
+        // navigation all converge on the same native Committed transition.
+        // The Wry guard hides before callback admission on all desktop ports.
+        let raw_policy = source
+            .split("let mut builder = builder")
+            .nth(1)
+            .expect("raw view policy builder")
+            .split("// This host-owned guard")
+            .next()
+            .expect("pre-script raw view policy");
+        assert!(raw_policy.contains("with_navigation_presentation_guard(move ||"));
+        assert!(raw_policy.contains("guard_presentation_permit.store(false, Ordering::Release)"));
+        let webview2 = include_str!("../../../vendor/wry/src/webview2/mod.rs");
+        assert!(webview2.contains("navigation_presentation_guard"));
+        assert!(webview2.contains("ShowWindow(hwnd, SW_HIDE)"));
+        assert!(webview2.contains("committed_controller.SetIsVisible(false)"));
+        let guarded_webview2 = webview2
+            .split("if let Some(guard) = navigation_presentation_guard.as_ref()")
+            .nth(1)
+            .expect("WebView2 commit guard");
+        assert!(
+            guarded_webview2.find("guard();").unwrap()
+                < guarded_webview2.find("ShowWindow(hwnd, SW_HIDE)").unwrap()
+        );
+
+        let webkitgtk = include_str!("../../../vendor/wry/src/webkitgtk/mod.rs");
+        let guarded_gtk = webkitgtk
+            .split("(navigation_presentation_guard.as_ref(), transition)")
+            .nth(1)
+            .expect("WebKitGTK commit guard");
+        assert!(
+            guarded_gtk.find("guard();").unwrap()
+                < guarded_gtk.find("webview.set_opacity(0.0)").unwrap()
+        );
+
+        let wkwebview = include_str!("../../../vendor/wry/src/wkwebview/navigation.rs");
+        let guarded_wk = wkwebview
+            .split("if let Some(guard) = &this.ivars().navigation_presentation_guard")
+            .nth(1)
+            .expect("WKWebView commit guard");
+        assert!(
+            guarded_wk.find("guard();").unwrap()
+                < guarded_wk.find("webview.setHidden(true)").unwrap()
+        );
+    }
+
+    #[test]
+    fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
+        let mac = include_str!("platform/macos/stage.rs");
+        let mac_sync = mac
+            .split("fn sync_visibility(&self)")
+            .nth(1)
+            .expect("macOS visibility sync")
+            .split("fn bump_layout_epoch")
+            .next()
+            .expect("bounded macOS visibility sync");
+        let mac_reveal = mac_sync
+            .find("view.view.setHidden(false)")
+            .expect("macOS reveal primitive");
+        assert!(mac_sync[..mac_reveal]
+            .rfind("presentation_permit.load(Ordering::Acquire)")
+            .is_some());
+        assert!(mac_sync[mac_reveal..]
+            .find("presentation_permit.load(Ordering::Acquire)")
+            .is_some());
+
+        let linux = include_str!("platform/linux/stage.rs");
+        let linux_sync = linux
+            .split("fn sync(")
+            .nth(1)
+            .expect("Linux stage sync")
+            .split("fn schedule_sync")
+            .next()
+            .expect("bounded Linux stage sync");
+        let linux_reveal = linux_sync
+            .find("view.view.set_opacity(1.0)")
+            .expect("Linux reveal primitive");
+        assert!(linux_sync[..linux_reveal]
+            .rfind("view_may_reveal(state, revision, *id, view)")
+            .is_some());
+        assert!(linux_sync[linux_reveal..]
+            .find("view_may_reveal(state, revision, *id, view)")
+            .is_some());
+
+        let windows = include_str!("platform/windows/stage.rs");
+        let windows_reveal = windows
+            .split("fn apply_native_placement(")
+            .nth(1)
+            .expect("Windows native placement")
+            .split("fn finish_native_placement")
+            .next()
+            .expect("bounded Windows native placement");
+        let controller_reveal = windows_reveal
+            .find("placement.controller.SetIsVisible(true)")
+            .expect("WebView2 controller reveal");
+        assert!(windows_reveal[..controller_reveal]
+            .rfind("placement_may_reveal(state, placement)")
+            .is_some());
+        assert!(windows_reveal[controller_reveal..]
+            .find("placement_may_reveal(state, placement)")
+            .is_some());
+        let window_reveal = windows_reveal
+            .find("ShowWindow(placement.container, SW_SHOWNA)")
+            .expect("WebView2 child window reveal");
+        assert!(windows_reveal[..window_reveal]
+            .rfind("placement_may_reveal(state, placement)")
+            .is_some());
+        assert!(windows_reveal[window_reveal..]
+            .find("placement_may_reveal(state, placement)")
+            .is_some());
+
+        let mac_container = mac
+            .split("fn sync_container_visibility(&self)")
+            .nth(1)
+            .expect("macOS container visibility sync")
+            .split("fn bump_layout_epoch")
+            .next()
+            .expect("bounded macOS container visibility sync");
+        let container_reveal = mac_container
+            .find("self.setHidden(false)")
+            .expect("macOS stage-container reveal");
+        assert!(mac_container[..container_reveal]
+            .rfind("content_update_epoch.get() == epoch")
+            .is_some());
+        assert!(mac_container[container_reveal..]
+            .find("content_update_epoch.get() != epoch")
+            .is_some());
+
+        let mac_host_layout = include_str!("host.rs")
+            .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_content(")
+            .nth(1)
+            .expect("macOS host layout")
+            .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_drop_indicator")
+            .next()
+            .expect("bounded macOS host layout");
+        assert!(
+            mac_host_layout.find("begin_content_update").unwrap()
+                < mac_host_layout.find("stage_set_frame").unwrap()
+        );
+        assert!(mac_host_layout.contains("content_update_is_current"));
+        assert!(mac_host_layout.contains("finish_content_update"));
+        assert!(!mac_host_layout.contains("stage.setHidden(false)"));
+
+        let host = include_str!("host.rs");
+        assert!(
+            host.matches("view.presentation_permit.load(Ordering::Acquire)")
+                .count()
+                >= 5
+        );
+        assert!(host.matches("view.presentable").count() >= 5);
+    }
+
+    #[test]
+    fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
+        let source = include_str!("host.rs");
+        let title_callback = source
+            .split(".with_document_title_changed_handler")
+            .nth(1)
+            .expect("raw title callback")
+            .split("// Intentionally do not install a new-window callback")
+            .next()
+            .expect("bounded raw title callback");
+        assert!(title_callback.contains("with_title_observation"));
+        assert!(!title_callback.contains("title_permit.emit"));
+
+        let completion = source
+            .split("fn queue_navigation_completion(")
+            .nth(1)
+            .expect("navigation completion queue")
+            .split("fn queue_navigation_failure(")
+            .next()
+            .expect("bounded navigation completion queue");
+        let title = completion
+            .find("complete_title_attribution")
+            .expect("finished native title query");
+        let ready = completion
+            .find("emit_navigation_ready")
+            .expect("presentation-ready event");
+        assert!(title < ready);
+
+        let observed = source
+            .split("fn emit_title_observation(")
+            .nth(1)
+            .expect("title observation gate")
+            .split("fn emit_navigation_observation(")
+            .next()
+            .expect("bounded title observation gate");
+        assert!(observed.contains("view.presentable"));
+        assert!(observed.contains("view.title_ready != Some(epoch)"));
+    }
+
+    #[test]
+    fn zoom_settlement_keeps_the_last_proven_native_scale_on_failure() {
+        assert_eq!(settled_zoom_scale(1.0, 1.25, true), 1.25);
+        assert_eq!(settled_zoom_scale(1.25, 1.5, false), 1.25);
+    }
+
+    #[test]
+    fn user_native_action_results_are_never_silently_discarded() {
+        let source = include_str!("host.rs");
+        let actions = source
+            .split("fn invoke_navigation_action(")
+            .nth(1)
+            .expect("native navigation-action adapter")
+            .split("pub(crate) fn zoom(")
+            .next()
+            .expect("bounded native navigation-action adapter");
+        assert!(actions.contains("EngineEvent::NativeActionFailed"));
+        assert!(actions.contains("emit_navigation_observation"));
+        assert!(!actions.contains("let _ = view.reload()"));
+        assert!(!actions.contains("let _ = view.go_back()"));
+        assert!(!actions.contains("let _ = view.go_forward()"));
+
+        let zoom = source
+            .split("pub(crate) fn zoom(")
+            .nth(1)
+            .expect("native zoom adapter")
+            .split("pub(crate) fn extract_html(")
+            .next()
+            .expect("bounded native zoom adapter");
+        assert!(zoom.contains("EngineEvent::ZoomSettled"));
+        assert!(zoom.contains("settled_zoom_scale"));
+        assert!(!zoom.contains("let _ = view.zoom"));
+    }
+
+    #[test]
+    fn raw_native_media_surfaces_are_denied_per_view() {
+        let source = include_str!("host.rs");
+        let raw_policy = source
+            .split("let mut builder = builder")
+            .nth(1)
+            .expect("raw view policy builder")
+            .split("// This host-owned guard")
+            .next()
+            .expect("pre-script raw view policy");
+        assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
+        assert!(raw_policy.contains("with_picture_in_picture_enabled(false)"));
+    }
+
+    #[test]
+    fn warm_spare_cannot_outlive_its_profiles_last_real_view() {
+        let source = include_str!("host.rs");
+        let ensure_spare = source
+            .split("pub(crate) fn ensure_spare(&mut self, partition: Partition)")
+            .nth(1)
+            .expect("native warm-spare implementation")
+            .split("pub(crate) fn ensure_spare(&mut self, partition: Partition)")
+            .next()
+            .expect("end of native warm-spare implementation");
+        assert!(ensure_spare.contains("!self.has_live_profile_view(profile)"));
+
+        let idle_close = source
+            .split("fn close_idle_spare(&mut self, profile: ProfileId)")
+            .nth(1)
+            .expect("idle spare retirement")
+            .split("pub(crate) fn close(&mut self, id: ItemId)")
+            .next()
+            .expect("end of idle spare retirement");
+        assert!(idle_close.contains("spare.view.close_explicit()"));
+        assert!(idle_close.contains("self.web_contexts.remove(&profile)"));
+
+        let close = source
+            .split("pub(crate) fn close(&mut self, id: ItemId)")
+            .nth(1)
+            .expect("view close implementation")
+            .split("pub(crate) fn erase_profile_data")
+            .next()
+            .expect("end of view close implementation");
+        assert!(close.contains("self.close_idle_spare(profile)"));
+    }
+
+    #[test]
     fn windows_raw_autofill_surfaces_are_mandatory_verified_postconditions() {
         let source = include_str!("platform/windows/mod.rs");
         let configure = source
@@ -5807,17 +7547,30 @@ mod tests {
     }
 
     #[test]
-    fn favicon_callback_accepts_only_the_canonical_primitive_string() {
-        let rgba = vec![17_u8; zephium_core::icon::RGBA32_BYTES];
+    fn favicon_callback_accepts_bounded_native_json_spellings_of_the_canonical_string() {
+        let rgba: Vec<u8> = (0..zephium_core::icon::RGBA32_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect();
         let chrome = zephium_core::icon::chrome_value(&rgba).unwrap();
         let encoded = chrome
             .strip_prefix(zephium_core::icon::RGBA32_PREFIX)
             .unwrap();
+        assert!(encoded.contains('/'));
         let serialized = serde_json::to_string(encoded).unwrap();
-        assert_eq!(decode_favicon_eval_result(&serialized), Some(rgba));
+        let foundation_serialized = serialized.replace('/', "\\/");
+        assert_eq!(decode_favicon_eval_result(&serialized), Some(rgba.clone()));
+        assert_eq!(
+            decode_favicon_eval_result(&foundation_serialized),
+            Some(rgba)
+        );
         assert!(decode_favicon_eval_result("null").is_none());
         assert!(decode_favicon_eval_result(encoded).is_none());
         assert!(decode_favicon_eval_result(&format!("\"{encoded}x\"")).is_none());
+        assert!(decode_favicon_eval_result(&format!(
+            "\"{}\"",
+            "A".repeat(zephium_core::icon::RGBA32_BASE64_BYTES * 2 + 1)
+        ))
+        .is_none());
     }
 
     #[test]
@@ -5846,12 +7599,20 @@ mod tests {
         let first_navigation = NavigationEpochTracker::new();
         let first_epoch = first_navigation.begin("https://first.example/").unwrap();
         assert_eq!(
-            first_navigation.observe_load("https://first.example/", &PageLoadEvent::Started),
-            Some(first_epoch)
+            first_navigation.observe_navigation(&wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(1),
+                phase: wry::NavigationEventPhase::Started,
+                url: "https://first.example/".into(),
+            }),
+            Some(NavigationTransition::Started(first_epoch))
         );
         assert_eq!(
-            first_navigation.observe_load("https://first.example/", &PageLoadEvent::Finished),
-            Some(first_epoch)
+            first_navigation.observe_navigation(&wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(1),
+                phase: wry::NavigationEventPhase::Committed,
+                url: "https://first.example/".into(),
+            }),
+            Some(NavigationTransition::Committed(first_epoch))
         );
         assert!(discard_probe_identity_matches(
             &first_permit,

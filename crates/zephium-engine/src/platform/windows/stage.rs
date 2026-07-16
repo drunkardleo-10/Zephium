@@ -8,6 +8,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
@@ -31,6 +33,8 @@ use wry::WebViewExtWindows;
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::split::{self, Pane};
+
+use crate::pane_geometry::rounded_native_size;
 
 const RADIUS: f64 = 8.0;
 const INDICATOR_RADIUS: f64 = 10.0;
@@ -105,7 +109,12 @@ struct HostView {
     serial: u64,
     applied: Cell<AppliedPlacement>,
     consecutive_failures: Cell<u8>,
+    terminal_failure_reported: Cell<bool>,
+    generation: Arc<AtomicBool>,
+    presentation_permit: Arc<AtomicBool>,
 }
+
+type PlacementFailureCallback = Rc<dyn Fn(ItemId, Arc<AtomicBool>)>;
 
 struct State {
     parent: HWND,
@@ -115,13 +124,24 @@ struct State {
     hidden: bool,
     tree: Option<Pane>,
     views: HashMap<ItemId, HostView>,
+    // Logical visibility alone must not expose a newly constructed
+    // controller's blank backing store. Every identity-bearing commit removes
+    // its leaf; exact URL attribution plus the shell's identity-bound
+    // acknowledgement inserts it again.
+    ready: HashSet<ItemId>,
     visible: HashSet<ItemId>,
     dirty: HashSet<ItemId>,
+    // A stale native visibility call can pump and return after a newer
+    // placement updated `applied`. Keep uncertainty separate instead of
+    // overwriting that newer cache; the next pass forcibly reasserts both
+    // HWND and controller visibility for the authoritative revision.
+    visibility_uncertain: HashSet<ItemId>,
     revision: u64,
     next_serial: u64,
     layout_timer: Option<usize>,
     indicator: Option<HWND>,
     indicator_size: (i32, i32),
+    on_placement_failure: PlacementFailureCallback,
 }
 
 thread_local! {
@@ -151,7 +171,11 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(parent: HWND, gap: f64) -> Self {
+    pub fn new(
+        parent: HWND,
+        gap: f64,
+        on_placement_failure: impl Fn(ItemId, Arc<AtomicBool>) + 'static,
+    ) -> Self {
         let state = Rc::new(RefCell::new(State {
             parent,
             gap,
@@ -160,22 +184,27 @@ impl Stage {
             hidden: true,
             tree: None,
             views: HashMap::new(),
+            ready: HashSet::new(),
             visible: HashSet::new(),
             dirty: HashSet::new(),
+            visibility_uncertain: HashSet::new(),
             revision: 0,
             next_serial: 1,
             layout_timer: None,
             indicator: None,
             indicator_size: (0, 0),
+            on_placement_failure: Rc::new(on_placement_failure),
         }));
         Self { state }
     }
 
     /// One native pass for frame, tree and visibility; `None` region hides
     /// the whole stage.
-    pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) {
+    pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) -> bool {
         let hide_now = {
-            let mut s = self.state.borrow_mut();
+            let Ok(mut s) = self.state.try_borrow_mut() else {
+                return false;
+            };
             let next_visible = if region.is_some() {
                 visible.iter().copied().collect::<HashSet<_>>()
             } else {
@@ -209,21 +238,39 @@ impl Stage {
         // this call; positioning/showing the latest panes is coalesced.
         hide_views(&self.state, &hide_now);
         schedule_sync(&self.state);
+        true
     }
 
     pub fn has_view(&self, id: ItemId) -> bool {
         self.state.borrow().views.contains_key(&id)
     }
 
-    pub fn insert_view(&self, id: ItemId, view: &wry::WebView) {
+    /// A coalesced layout may run before a later-queued controller creation.
+    /// The stage retains that desired tree so creation can attach and schedule
+    /// the missing child at the already-authoritative geometry.
+    pub fn contains_item(&self, id: ItemId) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.tree.as_ref().is_some_and(|tree| tree.contains(id)))
+    }
+
+    pub fn insert_view(
+        &self,
+        id: ItemId,
+        view: &wry::WebView,
+        generation: Arc<AtomicBool>,
+        presentation_permit: Arc<AtomicBool>,
+    ) -> bool {
         let controller = view.controller();
         let mut container = HWND::default();
         if unsafe { controller.ParentWindow(&mut container) }.is_err() {
-            return;
+            return false;
         }
         let _ = unsafe { ShowWindow(container, SW_HIDE) };
         let controller_hidden = unsafe { controller.SetIsVisible(false) }.is_ok();
         let mut state = self.state.borrow_mut();
+        state.ready.remove(&id);
+        state.visibility_uncertain.remove(&id);
         let serial = state.next_serial;
         state.next_serial = state.next_serial.wrapping_add(1).max(1);
         state.views.insert(
@@ -238,19 +285,77 @@ impl Stage {
                     ..AppliedPlacement::default()
                 }),
                 consecutive_failures: Cell::new(u8::from(!controller_hidden)),
+                terminal_failure_reported: Cell::new(false),
+                generation,
+                presentation_permit,
             },
         );
         state.dirty.insert(id);
         drop(state);
         schedule_sync(&self.state);
+        true
     }
 
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the container window; dropping the webview destroys it.
         let mut state = self.state.borrow_mut();
         state.views.remove(&id);
+        state.ready.remove(&id);
         state.dirty.remove(&id);
+        state.visibility_uncertain.remove(&id);
         state.visible.remove(&id);
+    }
+
+    /// Reveal one exact raw-view generation after privileged chrome verified
+    /// its attributed URL/revision and the shell returned the same identity.
+    pub fn set_ready(&self, id: ItemId) -> bool {
+        {
+            let Ok(mut state) = self.state.try_borrow_mut() else {
+                return false;
+            };
+            if !state.views.contains_key(&id) {
+                return false;
+            }
+            let newly_ready = state.ready.insert(id);
+            state.dirty.insert(id);
+            if newly_ready {
+                state.revision = state.revision.wrapping_add(1).max(1);
+            }
+        }
+        // Re-drive an identical value too: a previous bounded COM placement
+        // retry may have stopped without exposing the controller.
+        schedule_sync(&self.state);
+        true
+    }
+
+    /// Re-arm the presentation barrier for a newly committed main-frame
+    /// document. Hide in this call rather than waiting for the frame timer:
+    /// ContentLoading is the last browser-process boundary before the new
+    /// document can produce pixels, and an old readiness bit must not expose
+    /// them under stale chrome.
+    pub fn set_pending(&self, id: ItemId) -> bool {
+        let attached = match self.state.try_borrow_mut() {
+            Ok(mut state) => {
+                if !state.views.contains_key(&id) {
+                    return true;
+                }
+                if let Some(view) = state.views.get(&id) {
+                    view.presentation_permit.store(false, Ordering::Release);
+                }
+                if state.ready.remove(&id) {
+                    state.revision = state.revision.wrapping_add(1).max(1);
+                }
+                state.dirty.insert(id);
+                true
+            }
+            Err(_) => false,
+        };
+        if !attached {
+            return false;
+        }
+        hide_views(&self.state, &[id]);
+        schedule_sync(&self.state);
+        true
     }
 
     pub fn set_drop_indicator(&self, zone: Option<Rect>) {
@@ -432,12 +537,14 @@ struct NativePlacement {
     screen_origin: Option<(i32, i32)>,
     applied: AppliedPlacement,
     delta: PlacementDelta,
+    presentation_permit: Arc<AtomicBool>,
 }
 
 fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
     struct Hide {
         id: ItemId,
         serial: u64,
+        revision: u64,
         container: HWND,
         controller: ICoreWebView2Controller,
         applied: AppliedPlacement,
@@ -454,6 +561,7 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
                 .then(|| Hide {
                     id: *id,
                     serial: view.serial,
+                    revision: state.revision,
                     container: view.container,
                     controller: view.controller.clone(),
                     applied,
@@ -467,9 +575,18 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
         if applied.window_visible != Some(false) {
             let _ = unsafe { ShowWindow(hide.container, SW_HIDE) };
             applied.window_visible = Some(false);
+            if !hide_is_current(state, hide.id, hide.serial, hide.revision) {
+                redrive_uncertain_visibility(state, hide.id, hide.serial);
+                continue;
+            }
         }
         let controller_failed = if applied.controller_visible != Some(false) {
-            if unsafe { hide.controller.SetIsVisible(false) }.is_ok() {
+            let hidden = unsafe { hide.controller.SetIsVisible(false) }.is_ok();
+            if !hide_is_current(state, hide.id, hide.serial, hide.revision) {
+                redrive_uncertain_visibility(state, hide.id, hide.serial);
+                continue;
+            }
+            if hidden {
                 applied.controller_visible = Some(false);
                 false
             } else {
@@ -478,32 +595,88 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
         } else {
             false
         };
-        let mut state = state.borrow_mut();
-        let Some(view) = state
+        let mut current = state.borrow_mut();
+        if current.revision != hide.revision {
+            drop(current);
+            redrive_uncertain_visibility(state, hide.id, hide.serial);
+            continue;
+        }
+        let Some(view) = current
             .views
             .get(&hide.id)
             .filter(|view| view.serial == hide.serial)
         else {
+            drop(current);
+            redrive_uncertain_visibility(state, hide.id, hide.serial);
             continue;
         };
         view.applied.set(applied);
         if controller_failed {
-            state.dirty.insert(hide.id);
+            current.dirty.insert(hide.id);
         }
     }
 }
 
-fn placement_is_current(state: &Rc<RefCell<State>>, placement: &NativePlacement) -> bool {
-    let state = state.borrow();
-    state.revision == placement.revision
-        && state
+fn hide_is_current(state: &Rc<RefCell<State>>, id: ItemId, serial: u64, revision: u64) -> bool {
+    state.try_borrow().is_ok_and(|state| {
+        state.revision == revision
+            && state
+                .views
+                .get(&id)
+                .is_some_and(|view| view.serial == serial)
+    })
+}
+
+fn redrive_uncertain_visibility(state: &Rc<RefCell<State>>, id: ItemId, serial: u64) {
+    let marked = state.try_borrow_mut().is_ok_and(|mut state| {
+        if state
             .views
-            .get(&placement.id)
-            .is_some_and(|view| view.serial == placement.serial)
+            .get(&id)
+            .is_none_or(|view| view.serial != serial)
+        {
+            return false;
+        }
+        state.visibility_uncertain.insert(id);
+        state.dirty.insert(id);
+        true
+    });
+    if marked {
+        schedule_sync(state);
+    }
+}
+
+fn placement_is_current(state: &Rc<RefCell<State>>, placement: &NativePlacement) -> bool {
+    state.try_borrow().is_ok_and(|state| {
+        state.revision == placement.revision
+            && state
+                .views
+                .get(&placement.id)
+                .is_some_and(|view| view.serial == placement.serial)
+    })
+}
+
+fn placement_may_reveal(state: &Rc<RefCell<State>>, placement: &NativePlacement) -> bool {
+    placement.show
+        && placement.presentation_permit.load(Ordering::Acquire)
+        && state.try_borrow().is_ok_and(|state| {
+            state.revision == placement.revision
+                && !state.hidden
+                && state.visible.contains(&placement.id)
+                && state.ready.contains(&placement.id)
+                && state
+                    .tree
+                    .as_ref()
+                    .is_some_and(|tree| tree.contains(placement.id))
+                && state.views.get(&placement.id).is_some_and(|view| {
+                    view.serial == placement.serial
+                        && Arc::ptr_eq(&view.presentation_permit, &placement.presentation_permit)
+                })
+        })
+        && placement.presentation_permit.load(Ordering::Acquire)
 }
 
 fn sync(state: &Rc<RefCell<State>>) {
-    let (parent, gap, origin, size, hidden, tree, visible, dirty, revision) = {
+    let (parent, gap, origin, size, hidden, tree, ready, visible, dirty, revision) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
@@ -518,6 +691,7 @@ fn sync(state: &Rc<RefCell<State>>) {
             state.size,
             state.hidden,
             state.tree.clone(),
+            state.ready.clone(),
             state.visible.clone(),
             dirty,
             state.revision,
@@ -532,16 +706,12 @@ fn sync(state: &Rc<RefCell<State>>) {
         .map(|tree| split::layout(tree, local, gap))
         .unwrap_or_default()
         .into_iter()
-        .map(|(id, rect)| {
-            (
-                id,
-                (
-                    ((origin.0 + rect.x) * scale).round() as i32,
-                    ((origin.1 + rect.y) * scale).round() as i32,
-                    ((rect.width * scale).round() as i32).max(0),
-                    ((rect.height * scale).round() as i32).max(0),
-                ),
-            )
+        .filter_map(|(id, rect)| {
+            let (width, height) = rounded_native_size(rect.width, rect.height, scale)?;
+            let x = (origin.0 + rect.x) * scale;
+            let y = (origin.1 + rect.y) * scale;
+            (x.is_finite() && y.is_finite())
+                .then_some((id, (x.round() as i32, y.round() as i32, width, height)))
         })
         .collect::<HashMap<_, _>>();
     let mut parent_screen = POINT { x: 0, y: 0 };
@@ -556,9 +726,17 @@ fn sync(state: &Rc<RefCell<State>>) {
             .filter_map(|id| {
                 let view = state.views.get(&id)?;
                 let rect = pane_rects.get(&id).copied();
-                let show = !hidden && visible.contains(&id) && rect.is_some();
+                let show = !hidden
+                    && ready.contains(&id)
+                    && visible.contains(&id)
+                    && rect.is_some()
+                    && view.presentation_permit.load(Ordering::Acquire);
                 let applied = view.applied.get();
-                let delta = placement_delta(applied, show, rect, radius, parent_screen_origin);
+                let mut delta = placement_delta(applied, show, rect, radius, parent_screen_origin);
+                if state.visibility_uncertain.contains(&id) {
+                    delta.window_visibility = true;
+                    delta.controller_visibility = true;
+                }
                 (!delta.is_empty()).then(|| NativePlacement {
                     id,
                     serial: view.serial,
@@ -571,6 +749,7 @@ fn sync(state: &Rc<RefCell<State>>) {
                     screen_origin: parent_screen_origin,
                     applied,
                     delta,
+                    presentation_permit: view.presentation_permit.clone(),
                 })
             })
             .collect::<Vec<_>>()
@@ -594,16 +773,25 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
 
     let mut applied = placement.applied;
     let mut failed = false;
-    if !placement.show {
-        if placement.delta.window_visibility {
+    let presentation_revoked = !placement.presentation_permit.load(Ordering::Acquire);
+    if !placement.show || presentation_revoked {
+        if presentation_revoked || placement.delta.window_visibility {
             let _ = unsafe { ShowWindow(placement.container, SW_HIDE) };
             applied.window_visible = Some(false);
+            if !placement_is_current(state, placement) {
+                finish_native_placement(state, placement, applied, false);
+                return;
+            }
         }
-        if placement.delta.controller_visibility {
+        if presentation_revoked || placement.delta.controller_visibility {
             if unsafe { placement.controller.SetIsVisible(false) }.is_ok() {
                 applied.controller_visible = Some(false);
             } else {
                 failed = true;
+            }
+            if !placement_is_current(state, placement) {
+                finish_native_placement(state, placement, applied, false);
+                return;
             }
         }
         finish_native_placement(state, placement, applied, failed);
@@ -631,6 +819,10 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         } else {
             failed = true;
         }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
     }
     if placement.delta.rounded {
         let region = unsafe {
@@ -652,6 +844,10 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         } else {
             applied.rounded = Some((width, height, placement.radius));
         }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
     }
     if placement.delta.controller_size {
         if unsafe {
@@ -668,6 +864,10 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         } else {
             failed = true;
         }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
     }
     if placement.delta.notify_parent_position {
         if unsafe { placement.controller.NotifyParentWindowPositionChanged() }.is_ok() {
@@ -677,13 +877,17 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         } else {
             failed = true;
         }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
     }
 
     // COM can re-enter the message pump. Revalidate the stage revision before
     // making content visible so a superseded placement cannot win the race.
     let geometry_ready = applied.container_rect == placement.rect
         && applied.controller_size == Some((width, height));
-    if geometry_ready && placement_is_current(state, placement) {
+    if geometry_ready && placement_may_reveal(state, placement) {
         if placement.delta.controller_visibility {
             if unsafe { placement.controller.SetIsVisible(true) }.is_ok() {
                 applied.controller_visible = Some(true);
@@ -691,9 +895,27 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
                 failed = true;
             }
         }
-        if applied.controller_visible == Some(true) && placement.delta.window_visibility {
+        if !placement_may_reveal(state, placement) {
+            // SetIsVisible is a COM boundary and may pump a newer tab/split
+            // update whose old leaf still has a valid navigation permit.
+            // Revision and logical visibility therefore dominate the permit.
+            let _ = unsafe { placement.controller.SetIsVisible(false) };
+            applied.controller_visible = Some(false);
+            let _ = unsafe { ShowWindow(placement.container, SW_HIDE) };
+            applied.window_visible = Some(false);
+        } else if applied.controller_visible == Some(true) && placement.delta.window_visibility {
             let _ = unsafe { ShowWindow(placement.container, SW_SHOWNA) };
             applied.window_visible = Some(true);
+        }
+        if !placement_may_reveal(state, placement) {
+            // Both COM visibility and ShowWindow can pump a nested native
+            // commit or layout. A superseding revision observed after either
+            // call wins before the outer placement reaches the compositor.
+            let _ = unsafe { ShowWindow(placement.container, SW_HIDE) };
+            applied.window_visible = Some(false);
+            if unsafe { placement.controller.SetIsVisible(false) }.is_ok() {
+                applied.controller_visible = Some(false);
+            }
         }
     } else {
         let _ = unsafe { ShowWindow(placement.container, SW_HIDE) };
@@ -706,6 +928,24 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
     finish_native_placement(state, placement, applied, failed);
 }
 
+fn conceal_superseded_placement(
+    state: &Rc<RefCell<State>>,
+    placement: &NativePlacement,
+    mut applied: AppliedPlacement,
+) {
+    // A geometry API can pump a nested message loop which applies a newer
+    // tab/split revision, then return to this stale stack frame. Conceal both
+    // native surfaces before returning; finish_native_placement recognizes
+    // supersession, preserves the latest dirty obligation, and does not spend
+    // the bounded native-failure budget.
+    let _ = unsafe { ShowWindow(placement.container, SW_HIDE) };
+    applied.window_visible = Some(false);
+    if unsafe { placement.controller.SetIsVisible(false) }.is_ok() {
+        applied.controller_visible = Some(false);
+    }
+    finish_native_placement(state, placement, applied, false);
+}
+
 fn finish_native_placement(
     state: &Rc<RefCell<State>>,
     placement: &NativePlacement,
@@ -713,27 +953,61 @@ fn finish_native_placement(
     failed: bool,
 ) {
     let mut retry = false;
+    let mut terminal = None;
     {
         let mut state = state.borrow_mut();
-        let Some(view) = state
-            .views
-            .get(&placement.id)
-            .filter(|view| view.serial == placement.serial)
-        else {
-            return;
+        let superseded = state.revision != placement.revision;
+        let report_generation = {
+            let Some(view) = state
+                .views
+                .get(&placement.id)
+                .filter(|view| view.serial == placement.serial)
+            else {
+                return;
+            };
+            if superseded {
+                // A WebView2 COM call above may have pumped a nested message
+                // loop in which a newer resize/split revision was applied.
+                // Do not overwrite the newer pass's applied cache. The stale
+                // native call can still have landed after that cache update,
+                // so force both visibility surfaces on the next revision.
+                retry = true;
+                None
+            } else if failed {
+                view.applied.set(applied);
+                let failures = view.consecutive_failures.get().saturating_add(1);
+                view.consecutive_failures.set(failures);
+                retry = failures <= MAX_NATIVE_RETRIES;
+                (!retry && !view.terminal_failure_reported.replace(true))
+                    .then(|| view.generation.clone())
+            } else {
+                view.applied.set(applied);
+                view.consecutive_failures.set(0);
+                None
+            }
         };
-        view.applied.set(applied);
-        if failed {
-            let failures = view.consecutive_failures.get().saturating_add(1);
-            view.consecutive_failures.set(failures);
+        if superseded {
+            state.visibility_uncertain.insert(placement.id);
+        } else if !failed
+            && applied.window_visible == Some(placement.show)
+            && applied.controller_visible == Some(placement.show)
+        {
+            state.visibility_uncertain.remove(&placement.id);
+        }
+        if superseded || failed {
             state.dirty.insert(placement.id);
-            retry = failures <= MAX_NATIVE_RETRIES;
-        } else {
-            view.consecutive_failures.set(0);
+        }
+        if let Some(generation) = report_generation {
+            terminal = Some((state.on_placement_failure.clone(), generation));
+            state.dirty.remove(&placement.id);
         }
     }
     if retry {
         schedule_sync(state);
+    } else if let Some((callback, generation)) = terminal {
+        // Invoke only after the RefCell borrow is released. The callback may
+        // enter the host queue and retire this exact generation.
+        callback(placement.id, generation);
     }
 }
 

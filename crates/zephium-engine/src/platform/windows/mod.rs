@@ -540,6 +540,13 @@ pub fn current_url(view: &wry::WebView) -> Option<String> {
     take_pwstr_bounded(source, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
 }
 
+pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
+    // Wry's ContentLoading guard has already hidden both the child HWND and
+    // controller. Re-drive the operation here so COM failure becomes an
+    // exact host lifecycle failure rather than best-effort presentation.
+    view.set_visible(false).is_ok()
+}
+
 /// A synchronization handle opened while the WebView2 browser process is
 /// known alive. Holding the OS handle (rather than only a PID) avoids PID
 /// reuse races when profile deletion waits for the UDF session to end.

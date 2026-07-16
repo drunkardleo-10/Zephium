@@ -1,9 +1,12 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{NSColor, NSEvent, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
@@ -11,19 +14,55 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::split::{self, Divider, Pane};
 
+use crate::pane_geometry::rounded_native_size;
+
 type RatioCallback = Rc<dyn Fn(Pane)>;
+type StageFailureCallback = Rc<dyn Fn(usize)>;
+const MAX_ASYNC_STAGE_RETRIES: u8 = 4;
+
+#[derive(Clone)]
+struct HostView {
+    view: Retained<NSView>,
+    presentation_permit: Arc<AtomicBool>,
+}
 
 #[derive(Default)]
 pub struct StageIvars {
-    // Boxed: ItemId is a u128 (align 16) and the ObjC runtime caps ivar
-    // alignment at 8, so the tree must live behind a pointer.
+    // Boxed: ItemId is a u128 (align 16), while objc2 0.6's `define_class!`
+    // registrar supports ivar alignments only through 8 bytes. Keep the tree
+    // in a correctly aligned Rust allocation behind a pointer-sized ivar.
     tree: RefCell<Option<Box<Pane>>>,
-    views: RefCell<HashMap<ItemId, Retained<NSView>>>,
+    views: RefCell<HashMap<ItemId, HostView>>,
+    // A raw view is never exposed while it still contains WKWebView's
+    // construction-time blank document. `visible` is the logical split
+    // model; `ready` advances only after privileged chrome applies and
+    // verifies the exact committed URL/revision.
+    visible: RefCell<HashSet<ItemId>>,
+    ready: RefCell<HashSet<ItemId>>,
+    /// Leaves whose current AppKit frame occupies at least one backing pixel
+    /// on each axis. A collapsed deep split is hidden, not promoted to an
+    /// arbitrary surface; resize can repopulate this set reversibly.
+    paintable: RefCell<HashSet<ItemId>>,
+    paintable_changed: Cell<bool>,
+    // Host layout calls can re-enter AppKit while applying frame/tree/view
+    // mutations. This generation makes the newest nested call authoritative
+    // over every older stack frame, including visibility of the stage itself.
+    content_update_epoch: Cell<u64>,
+    desired_container_visible: Cell<bool>,
     layout_epoch: Cell<u64>,
+    // Geometry/visibility native calls can re-enter AppKit more often than
+    // the bounded synchronous convergence loop permits. One retained main-
+    // queue turn owns the retry; while it is pending the entire stage stays
+    // hidden so stale split frames cannot paint beneath newer chrome.
+    stage_retry_scheduled: Cell<bool>,
+    stage_retry_attempts: Cell<u8>,
+    stage_retry_terminal: Cell<bool>,
+    geometry_pending: Cell<bool>,
     gap: Cell<f64>,
     drag: RefCell<Option<Divider>>,
     indicator: RefCell<Option<Retained<NSView>>>,
     on_ratio: RefCell<Option<RatioCallback>>,
+    on_stage_failure: RefCell<Option<StageFailureCallback>>,
 }
 
 define_class!(
@@ -36,11 +75,17 @@ define_class!(
     impl ContentStage {
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
-            self.position_panes();
+            self.bump_layout_epoch();
+            if self.position_panes() && self.ivars().paintable_changed.replace(false) {
+                let _ = self.sync_visibility();
+            }
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if self.ivars().stage_retry_terminal.get() {
+                return;
+            }
             let (px, py) = self.local_point(event);
             let ivars = self.ivars();
             let tree = ivars
@@ -59,17 +104,27 @@ define_class!(
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
+            if self.ivars().stage_retry_terminal.get() {
+                return;
+            }
             let ivars = self.ivars();
-            let Some(drag) = ivars.drag.try_borrow().ok().and_then(|drag| drag.clone()) else {
+            let Some(grabbed) = ivars.drag.try_borrow().ok().and_then(|drag| drag.clone()) else {
                 return;
             };
             let (px, py) = self.local_point(event);
-            let ratio = split::ratio_for(drag.axis, drag.rect, ivars.gap.get(), px, py);
+            let region = self.region();
+            let gap = ivars.gap.get();
             let changed = if let Ok(mut tree) = ivars.tree.try_borrow_mut() {
                 let Some(tree) = tree.as_mut() else {
                     return;
                 };
-                tree.set_ratio(&drag.path, ratio);
+                let Some(current) =
+                    split::divider_at_path(tree, region, gap, &grabbed.path)
+                else {
+                    return;
+                };
+                let ratio = split::ratio_for(current.axis, current.rect, gap, px, py);
+                tree.set_ratio(&current.path, ratio);
                 true
             } else {
                 false
@@ -78,20 +133,48 @@ define_class!(
                 return;
             }
             self.bump_layout_epoch();
-            self.position_panes();
+            if self.position_panes() && self.ivars().paintable_changed.replace(false) {
+                let _ = self.sync_visibility();
+            }
         }
 
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, _event: &NSEvent) {
+        fn mouse_up(&self, event: &NSEvent) {
+            if self.ivars().stage_retry_terminal.get() {
+                return;
+            }
             let ivars = self.ivars();
-            if ivars
+            let Some(drag) = ivars
                 .drag
                 .try_borrow_mut()
                 .ok()
                 .and_then(|mut drag| drag.take())
-                .is_none()
-            {
+            else {
                 return;
+            };
+            // AppKit may deliver the final pointer coordinate in mouseUp
+            // without a preceding mouseDragged at that exact position. Land
+            // it before publishing the authoritative tree to the shell.
+            let (px, py) = self.local_point(event);
+            let region = self.region();
+            let gap = ivars.gap.get();
+            let changed = if let Ok(mut tree) = ivars.tree.try_borrow_mut() {
+                tree.as_mut().is_some_and(|tree| {
+                    let Some(current) = split::divider_at_path(tree, region, gap, &drag.path) else {
+                        return false;
+                    };
+                    let ratio = split::ratio_for(current.axis, current.rect, gap, px, py);
+                    tree.set_ratio(&current.path, ratio);
+                    true
+                })
+            } else {
+                false
+            };
+            if changed {
+                self.bump_layout_epoch();
+                if self.position_panes() && self.ivars().paintable_changed.replace(false) {
+                    let _ = self.sync_visibility();
+                }
             }
             let tree = ivars
                 .tree
@@ -113,25 +196,149 @@ define_class!(
 );
 
 impl ContentStage {
-    pub fn new(mtm: MainThreadMarker, gap: f64) -> Retained<Self> {
+    pub fn new(
+        mtm: MainThreadMarker,
+        gap: f64,
+        on_stage_failure: Box<dyn Fn(usize)>,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(StageIvars {
             gap: Cell::new(gap),
+            on_stage_failure: RefCell::new(Some(Rc::from(on_stage_failure))),
             ..Default::default()
         });
-        unsafe { msg_send![super(this), init] }
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setWantsLayer(true);
+        // `addSubview:` is a native painting boundary. A newly-created stage
+        // remains fail-closed until one exact layout update finishes.
+        this.setHidden(true);
+        this
     }
 
-    pub fn set_tree(&self, tree: Option<Pane>) {
+    /// Reserve authority for one host layout before performing any AppKit
+    /// calls. A nested layout increments this epoch and permanently prevents
+    /// the older stack frame from revealing the stage container afterward.
+    pub fn begin_content_update(&self, visible: bool) -> Option<u64> {
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return None;
+        }
+        let epoch = self
+            .ivars()
+            .content_update_epoch
+            .get()
+            .wrapping_add(1)
+            .max(1);
+        self.ivars().content_update_epoch.set(epoch);
+        self.ivars().desired_container_visible.set(visible);
+        if !visible {
+            // AppKit may not deliver mouseUp after the owning window is
+            // hidden/minimized. Do not let that abandoned native capture keep
+            // authorizing an old divider path when the stage is shown again.
+            if let Ok(mut drag) = self.ivars().drag.try_borrow_mut() {
+                drag.take();
+            }
+        }
+        Some(epoch)
+    }
+
+    pub fn content_update_is_current(&self, epoch: u64) -> bool {
+        !self.ivars().stage_retry_terminal.get() && self.ivars().content_update_epoch.get() == epoch
+    }
+
+    pub fn has_terminal_failure(&self) -> bool {
+        self.ivars().stage_retry_terminal.get()
+    }
+
+    /// Complete the exact update reserved by `begin_content_update`. Stale
+    /// outer updates are no-ops; their nested successor already owns the
+    /// retained desired state and native convergence obligation.
+    pub fn finish_content_update(&self, epoch: u64) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return false;
+        }
+        if !self.content_update_is_current(epoch) {
+            return true;
+        }
+        let _ = self.sync_container_visibility();
+        // A retained main-queue retry is an accepted native obligation, not a
+        // terminal application failure. Only exhaustion/panic makes the host
+        // seal the engine; the stage remains hidden while a retry is pending.
+        !self.ivars().stage_retry_terminal.get()
+    }
+
+    /// An exact layout whose native children could not be established must
+    /// never leave the prior stage visible under newer browser chrome.
+    pub fn abort_content_update(&self, epoch: u64) {
+        if self.content_update_is_current(epoch) {
+            self.ivars().desired_container_visible.set(false);
+            if let Ok(mut drag) = self.ivars().drag.try_borrow_mut() {
+                drag.take();
+            }
+            let superseding = self
+                .ivars()
+                .content_update_epoch
+                .get()
+                .wrapping_add(1)
+                .max(1);
+            self.ivars().content_update_epoch.set(superseding);
+        }
+        let _ = self.sync_container_visibility();
+    }
+
+    pub fn set_tree(&self, tree: Option<Pane>) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            return false;
+        }
         let Ok(mut current) = self.ivars().tree.try_borrow_mut() else {
-            return;
+            return false;
         };
-        *current = tree.map(Box::new);
+        let next = tree.map(Box::new);
+        if current.as_deref() == next.as_deref() {
+            drop(current);
+            let _ = self.position_panes();
+            return !self.ivars().stage_retry_terminal.get();
+        }
+        let topology_changed = match (current.as_deref(), next.as_deref()) {
+            (Some(current), Some(next)) => !current.same_topology(next),
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => true,
+        };
+        let drag_active = self
+            .ivars()
+            .drag
+            .try_borrow()
+            .is_ok_and(|drag| drag.is_some());
+        if drag_active && !topology_changed {
+            // During a native drag the stage owns the newest ratio while the
+            // shell intentionally waits for mouseUp. A resize can relayout
+            // with the shell's older ratio; retain the local tree and let
+            // resizeSubviews recompute geometry instead of snapping back.
+            return true;
+        }
+        if topology_changed {
+            let Ok(mut drag) = self.ivars().drag.try_borrow_mut() else {
+                // Never install a tree whose same binary path could still be
+                // authorized by an uncleared gesture.
+                return false;
+            };
+            drag.take();
+        }
+        *current = next;
         drop(current);
         self.bump_layout_epoch();
-        self.position_panes();
+        let _ = self.position_panes();
+        !self.ivars().stage_retry_terminal.get()
     }
 
     pub fn set_on_ratio(&self, f: Box<dyn Fn(Pane)>) {
+        if self.ivars().stage_retry_terminal.get() {
+            return;
+        }
         if let Ok(mut callback) = self.ivars().on_ratio.try_borrow_mut() {
             *callback = Some(Rc::from(f));
         }
@@ -144,19 +351,86 @@ impl ContentStage {
             .is_ok_and(|views| views.contains_key(&id))
     }
 
-    pub fn insert_view(&self, id: ItemId, view: Retained<NSView>) {
-        let Ok(mut views) = self.ivars().views.try_borrow_mut() else {
-            return;
+    /// Returns whether the latest authoritative layout expects this item.
+    /// A view can be constructed after that layout task ran, so creation uses
+    /// this retained model to attach the late native child without waiting for
+    /// another resize or user interaction.
+    pub fn contains_item(&self, id: ItemId) -> bool {
+        self.ivars()
+            .tree
+            .try_borrow()
+            .is_ok_and(|tree| tree.as_deref().is_some_and(|tree| tree.contains(id)))
+    }
+
+    pub fn attached_items(&self) -> Option<Vec<ItemId>> {
+        self.ivars()
+            .views
+            .try_borrow()
+            .ok()
+            .map(|views| views.keys().copied().collect())
+    }
+
+    pub fn retire(&self) {
+        self.ivars().stage_retry_terminal.set(true);
+        self.ivars().stage_retry_scheduled.set(false);
+        self.setHidden(true);
+        self.removeFromSuperview();
+    }
+
+    pub fn insert_view(
+        &self,
+        id: ItemId,
+        view: Retained<NSView>,
+        presentation_permit: Arc<AtomicBool>,
+    ) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            return false;
+        }
+        // `addSubview:` may paint synchronously. Hide before attaching so a
+        // new WKWebView cannot expose its default white backing store between
+        // construction and the first attributed, chrome-verified document.
+        view.setHidden(true);
+        let Ok(mut ready) = self.ivars().ready.try_borrow_mut() else {
+            return false;
         };
-        views.insert(id, view.clone());
+        ready.remove(&id);
+        drop(ready);
+        let Ok(mut views) = self.ivars().views.try_borrow_mut() else {
+            return false;
+        };
+        views.insert(
+            id,
+            HostView {
+                view: view.clone(),
+                presentation_permit,
+            },
+        );
         drop(views);
         self.bump_layout_epoch();
         // `addSubview:` can synchronously enter AppKit callbacks. Native work
         // happens only after the view registry borrow has been released.
         self.addSubview(&view);
+        if self.ivars().stage_retry_terminal.get() {
+            return false;
+        }
+        let _ = self.position_panes();
+        let _ = self.sync_visibility();
+        !self.ivars().stage_retry_terminal.get()
     }
 
     pub fn remove_view(&self, id: ItemId) {
+        if self.ivars().stage_retry_terminal.get() && !self.isHidden() {
+            self.setHidden(true);
+        }
+        if let Ok(mut visible) = self.ivars().visible.try_borrow_mut() {
+            visible.remove(&id);
+        }
+        if let Ok(mut ready) = self.ivars().ready.try_borrow_mut() {
+            ready.remove(&id);
+        }
+        if let Ok(mut paintable) = self.ivars().paintable.try_borrow_mut() {
+            paintable.remove(&id);
+        }
         let view = self
             .ivars()
             .views
@@ -165,25 +439,96 @@ impl ContentStage {
             .and_then(|mut views| views.remove(&id));
         if let Some(view) = view {
             self.bump_layout_epoch();
-            view.removeFromSuperview();
+            view.view.removeFromSuperview();
         }
     }
 
-    pub fn set_visible(&self, visible: &[ItemId]) {
-        let Some(views) = self.ivars().views.try_borrow().ok().map(|views| {
-            views
-                .iter()
-                .map(|(id, view)| (*id, view.clone()))
-                .collect::<Vec<_>>()
-        }) else {
-            return;
-        };
-        for (id, view) in views {
-            view.setHidden(!visible.contains(&id));
+    pub fn set_visible(&self, visible: &[ItemId]) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            return false;
         }
+        let next = visible.iter().copied().collect::<HashSet<_>>();
+        let Some(changed) = self
+            .ivars()
+            .visible
+            .try_borrow_mut()
+            .ok()
+            .map(|mut current| {
+                let changed = *current != next;
+                *current = next.clone();
+                changed
+            })
+        else {
+            return false;
+        };
+        if changed {
+            self.bump_layout_epoch();
+        }
+        // Run even for an identical logical value: a prior AppKit re-entry
+        // may have forced a fail-closed hide before the newest state settled.
+        let _ = self.sync_visibility();
+        !self.ivars().stage_retry_terminal.get()
+    }
+
+    /// Reveal one exact raw-view generation after privileged chrome verified
+    /// its attributed URL/revision and the shell returned the same identity.
+    pub fn set_ready(&self, id: ItemId) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            return false;
+        }
+        let newly_ready = match self.ivars().ready.try_borrow_mut() {
+            Ok(mut ready) => ready.insert(id),
+            Err(_) => return false,
+        };
+        if !newly_ready {
+            let _ = self.sync_visibility();
+            return !self.ivars().stage_retry_terminal.get();
+        }
+        self.bump_layout_epoch();
+        let _ = self.sync_visibility();
+        !self.ivars().stage_retry_terminal.get()
+    }
+
+    /// Re-arm the presentation barrier for a newly committed main-frame
+    /// document. The stage retains this logical state before native sync, so
+    /// a later resize/layout pass cannot reveal the new pixels using the
+    /// previous document's readiness acknowledgement.
+    pub fn set_pending(&self, id: ItemId) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return false;
+        }
+        let attached = match self.ivars().views.try_borrow() {
+            Ok(views) => views.contains_key(&id),
+            Err(_) => return false,
+        };
+        if !attached {
+            return true;
+        }
+        if let Ok(views) = self.ivars().views.try_borrow() {
+            if let Some(view) = views.get(&id) {
+                view.presentation_permit.store(false, Ordering::Release);
+            }
+        }
+        let removed = match self.ivars().ready.try_borrow_mut() {
+            Ok(mut ready) => ready.remove(&id),
+            Err(_) => return false,
+        };
+        if removed {
+            self.bump_layout_epoch();
+        }
+        // Run even when an identical pending value was already retained: a
+        // prior AppKit re-entry may have interrupted the fail-closed hide.
+        let _ = self.sync_visibility();
+        !self.ivars().stage_retry_terminal.get()
     }
 
     pub fn set_drop_indicator(&self, zone: Option<Rect>) {
+        if self.ivars().stage_retry_terminal.get() {
+            return;
+        }
         match zone {
             None => {
                 let view = self
@@ -256,11 +601,18 @@ impl ContentStage {
         (local.x, self.bounds().size.height - local.y)
     }
 
-    fn position_panes(&self) {
+    fn position_panes(&self) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return false;
+        }
         // A frame mutation can synchronously re-enter AppKit. Snapshot all
         // Rust ownership first, release RefCell guards, and retry from the
-        // latest model if re-entry changed the tree/view generation.
-        for _ in 0..4 {
+        // latest model if re-entry changed the tree/view generation. Never
+        // touch another child after one native call supersedes this snapshot.
+        'attempt: for _ in 0..4 {
             let ivars = self.ivars();
             let epoch = ivars.layout_epoch.get();
             let Some(tree) = ivars
@@ -269,32 +621,397 @@ impl ContentStage {
                 .ok()
                 .and_then(|tree| tree.as_deref().cloned())
             else {
-                return;
+                let Ok(mut paintable) = ivars.paintable.try_borrow_mut() else {
+                    self.defer_stage_retry(true);
+                    return false;
+                };
+                let changed = !paintable.is_empty();
+                paintable.clear();
+                ivars.paintable_changed.set(changed);
+                ivars.geometry_pending.set(false);
+                return true;
             };
             let Some(views) = ivars.views.try_borrow().ok().map(|views| views.clone()) else {
-                return;
+                self.defer_stage_retry(true);
+                return false;
             };
             let gap = ivars.gap.get();
             let bounds = self.bounds();
+            if !self.layout_epoch_is_current(epoch) {
+                continue 'attempt;
+            }
             let region = Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height);
+            let mut paintable = HashSet::new();
             for (id, r) in split::layout(&tree, region, gap) {
                 if let Some(view) = views.get(&id) {
-                    view.setFrame(NSRect::new(
+                    if !self.layout_epoch_is_current(epoch) {
+                        continue 'attempt;
+                    }
+                    let frame = NSRect::new(
                         NSPoint::new(r.x, bounds.size.height - r.y - r.height),
                         NSSize::new(r.width, r.height),
-                    ));
+                    );
+                    let backing = self.convertSizeToBacking(NSSize::new(r.width, r.height));
+                    if rounded_native_size(backing.width, backing.height, 1.0).is_some() {
+                        paintable.insert(id);
+                    }
+                    let current = view.view.frame();
+                    if !self.layout_epoch_is_current(epoch) {
+                        continue 'attempt;
+                    }
+                    if !same_rect(current, frame) {
+                        view.view.setFrame(frame);
+                        if !self.layout_epoch_is_current(epoch) {
+                            continue 'attempt;
+                        }
+                    }
                 }
             }
-            if self.ivars().layout_epoch.get() == epoch {
-                return;
+            if self.layout_epoch_is_current(epoch) {
+                let Ok(mut current) = self.ivars().paintable.try_borrow_mut() else {
+                    self.defer_stage_retry(true);
+                    return false;
+                };
+                let changed = *current != paintable;
+                *current = paintable;
+                drop(current);
+                self.ivars().paintable_changed.set(changed);
+                self.ivars().geometry_pending.set(false);
+                return true;
             }
         }
+        self.defer_stage_retry(true);
+        false
+    }
+
+    fn sync_visibility(&self) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return false;
+        }
+        // `setHidden:` may synchronously enter AppKit. Apply all removals
+        // before additions, and never show from a snapshot whose epoch was
+        // superseded during native work. A retry observes the newest model;
+        // exhaustion leaves uncertain views hidden until the next sync.
+        for _ in 0..4 {
+            let ivars = self.ivars();
+            let epoch = ivars.layout_epoch.get();
+            let Some(visible) = ivars.visible.try_borrow().ok().map(|set| set.clone()) else {
+                self.defer_stage_retry(false);
+                return false;
+            };
+            let Some(ready) = ivars.ready.try_borrow().ok().map(|set| set.clone()) else {
+                self.defer_stage_retry(false);
+                return false;
+            };
+            let Some(paintable) = ivars.paintable.try_borrow().ok().map(|set| set.clone()) else {
+                self.defer_stage_retry(false);
+                return false;
+            };
+            let Some(mut views) = ivars.views.try_borrow().ok().map(|views| {
+                views
+                    .iter()
+                    .map(|(id, view)| (*id, view.clone()))
+                    .collect::<Vec<_>>()
+            }) else {
+                self.defer_stage_retry(false);
+                return false;
+            };
+            views.sort_by_key(|(id, _)| *id);
+
+            let mut superseded = false;
+            for (_, view) in views.iter().filter(|(id, view)| {
+                !visible.contains(id)
+                    || !ready.contains(id)
+                    || !paintable.contains(id)
+                    || !view.presentation_permit.load(Ordering::Acquire)
+            }) {
+                if !view.view.isHidden() {
+                    view.view.setHidden(true);
+                }
+                if !self.layout_epoch_is_current(epoch) {
+                    superseded = true;
+                    break;
+                }
+            }
+            if superseded {
+                continue;
+            }
+
+            for (id, view) in views.iter().filter(|(id, _)| {
+                visible.contains(id) && ready.contains(id) && paintable.contains(id)
+            }) {
+                // Revalidate immediately before every reveal. This prevents
+                // an outer stale pass from undoing a nested newer hide.
+                let still_current = self.layout_epoch_is_current(epoch)
+                    && view.presentation_permit.load(Ordering::Acquire)
+                    && self
+                        .ivars()
+                        .visible
+                        .try_borrow()
+                        .is_ok_and(|current| current.contains(id))
+                    && self
+                        .ivars()
+                        .ready
+                        .try_borrow()
+                        .is_ok_and(|current| current.contains(id))
+                    && self
+                        .ivars()
+                        .paintable
+                        .try_borrow()
+                        .is_ok_and(|current| current.contains(id));
+                if !still_current {
+                    superseded = true;
+                    break;
+                }
+                let hidden = view.view.isHidden();
+                if !self.layout_epoch_is_current(epoch)
+                    || !view.presentation_permit.load(Ordering::Acquire)
+                {
+                    superseded = true;
+                    break;
+                }
+                if hidden {
+                    view.view.setHidden(false);
+                }
+                if !self.layout_epoch_is_current(epoch)
+                    || !view.presentation_permit.load(Ordering::Acquire)
+                {
+                    // `setHidden(false)` may pump a native commit callback.
+                    // A permit revoked during that re-entry wins before this
+                    // outer pass returns to AppKit for painting.
+                    if !view.view.isHidden() {
+                        view.view.setHidden(true);
+                    }
+                    superseded = true;
+                    break;
+                }
+            }
+            if !superseded && self.layout_epoch_is_current(epoch) {
+                return true;
+            }
+        }
+
+        // Native re-entry kept changing ownership. Enforce the part that is
+        // always safe from the latest model; a later identical sync may show
+        // the now-settled desired leaves.
+        let visible = self
+            .ivars()
+            .visible
+            .try_borrow()
+            .ok()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        let ready = self
+            .ivars()
+            .ready
+            .try_borrow()
+            .ok()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        let paintable = self
+            .ivars()
+            .paintable
+            .try_borrow()
+            .ok()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        if let Ok(views) = self.ivars().views.try_borrow() {
+            for (id, view) in views.iter() {
+                if !view.view.isHidden()
+                    && (!visible.contains(id)
+                        || !ready.contains(id)
+                        || !paintable.contains(id)
+                        || !view.presentation_permit.load(Ordering::Acquire))
+                {
+                    view.view.setHidden(true);
+                }
+            }
+        }
+        self.defer_stage_retry(false);
+        false
+    }
+
+    fn defer_stage_retry(&self, geometry: bool) {
+        if geometry {
+            self.ivars().geometry_pending.set(true);
+        }
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return;
+        }
+        let already_scheduled = self.ivars().stage_retry_scheduled.replace(true);
+        // Conceal the container before queueing. A stale geometry snapshot is
+        // unsafe even when every child still has a valid navigation permit.
+        if !self.isHidden() {
+            self.setHidden(true);
+        }
+        if self.ivars().stage_retry_terminal.get() {
+            self.ivars().stage_retry_scheduled.set(false);
+            return;
+        }
+        if already_scheduled {
+            return;
+        }
+        let attempts = self.ivars().stage_retry_attempts.get();
+        if attempts >= MAX_ASYNC_STAGE_RETRIES {
+            self.fail_stage_retry_terminal();
+            return;
+        }
+        self.ivars()
+            .stage_retry_attempts
+            .set(attempts.saturating_add(1));
+        let Some(mtm) = MainThreadMarker::new() else {
+            // ContentStage is MainThreadOnly, so this is an invariant guard.
+            // Retain the pending bit and hidden container if it is violated.
+            return;
+        };
+        let stage = MainThreadBound::new(self.retain(), mtm);
+        DispatchQueue::main().exec_async(move || {
+            // libdispatch callbacks have a C ABI; native re-entry must never
+            // let a Rust unwind cross that boundary.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return false;
+                };
+                let stage = stage.get(mtm);
+                stage.ivars().stage_retry_scheduled.set(false);
+                if stage.position_panes() && stage.sync_visibility() {
+                    return stage.sync_container_visibility();
+                }
+                false
+            }));
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let stage = stage.get(mtm);
+            match outcome {
+                Ok(true) => stage.ivars().stage_retry_attempts.set(0),
+                Ok(false) => {}
+                Err(_) => stage.fail_stage_retry_terminal(),
+            }
+        });
+    }
+
+    fn fail_stage_retry_terminal(&self) {
+        if self.ivars().stage_retry_terminal.replace(true) {
+            return;
+        }
+        self.ivars().stage_retry_scheduled.set(false);
+        if !self.isHidden() {
+            self.setHidden(true);
+        }
+        let callback = self
+            .ivars()
+            .on_stage_failure
+            .try_borrow()
+            .ok()
+            .and_then(|callback| callback.clone());
+        if let Some(callback) = callback {
+            callback(self as *const Self as usize);
+        }
+    }
+
+    fn sync_container_visibility(&self) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            if !self.isHidden() {
+                self.setHidden(true);
+            }
+            return false;
+        }
+        // `setHidden:` can pump AppKit. Revalidate the exact desired-layout
+        // generation before and after a reveal; on any mismatch conceal first
+        // and retry from the newest retained fact.
+        for _ in 0..4 {
+            let epoch = self.ivars().content_update_epoch.get();
+            let desired = self.ivars().desired_container_visible.get();
+            let presentation_safe = !self.ivars().stage_retry_terminal.get()
+                && !self.ivars().geometry_pending.get()
+                && !self.ivars().stage_retry_scheduled.get();
+            if !desired || !presentation_safe {
+                if !self.isHidden() {
+                    self.setHidden(true);
+                }
+                if self.ivars().content_update_epoch.get() == epoch
+                    && (!self.ivars().desired_container_visible.get()
+                        || self.ivars().geometry_pending.get()
+                        || self.ivars().stage_retry_scheduled.get()
+                        || self.ivars().stage_retry_terminal.get())
+                {
+                    return presentation_safe;
+                }
+                continue;
+            }
+
+            let may_reveal = self.ivars().content_update_epoch.get() == epoch
+                && self.ivars().desired_container_visible.get()
+                && !self.ivars().stage_retry_terminal.get()
+                && !self.ivars().geometry_pending.get()
+                && !self.ivars().stage_retry_scheduled.get();
+            if !may_reveal {
+                continue;
+            }
+            let hidden = self.isHidden();
+            if self.ivars().stage_retry_terminal.get()
+                || self.ivars().content_update_epoch.get() != epoch
+                || !self.ivars().desired_container_visible.get()
+                || self.ivars().geometry_pending.get()
+                || self.ivars().stage_retry_scheduled.get()
+            {
+                if !hidden {
+                    self.setHidden(true);
+                }
+                continue;
+            }
+            if hidden {
+                self.setHidden(false);
+            }
+            if self.ivars().content_update_epoch.get() != epoch
+                || !self.ivars().desired_container_visible.get()
+                || self.ivars().stage_retry_terminal.get()
+                || self.ivars().geometry_pending.get()
+                || self.ivars().stage_retry_scheduled.get()
+            {
+                // A nested hide or newer visible layout owns the container.
+                // Conceal before retrying so this stale outer setter cannot
+                // expose old leaves even for one compositor turn.
+                if !self.isHidden() {
+                    self.setHidden(true);
+                }
+                continue;
+            }
+            return true;
+        }
+
+        // Re-entry did not converge within the bounded synchronous budget.
+        // The privileged chrome surface is preferable to stale page pixels;
+        // a subsequent identical layout/ready update retries presentation.
+        if !self.isHidden() {
+            self.setHidden(true);
+        }
+        self.defer_stage_retry(false);
+        false
     }
 
     fn bump_layout_epoch(&self) {
         let epoch = self.ivars().layout_epoch.get().wrapping_add(1);
         self.ivars().layout_epoch.set(epoch.max(1));
     }
+
+    fn layout_epoch_is_current(&self, epoch: u64) -> bool {
+        !self.ivars().stage_retry_terminal.get() && self.ivars().layout_epoch.get() == epoch
+    }
+}
+
+fn same_rect(left: NSRect, right: NSRect) -> bool {
+    left.origin.x == right.origin.x
+        && left.origin.y == right.origin.y
+        && left.size.width == right.size.width
+        && left.size.height == right.size.height
 }
 
 #[cfg(test)]
