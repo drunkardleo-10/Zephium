@@ -6,35 +6,42 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
-	tabsOpen: () => __TAURI_INVOKE<void>("tabs_open"),
-	tabsActivate: (id: string) => __TAURI_INVOKE<void>("tabs_activate", { id }),
-	tabsClose: (id: string) => __TAURI_INVOKE<void>("tabs_close", { id }),
-	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<void>("tabs_navigate", { id, input }),
-	tabsReload: (id: string) => __TAURI_INVOKE<void>("tabs_reload", { id }),
-	tabsBack: (id: string) => __TAURI_INVOKE<void>("tabs_back", { id }),
-	tabsForward: (id: string) => __TAURI_INVOKE<void>("tabs_forward", { id }),
-	tabsSplit: (other: string) => __TAURI_INVOKE<void>("tabs_split", { other }),
-	tabsUnsplit: () => __TAURI_INVOKE<void>("tabs_unsplit"),
-	runCommand: (id: string) => __TAURI_INVOKE<void>("run_command", { id }),
+	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
+	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
+	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
+	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
+	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
+	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
+	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
+	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
+	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
+	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
+	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
+	operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
+	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
+	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
-	settingSet: (key: string, value: string) => __TAURI_INVOKE<void>("setting_set", { key, value }),
+	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
+	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
 	menuPopup: () => __TAURI_INVOKE<void>("menu_popup"),
 	launcherSearch: (query: string) => __TAURI_INVOKE<void>("launcher_search", { query }),
-	launcherRun: (action: SearchAction) => __TAURI_INVOKE<void>("launcher_run", { action }),
+	launcherRun: (action: SearchAction) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
-	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drop", { id, x, y }),
+	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
 	dividerDrag: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_drag", { x, y }),
-	dividerRelease: () => __TAURI_INVOKE<void>("divider_release"),
+	dividerRelease: (x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("divider_release", { x, y }),
 };
 
 /** Events */
 export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
+	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
+	runtimeStatusChanged: makeEvent<RuntimeStatusChanged>("runtime-status-changed"),
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
@@ -56,6 +63,7 @@ export type DividerView = {
 export type ItemsChanged = ItemsState;
 
 export type ItemsState = {
+	projection_revision: string,
 	tabs: TabView[],
 	active: string | null,
 };
@@ -65,6 +73,70 @@ export type LayoutChanged = LayoutState;
 export type LayoutState = {
 	dividers: DividerView[],
 };
+
+/**
+ *  Immediate result returned by a privileged IPC command. `accepted` with an
+ *  `operation_id` means the mutation was successfully and non-evictably
+ *  admitted to the shell's process-local ordered FIFO; it does not claim that
+ *  later native/store work succeeded or survive a process restart. `accepted`
+ *  without an id is reserved for a fully applied, privileged-UI-only action
+ *  such as toggling the launcher.
+ */
+export type OperationAdmission = {
+	operation_id: string | null,
+	accepted: boolean,
+};
+
+/**
+ *  The shell has processed an admitted operation in actor order. Consumers
+ *  reconcile logical effects from authoritative projections. A deferred
+ *  native navigation still resolves independently through engine events.
+ *  Long-running profile deletion retains its id internally and emits this
+ *  disposition exactly once, only after definitive rejection or both durable
+ *  deletion phases complete; retry state is never mislabeled as processed.
+ */
+export type OperationDisposition = {
+	operation_id: string,
+	outcome: OperationOutcome,
+	reason: OperationReason,
+};
+
+/**
+ *  The bounded terminal classification the actor can establish while
+ *  processing an admitted operation. `Deferred` means native work was queued
+ *  or an exact discard acknowledgement is still required; it never means a
+ *  page load or renderer callback succeeded.
+ */
+export type OperationOutcome = "applied" | "no_op" | "rejected" | "native_admission_failed" | "deferred";
+
+export type OperationProcessed = OperationDisposition;
+
+/**
+ *  Stable, non-page-derived detail for an operation outcome. Keeping this an
+ *  enum prevents native errors, URLs, or attacker-controlled strings from
+ *  becoming an unbounded privileged IPC/logging surface.
+ */
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+
+/**
+ *  Process-local reconciliation state for an admitted mutation. Pending and
+ *  processed entries are retained in a bounded fail-closed desktop ledger;
+ *  processed entries remain queryable until privileged chrome acknowledges
+ *  them. `Unknown` means the id was never admitted in this process, was already
+ *  acknowledged, or belongs to a previous process lifetime.
+ */
+export type OperationStatus = { state: "unknown" } | { state: "pending" } | { state: "processed"; disposition: OperationDisposition };
+
+/**
+ *  Process-lifetime browser-runtime state. Once `restart_required` becomes
+ *  true it remains true until the whole application exits; it is not cleared
+ *  by rebuilding a content WebView or profile environment.
+ */
+export type RuntimeStatus = {
+	restart_required: boolean,
+};
+
+export type RuntimeStatusChanged = RuntimeStatus;
 
 export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
 
@@ -87,6 +159,13 @@ export type TabChanged = TabView;
 
 export type TabView = {
 	id: string,
+	/**
+	 *  Process-local monotonically increasing projection revision, encoded as
+	 *  fixed-width hexadecimal so JavaScript can compare it without losing
+	 *  integer precision. Privileged chrome rejects an older per-tab delta
+	 *  after a newer presentation barrier has applied.
+	 */
+	projection_revision: string,
 	title: string,
 	url: string | null,
 	loading: boolean,

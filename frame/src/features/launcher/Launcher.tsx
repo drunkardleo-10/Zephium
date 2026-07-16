@@ -1,7 +1,7 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { SearchResult } from "../../ipc/bindings";
-import { commands, events } from "../../ipc/bindings";
+import { commands } from "../../ipc/bindings";
+import { events } from "../../ipc/native-events";
 import { FavIcon } from "../../ui/FavIcon";
 
 const KIND_LABEL: Record<string, string> = {
@@ -40,23 +40,22 @@ export function Launcher() {
 
   onMount(() => {
     input.focus();
-    search("");
     const unlistenResults = events.searchChanged.listen((e) => {
       if (e.payload.query === value()) {
         setResults(e.payload.results);
         setSelected(0);
       }
     });
-    const unlistenFocus = getCurrentWindow().onFocusChanged(({ payload }) => {
-      if (payload) {
-        input.focus();
-        input.select();
-        search(input.value);
-      }
-    });
+    search("");
+    const onFocus = () => {
+      input.focus();
+      input.select();
+      search(input.value);
+    };
+    window.addEventListener("focus", onFocus);
     onCleanup(() => {
       void unlistenResults.then((f) => f());
-      void unlistenFocus.then((f) => f());
+      window.removeEventListener("focus", onFocus);
     });
   });
 

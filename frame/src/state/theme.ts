@@ -1,4 +1,5 @@
-import { commands, events } from "../ipc/bindings";
+import { commands } from "../ipc/bindings";
+import { events } from "../ipc/native-events";
 
 export type Appearance = "system" | "light" | "dark";
 
@@ -12,6 +13,18 @@ function apply() {
 }
 
 export async function init() {
+  // Establish system dark/light synchronously before the first native IPC
+  // await so the hidden bootstrap document already has deterministic tokens.
+  apply();
+  let commandAppearance: Appearance | null = null;
+  const unlistenCommand = events.uiCommand.listen((e) => {
+    const id = e.payload;
+    if (id.startsWith("theme.")) {
+      commandAppearance = id.slice("theme.".length) as Appearance;
+      appearance = commandAppearance;
+      apply();
+    }
+  });
   const info = await commands.uiInfo();
   const kind = !info.material
     ? "none"
@@ -20,18 +33,15 @@ export async function init() {
       : "acrylic";
   document.documentElement.setAttribute("data-material", kind);
   const stored = await commands.settingGet("appearance");
-  if (stored === "light" || stored === "dark" || stored === "system") {
+  if (
+    commandAppearance === null &&
+    (stored === "light" || stored === "dark" || stored === "system")
+  ) {
     appearance = stored;
   }
   apply();
   media.addEventListener("change", apply);
-  unlisten = await events.uiCommand.listen((e) => {
-    const id = e.payload;
-    if (id.startsWith("theme.")) {
-      appearance = id.slice("theme.".length) as Appearance;
-      apply();
-    }
-  });
+  unlisten = await unlistenCommand;
 }
 
 export function dispose() {

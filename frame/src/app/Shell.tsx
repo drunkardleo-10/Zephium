@@ -12,7 +12,7 @@ export function Shell() {
     <div class="shell flex h-screen w-screen" classList={{ "p-2": !IS_MAC }}>
       <Sidebar />
       <Show when={!tabs.activeTab()?.url}>
-        <div class="min-w-0 flex-1">
+        <div class="min-w-0 flex-1" data-zephium-new-tab>
           <NewTab />
         </div>
       </Show>

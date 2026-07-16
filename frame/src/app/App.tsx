@@ -4,6 +4,7 @@ import { Launcher } from "../features/launcher/Launcher";
 import { Dividers } from "../features/split/Dividers";
 import { commands } from "../ipc/bindings";
 import * as layout from "../state/layout";
+import * as operations from "../state/operations";
 import * as tabs from "../state/tabs";
 import * as theme from "../state/theme";
 import * as ui from "../state/ui";
@@ -52,7 +53,22 @@ function onKeyDown(e: KeyboardEvent) {
 
 export default function App() {
   onMount(() => {
-    void theme.init();
+    void (async () => {
+      try {
+        await theme.init();
+        if (getCurrentWindow().label !== "main") return;
+        // Hidden native windows may suspend requestAnimationFrame indefinitely.
+        // Force style/layout resolution synchronously; the inline bootstrap and
+        // default body background stay opaque until material discovery finishes.
+        void document.documentElement.getBoundingClientRect();
+        void getComputedStyle(document.body).backgroundColor;
+        if (!(await commands.uiReady())) throw new Error("native startup gate rejected UI");
+      } catch {
+        // The native watchdog owns the fail-closed exit. Keep page/native
+        // details out of this static diagnostic and never show partial chrome.
+        console.error("trusted UI initialization failed");
+      }
+    })();
     onCleanup(() => theme.dispose());
   });
 
@@ -61,11 +77,13 @@ export default function App() {
   }
 
   onMount(() => {
+    void operations.init();
     void tabs.init();
     void ui.init();
     if (!IS_MAC) void layout.init();
     document.addEventListener("keydown", onKeyDown);
     onCleanup(() => {
+      operations.dispose();
       tabs.dispose();
       ui.dispose();
       if (!IS_MAC) layout.dispose();

@@ -16,14 +16,20 @@ export function Dividers() {
       layout.drag(x, y);
     });
   };
-  const onUp = () => {
+  const onUp = (e: PointerEvent) => {
     if (!active) return;
     active = false;
     if (frame) {
       cancelAnimationFrame(frame);
       frame = 0;
     }
-    layout.release();
+    // The final coordinate and release are one ordered native command. Two
+    // fire-and-forget IPC calls could otherwise be delivered out of order and
+    // persist the previous animation frame's ratio.
+    layout.release(
+      e.type === "pointerup" ? e.clientX : null,
+      e.type === "pointerup" ? e.clientY : null,
+    );
     document.body.style.cursor = "";
   };
   const onDown = (e: PointerEvent, vertical: boolean) => {

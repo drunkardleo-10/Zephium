@@ -148,6 +148,7 @@ export function Sidebar() {
 
   return (
     <aside
+      data-zephium-active-tab={tabs.activeId() ?? ""}
       data-tauri-drag-region
       style={{ width: `${width()}px` }}
       class="relative flex shrink-0 select-none flex-col"
@@ -196,6 +197,7 @@ export function Sidebar() {
 
       <form class="px-2.5 pb-2 pt-1" onSubmit={submit}>
         <input
+          data-zephium-address
           ref={input}
           value={value()}
           onInput={(e) => setValue(e.currentTarget.value)}
@@ -217,31 +219,42 @@ export function Sidebar() {
       <nav class="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2.5 py-1">
         <For each={tabs.tabs()}>
           {(tab) => (
-            <button
-              type="button"
-              onPointerDown={(e) => onTabDown(e, tab.id, tab.title)}
-              onPointerMove={onTabMove}
-              onPointerUp={onTabUp}
-              onClick={() => onTabClick(tab.id)}
-              class="group flex h-9 cursor-grab items-center gap-2.5 rounded-md px-3 text-[13px]"
+            <div
+              data-zephium-tab-id={tab.id}
+              data-zephium-tab-url={tab.url ?? ""}
+              data-zephium-projection-revision={tab.projection_revision}
+              class="group flex h-9 items-center rounded-md text-[13px]"
               classList={{
                 "ring-1 ring-accent/40": splitting() && tab.id !== tabs.activeId(),
                 "bg-elevated text-text": tab.id === tabs.activeId(),
                 "text-muted hover:bg-hover hover:text-text": tab.id !== tabs.activeId(),
               }}
             >
-              <FavIcon favicon={tab.favicon} loading={tab.loading} />
-              <span class="flex-1 truncate text-left">{tab.title}</span>
-              <span
+              <button
+                type="button"
+                onPointerDown={(e) => onTabDown(e, tab.id, tab.title)}
+                onPointerMove={onTabMove}
+                onPointerUp={onTabUp}
+                onClick={() => onTabClick(tab.id)}
+                class="flex min-w-0 flex-1 cursor-grab items-center gap-2.5 self-stretch px-3"
+              >
+                <FavIcon favicon={tab.favicon} loading={tab.loading} />
+                <span data-zephium-tab-label class="flex-1 truncate text-left">
+                  {tab.title}
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label="Close tab"
                 onClick={(e) => {
                   e.stopPropagation();
                   tabs.close(tab.id);
                 }}
-                class="hidden h-5 w-5 items-center justify-center rounded text-faint hover:bg-hover hover:text-text group-hover:flex"
+                class="mr-2 flex h-5 w-5 items-center justify-center rounded text-faint opacity-0 hover:bg-hover hover:text-text group-hover:opacity-100 focus:opacity-100"
               >
                 <Icon icon={Cancel01Icon} size={12} />
-              </span>
-            </button>
+              </button>
+            </div>
           )}
         </For>
       </nav>

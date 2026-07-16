@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { events } from "../ipc/bindings";
+import { events } from "../ipc/native-events";
 
 const [command, setCommand] = createSignal<{ id: string; seq: number }>(
   { id: "", seq: 0 },

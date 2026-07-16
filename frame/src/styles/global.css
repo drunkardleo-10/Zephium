@@ -48,11 +48,19 @@ body,
 
 body {
   margin: 0;
-  background: transparent;
+  background: var(--color-bg);
   color: var(--color-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+}
+
+/* Transparency is enabled only after native material discovery completes.
+   Until then the bootstrap document and chrome are deterministically opaque. */
+:root[data-material="vibrancy"],
+:root[data-material="vibrancy"] body,
+:root[data-material="vibrancy"] #root {
+  background: transparent;
 }
 
 /* no system material: the chrome draws the window frame itself */
@@ -66,6 +74,11 @@ body {
 /* dwm ignores the acrylic tint on win11 22h2+; the chrome paints it */
 :root[data-material="acrylic"] body {
   background: color-mix(in srgb, var(--color-bg) 80%, transparent);
+}
+
+:root[data-material="acrylic"],
+:root[data-material="acrylic"] #root {
+  background: transparent;
 }
 
 ::selection {
