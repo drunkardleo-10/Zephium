@@ -11,21 +11,22 @@ authors = ["crynta"]
 repository = "https://github.com/zephium/zephium"
 
 [workspace.dependencies]
-zephium-core = { path = "crates/zephium-core" }
-zephium-ipc = { path = "crates/zephium-ipc" }
-zephium-engine = { path = "crates/zephium-engine" }
-zephium-net = { path = "crates/zephium-net" }
-zephium-store = { path = "crates/zephium-store" }
-zephium-app = { path = "crates/zephium-app" }
+zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
+zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
+zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
+zephium-net = { path = "crates/zephium-net", version = "=0.1.0" }
+zephium-store = { path = "crates/zephium-store", version = "=0.1.0" }
+zephium-app = { path = "crates/zephium-app", version = "=0.1.0" }
 
-tauri = { version = "2", features = ["macos-private-api", "devtools"] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-build = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
-wry = "0.55"
+wry = "=0.55.1"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 thiserror = "2"
 ulid = "1"
 ureq = "2"
@@ -39,3 +40,23 @@ specta-typescript = "0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 proptest = "1"
 tempfile = "3"
+
+# `vendor/wry` starts from the exact upstream revision documented alongside the
+# vendored source and is maintained as Zephium's auditable native-security
+# adapter. Keeping it in-tree makes callback, prompt, teardown, profile, and
+# Linux process-isolation policy reproducible without relying on a mutable fork.
+[patch.crates-io]
+wry = { path = "vendor/wry" }
+
+[profile.release]
+# Browser chrome should fail terminally on an invariant violation instead of
+# attempting to unwind through native WebView/Objective-C/COM callbacks.
+panic = "abort"
+# Keep the native shell small without giving up whole-program optimization.
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# Bounds checks remain enabled independently; retain integer overflow checks
+# as well so release builds do not silently wrap security/resource counters.
+overflow-checks = true
