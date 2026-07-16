@@ -1,101 +1,2133 @@
-name: Test build
+name: Production release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Protected annotated vMAJOR.MINOR.PATCH tag targeting this main commit
+        required: true
+        type: string
+      release_sequence:
+        description: Confirmation of the uniquely derived next stable-channel sequence
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  # One stable-channel publisher at a time. Per-tag concurrency would allow
+  # two tags to advance from the same previous sequence concurrently.
+  group: production-release-stable
+  cancel-in-progress: false
+
+env:
+  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.5"
 
 jobs:
-  bundle:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-22.04
-            bundles: |
-              target/release/bundle/appimage/*.AppImage
-              target/release/bundle/deb/*.deb
-              target/release/bundle/rpm/*.rpm
-          - platform: windows-latest
-            bundles: |
-              target/release/bundle/nsis/*.exe
-              target/release/bundle/msi/*.msi
-
-    runs-on: ${{ matrix.platform }}
+  release_gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production-release
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      default_branch: ${{ steps.release.outputs.default_branch }}
+      published_at: ${{ steps.release.outputs.published_at }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-
-      # The gstreamer set must be complete: linuxdeploy always drags the
-      # gstreamer core in as a webkit dependency, and a core without plugins
-      # shadows the host stack and crashes the web process on any media page
-      # (autoaudiosink not found). bundleMediaFramework packs the full stack.
-      - name: Install Linux build dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            patchelf \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav \
-            gstreamer1.0-gl \
-            gstreamer1.0-alsa \
-            gstreamer1.0-pulseaudio
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          node-version: 24
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - id: release
+        name: Prove trusted main, protected environment, and exact release tag
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POLICY_TOKEN }}
+          RELEASE_SEQUENCE: ${{ inputs.release_sequence }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::error title=Missing release-policy credential::A fine-grained, read-only release policy token is mandatory."
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" != "branch" || \
+                "${GITHUB_REF_NAME}" != "main" || \
+                "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error title=Untrusted workflow ref::Production release must be dispatched from the protected main branch, never from a tag or another branch."
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "${GITHUB_SHA}" ]]; then
+            echo "::error title=Workflow checkout mismatch::The checked-out release workflow is not the event commit."
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error title=Invalid release tag::release_tag must be exactly vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+
+          policy_dir="$(mktemp -d)"
+          trap 'rm -rf "${policy_dir}"' EXIT
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}" > "${policy_dir}/repository.json"
+          default_branch="$(jq -er '.default_branch' "${policy_dir}/repository.json")"
+          owner_type="$(jq -er '.owner.type' "${policy_dir}/repository.json")"
+          if [[ "${default_branch}" != "main" ]]; then
+            echo "::error title=Unexpected default branch::Production policy requires main to be the repository default branch."
+            exit 1
+          fi
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/branches/${default_branch}" > "${policy_dir}/branch.json"
+          if ! jq -e \
+            --arg sha "${GITHUB_SHA}" \
+            '.name == "main" and .protected == true and .commit.sha == $sha' \
+            "${policy_dir}/branch.json" >/dev/null; then
+            echo "::error title=Unprotected or stale release commit::The dispatch SHA must be the current head of protected main."
+            exit 1
+          fi
+
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release" > "${policy_dir}/environment.json"
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release/deployment-branch-policies?per_page=30" > "${policy_dir}/branch-policies.json"
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release/secrets?per_page=100" > "${policy_dir}/environment-secrets.json"
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release/variables?per_page=30" > "${policy_dir}/environment-variables.json"
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/secrets?per_page=100" > "${policy_dir}/repository-secrets.json"
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/variables?per_page=30" > "${policy_dir}/repository-variables.json"
+          if [[ "${owner_type}" == "Organization" ]]; then
+            gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/organization-secrets?per_page=100" > "${policy_dir}/organization-secrets.json"
+            gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/organization-variables?per_page=30" > "${policy_dir}/organization-variables.json"
+          elif [[ "${owner_type}" == "User" ]]; then
+            printf '%s\n' '{"total_count":0,"secrets":[]}' > "${policy_dir}/organization-secrets.json"
+            printf '%s\n' '{"total_count":0,"variables":[]}' > "${policy_dir}/organization-variables.json"
+          else
+            echo "::error title=Unknown repository owner::Cannot prove organization credential scope for owner type ${owner_type}."
+            exit 1
+          fi
+          python3 scripts/release/verify_release_policy.py \
+            --environment-json "${policy_dir}/environment.json" \
+            --branch-policies-json "${policy_dir}/branch-policies.json" \
+            --secrets-json "${policy_dir}/environment-secrets.json" \
+            --variables-json "${policy_dir}/environment-variables.json" \
+            --repository-secrets-json "${policy_dir}/repository-secrets.json" \
+            --repository-variables-json "${policy_dir}/repository-variables.json" \
+            --organization-secrets-json "${policy_dir}/organization-secrets.json" \
+            --organization-variables-json "${policy_dir}/organization-variables.json" \
+            --environment production-release \
+            --branch "${default_branch}"
+
+          policy="$(gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases")"
+          if ! jq -e \
+            '.enabled == true and (.enforced_by_owner | type == "boolean")' \
+            <<<"${policy}" >/dev/null; then
+            echo "::error title=Mutable GitHub releases::Repository release immutability must be enabled before any production build starts."
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != "tag" ]]; then
+            echo "::error title=Lightweight release tag::Production releases require an annotated, protected tag."
+            exit 1
+          fi
+          tagged_commit="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          if [[ "${tagged_commit}" != "${GITHUB_SHA}" ]]; then
+            echo "::error title=Release commit mismatch::The workflow checkout, tag target, and workflow SHA must be identical."
+            exit 1
+          fi
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > "${policy_dir}/release-tag-ref.json"
+          if ! tag_object="$(jq -er \
+            --arg ref "refs/tags/${RELEASE_TAG}" \
+            'select(.ref == $ref and .object.type == "tag") | .object.sha' \
+            "${policy_dir}/release-tag-ref.json")"; then
+            echo "::error title=Invalid remote release tag::The remote release ref is not one exact annotated tag object."
+            exit 1
+          fi
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "${policy_dir}/release-tag-object.json"
+          if ! jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg commit "${GITHUB_SHA}" \
+            '.tag == $tag and .object.type == "commit" and .object.sha == $commit' \
+            "${policy_dir}/release-tag-object.json" >/dev/null; then
+            echo "::error title=Remote release tag mismatch::The remote tag must be a single annotated tag object that directly targets this main commit."
+            exit 1
+          fi
+          if ! [[ "${RELEASE_SEQUENCE}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error title=Invalid update sequence::The update sequence must be a positive integer."
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          python3 - "${version}" <<'PY'
+          import json
+          import pathlib
+          import sys
+          import tomllib
+
+          expected = sys.argv[1]
+          sys.path.insert(0, str(pathlib.Path("scripts/release").resolve()))
+          import update_manifest
+
+          if not update_manifest.is_stable_version(expected):
+              raise SystemExit(f"stable release tag must be vMAJOR.MINOR.PATCH: {expected!r}")
+          tauri = json.loads(pathlib.Path("desktop/tauri.conf.json").read_text())
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          versions = {tauri["version"], cargo["workspace"]["package"]["version"]}
+          if versions != {expected}:
+              raise SystemExit(
+                  f"release tag {expected!r} does not match every authoritative version: {sorted(versions)!r}"
+              )
+          PY
+          existing="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id")"
+          if [[ -n "${existing}" ]]; then
+            echo "::error title=Release already exists::Release assets are immutable in this pipeline; cut a new version instead of replacing them."
+            exit 1
+          fi
+          published_at="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "default_branch=${default_branch}"
+            echo "version=${version}"
+            echo "published_at=${published_at}"
+            echo "tag=${RELEASE_TAG}"
+          } >> "${GITHUB_OUTPUT}"
+
+  # Artifact jobs may run only after this exact commit passes the complete
+  # reusable CI matrix. A green result from another commit or branch is not
+  # release evidence.
+  ci:
+    needs: release_gate
+    uses: ./.github/workflows/ci.yml
+    with:
+      checkout_ref: ${{ needs.release_gate.outputs.commit }}
+
+  security_policy:
+    needs: [release_gate, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release_gate.outputs.commit }}
+
+      - name: Test release policy, metadata, and private-symbol tooling
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 scripts/release/test_update_manifest.py
+          python3 scripts/release/test_seal_symbols.py
+          python3 scripts/release/test_finalize_sbom.py
+          python3 scripts/release/test_verify_release_policy.py
+          bash -n scripts/release/sign_rpm.sh
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
 
-      - uses: swatinem/rust-cache@v2
+      - name: Enforce production native-engine security readiness
+        run: cargo xtask check-release-engine-security
+
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
-          key: bundle-${{ matrix.platform }}
+          tool: cargo-deny@0.20.2
+          fallback: none
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build bundles
-        run: pnpm --dir desktop run build
+      - name: Audit the complete frontend/build dependency graph
+        # Release tooling is part of the artifact supply chain; audit the full
+        # lockfile, not only packages shipped into the frontend bundle.
+        run: pnpm audit --audit-level high
 
-      # The Ubuntu 22.04 host bundles libwayland 1.20 into the AppImage, which
-      # shadows the host copy and breaks EGL on recent Mesa (Arch, Fedora).
-      # Same proven fix as Terax, minus updater re-signing.
-      - name: Fix AppImage wayland libs
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Enforce licenses, advisories, and sources policy
+        run: cargo deny check
+
+  # Fedora 43 is the oldest target for the RPM release. Its signed stable
+  # repositories must carry WebKitGTK 2.52.5 before this job can publish; the
+  # checks below intentionally block while that security update is only in
+  # updates-testing. Keep this separate from the portable formats: Ubuntu LTS
+  # and Debian stable are still below the floor,
+  # while Tauri only fully supports AppImage media bundling on Ubuntu. Building
+  # an AppImage on Fedora would also silently raise its glibc baseline. An
+  # AppImage embeds build-host dependencies; this RPM deliberately embeds no
+  # WebKit/GStreamer runtime and enforces the Fedora engine at install time.
+  linux_rpm:
+    needs: [release_gate, security_policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: production-release
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    container:
+      # OCI index digest independently checked against Fedora's official
+      # registry API on 2026-07-14. The tag is retained only for readability.
+      image: registry.fedoraproject.org/fedora:43@sha256:711261231459f5ebc6694f7eb2b4b427b87fb6272df8b6663cb4bcbdbb220e9f
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: "1"
+      CARGO_PROFILE_RELEASE_STRIP: none
+      RELEASE_COMMIT: ${{ needs.release_gate.outputs.commit }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install Fedora stable build dependencies
         run: |
           set -euo pipefail
-          APPIMAGE=$(ls target/release/bundle/appimage/*.AppImage | head -n1)
-          BASENAME=$(basename "$APPIMAGE")
-          WORK=$(mktemp -d)
-          cp "$APPIMAGE" "$WORK/"
-          pushd "$WORK" >/dev/null
-          chmod +x "./$BASENAME"
-          "./$BASENAME" --appimage-extract >/dev/null
-          for lib in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0; do
-            test -e "squashfs-root/usr/lib/$lib" \
-              || { echo "expected bundled lib missing: $lib (layout changed?)"; exit 1; }
-          done
-          rm -f squashfs-root/usr/lib/libwayland-client.so.0 \
-                squashfs-root/usr/lib/libwayland-egl.so.1 \
-                squashfs-root/usr/lib/libwayland-cursor.so.0 \
-                squashfs-root/usr/lib/libwayland-server.so.0
-          curl -fsSL -o appimagetool.AppImage \
-            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          chmod +x appimagetool.AppImage
-          ARCH=x86_64 ./appimagetool.AppImage --appimage-extract-and-run squashfs-root "$BASENAME"
-          popd >/dev/null
-          cp "$WORK/$BASENAME" "$APPIMAGE"
+          source /etc/os-release
+          test "${ID}" = "fedora"
+          test "${VERSION_ID}" = "43"
+          dnf -y upgrade --refresh
+          if dnf repolist --enabled | grep -Eiq 'rawhide|updates-testing'; then
+            echo "::error title=Unstable Fedora repository::Linux release artifacts must use only Fedora stable repositories."
+            exit 1
+          fi
+          dnf -y install \
+            ca-certificates \
+            binutils \
+            bubblewrap \
+            cpio \
+            curl \
+            file \
+            findutils \
+            gcc \
+            gcc-c++ \
+            git \
+            gnupg2 \
+            gtk3-devel \
+            libappindicator-gtk3-devel \
+            libseccomp \
+            librsvg2-devel \
+            libxdo-devel \
+            make \
+            openssl-devel \
+            pkgconf-pkg-config \
+            python3 \
+            rpm-build \
+            rpm-sign \
+            rpmrebuild \
+            rustup \
+            tar \
+            webkit2gtk4.1-devel \
+            xdg-dbus-proxy \
+            xz \
+            gstreamer1-plugins-base \
+            gstreamer1-plugins-good \
+            gstreamer1-plugins-bad-free \
+            gstreamer1-plugin-libav
+          dnf clean all
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          name: zephium-${{ matrix.platform }}
-          path: ${{ matrix.bundles }}
+          persist-credentials: false
+          ref: ${{ needs.release_gate.outputs.commit }}
+
+      - name: Prove Fedora WebKitGTK build floor
+        run: |
+          set -euo pipefail
+          installed="$(pkg-config --modversion webkit2gtk-4.1)"
+          packaged="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
+          required="${ZEPHIUM_MIN_WEBKITGTK_VERSION}"
+          echo "Fedora WebKitGTK package: ${packaged}; pkg-config: ${installed}; required: >= ${required}"
+          if [[ ! "${packaged}" =~ ^2\.52\.([0-9]+)$ ]]; then
+            echo "::error title=Unreviewed WebKitGTK release line::Refusing to build Linux artifacts against ${packaged}; only the reviewed stable 2.52.x line is admitted."
+            exit 1
+          fi
+          packaged_patch="${BASH_REMATCH[1]}"
+          if (( 10#${packaged_patch} < 5 )); then
+            echo "::error title=Unsupported WebKitGTK patch::Refusing to build Linux artifacts against ${packaged}; patch 2.52.5 or newer is required."
+            exit 1
+          fi
+          if ! rpm -q --whatprovides "webkit2gtk4.1 >= ${required}" >/dev/null; then
+            echo "::error title=Unsupported WebKitGTK build host::Refusing to build Linux artifacts with WebKitGTK ${packaged}; version ${required} or newer is required."
+            exit 1
+          fi
+          if [[ "${installed}" != "${packaged}" ]]; then
+            echo "::error title=WebKitGTK provenance mismatch::pkg-config resolved ${installed}, but Fedora's installed package is ${packaged}."
+            exit 1
+          fi
+          command -v bwrap >/dev/null
+          bwrap_path="$(command -v bwrap)"
+          if [[ "$(rpm -qf --qf '%{NAME}' "${bwrap_path}")" != "bubblewrap" ]]; then
+            echo "::error title=Unexpected bubblewrap provider::${bwrap_path} is not owned by Fedora's bubblewrap package."
+            exit 1
+          fi
+          for package in webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp; do
+            vendor="$(rpm -q --qf '%{VENDOR}' "${package}")"
+            if [[ "${vendor}" != "Fedora Project" ]]; then
+              echo "::error title=Unexpected Fedora package vendor::${package} reports vendor '${vendor}'."
+              exit 1
+            fi
+            signature="$(rpm -q --qf '%|DSAHEADER?{%{DSAHEADER:pgpsig}}:{%|RSAHEADER?{%{RSAHEADER:pgpsig}}:{%|SIGGPG?{%{SIGGPG:pgpsig}}:{%|SIGPGP?{%{SIGPGP:pgpsig}}:{(none)}|}|}|}|' "${package}")"
+            if [[ -z "${signature}" || "${signature}" == "(none)" ]]; then
+              echo "::error title=Unsigned Fedora package::${package} has no retained RPM signature metadata."
+              exit 1
+            fi
+          done
+          rpm -V webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify and record Fedora-signed build inputs
+        run: |
+          set -euo pipefail
+          # The pinned Fedora image supplies the trust roots. Every native
+          # release-build package below came through DNF with package-signature
+          # checking; verify its installed payload again before it can influence
+          # bytes that will later receive the publisher signature.
+          build_packages=(
+            binutils bubblewrap ca-certificates cpio curl file findutils gcc gcc-c++ git gnupg2
+            gtk3-devel libappindicator-gtk3-devel libseccomp librsvg2-devel
+            libxdo-devel make openssl-devel pkgconf-pkg-config python3 rpm-build
+            rpm-sign rpmrebuild rustup tar webkit2gtk4.1 webkit2gtk4.1-devel
+            xdg-dbus-proxy xz
+            gstreamer1-plugins-base gstreamer1-plugins-good
+            gstreamer1-plugins-bad-free gstreamer1-plugin-libav
+          )
+          for package in "${build_packages[@]}"; do
+            vendor="$(rpm -q --qf '%{VENDOR}' "${package}")"
+            if [[ "${vendor}" != "Fedora Project" ]]; then
+              echo "::error title=Unexpected build-package vendor::${package} reports vendor '${vendor}'."
+              exit 1
+            fi
+            rpm -V "${package}"
+          done
+          {
+            echo "Fedora release-build package inventory"
+            echo "OCI index: sha256:711261231459f5ebc6694f7eb2b4b427b87fb6272df8b6663cb4bcbdbb220e9f"
+            echo
+            rpm -q --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+              "${build_packages[@]}" | LC_ALL=C sort
+            echo
+            echo "Complete installed Fedora RPM inventory"
+            rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort
+            echo
+            rustc --version --verbose
+            cargo --version --verbose
+            node --version
+            pnpm --version
+          } > "${RUNNER_TEMP}/zephium-fedora-build-inputs.txt"
+          test -s "${RUNNER_TEMP}/zephium-fedora-build-inputs.txt"
+
+      - name: Build the Fedora binary and retain private symbols
+        run: |
+          set -euo pipefail
+          pnpm --dir desktop exec tauri build \
+            --ci \
+            --no-bundle \
+            -- \
+            --locked
+          binary=target/release/zephium-desktop
+          test -x "${binary}"
+          mkdir -p target/release/private-symbols
+          objcopy --only-keep-debug "${binary}" target/release/private-symbols/zephium-desktop.debug
+          strip --strip-unneeded "${binary}"
+          objcopy --add-gnu-debuglink=target/release/private-symbols/zephium-desktop.debug "${binary}"
+          test -s target/release/private-symbols/zephium-desktop.debug
+          readelf -S "${binary}" | grep -F '.gnu_debuglink'
+          binary_build_id="$(readelf -n "${binary}" | sed -n 's/.*Build ID: //p')"
+          debug_build_id="$(readelf -n target/release/private-symbols/zephium-desktop.debug | sed -n 's/.*Build ID: //p')"
+          [[ "${binary_build_id}" =~ ^[0-9a-fA-F]+$ ]]
+          test "${binary_build_id}" = "${debug_build_id}"
+          printf '%s\n' "${binary_build_id}" > \
+            target/release/private-symbols/zephium-desktop.build-id.txt
+
+      - name: Bundle only the supported Fedora RPM
+        run: |
+          set -euo pipefail
+          rpm_config='{"build":{"beforeBundleCommand":""},"bundle":{"linux":{"rpm":{"depends":["webkit2gtk4.1","bubblewrap","libseccomp","xdg-dbus-proxy","gstreamer1-plugins-base","gstreamer1-plugins-good","gstreamer1-plugins-bad-free","gstreamer1-plugin-libav"]}}}}'
+          pnpm --dir desktop exec tauri bundle \
+            --ci \
+            --bundles rpm \
+            --config "${rpm_config}" \
+            --no-sign
+
+      # Tauri's RPM configuration accepts dependency names but currently maps
+      # them through rpm::Dependency::any, so it cannot express a versioned
+      # requirement. Use Fedora's stable rpmrebuild tool to change that one
+      # requirement, then prove payload metadata/digests and scripts unchanged.
+      - name: Add and verify install-time WebKitGTK floor
+        run: |
+          set -euo pipefail
+          build_engine="$(pkg-config --modversion webkit2gtk-4.1)"
+          packaged_engine="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
+          if [[ ! "${packaged_engine}" =~ ^2\.52\.([0-9]+)$ ]]; then
+            echo "::error title=WebKitGTK release line changed during build::Refusing to publish an RPM built against unreviewed WebKitGTK ${packaged_engine}."
+            exit 1
+          fi
+          packaged_patch="${BASH_REMATCH[1]}"
+          if (( 10#${packaged_patch} < 5 )); then
+            echo "::error title=WebKitGTK patch changed during build::Refusing to publish an RPM built against unsupported WebKitGTK ${packaged_engine}."
+            exit 1
+          fi
+          if ! rpm -q --whatprovides "webkit2gtk4.1 >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}" >/dev/null || \
+             [[ "${build_engine}" != "${packaged_engine}" ]]; then
+            echo "::error title=WebKitGTK changed during build::Refusing to publish an RPM built against ${build_engine}; signed Fedora package ${packaged_engine}, required >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}."
+            exit 1
+          fi
+          rpm -V webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp
+
+          mapfile -t sources < <(find target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' -print)
+          if [[ "${#sources[@]}" -ne 1 ]]; then
+            echo "::error title=Unexpected RPM output::Expected exactly one source RPM, found ${#sources[@]}."
+            exit 1
+          fi
+          source_rpm="${sources[0]}"
+          rebuild_root="${RUNNER_TEMP}/zephium-rpm-rebuild"
+          mkdir -p "${rebuild_root}"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          rpmrebuild \
+            --batch \
+            --package \
+            --define "_topdir ${rebuild_root}" \
+            --change-spec-requires="sed -e 's/webkit2gtk4\\.1/webkit2gtk4.1 >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}/'" \
+            "${source_rpm}"
+          mapfile -t rebuilt < <(find "${rebuild_root}/RPMS" -type f -name '*.rpm' -print)
+          if [[ "${#rebuilt[@]}" -ne 1 ]]; then
+            echo "::error title=Unexpected rebuilt RPM output::Expected exactly one hardened RPM, found ${#rebuilt[@]}."
+            exit 1
+          fi
+          hardened_rpm="${rebuilt[0]}"
+          diff -u \
+            <(rpm -qpl "${source_rpm}" | LC_ALL=C sort) \
+            <(rpm -qpl "${hardened_rpm}" | LC_ALL=C sort)
+          diff -u \
+            <(rpm -qp --dump "${source_rpm}" | LC_ALL=C sort) \
+            <(rpm -qp --dump "${hardened_rpm}" | LC_ALL=C sort)
+          diff -u \
+            <(rpm -qp --scripts "${source_rpm}") \
+            <(rpm -qp --scripts "${hardened_rpm}")
+          mv "${hardened_rpm}" "${source_rpm}"
+
+          requirements="$(rpm -qp --requires "${source_rpm}")"
+          mapfile -t engine_requirements < <(grep -E '^webkit2gtk4\.1([[:space:]]|$)' <<<"${requirements}")
+          if [[ "${#engine_requirements[@]}" -ne 1 ]] || \
+             [[ "${engine_requirements[0]}" != "webkit2gtk4.1 >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}" ]]; then
+            echo "::error title=Invalid WebKitGTK RPM requirement::Expected exactly 'webkit2gtk4.1 >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}'."
+            printf '%s\n' "${engine_requirements[@]}"
+            exit 1
+          fi
+          for package in \
+            bubblewrap \
+            libseccomp \
+            xdg-dbus-proxy \
+            gstreamer1-plugins-base \
+            gstreamer1-plugins-good \
+            gstreamer1-plugins-bad-free \
+            gstreamer1-plugin-libav; do
+            grep -Fx "${package}" <<<"${requirements}"
+          done
+
+          payload="$(rpm -qpl "${source_rpm}")"
+          if grep -Ei '/(libwebkit2gtk|libjavascriptcoregtk|libgstreamer|libgst[^/]*\.so|WebKit(Web|Network|GPU)Process|gstreamer-1\.0/)' <<<"${payload}"; then
+            echo "::error title=Unexpected bundled engine::RPM must use the version-gated Fedora WebKitGTK and GStreamer packages, not copy host engine/media binaries."
+            exit 1
+          fi
+
+          # Inspect the actual ELF graph as well as package filenames. The
+          # application must link to Fedora's WebKitGTK/JSC sonames, must not
+          # carry a private copy of any engine/media library, and must not
+          # retain a build-machine RPATH that can shadow the host packages.
+          payload_root="${RUNNER_TEMP}/zephium-rpm-payload"
+          mkdir -p "${payload_root}"
+          source_rpm_abs="$(readlink -f "${source_rpm}")"
+          pushd "${payload_root}" >/dev/null
+          rpm2cpio "${source_rpm_abs}" | cpio -idmu --quiet
+          popd >/dev/null
+          mapfile -t executables < <(find "${payload_root}/usr/bin" -type f -print)
+          if [[ "${#executables[@]}" -ne 1 ]]; then
+            echo "::error title=Unexpected executable payload::Expected exactly one application executable, found ${#executables[@]}."
+            exit 1
+          fi
+          elf_header="$(readelf -h "${executables[0]}")"
+          program_headers="$(readelf -W -l "${executables[0]}")"
+          dynamic="$(readelf -d "${executables[0]}")"
+          grep -Eq 'Type:[[:space:]]+DYN.*Position-Independent Executable' <<<"${elf_header}"
+          grep -Eq '^[[:space:]]*GNU_RELRO[[:space:]]' <<<"${program_headers}"
+          stack_flags="$(awk '$1 == "GNU_STACK" { print $(NF - 1) }' <<<"${program_headers}")"
+          if [[ -z "${stack_flags}" || "${stack_flags}" == *E* ]]; then
+            echo "::error title=Unsafe executable stack::Packaged application is missing a non-executable GNU_STACK declaration."
+            exit 1
+          fi
+          if ! grep -Eq 'BIND_NOW|Flags:.*NOW' <<<"${dynamic}"; then
+            echo "::error title=Partial RELRO only::Packaged application must request immediate binding for full RELRO."
+            exit 1
+          fi
+          grep -F 'Shared library: [libwebkit2gtk-4.1.so.0]' <<<"${dynamic}"
+          grep -F 'Shared library: [libjavascriptcoregtk-4.1.so.0]' <<<"${dynamic}"
+          if grep -E '(RPATH|RUNPATH).*(/home/runner|/github/workspace|/target/|/build/)' <<<"${dynamic}"; then
+            echo "::error title=Unsafe RPM runpath::Application ELF metadata retains a build-machine path."
+            exit 1
+          fi
+          while IFS= read -r needed; do
+            if find "${payload_root}" -type f -name "${needed}" -print -quit | grep -q .; then
+              echo "::error title=Bundled engine dependency::RPM contains ${needed}; the signed Fedora package must provide it."
+              exit 1
+            fi
+          done < <(
+            sed -n 's/.*Shared library: \[\(lib\(webkit2gtk\|javascriptcoregtk\|gstreamer\|gst[^]]*\)[^]]*\)\].*/\1/p' <<<"${dynamic}"
+          )
+          test ! -e target/release/bundle/appimage
+          test ! -e target/release/bundle/deb
+          rpm -Kv "${source_rpm}"
+          {
+            rpm -qip "${source_rpm}"
+            echo
+            echo "Requires:"
+            printf '%s\n' "${requirements}"
+            echo
+            echo "Build WebKitGTK: ${build_engine} (Fedora package ${packaged_engine})"
+            echo "Media runtime: host Fedora GStreamer packages listed above; no media framework is embedded."
+            echo
+            cat "${RUNNER_TEMP}/zephium-fedora-build-inputs.txt"
+            echo
+            echo "Application ELF header:"
+            printf '%s\n' "${elf_header}"
+            echo
+            echo "Application ELF program headers:"
+            printf '%s\n' "${program_headers}"
+            echo
+            echo "Application ELF dynamic section:"
+            printf '%s\n' "${dynamic}"
+            echo
+            echo "Application/private-debug build ID:"
+            cat target/release/private-symbols/zephium-desktop.build-id.txt
+          } > target/release/bundle/rpm/zephium-rpm-audit.txt
+          test -s "${source_rpm}"
+
+      - name: Publisher-sign the final rebuilt RPM
+        env:
+          RPM_SIGNING_KEY_FINGERPRINT: ${{ vars.RPM_SIGNING_KEY_FINGERPRINT }}
+          RPM_SIGNING_KEY_PASSPHRASE: ${{ secrets.RPM_SIGNING_KEY_PASSPHRASE }}
+          RPM_SIGNING_PRIVATE_KEY: ${{ secrets.RPM_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mapfile -t rpms < <(find target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' -print)
+          test "${#rpms[@]}" -eq 1
+          public_key=target/release/bundle/rpm/zephium-rpm-signing-key.asc
+          bash scripts/release/sign_rpm.sh "${rpms[0]}" "${public_key}"
+          rpm_dir="$(dirname "${rpms[0]}")"
+          rpm_name="$(basename "${rpms[0]}")"
+          (cd "${rpm_dir}" && sha256sum "${rpm_name}" > "${rpm_name}.sha256")
+          {
+            echo
+            echo "Publisher signing key: ${RPM_SIGNING_KEY_FINGERPRINT}"
+            rpm -Kv "${rpms[0]}"
+          } >> target/release/bundle/rpm/zephium-rpm-audit.txt
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.44.0
+
+      - name: Generate and bind the Linux installed-payload SBOM
+        env:
+          RELEASE_VERSION: ${{ needs.release_gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t rpms < <(find target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' -print)
+          mapfile -t executables < <(find "${RUNNER_TEMP}/zephium-rpm-payload/usr/bin" -type f -print)
+          test "${#rpms[@]}" -eq 1
+          test "${#executables[@]}" -eq 1
+
+          scan_root="${RUNNER_TEMP}/zephium-linux-sbom-payload"
+          mkdir -p "${scan_root}/installed" "${scan_root}/build-manifests/wry" \
+            "${scan_root}/build-manifests/javascript/root" \
+            "${scan_root}/build-manifests/javascript/desktop" \
+            "${scan_root}/build-manifests/javascript/frame"
+          cp -a "${RUNNER_TEMP}/zephium-rpm-payload/." "${scan_root}/installed/"
+          cp Cargo.toml Cargo.lock "${scan_root}/build-manifests/"
+          cp vendor/wry/Cargo.toml vendor/wry/Cargo.lock \
+            "${scan_root}/build-manifests/wry/"
+          cp pnpm-lock.yaml package.json "${scan_root}/build-manifests/javascript/root/"
+          cp desktop/package.json "${scan_root}/build-manifests/javascript/desktop/"
+          cp frame/package.json "${scan_root}/build-manifests/javascript/frame/"
+
+          source_name="Zephium Linux x86_64 installed payload"
+          output="target/release/bundle/rpm/Zephium-${RELEASE_VERSION}-linux-x86_64.cdx.json"
+          SYFT_CHECK_FOR_APP_UPDATE=false SYFT_FILE_METADATA_SELECTION=all \
+            syft scan "dir:${scan_root}" \
+            --source-name "${source_name}" \
+            --source-version "${RELEASE_VERSION}" \
+            --source-supplier Zephium \
+            --output "cyclonedx-json=${output}"
+          packaged_executable="${scan_root}/installed/usr/bin/$(basename "${executables[0]}")"
+          python3 scripts/release/finalize_sbom.py \
+            --sbom "${output}" \
+            --scan-root "${scan_root}" \
+            --source-name "${source_name}" \
+            --version "${RELEASE_VERSION}" \
+            --commit "${RELEASE_COMMIT}" \
+            --platform linux \
+            --subject "${rpms[0]}" \
+            --executable "${packaged_executable}" \
+            --reference-executable target/release/zephium-desktop
+          python3 -m json.tool "${output}" >/dev/null
+
+      - name: Attest Linux release outputs at their producing runner
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: target/release/bundle/rpm/*
+
+      - name: Attest the exact Linux RPM SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: target/release/bundle/rpm/*.rpm
+          sbom-path: target/release/bundle/rpm/Zephium-${{ needs.release_gate.outputs.version }}-linux-x86_64.cdx.json
+
+      - name: Upload Fedora RPM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zephium-release-linux-x86_64
+          path: |
+            target/release/bundle/rpm/*.rpm
+            target/release/bundle/rpm/*.sha256
+            target/release/bundle/rpm/*.asc
+            target/release/bundle/rpm/*.cdx.json
+            target/release/bundle/rpm/zephium-rpm-audit.txt
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Seal Linux private symbols outside the public release
+        env:
+          SYMBOL_AUTHENTICATION_KEY: ${{ secrets.SYMBOL_AUTHENTICATION_KEY }}
+          SYMBOL_ENCRYPTION_KEY: ${{ secrets.SYMBOL_ENCRYPTION_KEY }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/Zephium-${RELEASE_COMMIT}-linux-x86_64-private-symbols.tar.gz"
+          tar -C target/release/private-symbols -czf "${archive}" .
+          python3 scripts/release/seal_symbols.py seal \
+            "${archive}" \
+            "${archive}.enc" \
+            "${archive}.enc.hmac-sha256"
+          rm -f "${archive}"
+
+      - name: Store only sealed Linux private symbols
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zephium-private-symbols-linux-x86_64-${{ needs.release_gate.outputs.commit }}
+          path: |
+            ${{ runner.temp }}/Zephium-${{ needs.release_gate.outputs.commit }}-linux-x86_64-private-symbols.tar.gz.enc
+            ${{ runner.temp }}/Zephium-${{ needs.release_gate.outputs.commit }}-linux-x86_64-private-symbols.tar.gz.enc.hmac-sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  windows_bundle:
+    needs: [release_gate, security_policy]
+    runs-on: windows-2025
+    timeout-minutes: 90
+    environment: production-release
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: "1"
+      CARGO_PROFILE_RELEASE_STRIP: none
+      RELEASE_COMMIT: ${{ needs.release_gate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release_gate.outputs.commit }}
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the Windows binary before exposing the signing identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pnpm --dir desktop exec tauri build --ci --no-bundle -- --locked
+          if ($LASTEXITCODE -ne 0) { throw "Tauri Windows release build failed" }
+          if (-not (Test-Path "target/release/zephium-desktop.exe")) {
+            throw "release executable is missing"
+          }
+
+      - id: windows-certificate
+        name: Import and validate the Authenticode identity
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_SHA256: ${{ vars.WINDOWS_CERTIFICATE_SHA256 }}
+          WINDOWS_CERTIFICATE_SUBJECT: ${{ vars.WINDOWS_CERTIFICATE_SUBJECT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_SHA256) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_SUBJECT)) {
+            throw "Authenticode certificate, password, expected SHA-256, and expected subject are mandatory"
+          }
+          if ($env:WINDOWS_CERTIFICATE_SHA256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw "WINDOWS_CERTIFICATE_SHA256 must be exactly 64 uppercase hexadecimal characters"
+          }
+          $timestamp = [Uri]$env:WINDOWS_TIMESTAMP_URL
+          if ($timestamp.Scheme -ne "https" -or -not $timestamp.IsAbsoluteUri) {
+            throw "WINDOWS_TIMESTAMP_URL must be an absolute HTTPS RFC 3161 endpoint"
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "zephium-signing.pfx"
+          $ledger = Join-Path $env:RUNNER_TEMP "zephium-imported-certificates.txt"
+          Remove-Item -LiteralPath $ledger -Force -ErrorAction SilentlyContinue
+          $before = @(Get-ChildItem Cert:\CurrentUser\My | ForEach-Object { $_.Thumbprint })
+          $imported = @()
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false)
+          } finally {
+            # Import-PfxCertificate can add a chain before a later validation
+            # fails. Persist every returned or newly visible certificate so an
+            # always-running cleanup step can remove the complete secret-bearing
+            # import, not only the selected leaf identity.
+            $after = @(Get-ChildItem Cert:\CurrentUser\My | ForEach-Object { $_.Thumbprint })
+            $added = @($after | Where-Object { $before -notcontains $_ })
+            $returned = @($imported | ForEach-Object { $_.Thumbprint })
+            @($added + $returned) |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Sort-Object -Unique |
+              Set-Content -LiteralPath $ledger -Encoding ascii
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+          $codeSigning = @($imported | Where-Object {
+            $_.HasPrivateKey -and
+            ($_.EnhancedKeyUsageList.ObjectId.Value -contains "1.3.6.1.5.5.7.3.3")
+          })
+          if ($codeSigning.Count -ne 1) {
+            throw "PFX must contain exactly one private code-signing identity"
+          }
+          $certificate = $codeSigning[0]
+          if ($certificate.Subject -ne $env:WINDOWS_CERTIFICATE_SUBJECT) {
+            throw "Authenticode certificate subject does not match protected release configuration"
+          }
+          $certificateSha256 = [Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($certificate.RawData)
+          )
+          $expectedCertificateSha256 = $env:WINDOWS_CERTIFICATE_SHA256
+          if ($certificateSha256 -cne $expectedCertificateSha256) {
+            throw "Authenticode leaf certificate SHA-256 does not match protected release configuration"
+          }
+          $now = [DateTime]::UtcNow
+          if ($certificate.NotBefore.ToUniversalTime() -gt $now -or $certificate.NotAfter.ToUniversalTime() -lt $now.AddDays(7)) {
+            throw "Authenticode certificate is not currently valid for the complete release window"
+          }
+          "thumbprint=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "certificate_sha256=$certificateSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $config = @{
+            build = @{
+              beforeBundleCommand = ""
+            }
+            bundle = @{
+              windows = @{
+                allowDowngrades = $false
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+                tsp = $true
+              }
+            }
+          } | ConvertTo-Json -Depth 5 -Compress
+          $config | Out-File -LiteralPath (Join-Path $env:RUNNER_TEMP "tauri-windows-release.json") -Encoding utf8NoBOM
+
+      - name: Bundle publisher-signed Windows installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pnpm --dir desktop exec tauri bundle `
+            --ci `
+            --bundles nsis,msi `
+            --config (Join-Path $env:RUNNER_TEMP "tauri-windows-release.json")
+          if ($LASTEXITCODE -ne 0) { throw "Tauri Windows release bundling failed" }
+
+      - name: Verify Windows executable mitigations
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe is unavailable"
+          }
+          $dumpbin = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" |
+            Select-Object -First 1
+          if (-not $dumpbin) {
+            throw "dumpbin.exe is unavailable"
+          }
+          $binary = Resolve-Path "target/release/zephium-desktop.exe"
+          $audit = (& $dumpbin /headers /loadconfig $binary) -join "`n"
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin could not inspect the packaged Windows executable"
+          }
+          $required = [ordered]@{
+            "high-entropy ASLR" = "HIGH_ENTROPY_VA|High Entropy Virtual Addresses"
+            "ASLR" = "DYNAMIC_BASE|Dynamic base"
+            "DEP" = "NX_COMPAT|NX compatible"
+            "CFG image characteristic" = "GUARD_CF|Guard CF|Control Flow Guard"
+            "CFG instrumentation" = "CF Instrumented"
+            "CFG function table" = "FID table present"
+          }
+          foreach ($entry in $required.GetEnumerator()) {
+            if ($audit -notmatch $entry.Value) {
+              throw "Windows executable is missing required mitigation evidence: $($entry.Key)"
+            }
+          }
+          $llvmReadobj = Get-Command "llvm-readobj.exe" -ErrorAction Stop
+          $llvmPdbutil = Get-Command "llvm-pdbutil.exe" -ErrorAction Stop
+          $llvmReadobjPath = $llvmReadobj.Source
+          $llvmPdbutilPath = $llvmPdbutil.Source
+          $codeView = (& $llvmReadobjPath --coff-debug-directory $binary) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw "llvm-readobj could not inspect PE CodeView identity" }
+          $binaryGuidMatch = [regex]::Match($codeView, 'PDBGUID:\s*(\{[0-9A-Fa-f-]+\})')
+          $binaryAgeMatch = [regex]::Match($codeView, 'PDBAge:\s*(0x[0-9A-Fa-f]+|[0-9]+)')
+          if (-not $binaryGuidMatch.Success -or -not $binaryAgeMatch.Success) {
+            throw "release executable has no complete PDB GUID/age identity"
+          }
+          $binaryGuid = $binaryGuidMatch.Groups[1].Value.Trim('{}').Replace('-', '').ToUpperInvariant()
+          $binaryAgeValue = $binaryAgeMatch.Groups[1].Value
+          $binaryAge = if ($binaryAgeValue.StartsWith('0x')) {
+            [Convert]::ToUInt64($binaryAgeValue.Substring(2), 16)
+          } else {
+            [Convert]::ToUInt64($binaryAgeValue, 10)
+          }
+          $pdbMatches = @()
+          foreach ($pdb in @(Get-ChildItem "target/release" -File -Filter "*.pdb")) {
+            $summary = (& $llvmPdbutilPath dump -summary $pdb.FullName) -join "`n"
+            if ($LASTEXITCODE -ne 0) { throw "llvm-pdbutil rejected $($pdb.Name)" }
+            $pdbGuidMatch = [regex]::Match($summary, '(?m)^\s*GUID:\s*(\{[0-9A-Fa-f-]+\})\s*$')
+            $pdbAgeMatch = [regex]::Match($summary, '(?m)^\s*Age:\s*([0-9]+)\s*$')
+            if (-not $pdbGuidMatch.Success -or -not $pdbAgeMatch.Success) {
+              throw "PDB has no complete GUID/age identity: $($pdb.Name)"
+            }
+            $pdbGuid = $pdbGuidMatch.Groups[1].Value.Trim('{}').Replace('-', '').ToUpperInvariant()
+            $pdbAge = [uint64]$pdbAgeMatch.Groups[1].Value
+            if ($pdbGuid -eq $binaryGuid -and $pdbAge -eq $binaryAge) {
+              $pdbMatches += $pdb
+            }
+          }
+          if ($pdbMatches.Count -ne 1) {
+            throw "expected exactly one retained PDB matching the release executable; found $($pdbMatches.Count)"
+          }
+          @(
+            $audit,
+            "",
+            "CodeView/PDB identity: $binaryGuid age $binaryAge",
+            "Matching private PDB: $($pdbMatches[0].Name)"
+          ) | Out-File -Encoding utf8 "target/release/bundle/zephium-pe-audit.txt"
+
+      - name: Prove every Windows executable and installer is signed and timestamped
+        shell: pwsh
+        env:
+          EXPECTED_CERTIFICATE_SHA256: ${{ steps.windows-certificate.outputs.certificate_sha256 }}
+          EXPECTED_THUMBPRINT: ${{ steps.windows-certificate.outputs.thumbprint }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -File -Filter "signtool.exe" |
+            Where-Object FullName -Match '\\x64\\signtool\.exe$' |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe is unavailable" }
+          $signtoolPath = $signtool.FullName
+          $files = @(
+            Get-Item "target/release/zephium-desktop.exe"
+            Get-ChildItem "target/release/bundle/nsis" -File -Filter "*.exe"
+            Get-ChildItem "target/release/bundle/msi" -File -Filter "*.msi"
+          )
+          if (($files | Where-Object Extension -eq ".msi").Count -ne 1 -or
+              ($files | Where-Object { $_.Name -like "*-setup.exe" }).Count -ne 1) {
+            throw "expected exactly one signed MSI and one signed NSIS installer"
+          }
+          $signatureAudit = foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "invalid Authenticode signature on $($file.Name): $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) {
+              throw "unexpected Authenticode signer on $($file.Name)"
+            }
+            $signerCertificateSha256 = [Convert]::ToHexString(
+              [System.Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData)
+            )
+            if ($signerCertificateSha256 -cne $env:EXPECTED_CERTIFICATE_SHA256) {
+              throw "unexpected Authenticode leaf certificate on $($file.Name)"
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "missing trusted timestamp on $($file.Name)"
+            }
+            $nativeVerification = (& $signtoolPath verify /pa /all /v $file.FullName) -join "`n"
+            if ($LASTEXITCODE -ne 0) { throw "signtool rejected $($file.Name)" }
+            [pscustomobject]@{
+              File = $file.Name
+              NativeVerification = $nativeVerification
+              Sha256 = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+              Signer = $signature.SignerCertificate.Subject
+              SignerCertificateSha256 = $signerCertificateSha256.ToLowerInvariant()
+              SignerThumbprint = $signature.SignerCertificate.Thumbprint
+              TimestampAuthority = $signature.TimeStamperCertificate.Subject
+            }
+          }
+          $signatureAudit | ConvertTo-Json -Depth 3 |
+            Out-File -Encoding utf8 "target/release/bundle/zephium-authenticode-audit.json"
+
+      - name: Extract and verify the executable embedded in both Windows installers
+        shell: pwsh
+        env:
+          EXPECTED_CERTIFICATE_SHA256: ${{ steps.windows-certificate.outputs.certificate_sha256 }}
+          EXPECTED_THUMBPRINT: ${{ steps.windows-certificate.outputs.thumbprint }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $payloadRoot = Join-Path $env:RUNNER_TEMP "zephium-windows-payload"
+          $msiRoot = Join-Path $payloadRoot "msi-installed"
+          $nsisRoot = Join-Path $payloadRoot "nsis-installed"
+          New-Item -ItemType Directory -Path $msiRoot, $nsisRoot | Out-Null
+
+          $msis = @(Get-ChildItem "target/release/bundle/msi" -File -Filter "*.msi")
+          $installers = @(Get-ChildItem "target/release/bundle/nsis" -File -Filter "*-setup.exe")
+          if ($msis.Count -ne 1 -or $installers.Count -ne 1) {
+            throw "expected exactly one MSI and one NSIS installer for payload extraction"
+          }
+
+          $msiArguments = "/a `"$($msis[0].FullName)`" /qn TARGETDIR=`"$msiRoot`""
+          $msiProcess = Start-Process -FilePath "msiexec.exe" `
+            -ArgumentList $msiArguments `
+            -NoNewWindow -PassThru -Wait
+          if ($msiProcess.ExitCode -ne 0) {
+            throw "administrative MSI extraction failed with exit code $($msiProcess.ExitCode)"
+          }
+
+          $sevenZip = Get-Command "7z.exe" -ErrorAction Stop
+          $sevenZipPath = $sevenZip.Source
+          & $sevenZipPath x -y "-o$nsisRoot" $installers[0].FullName | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip could not extract the NSIS installer" }
+          $nestedRoot = Join-Path $nsisRoot "_expanded_archives"
+          $nestedArchives = @(Get-ChildItem $nsisRoot -Recurse -File | Where-Object {
+            $_.Extension -in @(".7z", ".zip")
+          })
+          for ($index = 0; $index -lt $nestedArchives.Count; $index++) {
+            $destination = Join-Path $nestedRoot $index
+            New-Item -ItemType Directory -Path $destination | Out-Null
+            & $sevenZipPath x -y "-o$destination" $nestedArchives[$index].FullName | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "7-Zip could not extract a nested NSIS payload archive"
+            }
+          }
+
+          $reference = Get-Item "target/release/zephium-desktop.exe"
+          $referenceHash = (Get-FileHash -Algorithm SHA256 $reference.FullName).Hash
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -File -Filter "signtool.exe" |
+            Where-Object FullName -Match '\\x64\\signtool\.exe$' |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe is unavailable" }
+
+          $embeddedAudit = foreach ($payload in @(
+            [pscustomobject]@{ Installer = "MSI"; Root = $msiRoot },
+            [pscustomobject]@{ Installer = "NSIS"; Root = $nsisRoot }
+          )) {
+            $matches = @(Get-ChildItem $payload.Root -Recurse -File -Filter "*.exe" | Where-Object {
+              (Get-FileHash -Algorithm SHA256 $_.FullName).Hash -eq $referenceHash
+            })
+            if ($matches.Count -ne 1) {
+              throw "$($payload.Installer) payload must contain exactly one byte-identical main executable; found $($matches.Count)"
+            }
+            $embedded = $matches[0]
+            $signature = Get-AuthenticodeSignature -LiteralPath $embedded.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+                $signature.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT -or
+                $null -eq $signature.TimeStamperCertificate) {
+              throw "$($payload.Installer) embeds an invalid, unexpected, or untimestamped application signature"
+            }
+            $signerCertificateSha256 = [Convert]::ToHexString(
+              [System.Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData)
+            )
+            if ($signerCertificateSha256 -cne $env:EXPECTED_CERTIFICATE_SHA256) {
+              throw "$($payload.Installer) embeds an application signed by an unexpected leaf certificate"
+            }
+            $signtoolPath = $signtool.FullName
+            $nativeVerification = (& $signtoolPath verify /pa /all /v $embedded.FullName) -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool rejected the executable embedded in $($payload.Installer)"
+            }
+            [pscustomobject]@{
+              File = $embedded.FullName.Substring($payloadRoot.Length + 1)
+              Installer = $payload.Installer
+              NativeVerification = $nativeVerification
+              Sha256 = $referenceHash.ToLowerInvariant()
+              Signer = $signature.SignerCertificate.Subject
+              SignerCertificateSha256 = $signerCertificateSha256.ToLowerInvariant()
+              SignerThumbprint = $signature.SignerCertificate.Thumbprint
+              TimestampAuthority = $signature.TimeStamperCertificate.Subject
+            }
+          }
+          $outerAudit = @(
+            Get-Content -Raw "target/release/bundle/zephium-authenticode-audit.json" |
+              ConvertFrom-Json
+          )
+          @($outerAudit + $embeddedAudit) | ConvertTo-Json -Depth 4 |
+            Out-File -Encoding utf8 "target/release/bundle/zephium-authenticode-audit.json"
+
+      - name: Remove every certificate imported from the Authenticode PFX
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ledger = Join-Path $env:RUNNER_TEMP "zephium-imported-certificates.txt"
+          if (Test-Path -LiteralPath $ledger) {
+            foreach ($thumbprint in @(Get-Content -LiteralPath $ledger)) {
+              if ($thumbprint -notmatch '^[A-Fa-f0-9]{40}$') {
+                throw "certificate cleanup ledger contains an invalid thumbprint"
+              }
+              $certificate = "Cert:\CurrentUser\My\$thumbprint"
+              if (Test-Path -LiteralPath $certificate) {
+                Remove-Item -LiteralPath $certificate -Force
+              }
+            }
+          }
+          Remove-Item -LiteralPath @(
+            $ledger,
+            (Join-Path $env:RUNNER_TEMP "zephium-signing.pfx"),
+            (Join-Path $env:RUNNER_TEMP "tauri-windows-release.json")
+          ) -Force -ErrorAction SilentlyContinue
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.44.0
+
+      - name: Generate and bind the Windows extracted-installer-payload SBOM
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.release_gate.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $payloadRoot = Join-Path $env:RUNNER_TEMP "zephium-windows-payload"
+          $manifestRoot = Join-Path $payloadRoot "build-manifests"
+          $javascriptRoot = Join-Path $manifestRoot "javascript"
+          New-Item -ItemType Directory -Path `
+            $manifestRoot, `
+            (Join-Path $manifestRoot "wry"), `
+            (Join-Path $javascriptRoot "root"), `
+            (Join-Path $javascriptRoot "desktop"), `
+            (Join-Path $javascriptRoot "frame") | Out-Null
+          Copy-Item Cargo.toml, Cargo.lock -Destination $manifestRoot
+          Copy-Item vendor/wry/Cargo.toml, vendor/wry/Cargo.lock -Destination (Join-Path $manifestRoot "wry")
+          Copy-Item pnpm-lock.yaml, package.json -Destination (Join-Path $javascriptRoot "root")
+          Copy-Item desktop/package.json -Destination (Join-Path $javascriptRoot "desktop")
+          Copy-Item frame/package.json -Destination (Join-Path $javascriptRoot "frame")
+
+          $msis = @(Get-ChildItem "target/release/bundle/msi" -File -Filter "*.msi")
+          $installers = @(Get-ChildItem "target/release/bundle/nsis" -File -Filter "*-setup.exe")
+          if ($msis.Count -ne 1 -or $installers.Count -ne 1) {
+            throw "expected exactly one MSI and one NSIS installer"
+          }
+          $reference = Get-Item "target/release/zephium-desktop.exe"
+          $referenceHash = (Get-FileHash -Algorithm SHA256 $reference.FullName).Hash
+          $executables = foreach ($root in @(
+            (Join-Path $payloadRoot "msi-installed"),
+            (Join-Path $payloadRoot "nsis-installed")
+          )) {
+            $matches = @(Get-ChildItem $root -Recurse -File -Filter "*.exe" | Where-Object {
+              (Get-FileHash -Algorithm SHA256 $_.FullName).Hash -eq $referenceHash
+            })
+            if ($matches.Count -ne 1) {
+              throw "extracted installer payload no longer contains exactly one byte-identical main executable"
+            }
+            $matches[0]
+          }
+
+          $sourceName = "Zephium Windows x86_64 extracted installer payloads"
+          $output = "target/release/bundle/Zephium-$env:RELEASE_VERSION-windows-x86_64.cdx.json"
+          $env:SYFT_CHECK_FOR_APP_UPDATE = "false"
+          $env:SYFT_FILE_METADATA_SELECTION = "all"
+          syft scan "dir:$payloadRoot" `
+            --source-name $sourceName `
+            --source-version $env:RELEASE_VERSION `
+            --source-supplier Zephium `
+            --output "cyclonedx-json=$output"
+          if ($LASTEXITCODE -ne 0) { throw "Syft failed" }
+          $arguments = @(
+            "scripts/release/finalize_sbom.py",
+            "--sbom", $output,
+            "--scan-root", $payloadRoot,
+            "--source-name", $sourceName,
+            "--version", $env:RELEASE_VERSION,
+            "--commit", $env:RELEASE_COMMIT,
+            "--platform", "windows",
+            "--subject", $msis[0].FullName,
+            "--subject", $installers[0].FullName,
+            "--reference-executable", $reference.FullName
+          )
+          foreach ($executable in $executables) {
+            $arguments += @("--executable", $executable.FullName)
+          }
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) { throw "release SBOM binding failed" }
+          Get-Content -Raw $output | ConvertFrom-Json | Out-Null
+
+      - name: Attest Windows release outputs at their producing runner
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/zephium-pe-audit.txt
+            target/release/bundle/zephium-authenticode-audit.json
+            target/release/bundle/*.cdx.json
+
+      - name: Attest the exact Windows installer SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*-setup.exe
+          sbom-path: target/release/bundle/Zephium-${{ needs.release_gate.outputs.version }}-windows-x86_64.cdx.json
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zephium-release-windows-x86_64
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/bundle/zephium-pe-audit.txt
+            target/release/bundle/zephium-authenticode-audit.json
+            target/release/bundle/*.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Seal Windows private symbols outside the public release
+        shell: pwsh
+        env:
+          SYMBOL_AUTHENTICATION_KEY: ${{ secrets.SYMBOL_AUTHENTICATION_KEY }}
+          SYMBOL_ENCRYPTION_KEY: ${{ secrets.SYMBOL_ENCRYPTION_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $symbols = @(Get-ChildItem "target/release" -File -Filter "*.pdb")
+          if ($symbols.Count -lt 1) { throw "release build produced no PDB files" }
+          $archive = Join-Path $env:RUNNER_TEMP "Zephium-$env:RELEASE_COMMIT-windows-x86_64-private-symbols.zip"
+          Compress-Archive -LiteralPath $symbols.FullName -DestinationPath $archive -CompressionLevel Optimal
+          $gitOpenSsl = "${env:ProgramFiles}\Git\usr\bin"
+          if (-not (Test-Path (Join-Path $gitOpenSsl "openssl.exe"))) {
+            throw "the pinned runner image does not provide Git's OpenSSL"
+          }
+          $env:PATH = "$gitOpenSsl;$env:PATH"
+          python scripts/release/seal_symbols.py seal `
+            $archive `
+            "$archive.enc" `
+            "$archive.enc.hmac-sha256"
+          if ($LASTEXITCODE -ne 0) { throw "symbol archive sealing failed" }
+          Remove-Item -LiteralPath $archive -Force
+
+      - name: Store only sealed Windows private symbols
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zephium-private-symbols-windows-x86_64-${{ needs.release_gate.outputs.commit }}
+          path: |
+            ${{ runner.temp }}/Zephium-${{ needs.release_gate.outputs.commit }}-windows-x86_64-private-symbols.zip.enc
+            ${{ runner.temp }}/Zephium-${{ needs.release_gate.outputs.commit }}-windows-x86_64-private-symbols.zip.enc.hmac-sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  macos_bundle:
+    needs: [release_gate, security_policy]
+    name: macOS ${{ matrix.arch }} signed and notarized
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    environment: production-release
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: macos-26
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-26-intel
+            target: x86_64-apple-darwin
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: "1"
+      CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: off
+      CARGO_PROFILE_RELEASE_STRIP: none
+      RELEASE_COMMIT: ${{ needs.release_gate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release_gate.outputs.commit }}
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Require complete Apple publisher credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Missing Apple release credential::${name} is mandatory for a publishable macOS artifact."
+              exit 1
+            fi
+          done
+          if [[ ! "${APPLE_SIGNING_IDENTITY}" =~ ^Developer\ ID\ Application: ]] || [[ ! "${APPLE_TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error title=Invalid Apple release identity::A Developer ID Application identity and 10-character team ID are required."
+            exit 1
+          fi
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the macOS binary and retain its dSYM
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          pnpm --dir desktop exec tauri build \
+            --ci \
+            --target "${TARGET}" \
+            --no-bundle \
+            -- \
+            --locked
+          binary="target/${TARGET}/release/zephium-desktop"
+          test -x "${binary}"
+          mkdir -p "target/${TARGET}/release/private-symbols"
+          dsym="target/${TARGET}/release/private-symbols/Zephium-${TARGET}.dSYM"
+          xcrun dsymutil "${binary}" -o "${dsym}"
+          test -d "${dsym}"
+          xcrun dwarfdump --uuid "${dsym}" | tee "${dsym}.uuid.txt"
+          strip -S "${binary}"
+
+      - name: Sign, notarize, and staple the macOS app and DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Tauri waits for notarization and staples by default. Never add
+          # --skip-stapling or --no-sign to this production job.
+          pnpm --dir desktop exec tauri bundle \
+            --ci \
+            --target "${TARGET}" \
+            --bundles app,dmg \
+            --config '{"build":{"beforeBundleCommand":""}}'
+
+      - name: Verify Apple signature, hardened runtime, notarization, and stapling
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=("target/${TARGET}/release/bundle/macos/"*.app)
+          dmgs=("target/${TARGET}/release/bundle/dmg/"*.dmg)
+          test "${#apps[@]}" -eq 1
+          test "${#dmgs[@]}" -eq 1
+          app="${apps[0]}"
+          dmg="${dmgs[0]}"
+          packaged_binary="${app}/Contents/MacOS/zephium-desktop"
+          dsym="target/${TARGET}/release/private-symbols/Zephium-${TARGET}.dSYM"
+          test -x "${packaged_binary}"
+          test -d "${dsym}"
+
+          codesign --verify --deep --strict --verbose=4 "${app}"
+          codesign --verify --strict --verbose=4 "${dmg}"
+          details="$(codesign --display --verbose=4 "${app}" 2>&1)"
+          grep -F "Authority=${APPLE_SIGNING_IDENTITY}" <<<"${details}"
+          grep -F "TeamIdentifier=${APPLE_TEAM_ID}" <<<"${details}"
+          grep -Eq 'flags=.*\(runtime\)' <<<"${details}"
+          spctl --assess --type execute --verbose=4 "${app}"
+          xcrun stapler validate "${app}"
+          xcrun stapler validate "${dmg}"
+
+          # WebKit's JIT runs in Apple-owned WebContent processes; Zephium's
+          # executable requires no code-signing entitlement. Inspect every
+          # Mach-O in the app and reject any entitlement until it is explicitly
+          # reviewed and added to this allowlist.
+          macho_list="${RUNNER_TEMP}/zephium-macho-files"
+          entitlement_audit="${RUNNER_TEMP}/zephium-entitlements-audit.txt"
+          : > "${macho_list}"
+          : > "${entitlement_audit}"
+          while IFS= read -r -d '' candidate; do
+            if file -b "${candidate}" | grep -F 'Mach-O' >/dev/null; then
+              printf '%s\0' "${candidate}" >> "${macho_list}"
+            fi
+          done < <(find "${app}/Contents" -type f -print0)
+          macho_count=0
+          while IFS= read -r -d '' candidate; do
+            macho_count="$((macho_count + 1))"
+            codesign --verify --strict --verbose=4 "${candidate}"
+            entitlements="${RUNNER_TEMP}/zephium-entitlements-${macho_count}.txt"
+            codesign --display --entitlements - "${candidate}" > "${entitlements}"
+            if [[ -s "${entitlements}" ]]; then
+              echo "::error title=Unreviewed code-signing entitlement::The entitlement allowlist is empty, but ${candidate} contains an explicit entitlement blob."
+              exit 1
+            fi
+            relative="${candidate#"${app}"/}"
+            printf 'Mach-O: %s\nEntitlements: none\n\n' "${relative}" >> "${entitlement_audit}"
+          done < "${macho_list}"
+          if [[ "${macho_count}" -lt 1 ]]; then
+            echo "::error title=Missing signed code::Packaged app contains no inspectable Mach-O executable."
+            exit 1
+          fi
+          binary_uuid="$(xcrun dwarfdump --uuid "${packaged_binary}" | awk 'NR == 1 { print $2 }')"
+          dsym_uuid="$(xcrun dwarfdump --uuid "${dsym}" | awk 'NR == 1 { print $2 }')"
+          test -n "${binary_uuid}"
+          test "${binary_uuid}" = "${dsym_uuid}"
+
+          mountpoint="$(mktemp -d)"
+          cleanup_mount() {
+            hdiutil detach "${mountpoint}" -force >/dev/null 2>&1 || true
+            rmdir "${mountpoint}" 2>/dev/null || true
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "${mountpoint}" "${dmg}" >/dev/null
+          mounted_apps=("${mountpoint}/"*.app)
+          test "${#mounted_apps[@]}" -eq 1
+          codesign --verify --deep --strict --verbose=4 "${mounted_apps[0]}"
+          spctl --assess --type execute --verbose=4 "${mounted_apps[0]}"
+          cmp -s \
+            "${packaged_binary}" \
+            "${mounted_apps[0]}/Contents/MacOS/zephium-desktop"
+          {
+            printf '%s\n' "${details}"
+            echo
+            echo "Code-signing entitlement allowlist (currently empty):"
+            cat "${entitlement_audit}"
+            echo
+            echo "Packaged binary/dSYM UUID: ${binary_uuid}"
+            echo
+            xcrun stapler validate "${app}"
+            xcrun stapler validate "${dmg}"
+          } > "target/${TARGET}/release/bundle/zephium-apple-audit.txt"
+          cleanup_mount
+          trap - EXIT
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.44.0
+
+      - name: Generate and bind the macOS installed-payload SBOM
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.release_gate.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          public="${RUNNER_TEMP}/zephium-public"
+          mkdir -p "${public}"
+          dmgs=("target/${TARGET}/release/bundle/dmg/"*.dmg)
+          apps=("target/${TARGET}/release/bundle/macos/"*.app)
+          test "${#dmgs[@]}" -eq 1
+          test "${#apps[@]}" -eq 1
+          public_dmg="${public}/Zephium-${RELEASE_VERSION}-macos-${ARCH}.dmg"
+          cp "${dmgs[0]}" "${public_dmg}"
+          cp "target/${TARGET}/release/bundle/zephium-apple-audit.txt" "${public}/Zephium-${RELEASE_VERSION}-macos-${ARCH}-audit.txt"
+
+          scan_root="${RUNNER_TEMP}/zephium-macos-sbom-payload"
+          mkdir -p "${scan_root}/installed" "${scan_root}/build-manifests/wry" \
+            "${scan_root}/build-manifests/javascript/root" \
+            "${scan_root}/build-manifests/javascript/desktop" \
+            "${scan_root}/build-manifests/javascript/frame"
+          mountpoint="$(mktemp -d)"
+          cleanup_mount() {
+            hdiutil detach "${mountpoint}" -force >/dev/null 2>&1 || true
+            rmdir "${mountpoint}" 2>/dev/null || true
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "${mountpoint}" "${public_dmg}" >/dev/null
+          mounted_apps=("${mountpoint}/"*.app)
+          test "${#mounted_apps[@]}" -eq 1
+          staged_app="${scan_root}/installed/Zephium.app"
+          ditto "${mounted_apps[0]}" "${staged_app}"
+          test -x "${staged_app}/Contents/MacOS/zephium-desktop"
+          cleanup_mount
+          trap - EXIT
+
+          cp Cargo.toml Cargo.lock "${scan_root}/build-manifests/"
+          cp vendor/wry/Cargo.toml vendor/wry/Cargo.lock \
+            "${scan_root}/build-manifests/wry/"
+          cp pnpm-lock.yaml package.json "${scan_root}/build-manifests/javascript/root/"
+          cp desktop/package.json "${scan_root}/build-manifests/javascript/desktop/"
+          cp frame/package.json "${scan_root}/build-manifests/javascript/frame/"
+
+          source_name="Zephium macOS ${ARCH} installed payload"
+          sbom="${public}/Zephium-${RELEASE_VERSION}-macos-${ARCH}.cdx.json"
+          SYFT_CHECK_FOR_APP_UPDATE=false SYFT_FILE_METADATA_SELECTION=all \
+            syft scan "dir:${scan_root}" \
+            --source-name "${source_name}" \
+            --source-version "${RELEASE_VERSION}" \
+            --source-supplier Zephium \
+            --output "cyclonedx-json=${sbom}"
+          python3 scripts/release/finalize_sbom.py \
+            --sbom "${sbom}" \
+            --scan-root "${scan_root}" \
+            --source-name "${source_name}" \
+            --version "${RELEASE_VERSION}" \
+            --commit "${RELEASE_COMMIT}" \
+            --platform macos \
+            --subject "${public_dmg}" \
+            --executable "${staged_app}/Contents/MacOS/zephium-desktop" \
+            --reference-executable "${apps[0]}/Contents/MacOS/zephium-desktop"
+          python3 -m json.tool "${sbom}" >/dev/null
+
+      - name: Attest macOS release outputs at their producing runner
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/zephium-public/*
+
+      - name: Attest the exact macOS DMG SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/zephium-public/Zephium-${{ needs.release_gate.outputs.version }}-macos-${{ matrix.arch }}.dmg
+          sbom-path: ${{ runner.temp }}/zephium-public/Zephium-${{ needs.release_gate.outputs.version }}-macos-${{ matrix.arch }}.cdx.json
+
+      - name: Upload signed and notarized macOS artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zephium-release-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/zephium-public/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Seal macOS private symbols outside the public release
+        env:
+          ARCH: ${{ matrix.arch }}
+          SYMBOL_AUTHENTICATION_KEY: ${{ secrets.SYMBOL_AUTHENTICATION_KEY }}
+          SYMBOL_ENCRYPTION_KEY: ${{ secrets.SYMBOL_ENCRYPTION_KEY }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/Zephium-${RELEASE_COMMIT}-macos-${ARCH}-private-symbols.tar.gz"
+          tar -C "target/${TARGET}/release/private-symbols" \
+            -czf "${archive}" .
+          python3 scripts/release/seal_symbols.py seal \
+            "${archive}" \
+            "${archive}.enc" \
+            "${archive}.enc.hmac-sha256"
+          rm -f "${archive}"
+
+      - name: Store only sealed macOS private symbols
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zephium-private-symbols-macos-${{ matrix.arch }}-${{ needs.release_gate.outputs.commit }}
+          path: |
+            ${{ runner.temp }}/Zephium-${{ needs.release_gate.outputs.commit }}-macos-${{ matrix.arch }}-private-symbols.tar.gz.enc
+            ${{ runner.temp }}/Zephium-${{ needs.release_gate.outputs.commit }}-macos-${{ matrix.arch }}-private-symbols.tar.gz.enc.hmac-sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  assemble_attest_publish:
+    needs: [release_gate, linux_rpm, windows_bundle, macos_bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production-release
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      RELEASE_COMMIT: ${{ needs.release_gate.outputs.commit }}
+      RELEASE_TAG: ${{ needs.release_gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.release_gate.outputs.commit }}
+
+      - name: Download only public, already-signed platform artifacts
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: zephium-release-*
+          path: release/incoming
+          digest-mismatch: error
+
+      - name: Assemble a collision-free public artifact set
+        run: |
+          set -euo pipefail
+          mkdir -p release/public
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import shutil
+
+          source = pathlib.Path("release/incoming")
+          output = pathlib.Path("release/public")
+          files = []
+          for path in sorted(source.rglob("*")):
+              if path.is_symlink():
+                  raise SystemExit(f"release input contains a symbolic link: {path}")
+              if path.is_dir():
+                  continue
+              if not path.is_file():
+                  raise SystemExit(f"release input is not a regular file: {path}")
+              files.append(path)
+          if not files:
+              raise SystemExit("no platform release artifacts were downloaded")
+          for path in files:
+              if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}", path.name):
+                  raise SystemExit(f"unsafe release artifact name: {path.name}")
+              lower = path.name.lower()
+              allowed = lower.endswith(
+                  (".rpm", ".msi", "-setup.exe", ".dmg", ".cdx.json", ".sha256", ".asc")
+              ) or lower in {
+                  "zephium-authenticode-audit.json",
+                  "zephium-pe-audit.txt",
+                  "zephium-rpm-audit.txt",
+              } or (lower.startswith("zephium-") and lower.endswith("-audit.txt"))
+              if not allowed:
+                  raise SystemExit(f"unexpected release artifact type: {path.name}")
+              destination = output / path.name
+              if destination.exists():
+                  raise SystemExit(f"colliding release artifact name: {path.name}")
+              shutil.copyfile(path, destination)
+
+          names = [path.name for path in output.iterdir()]
+          requirements = {
+              ".rpm": 1,
+              ".msi": 1,
+              "-setup.exe": 1,
+              ".dmg": 2,
+              ".cdx.json": 4,
+          }
+          for suffix, expected in requirements.items():
+              actual = sum(name.lower().endswith(suffix) for name in names)
+              if actual != expected:
+                  raise SystemExit(f"expected {expected} {suffix} artifacts, found {actual}")
+          PY
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify the update key and complete immutable stable chain
+        id: previous
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POLICY_TOKEN }}
+          RELEASE_SEQUENCE: ${{ inputs.release_sequence }}
+          UPDATE_SIGNING_KEY_ID: ${{ vars.UPDATE_SIGNING_KEY_ID }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ vars.UPDATE_SIGNING_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${UPDATE_SIGNING_PUBLIC_KEY}" || -z "${UPDATE_SIGNING_KEY_ID}" ]]; then
+            echo "::error title=Missing update trust root::Protected update public key and key ID are mandatory."
+            exit 1
+          fi
+          mkdir release/previous
+          public_key=release/previous/update-signing-key.pub
+          printf '%s\n' "${UPDATE_SIGNING_PUBLIC_KEY}" > "${public_key}"
+          calculated_key_id="sha256:$(sha256sum "${public_key}" | cut -d' ' -f1)"
+          if [[ "${calculated_key_id}" != "${UPDATE_SIGNING_KEY_ID}" ]]; then
+            echo "::error title=Update key mismatch::Protected update key ID does not identify the configured public key bytes."
+            exit 1
+          fi
+
+          releases_json=release/previous/published-releases.json
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -s 'add' > "${releases_json}"
+
+          tags_file=release/previous/stable-tags.txt
+          python3 scripts/release/update_manifest.py release-tags \
+            --releases-json "${releases_json}" \
+            --repository "${GITHUB_REPOSITORY}" > "${tags_file}"
+          mapfile -t stable_tags < "${tags_file}"
+          material_root=release/previous/releases
+          mkdir "${material_root}"
+          for stable_tag in "${stable_tags[@]}"; do
+            release_dir="${material_root}/${stable_tag}"
+            mkdir "${release_dir}"
+            tag_ref="$(gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${stable_tag}")"
+            if ! tag_object="$(jq -er \
+              --arg ref "refs/tags/${stable_tag}" \
+              'select(.ref == $ref and .object.type == "tag") | .object.sha' \
+              <<<"${tag_ref}")"; then
+              echo "::error title=Invalid stable release tag::${stable_tag} is missing, lightweight, or retargeted."
+              exit 1
+            fi
+            tag_document="$(gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")"
+            if ! stable_commit="$(jq -er \
+              --arg tag "${stable_tag}" \
+              'select(.tag == $tag and .object.type == "commit") | .object.sha' \
+              <<<"${tag_document}")"; then
+              echo "::error title=Invalid stable release tag::${stable_tag} is chained or does not directly target one commit."
+              exit 1
+            fi
+            printf '%s\n' "${stable_commit}" > "${release_dir}/tag-commit.txt"
+            gh release download "${stable_tag}" \
+              --dir "${release_dir}" \
+              --pattern zephium-update-stable.json \
+              --pattern zephium-update-stable.json.sigstore.json
+            manifest="${release_dir}/zephium-update-stable.json"
+            bundle="${release_dir}/zephium-update-stable.json.sigstore.json"
+            test -s "${manifest}"
+            test -s "${bundle}"
+            cosign verify-blob \
+              --key "${public_key}" \
+              --bundle "${bundle}" \
+              "${manifest}"
+          done
+
+          chain_result=release/previous/verified-chain.json
+          python3 scripts/release/update_manifest.py verify-chain \
+            --releases-json "${releases_json}" \
+            --material-dir "${material_root}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --signing-key-id "${UPDATE_SIGNING_KEY_ID}" \
+            --expected-current-tag "${RELEASE_TAG}" \
+            --expected-next-sequence "${RELEASE_SEQUENCE}" \
+            --output "${chain_result}"
+          {
+            echo "manifest=$(jq -r '.head_manifest // ""' "${chain_result}")"
+            echo "head_manifest_sha256=$(jq -r '.head_manifest_sha256 // ""' "${chain_result}")"
+            echo "head_sequence=$(jq -r '.head_sequence // ""' "${chain_result}")"
+            echo "head_tag=$(jq -r '.head_tag // ""' "${chain_result}")"
+            echo "next_sequence=$(jq -r '.next_sequence' "${chain_result}")"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Generate and sign rollback-resistant update metadata
+        run: |
+          set -euo pipefail
+          if [[ -z "${COSIGN_PRIVATE_KEY}" || -z "${COSIGN_PASSWORD}" ]]; then
+            echo "::error title=Missing update signing key::Unsigned update metadata is never publishable."
+            exit 1
+          fi
+          previous_args=()
+          if [[ -n "${PREVIOUS_MANIFEST}" ]]; then
+            previous_args=(--previous "${PREVIOUS_MANIFEST}")
+          fi
+          manifest=release/public/zephium-update-stable.json
+          python3 scripts/release/update_manifest.py generate \
+            --artifact-dir release/public \
+            --output "${manifest}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${RELEASE_TAG}" \
+            --commit "${RELEASE_COMMIT}" \
+            --sequence "${RELEASE_SEQUENCE}" \
+            --published-at "${PUBLISHED_AT}" \
+            --signing-key-id "${UPDATE_SIGNING_KEY_ID}" \
+            "${previous_args[@]}"
+          bundle="${manifest}.sigstore.json"
+          cosign sign-blob \
+            --yes \
+            --key env://COSIGN_PRIVATE_KEY \
+            --bundle "${bundle}" \
+            "${manifest}"
+          printf '%s\n' "${UPDATE_SIGNING_PUBLIC_KEY}" > release/update-signing-key.pub
+          cosign verify-blob \
+            --key release/update-signing-key.pub \
+            --bundle "${bundle}" \
+            "${manifest}"
+          python3 scripts/release/update_manifest.py verify \
+            --manifest "${manifest}" \
+            --artifact-dir release/public \
+            --expected-sequence "${RELEASE_SEQUENCE}" \
+            --expected-repository "${GITHUB_REPOSITORY}" \
+            --expected-tag "${RELEASE_TAG}" \
+            --expected-commit "${RELEASE_COMMIT}" \
+            --expected-signing-key-id "${UPDATE_SIGNING_KEY_ID}"
+        env:
+          COSIGN_PASSWORD: ${{ secrets.UPDATE_SIGNING_KEY_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          PREVIOUS_MANIFEST: ${{ steps.previous.outputs.manifest }}
+          PUBLISHED_AT: ${{ needs.release_gate.outputs.published_at }}
+          RELEASE_SEQUENCE: ${{ steps.previous.outputs.next_sequence }}
+          UPDATE_SIGNING_KEY_ID: ${{ vars.UPDATE_SIGNING_KEY_ID }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ vars.UPDATE_SIGNING_PUBLIC_KEY }}
+
+      - name: Sign a checksum inventory covering every public asset
+        env:
+          COSIGN_PASSWORD: ${{ secrets.UPDATE_SIGNING_KEY_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ vars.UPDATE_SIGNING_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          inventory="${RUNNER_TEMP}/zephium-SHA256SUMS"
+          (
+            cd release/public
+            find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name 'SHA256SUMS.sigstore.json' -printf '%f\0' |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) > "${inventory}"
+          test -s "${inventory}"
+          mv "${inventory}" release/public/SHA256SUMS
+          cosign sign-blob \
+            --yes \
+            --key env://COSIGN_PRIVATE_KEY \
+            --bundle release/public/SHA256SUMS.sigstore.json \
+            release/public/SHA256SUMS
+          printf '%s\n' "${UPDATE_SIGNING_PUBLIC_KEY}" > release/update-signing-key.pub
+          cosign verify-blob \
+            --key release/update-signing-key.pub \
+            --bundle release/public/SHA256SUMS.sigstore.json \
+            release/public/SHA256SUMS
+          (cd release/public && sha256sum --check --strict SHA256SUMS)
+
+      - name: Generate producing-runner provenance for assembly outputs
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            release/public/zephium-update-stable.json
+            release/public/zephium-update-stable.json.sigstore.json
+            release/public/SHA256SUMS
+            release/public/SHA256SUMS.sigstore.json
+
+      - name: Revalidate the sealed public set after attestation
+        run: |
+          set -euo pipefail
+          diff -u \
+            <(find release/public -maxdepth 1 -type f ! -name SHA256SUMS ! -name 'SHA256SUMS.sigstore.json' -printf '%f\n' | LC_ALL=C sort) \
+            <(awk '{ print $2 }' release/public/SHA256SUMS | LC_ALL=C sort)
+          (cd release/public && sha256sum --check --strict SHA256SUMS)
+          cosign verify-blob \
+            --key release/update-signing-key.pub \
+            --bundle release/public/SHA256SUMS.sigstore.json \
+            release/public/SHA256SUMS
+          cosign verify-blob \
+            --key release/update-signing-key.pub \
+            --bundle release/public/zephium-update-stable.json.sigstore.json \
+            release/public/zephium-update-stable.json
+
+      - name: Revalidate repository release immutability before upload
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POLICY_TOKEN }}
+        run: |
+          set -euo pipefail
+          policy="$(gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases")"
+          jq -e '.enabled == true and (.enforced_by_owner | type == "boolean")' \
+            <<<"${policy}" >/dev/null
+          existing="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id")"
+          test -z "${existing}"
+
+      - name: Create a draft and upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_ref="$(gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          if ! tag_object="$(jq -er \
+            --arg ref "refs/tags/${RELEASE_TAG}" \
+            'select(.ref == $ref and .object.type == "tag") | .object.sha' \
+            <<<"${tag_ref}")"; then
+            echo "::error title=Remote release tag changed::Refusing to upload against a missing or lightweight release tag."
+            exit 1
+          fi
+          tag="$(gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")"
+          if ! jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg commit "${RELEASE_COMMIT}" \
+            '.tag == $tag and .object.type == "commit" and .object.sha == $commit' \
+            <<<"${tag}" >/dev/null; then
+            echo "::error title=Remote release tag changed::Refusing to upload against a missing, lightweight, chained, or retargeted release tag."
+            exit 1
+          fi
+          gh release create "${RELEASE_TAG}" \
+            --draft \
+            --verify-tag \
+            --target "${RELEASE_COMMIT}" \
+            --title "Zephium ${RELEASE_TAG#v}" \
+            --notes-from-tag
+          gh release upload "${RELEASE_TAG}" release/public/*
+
+      - name: Publish and bind the verified release
+        env:
+          GH_POLICY_TOKEN: ${{ secrets.RELEASE_POLICY_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SEQUENCE: ${{ steps.previous.outputs.next_sequence }}
+          UPDATE_SIGNING_KEY_ID: ${{ vars.UPDATE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_POLICY_TOKEN}" ]]; then
+            echo "::error title=Missing release-policy credential::Cannot revalidate production policy before publication."
+            exit 1
+          fi
+          policy_dir="$(mktemp -d)"
+          trap 'rm -rf "${policy_dir}"' EXIT
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}" > "${policy_dir}/repository.json"
+          default_branch="$(jq -er '.default_branch' "${policy_dir}/repository.json")"
+          owner_type="$(jq -er '.owner.type' "${policy_dir}/repository.json")"
+          if [[ "${default_branch}" != "main" ]]; then
+            echo "::error title=Unexpected default branch::Production policy requires main to remain the repository default branch."
+            exit 1
+          fi
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/branches/${default_branch}" > "${policy_dir}/branch.json"
+          if ! jq -e '.name == "main" and .protected == true' \
+            "${policy_dir}/branch.json" >/dev/null; then
+            echo "::error title=Unprotected default branch::main lost branch protection during the release."
+            exit 1
+          fi
+          main_head="$(jq -er '.commit.sha' "${policy_dir}/branch.json")"
+          if [[ "${main_head}" != "${RELEASE_COMMIT}" ]]; then
+            GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_COMMIT}...${main_head}" > "${policy_dir}/compare.json"
+            if ! jq -e \
+              --arg release "${RELEASE_COMMIT}" \
+              '.status == "ahead" and .base_commit.sha == $release and .merge_base_commit.sha == $release' \
+              "${policy_dir}/compare.json" >/dev/null; then
+              echo "::error title=Release commit left main::The verified release commit is no longer an ancestor of protected main."
+              exit 1
+            fi
+          fi
+
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release" > "${policy_dir}/environment.json"
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release/deployment-branch-policies?per_page=30" > "${policy_dir}/branch-policies.json"
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release/secrets?per_page=100" > "${policy_dir}/environment-secrets.json"
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/environments/production-release/variables?per_page=30" > "${policy_dir}/environment-variables.json"
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/secrets?per_page=100" > "${policy_dir}/repository-secrets.json"
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/variables?per_page=30" > "${policy_dir}/repository-variables.json"
+          if [[ "${owner_type}" == "Organization" ]]; then
+            GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/organization-secrets?per_page=100" > "${policy_dir}/organization-secrets.json"
+            GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/organization-variables?per_page=30" > "${policy_dir}/organization-variables.json"
+          elif [[ "${owner_type}" == "User" ]]; then
+            printf '%s\n' '{"total_count":0,"secrets":[]}' > "${policy_dir}/organization-secrets.json"
+            printf '%s\n' '{"total_count":0,"variables":[]}' > "${policy_dir}/organization-variables.json"
+          else
+            echo "::error title=Unknown repository owner::Cannot prove organization credential scope for owner type ${owner_type}."
+            exit 1
+          fi
+          python3 scripts/release/verify_release_policy.py \
+            --environment-json "${policy_dir}/environment.json" \
+            --branch-policies-json "${policy_dir}/branch-policies.json" \
+            --secrets-json "${policy_dir}/environment-secrets.json" \
+            --variables-json "${policy_dir}/environment-variables.json" \
+            --repository-secrets-json "${policy_dir}/repository-secrets.json" \
+            --repository-variables-json "${policy_dir}/repository-variables.json" \
+            --organization-secrets-json "${policy_dir}/organization-secrets.json" \
+            --organization-variables-json "${policy_dir}/organization-variables.json" \
+            --environment production-release \
+            --branch "${default_branch}"
+          policy="$(GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases")"
+          jq -e '.enabled == true and (.enforced_by_owner | type == "boolean")' \
+            <<<"${policy}" >/dev/null
+          tag_ref="$(GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          if ! tag_object="$(jq -er \
+            --arg ref "refs/tags/${RELEASE_TAG}" \
+            'select(.ref == $ref and .object.type == "tag") | .object.sha' \
+            <<<"${tag_ref}")"; then
+            echo "::error title=Remote release tag changed::Refusing publication because the release ref is missing or lightweight."
+            exit 1
+          fi
+          tag="$(GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")"
+          if ! jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg commit "${RELEASE_COMMIT}" \
+            '.tag == $tag and .object.type == "commit" and .object.sha == $commit' \
+            <<<"${tag}" >/dev/null; then
+            echo "::error title=Remote release tag changed::Refusing publication because the protected tag no longer directly targets the verified release commit."
+            exit 1
+          fi
+
+          # GitHub draft releases remain mutable. Perform the authoritative
+          # set/byte comparison only after every remote policy and tag check.
+          # The stable-chain compare-and-check immediately below is the only
+          # remaining pre-publish network proof. A trusted Contents-write actor
+          # can still race these API boundaries; immutable post-publication
+          # local-asset verification detects a draft mismatch and turns it into
+          # a channel-freeze incident.
+          final_draft=release/final-draft
+          mkdir "${final_draft}"
+          gh release download "${RELEASE_TAG}" --dir "${final_draft}"
+          diff -u \
+            <(find release/public -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) \
+            <(find "${final_draft}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          while IFS= read -r -d '' source; do
+            cmp --silent "${source}" "${final_draft}/$(basename "${source}")"
+          done < <(find release/public -maxdepth 1 -type f -print0)
+          cosign verify-blob \
+            --key release/update-signing-key.pub \
+            --bundle "${final_draft}/zephium-update-stable.json.sigstore.json" \
+            "${final_draft}/zephium-update-stable.json"
+          python3 scripts/release/update_manifest.py verify \
+            --manifest "${final_draft}/zephium-update-stable.json" \
+            --artifact-dir "${final_draft}" \
+            --expected-sequence "${RELEASE_SEQUENCE}" \
+            --expected-repository "${GITHUB_REPOSITORY}" \
+            --expected-tag "${RELEASE_TAG}" \
+            --expected-commit "${RELEASE_COMMIT}" \
+            --expected-signing-key-id "${UPDATE_SIGNING_KEY_ID}"
+
+          # Re-enumerate the complete stable channel at the last pre-publish
+          # boundary. The current release is still a draft and is intentionally
+          # ignored. Any concurrently published stable release, deleted
+          # predecessor, changed asset inventory, sequence fork, or different
+          # unique head changes the pure result and blocks publication.
+          recheck_releases=release/previous/published-releases-before-publish.json
+          GH_TOKEN="${GH_POLICY_TOKEN}" gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -s 'add' > "${recheck_releases}"
+          recheck_chain=release/previous/verified-chain-before-publish.json
+          python3 scripts/release/update_manifest.py verify-chain \
+            --releases-json "${recheck_releases}" \
+            --material-dir release/previous/releases \
+            --repository "${GITHUB_REPOSITORY}" \
+            --signing-key-id "${UPDATE_SIGNING_KEY_ID}" \
+            --expected-current-tag "${RELEASE_TAG}" \
+            --expected-next-sequence "${RELEASE_SEQUENCE}" \
+            --output "${recheck_chain}"
+          if ! cmp --silent release/previous/verified-chain.json "${recheck_chain}"; then
+            echo "::error title=Stable update head changed::The authenticated channel head changed during this release; restart from a fresh reviewed dispatch."
+            exit 1
+          fi
+
+          gh release edit "${RELEASE_TAG}" --draft=false --latest
+          release_attestation_verified=false
+          for attempt in 1 2 3 4 5; do
+            if gh release verify "${RELEASE_TAG}"; then
+              release_attestation_verified=true
+              break
+            fi
+            sleep "$((attempt * 3))"
+          done
+          if [[ "${release_attestation_verified}" != true ]]; then
+            echo "::error title=Published immutable release verification failed::The release is already public and immutable, but GitHub did not produce a verifiable attestation. Freeze the channel and follow the post-publication incident procedure; do not delete, edit, or rerun this version."
+            exit 1
+          fi
+
+          # `gh release verify` authenticates GitHub's release attestation but
+          # does not compare any caller-owned file. Verify every expected local
+          # asset against that immutable attestation, then independently compare
+          # the complete published asset set so an injected extra is not missed.
+          published=release/published
+          mkdir "${published}"
+          post_publish_failure=false
+          while IFS= read -r -d '' source; do
+            if ! gh release verify-asset "${RELEASE_TAG}" "${source}"; then
+              post_publish_failure=true
+            fi
+          done < <(find release/public -maxdepth 1 -type f -print0)
+          if ! gh release download "${RELEASE_TAG}" --dir "${published}"; then
+            post_publish_failure=true
+          else
+            if ! diff -u \
+              <(find release/public -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) \
+              <(find "${published}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); then
+              post_publish_failure=true
+            fi
+            while IFS= read -r -d '' source; do
+              if ! cmp --silent "${source}" "${published}/$(basename "${source}")"; then
+                post_publish_failure=true
+              fi
+            done < <(find release/public -maxdepth 1 -type f -print0)
+          fi
+          if [[ "${post_publish_failure}" == true ]]; then
+            echo "::error title=Published immutable asset mismatch::The release is already public and immutable, but its attested asset set or bytes differ from the locally verified release set. Freeze the channel and follow the post-publication incident procedure; do not delete, edit, or rerun this version."
+            exit 1
+          fi
