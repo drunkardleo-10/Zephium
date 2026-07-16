@@ -1,9 +1,10 @@
 # Zephium Architecture
 
-FOSS, zero-telemetry browser on the OS-native webview (Tauri + Wry), Rust-heavy,
-with a SolidJS UI. This document is the single source of truth for structure and
-boundaries. Finalized 2026-07 after the foundation review; it reflects both what
-is built and the agreed target. Security enforcement lives in
+FOSS browser on the OS-native webview (Tauri + Wry), Rust-heavy, with a SolidJS
+UI and no application-owned telemetry. This document is the single source of
+truth for structure and boundaries. Revised 2026-07 during the foundation
+review; it reflects both what is built and the agreed target. Security
+enforcement lives in
 `docs/security-model.md`.
 
 Rigor is spent only where a decision is expensive to reverse; everything else
@@ -13,9 +14,11 @@ stays flexible.
 
 ## 0. North star and constraints
 
-**Power, polish and customization first.** Bundle/disk size is explicitly NOT a
-constraint: whatever we add, we ship ~80-100x smaller than Chromium-based
-browsers. Add any quality dependency or feature freely.
+**Power, polish, and customization without shipping another browser engine.**
+The distribution target is roughly 15–20 MiB, but size never overrides native
+safety, data durability, or release authenticity. A dependency must justify
+both its shipped bytes and its runtime behavior; large engine/runtime payloads
+are not bundled merely to meet a feature deadline.
 
 The constraints that remain hard:
 
@@ -63,9 +66,13 @@ The expensive decisions are 1-3 (purity, ownership, command/event shape).
 
 ## 2. Process and trust model
 
-The native webview gives us the hardest problem solved for free: untrusted web
-content runs in OS-sandboxed content processes we did not build. Our Rust never
-executes page JS.
+The native webview delegates renderer parsing/JIT and process sandboxing to the
+maintained OS engine: untrusted web content normally runs in engine-owned
+content processes we did not build. Zephium still has to prove each supported
+runtime's confinement and keep page data out of its Rust/native capabilities;
+using a multi-process WebView is not itself a site-isolation guarantee. Rust
+requests page-world scripts for tightly bounded observations, but never treats
+their results as trusted code or data.
 
 Three webview classes, mapping to the trust zones in security-model.md:
 
@@ -113,6 +120,15 @@ one window fight over the cursor: NSTrackingArea fires regardless of z-occlusion
   window/split resize is smooth with zero Rust per frame. Split dividers are
   dragged natively in the stage; ratio changes sync back to core via
   `EngineEvent::SplitChanged`. Windows/Linux get the equivalent (§13).
+- **Resize/layout is latest-value and revision-exact.** The shell coalesces
+  window-size facts, the engine retains at most one newest layout per bounded
+  window, and each stage hides removals before additions. Windows caches native
+  geometry/visibility and applies only deltas; COM visibility is revalidated
+  around each re-entrant call. Linux performs at most four immediate GTK
+  convergence attempts and owns one coalesced idle retry. macOS gives every
+  content update a container epoch before the first AppKit call, while its
+  native split tree recomputes pane frames during resize. A stale pass may hide
+  content, but it may never reveal content for an older tab/split revision.
 - **Chrome is positioned natively** (setFrame + autoresizing mask), NOT via
   Tauri multiwebview `add_child` (behind the `unstable` flag). Boring permanent
   OS API over unstable framework feature.
@@ -136,27 +152,29 @@ order: native menu > overlay panel > DOM.
   behavior. Simple confirmations are native dialogs/sheets. DOM renders only
   what stays fully inside the chrome region (tooltips, hovers).
 - **One reusable overlay panel** hosts the launcher/palette (and later find-bar,
-  rich modals): a pre-warmed hidden Tauri WebviewWindow whose NSWindow is
-  converted to an NSPanel subclass on macOS (non-activating, floating,
-  all-Spaces). Being a Tauri window, it reuses the specta IPC and asset
-  protocol as-is; the frame routes by window label. The pool grows to 1-2
-  recycled panels only when two surfaces must coexist.
+  rich modals): currently a pre-warmed hidden Tauri WebviewWindow configured
+  as a floating, all-Spaces auxiliary NSWindow on macOS. It is never changed
+  into an unrelated Objective-C class after allocation. Being a Tauri window,
+  it reuses the specta IPC and asset protocol as-is; the frame routes by
+  window label. The pool grows to 1-2 recycled surfaces only when two must
+  coexist.
 - **The launcher is ONE surface with one behavior**: free-floating, centered,
   independent of the main window; in-app and global hotkeys both just show it.
-  Non-activating panel means invoking it from another app does not raise the
-  rest of Zephium.
+  Allocation-time non-activating NSPanel semantics require a supported
+  Tao/Tauri constructor seam and are not claimed by the current NSWindow.
 - Anchored overlays (find-bar, modals over content) attach the same panel as a
   child window of the main window and position relative to its frame.
-- Per-platform backends: macOS NSPanel (above); Windows tool window +
+- Per-platform backends: macOS auxiliary NSWindow (with a future
+  allocation-time NSPanel seam); Windows tool window +
   RegisterHotKey; X11 free positioning; Hyprland wlr-layer-shell (gtk-layer-
   shell); **GNOME Wayland degrades honestly**: no global placement exists, the
   launcher shows over the main window (GtkOverlay in-window for anchored
   surfaces). Global hotkey on Wayland goes through the XDG GlobalShortcuts
   portal or compositor config.
-- Fallback path if panel conversion ever fights the framework: raw wry webview
-  (zone 2) in our own panel with a thin typed bridge over the same specta
-  types. Same security posture either way: local assets only, commands
-  validated in Rust.
+- A future true NSPanel must be allocated with a Tao-compatible subclass and
+  layout from the start; changing a live TaoWindow to a sibling Objective-C
+  class is forbidden. A raw zone-2 Wry view in an owned panel remains another
+  possible implementation, with local assets only and Rust-validated commands.
 
 **Internal pages** (history, settings, graphs/data viz, notes editor, easel):
 zone-2 webviews placed INTO the stage content region in place of a content view.
@@ -222,7 +240,20 @@ UI intent -> IPC/bridge -> command queue -> actor: domain reducer (pure)
 ```
 
 Engine callbacks (title, url, loading, favicon, nav state, new-window intent,
-permission request, download start, crash) enter the same queue as commands.
+permission request, download start, crash, native-runtime restart requirement)
+enter the same queue as commands. Runtime restart state is process-sticky and
+is replayed on chrome bootstrap; it is never cleared by recycling one content
+profile.
+
+Main-frame navigation uses an opaque native identity rather than requested-URL
+equality, so same-origin, cross-origin, and multi-hop redirects retain one
+ordered lifecycle. The raw view is hidden at native commit before Rust can be
+re-entered. Privileged chrome atomically applies and verifies the exact
+revision-bearing final URL/title projection; the actor correlates that revision
+again before it queues first-content geometry and returns the same opaque
+presentation id. A fresh tab's real New Tab surface remains in place until this
+transition, with no synthetic native placeholder. Native title attribution
+begins only after the exact navigation finishes.
 
 - **Projection is granular per domain** (`items.*`, `spaces.*`, `downloads.*`),
   NOT one monolithic snapshot: no re-render storms at scale. A fresh surface
@@ -234,6 +265,15 @@ permission request, download start, crash) enter the same queue as commands.
   UI is told the action succeeded.
 - Optimistic UI (drag-reorder) is transient view state, reconciled against the
   projection.
+
+Privileged mutations first reserve a bounded process-local operation id, then
+enter the non-evictable command FIFO. The actor records a typed disposition in a
+1,024-entry desktop ledger before event delivery. Chrome subscribes before
+calling `operations_reconcile`, deduplicates results, and retries explicit
+acknowledgement; the backend refuses new admission rather than evict an
+unacknowledged result. This repairs WebView reloads and missed events, but it is
+not a durable cross-process queue. Only operations with their own persistence
+journal, currently profile deletion, resume after process death.
 
 **Sync patterns by cardinality:** bounded state (items, spaces, windows) =
 snapshot + deltas; unbounded (history, downloads) = query + paginate, never
@@ -303,12 +343,28 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
 - New/empty tab has no webview (zero engine cost); the chrome renders the
   new-tab view. The webview is created lazily on first navigation (built:
   `view: bool` on Tab).
-- The scheduler binds the active tab plus a small warm pool to physical views.
-  Hibernated tabs keep navigation state, not a live view.
-- Restore fidelity is per-engine and accepted: WKWebView `interactionState`,
-  WebView2 `TrySuspend`/`Resume` (live suspend), WebKitGTK
-  `WebKitWebViewSessionState` (back/forward list).
-- Inactive non-hibernated tabs keep their webview hidden (media, sockets,
+- Three tiers, built (shell = policy via idle clock + maintenance tick;
+  engine = mechanism): hidden views get a low-memory hint on the visibility
+  transition; hidden AND idle (5 min) views suspend where a primitive exists
+  (WebView2 `TrySuspend`, auto-resume on visible; WebKit suspends hidden
+  processes itself). Twelve live views is the soft warm target. Above it,
+  hidden pages idle for 15 minutes may enter an exact generation/navigation
+  discard-safety probe; above the pressure watermark of 24, eligible hidden
+  pages may be probed without that long-idle grace. At most four probes run at
+  once, visible split leaves are protected, and an uncertain page is never
+  force-discarded. A successful discard drops the view but keeps the item;
+  activation recreates it and reapplies zoom.
+- The application refuses a 33rd logical view synchronously. Its absolute 32
+  ceiling includes eight slots for the largest visible split/recovery batch.
+  The native engine has an independent ceiling of 48 counting live views, a
+  warm spare, construction reservations, and WebView2 cleanup debt that may
+  still own a controller. These constants are admission bounds; the packaged
+  1/10/50/100-tab and 24-hour resource measurements remain release work.
+- Discard fidelity upgrade is planned per-engine: WKWebView
+  `interactionState`, WebView2 resume-state, WebKitGTK
+  `WebKitWebViewSessionState` (back/forward list). Until then a discarded
+  tab restores by URL.
+- Inactive non-discarded tabs keep their webview hidden (media, sockets,
   scroll survive a switch).
 
 ---
@@ -337,13 +393,24 @@ The full surface is declared now; implementations land incrementally. Grouped:
 
 Session restore state (§7) rides on lifecycle (`opts` carries restore state).
 
+The built favicon path deliberately has no second Rust HTTP stack or native
+image decoder. The exact site renderer scans a bounded set of same-origin icon
+links plus `/favicon.ico`, decodes there, and returns only canonical 32x32 RGBA
+for the current view generation/navigation epoch. Seven timed polls are
+followed by at most one fresh pass at document completion when the initial
+budget expired during loading. Cross-origin/CDN icons are not fetched until a
+profile-scoped broker can share the engine's exact cookies, proxy, DNS, and
+shutdown policy; affected sites may show the fallback rather than their
+declared icon.
+
 ---
 
-## 9. Blocker (built-in, adblock-rust)
+## 9. Blocker (planned next track, adblock-rust)
 
-Ships built-in (Brave's engine); this is why third-party adblock extensions are
-not a dependency. Two architectures behind one policy port, never per-request
-in core:
+The foundation keeps a policy port for a future built-in blocker based on
+Brave's `adblock-rust`; the current `set_content_rules` adapter is a no-op and
+no blocking claim is made. The intended implementation uses two architectures
+behind one policy port, never per-request logic in core:
 
 | Platform | Network blocking | adblock-rust role | Cosmetic |
 |---|---|---|---|
@@ -351,7 +418,7 @@ in core:
 | WKWebView (mac) | declarative `WKContentRuleList` | list parsing + `content_blocking` conversion to WebKit JSON + cosmetics | `WKUserScript` via injection pipeline |
 | WebKitGTK (Linux) | declarative `WebKitUserContentFilter` (same JSON format) | same as macOS | injected stylesheet/script |
 
-Accepted, documented gap: no runtime `$redirect`/scriptlets on WebKit;
+Expected, documented gap: no runtime `$redirect`/scriptlets on WebKit;
 declarative rule-count caps (split large lists). Cosmetic injection runs before
 render to avoid ad flash. List pipeline: fetch -> parse/validate (fuzz later)
 -> compile -> cache per profile -> hot reload. A local-root-CA MITM proxy is
@@ -431,6 +498,13 @@ Commands validate inputs in Rust; errors are a serializable `AppError`.
 Adding a command touches the capability manifest: a small, reviewable security
 checkpoint.
 
+Mutating commands return an `OperationAdmission` and later emit a correlated
+`OperationDisposition`; IPC must not discard either admission failure or a
+backend/store rejection. `Deferred` means the actor queued native/store work,
+not that navigation, reload, or rendering completed. Native-runtime update state uses the stable typed
+`zephium:runtime-status` event so UI presentation can be added without changing
+the backend contract.
+
 ---
 
 ## 13. Platform layer
@@ -438,7 +512,8 @@ checkpoint.
 Development reality: all three OSes are available for real testing, including
 Linux under Wayland (GNOME, Hyprland) and X11 (i3). Native code is written
 against the OS it runs on; no blind ports. CI matrix keeps all targets
-compiling (§14); behavior is verified on real machines.
+compiling (§14). The current source-level/native checks do not replace the
+packaged hostile-page and endurance matrix still required on real machines.
 
 Per-OS map for the native seams (each a `cfg`-selected module with the same
 inherent surface; no `dyn`):
@@ -465,28 +540,35 @@ target-gated. Linux caveat: content views on Linux are created via
 composition root (wry positions children only inside a Fixed;
 raw-window-handle child-building is not the GTK path).
 
-Phase 3 status: seams live in `zephium-engine/src/platform/` and
+Current foundation status: seams live in `zephium-engine/src/platform/` and
 `desktop/src/platform/` (cfg-selected modules, one per OS, same inherent
-surface). Implemented on all three: chrome positioning (setFrame /
-`SetBounds` on ICoreWebView2Controller / `gtk::Fixed` move), content layout
-(macOS stage in-pass; Windows and Linux event-driven `set_bounds`), NavProbe
-(canGoBack/Forward via WKWebView / ICoreWebView2 / WebKitGTK). Deferred to
-runtime iteration on real hardware: split divider drag and drop indicator on
-Windows/Linux (macOS stage equivalents), per-view rounded corners (skipped on
-Windows by design), Windows WebView2 profile partitions.
+surface). All three implement chrome positioning, content layout, native
+navigation probes, and per-profile engine partitions. On macOS the overlay
+keeps Tao's allocation-time Objective-C class, while queued chrome layout uses
+a main-thread-retained, generation/attachment-checked WKWebView that is
+unpublished before release. On Windows, every fallible controller build owns a
+typed cleanup plan for the parent subclass, controller `Close`, and child HWND;
+unresolved steps return as retryable profile-attributed debt and consume native
+resource budget. On Linux, context properties fail closed and CI additionally
+spawns a real Fedora WebProcess to inspect namespaces, no-new-privileges,
+seccomp, and host-path denial. Packaged real-OS hostile tests are still a
+release gate. Split-divider drag/drop indicators on Windows/Linux and per-view
+rounded corners remain later platform work (rounded corners are intentionally
+skipped on Windows for now).
 
 ---
 
 ## 14. CI
 
-`cargo xtask ci` is the single entrypoint. Matrix across
-{windows, macos, linux} on native runners so `cfg`-gated code cannot rot.
-
-Per target: `fmt --check`, `clippy -D warnings`, `test --workspace` (incl.
-proptest on domain invariants), specta TS-drift check, `cargo deny`,
-`cargo audit`, migration up-tests, frontend gates (`tsc --noEmit`, eslint,
-vitest). Also enforced: the dependency rules of §4 (core purity grep/test).
-Later: `cargo fuzz` on parsers (filter lists, themes), `cargo geiger`.
+`cargo xtask ci` is the local gate (fmt, clippy, tests, frame check).
+GitHub CI is the full matrix: {windows, macos, linux} native runners so
+`cfg`-gated code cannot rot, plus nextest, bindings-drift, coverage, and
+advisory `cargo machete` / `cargo deny check` (licenses, advisories,
+sources; deny.toml at the root). Frontend gate: `tsc --noEmit` + biome.
+The supported Fedora job explicitly runs the otherwise ignored real-WebProcess
+confinement probe; its result applies to that CI image, not every installation.
+Later: sustained fuzzing for new parsers (filter lists, themes), `cargo geiger`,
+packaged hostile tests, and endurance/resource gates.
 
 ---
 
@@ -535,19 +617,60 @@ splits, CI depth, exact reducer composition.
 
 ## 17. Persistence
 
-`zephium-store`, SQLite via rusqlite (bundled; FTS5 enabled via the
-bundled-full feature set).
+`zephium-store`, SQLite via rusqlite (the plain `bundled` feature ships
+FTS5; a test guards it).
 
 - **Storage is an actor**: rusqlite is blocking; a storage actor owns the
-  connection(s) per profile and serializes writes; the async Store port is a
-  message send. WAL mode, one writer per profile.
-- **One database per profile** (isolation is a security property). Incognito =
-  in-memory, never touches disk.
+  shared metadata connection and per-profile connections and serializes
+  writes; the async Store port is a message send.
+- **The isolation scope is explicit**: durable history and favicon data live
+  in per-profile databases. The registry, application settings, and complete
+  restorable non-private session share `meta.sqlite`; profiles are therefore
+  not separate file-level principals.
+- **Incognito is rejected at the persistence adapter**: it is absent from the
+  registry, session snapshot, history, and favicon databases. This is not a
+  claim that native web engines, swap, crash artifacts, or the OS never write
+  temporary private-session bytes to disk.
 - **Forward-only versioned migrations** (`user_version`) from day one, each
-  with an up-test on representative data.
-- Tables: profiles, spaces, items, history, documents, downloads, permissions,
-  sessions, settings, themes, search_engines + FTS5 index (items, history,
-  documents, commands).
+  with an up-test on representative data. A schema newer than this binary is
+  rejected, so rollback cannot write through a future format. The claimed
+  version must also match a bounded full `sqlite_schema` manifest generated
+  from the exact immutable migration prefix before migration DML and after
+  every step; injected/replaced triggers, indexes, views, tables, and FTS
+  shadow objects therefore fail closed instead of executing during migration.
+- **Database-path admission rejects existing aliases.** The store pins its
+  canonical data root, requires regular single-link files, creates new files
+  exclusively with owner-only permissions, opens SQLite with `NOFOLLOW`, and
+  rechecks platform file identity after open. This is not confinement against
+  a malicious process already running as the same OS user: closing all
+  directory-component and WAL/SHM races would require descriptor-relative
+  filesystem operations and persistent ownership identity end to end.
+- **Ancillary corruption degrades one profile, not the browser.** Once an
+  exact authoritative meta snapshot exists, every registered profile database
+  is securely opened read-only and schema-verified before read-write setup.
+  A future/altered schema is left untouched; any failed ancillary database is
+  explicitly reported by profile ID and disabled without retry or recreation.
+  The session and healthy siblings remain usable. Without authoritative session
+  truth, the same condition still stops startup. Only the crash-resumable
+  profile-deletion journal can later authorize removal of the preserved file.
+- **Authoritative snapshots are exact, not repaired on read.** An
+  allocation-free lexical preflight bounds JSON strings, scalar tokens,
+  structure, and depth before schema-aware bounded visitors allocate profile,
+  space, item, or split collections. Unknown fields and any difference from
+  the canonical session are quarantined; the original row is preserved and
+  the store stays read-only pending an explicit recovery flow.
+- **Profile deletion is a two-phase, crash-resumable application workflow.**
+  One SQLite transaction commits the exact survivor snapshot and authorization
+  journal before the in-memory tombstone/native retirement. Ambiguous
+  authorization rechecks the journal and rebuilds from the current
+  process-local session revision before a legal retry. Native verification is
+  durably recorded before the authorized profile database is unlinked; the
+  journal clears only after success and startup resumes unfinished phases.
+  Packaged tests of all engine storage types and crash boundaries remain a
+  production gate.
+- The current schema contains the shared registry/settings/session snapshot
+  and per-profile history/favicons with FTS5. Additional browser stores remain
+  future work, not an architectural guarantee.
 
 ---
 
