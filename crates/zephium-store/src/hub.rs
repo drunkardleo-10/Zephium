@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -61,14 +62,37 @@ pub struct Hub {
     degraded_profiles: HashSet<ProfileId>,
     legacy_state_purged: bool,
     recovery_required: Option<String>,
+    /// One unpredictable token shared by every Hub constructed in this
+    /// process. A completed Windows unlink may be reconciled only by a Hub
+    /// carrying a different token, making "after restart" an enforceable
+    /// state-machine transition rather than a caller convention.
+    deletion_process_generation: ProfileId,
     #[cfg(test)]
     ambiguous_profile_deletion_commit_once: bool,
+    #[cfg(test)]
+    fail_profile_deletion_after_local_purge_once: bool,
 }
 
 struct PreparedSession {
     state: SessionState,
     snapshot: String,
     registry: HashSet<ProfileId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProfileDeletionJournalEntry {
+    profile: ProfileId,
+    native_erasure_verified: bool,
+    local_unlink_process: Option<ProfileId>,
+}
+
+impl ProfileDeletionJournalEntry {
+    fn pending(self) -> PendingProfileDeletion {
+        PendingProfileDeletion {
+            profile: self.profile,
+            native_erasure_verified: self.native_erasure_verified,
+        }
+    }
 }
 
 /// Allocation-bounded wire representation for the authoritative snapshot.
@@ -273,6 +297,13 @@ mod bounded_snapshot_tests {
 
 impl Hub {
     pub fn open(dir: PathBuf) -> rusqlite::Result<Self> {
+        Self::open_with_deletion_process_generation(dir, deletion_process_generation())
+    }
+
+    fn open_with_deletion_process_generation(
+        dir: PathBuf,
+        deletion_process_generation: ProfileId,
+    ) -> rusqlite::Result<Self> {
         // Pin every derived database path to the canonical application-data
         // directory selected at startup. Final components are still opened
         // with NOFOLLOW and verified by file identity below.
@@ -285,7 +316,7 @@ impl Hub {
         {
             return Err(rusqlite::Error::InvalidPath(dir));
         }
-        let mut meta = open_database(&dir.join("meta.sqlite"))?;
+        let mut meta = open_meta_database(&dir.join("meta.sqlite"))?;
         configure(&meta)?;
         migrations::apply(&mut meta, migrations::META)?;
         let recovery_required = recovery_reason(&meta)?;
@@ -302,8 +333,11 @@ impl Hub {
             degraded_profiles: HashSet::new(),
             legacy_state_purged: false,
             recovery_required,
+            deletion_process_generation,
             #[cfg(test)]
             ambiguous_profile_deletion_commit_once: false,
+            #[cfg(test)]
+            fail_profile_deletion_after_local_purge_once: false,
         };
         hub.load_registry()?;
         // The snapshot and registry must agree before profile files are
@@ -325,7 +359,18 @@ impl Hub {
             // Validate the entire durable deletion cohort before opening or
             // migrating any profile database. Actual deletion is coordinated
             // later with the native engine and never runs on startup.
-            let _ = hub.profile_deletion_journal()?;
+            let journal = hub.profile_deletion_journal_entries()?;
+            if !journal.is_empty() && !authoritative {
+                return Err(invalid_data(
+                    "profile deletion journal has no valid authoritative session",
+                ));
+            }
+            // Windows cannot portably flush a directory handle after unlink.
+            // A completed local tombstone therefore survives until a later
+            // process start observes that the canonical database and both
+            // SQLite sidecars remain absent. A resurrected artifact reopens
+            // local cleanup without repeating native erasure.
+            hub.reconcile_completed_profile_deletion_tombstones()?;
             hub.degraded_profiles =
                 harden_registered_profile_files(&dir, &hub.registry, authoritative, authoritative)?;
         }
@@ -381,9 +426,17 @@ impl Hub {
             degraded_profiles: HashSet::new(),
             legacy_state_purged: false,
             recovery_required: None,
+            deletion_process_generation: deletion_process_generation(),
             #[cfg(test)]
             ambiguous_profile_deletion_commit_once: false,
+            #[cfg(test)]
+            fail_profile_deletion_after_local_purge_once: false,
         })
+    }
+
+    #[cfg(test)]
+    pub fn open_for_new_process(dir: PathBuf) -> rusqlite::Result<Self> {
+        Self::open_with_deletion_process_generation(dir, new_deletion_process_generation())
     }
 
     fn load_registry(&mut self) -> rusqlite::Result<()> {
@@ -478,15 +531,15 @@ impl Hub {
             return Ok(ProfileDeletionAuthorizeOutcome::InvalidSession);
         }
 
-        let pending = self.profile_deletion_journal()?;
-        let already_authorized = pending.iter().any(|deletion| deletion.profile == profile);
+        let journal = self.profile_deletion_journal_entries()?;
+        let already_authorized = journal.iter().any(|deletion| deletion.profile == profile);
         if self.registry.contains(&profile) {
             let mut expected = self.registry.clone();
             expected.remove(&profile);
             if prepared.registry != expected {
                 return Ok(ProfileDeletionAuthorizeOutcome::SessionConflict);
             }
-            if pending.len() >= MAX_PROFILE_DELETION_JOURNAL {
+            if journal.len() >= MAX_PROFILE_DELETION_JOURNAL {
                 return Err(invalid_data(
                     "profile deletion journal exceeds persistence limit",
                 ));
@@ -550,7 +603,7 @@ impl Hub {
         &self,
         next_registry: &HashSet<ProfileId>,
     ) -> rusqlite::Result<()> {
-        let pending_deletions = self.profile_deletion_journal()?;
+        let pending_deletions = self.profile_deletion_journal_entries()?;
         if pending_deletions
             .iter()
             .any(|deletion| next_registry.contains(&deletion.profile))
@@ -1535,6 +1588,37 @@ impl Hub {
         Some((Some(RGBA32_MIME.to_owned()), bytes))
     }
 
+    pub fn fresh_favicon_raster(
+        &mut self,
+        profile: ProfileId,
+        origin: &str,
+        max_age_seconds: i64,
+    ) -> Option<Vec<u8>> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || !valid_favicon_origin(origin)
+            || max_age_seconds < 0
+        {
+            return None;
+        }
+        let oldest = now_secs().saturating_sub(max_age_seconds);
+        let bytes = self
+            .profile_conn(profile)
+            .ok()?
+            .query_row(
+                "SELECT CASE WHEN length(icon) <= ?3 THEN icon END
+                 FROM favicons
+                 WHERE origin = ?1 AND fetched_at >= ?2",
+                params![origin, oldest, RGBA32_BYTES as i64],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()??;
+        validated_rgba32(&bytes)?;
+        Some(bytes)
+    }
+
     pub fn app_setting(&mut self, key: &str) -> Option<String> {
         if key.is_empty() || key.len() > MAX_SETTING_KEY_BYTES {
             return None;
@@ -1639,7 +1723,9 @@ impl Hub {
         Ok(())
     }
 
-    fn profile_deletion_journal(&self) -> rusqlite::Result<Vec<PendingProfileDeletion>> {
+    fn profile_deletion_journal_entries(
+        &self,
+    ) -> rusqlite::Result<Vec<ProfileDeletionJournalEntry>> {
         let count =
             self.meta
                 .query_row("SELECT count(*) FROM profile_deletion_journal", [], |row| {
@@ -1654,16 +1740,26 @@ impl Hub {
             "SELECT CASE
                         WHEN length(CAST(profile_id AS BLOB)) <= 26 THEN profile_id
                     END,
-                    native_erasure_verified
+                    native_erasure_verified,
+                    local_unlink_process IS NULL,
+                    CASE
+                        WHEN length(CAST(local_unlink_process AS BLOB)) <= 26
+                        THEN local_unlink_process
+                    END
              FROM profile_deletion_journal
              ORDER BY authorized_at, profile_id",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
         })?;
         let mut profiles = Vec::with_capacity(count as usize);
         for row in rows {
-            let (raw, native_erasure_verified) = row?;
+            let (raw, native_erasure_verified, local_unlink_is_null, local_unlink_process) = row?;
             let raw = raw.ok_or_else(|| invalid_data("profile deletion id exceeds limit"))?;
             let profile = ProfileId::parse(&raw)
                 .filter(|profile| profile.to_string() == raw)
@@ -1677,14 +1773,36 @@ impl Hub {
                     ))
                 }
             };
+            let local_unlink_process = match (local_unlink_is_null, local_unlink_process) {
+                (1, None) => None,
+                (0, Some(raw)) => {
+                    let generation = ProfileId::parse(&raw)
+                        .filter(|generation| generation.to_string() == raw)
+                        .ok_or_else(|| {
+                            invalid_data("profile deletion journal has invalid process generation")
+                        })?;
+                    Some(generation)
+                }
+                _ => {
+                    return Err(invalid_data(
+                        "profile deletion journal has invalid local-unlink state",
+                    ));
+                }
+            };
+            if local_unlink_process.is_some() && !native_erasure_verified {
+                return Err(invalid_data(
+                    "profile deletion journal completed local unlink without native proof",
+                ));
+            }
             if self.registry.contains(&profile) {
                 return Err(invalid_data(
                     "profile deletion journal overlaps active registry",
                 ));
             }
-            profiles.push(PendingProfileDeletion {
+            profiles.push(ProfileDeletionJournalEntry {
                 profile,
                 native_erasure_verified,
+                local_unlink_process,
             });
         }
         if profiles.len() != count as usize {
@@ -1695,9 +1813,103 @@ impl Hub {
         Ok(profiles)
     }
 
+    fn pending_profile_deletion_entries(
+        entries: &[ProfileDeletionJournalEntry],
+    ) -> Vec<PendingProfileDeletion> {
+        entries
+            .iter()
+            .copied()
+            // A Windows unlink is reported complete to the current process,
+            // while its authorization remains internally durable until a
+            // later process start verifies absence. Do not make the shell
+            // repeat a completed local operation during the same run.
+            .filter(|entry| entry.local_unlink_process.is_none())
+            .map(ProfileDeletionJournalEntry::pending)
+            .collect()
+    }
+
+    fn reconcile_completed_profile_deletion_tombstones(&mut self) -> rusqlite::Result<()> {
+        let Some(dir) = self.dir.clone() else {
+            return Ok(());
+        };
+        let completed: Vec<_> = self
+            .profile_deletion_journal_entries()?
+            .into_iter()
+            .filter(|entry| entry.local_unlink_process != Some(self.deletion_process_generation))
+            .filter(|entry| entry.local_unlink_process.is_some())
+            .collect();
+        if completed.is_empty() {
+            return Ok(());
+        }
+
+        // Resolve filesystem truth before taking SQLite's write transaction.
+        // A path that exists in any form (regular file, directory, symlink or
+        // reparse-point-like entry) is not considered absent.
+        let mut resolutions = Vec::with_capacity(completed.len());
+        for entry in completed {
+            let Some(prior_process) = entry.local_unlink_process else {
+                return Err(invalid_data(
+                    "completed profile deletion lost its process generation",
+                ));
+            };
+            resolutions.push((
+                entry.profile,
+                prior_process,
+                profile_artifacts_absent(&dir, entry.profile)?,
+            ));
+        }
+
+        let tx = self.meta.transaction()?;
+        for (profile, prior_process, absent) in resolutions {
+            let changed = if absent {
+                tx.execute(
+                    "DELETE FROM profile_deletion_journal
+                     WHERE profile_id = ?1
+                       AND native_erasure_verified = 1
+                       AND local_unlink_process = ?2",
+                    params![profile.to_string(), prior_process.to_string()],
+                )?
+            } else {
+                // The filesystem did not preserve the prior unlink across
+                // restart. Keep native proof, reopen only the idempotent local
+                // phase, and retain the original deletion authorization.
+                tx.execute(
+                    "UPDATE profile_deletion_journal
+                     SET local_unlink_process = NULL
+                     WHERE profile_id = ?1
+                       AND native_erasure_verified = 1
+                       AND local_unlink_process = ?2",
+                    params![profile.to_string(), prior_process.to_string()],
+                )?
+            };
+            if changed != 1 {
+                return Err(invalid_data(
+                    "profile deletion tombstone changed during restart reconciliation",
+                ));
+            }
+        }
+        tx.commit()
+    }
+
     #[cfg(test)]
     pub fn pending_profile_deletions(&self) -> rusqlite::Result<Vec<PendingProfileDeletion>> {
-        self.profile_deletion_journal()
+        Ok(Self::pending_profile_deletion_entries(
+            &self.profile_deletion_journal_entries()?,
+        ))
+    }
+
+    #[cfg(test)]
+    pub fn completed_profile_deletion_tombstones(&self) -> rusqlite::Result<Vec<ProfileId>> {
+        Ok(self
+            .profile_deletion_journal_entries()?
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .local_unlink_process
+                    .is_some()
+                    .then_some(entry.profile)
+            })
+            .collect())
     }
 
     /// Refreshes process-local registry truth from the durable transaction
@@ -1710,8 +1922,9 @@ impl Hub {
         self.load_registry()?;
         self.profiles
             .retain(|profile, _| self.registry.contains(profile));
-        let pending = self.profile_deletion_journal()?;
-        if !pending.is_empty() {
+        let journal = self.profile_deletion_journal_entries()?;
+        let pending = Self::pending_profile_deletion_entries(&journal);
+        if !journal.is_empty() {
             let authoritative = self.meta.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_snapshot WHERE id = 1)",
                 [],
@@ -1731,12 +1944,36 @@ impl Hub {
         self.ambiguous_profile_deletion_commit_once = true;
     }
 
+    #[cfg(test)]
+    pub fn fail_next_profile_deletion_after_local_purge(&mut self) {
+        self.fail_profile_deletion_after_local_purge_once = true;
+    }
+
     pub fn finalize_profile_deletion(&mut self, profile: ProfileId) -> rusqlite::Result<bool> {
+        self.finalize_profile_deletion_with_restart_confirmation(
+            profile,
+            cfg!(windows) && self.dir.is_some(),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn finalize_profile_deletion_requiring_restart_confirmation(
+        &mut self,
+        profile: ProfileId,
+    ) -> rusqlite::Result<bool> {
+        self.finalize_profile_deletion_with_restart_confirmation(profile, self.dir.is_some())
+    }
+
+    fn finalize_profile_deletion_with_restart_confirmation(
+        &mut self,
+        profile: ProfileId,
+        require_restart_confirmation: bool,
+    ) -> rusqlite::Result<bool> {
         // Validate every row first. A malformed sibling must not be hidden by
         // a targeted query and later crowd a valid authorization out of the
         // bounded cohort.
-        let pending = self.profile_deletion_journal()?;
-        let Some(deletion) = pending
+        let journal = self.profile_deletion_journal_entries()?;
+        let Some(deletion) = journal
             .into_iter()
             .find(|deletion| deletion.profile == profile)
         else {
@@ -1744,6 +1981,12 @@ impl Hub {
         };
         if self.registry.contains(&profile) {
             return Err(invalid_data("active profile cannot complete deletion"));
+        }
+        if deletion.local_unlink_process.is_some() && require_restart_confirmation {
+            // The first process has already completed its local phase. Only a
+            // Hub carrying a different process generation may clear this
+            // tombstone after re-observing the recovered filesystem namespace.
+            return Ok(true);
         }
 
         // Persist native proof before deleting the SQLite file. A crash after
@@ -1769,12 +2012,32 @@ impl Hub {
             // profile-shaped orphans are never discovered or removed here.
             purge_profile_file(dir, profile)?;
         }
-        let removed = self.meta.execute(
-            "DELETE FROM profile_deletion_journal
-             WHERE profile_id = ?1 AND native_erasure_verified = 1",
-            [profile.to_string()],
-        )?;
-        if removed != 1 {
+
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_profile_deletion_after_local_purge_once) {
+            return Err(invalid_data("injected failure after local profile purge"));
+        }
+
+        let changed = if require_restart_confirmation {
+            self.meta.execute(
+                "UPDATE profile_deletion_journal
+                 SET local_unlink_process = ?2
+                 WHERE profile_id = ?1
+                   AND native_erasure_verified = 1
+                   AND local_unlink_process IS NULL",
+                params![
+                    profile.to_string(),
+                    self.deletion_process_generation.to_string()
+                ],
+            )?
+        } else {
+            self.meta.execute(
+                "DELETE FROM profile_deletion_journal
+                 WHERE profile_id = ?1 AND native_erasure_verified = 1",
+                [profile.to_string()],
+            )?
+        };
+        if changed != 1 {
             return Err(invalid_data(
                 "profile deletion journal changed during completion",
             ));
@@ -1891,6 +2154,23 @@ impl Hub {
                  END;",
             )
             .unwrap();
+    }
+}
+
+fn deletion_process_generation() -> ProfileId {
+    static GENERATION: OnceLock<ProfileId> = OnceLock::new();
+    *GENERATION.get_or_init(new_deletion_process_generation)
+}
+
+fn new_deletion_process_generation() -> ProfileId {
+    // Migration 9 reserves the zero ULID as the generation marker for a
+    // completed version-8 unlink. Never mint it for a live process, making a
+    // migrated tombstone provably eligible only for restart reconciliation.
+    loop {
+        let generation = ProfileId::generate();
+        if generation != ProfileId::from(0) {
+            return generation;
+        }
     }
 }
 
@@ -2017,6 +2297,78 @@ fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     Ok(connection)
 }
 
+/// Opens the authoritative metadata database without giving an unknown
+/// on-disk schema a writable SQLite handle first. Existing files are fully
+/// configured and fingerprinted through a verified read-only handle; only an
+/// exact shipped migration boundary may then be reopened for migration.
+fn open_meta_database(path: &Path) -> rusqlite::Result<Connection> {
+    let path = canonical_child_path(path)?;
+    for _ in 0..4 {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() && has_single_link(&metadata) => {
+                let (validation, validation_metadata) = open_existing_database(
+                    &path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                        | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                )?;
+                configure_validation(&validation)?;
+                migrations::validate_current(&validation, migrations::META)?;
+
+                let (writable, writable_metadata) = open_existing_database(
+                    &path,
+                    OpenFlags::SQLITE_OPEN_READ_WRITE
+                        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                        | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                )?;
+                if !same_file_identity(&validation_metadata, &writable_metadata) {
+                    return Err(rusqlite::Error::InvalidPath(path));
+                }
+                drop(validation);
+                return Ok(writable);
+            }
+            Ok(_) => return Err(rusqlite::Error::InvalidPath(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true).write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                match options.open(&path) {
+                    Ok(file) => {
+                        drop(file);
+                        let created_metadata = std::fs::symlink_metadata(&path)
+                            .map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
+                        if !created_metadata.file_type().is_file()
+                            || !has_single_link(&created_metadata)
+                        {
+                            return Err(rusqlite::Error::InvalidPath(path));
+                        }
+                        let (writable, writable_metadata) = open_existing_database(
+                            &path,
+                            OpenFlags::SQLITE_OPEN_READ_WRITE
+                                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                        )?;
+                        if !same_file_identity(&created_metadata, &writable_metadata) {
+                            return Err(rusqlite::Error::InvalidPath(path));
+                        }
+                        return Ok(writable);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
+                    }
+                }
+            }
+            Err(_) => return Err(rusqlite::Error::InvalidPath(path)),
+        }
+    }
+    Err(rusqlite::Error::InvalidPath(path))
+}
+
 /// Opens an already-existing regular, single-link database and returns the
 /// verified filesystem identity captured after SQLite acquired its handle.
 /// This never creates a replacement when the path disappears.
@@ -2120,6 +2472,10 @@ fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlite::Result<b
         }
     }
     Ok(false)
+}
+
+fn profile_artifacts_absent(dir: &Path, profile: ProfileId) -> rusqlite::Result<bool> {
+    Ok(!profile_artifacts_exist(dir, profile)?)
 }
 
 fn configure(conn: &Connection) -> rusqlite::Result<()> {
@@ -2435,6 +2791,35 @@ fn section_to_str(section: SpaceSection) -> &'static str {
 mod connection_hardening_tests {
     use super::*;
     use rusqlite::config::DbConfig;
+
+    #[test]
+    fn authoritative_meta_creation_and_read_only_reopen_reach_exact_boundary() {
+        for precreate_empty_file in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("meta.sqlite");
+            if precreate_empty_file {
+                std::fs::File::create(&path).unwrap();
+            }
+
+            let mut connection = open_meta_database(&path).unwrap();
+            configure(&connection).unwrap();
+            migrations::apply(&mut connection, migrations::META).unwrap();
+            drop(connection);
+            let first_identity = std::fs::symlink_metadata(&path).unwrap();
+
+            let mut reopened = open_meta_database(&path).unwrap();
+            configure(&reopened).unwrap();
+            migrations::apply(&mut reopened, migrations::META).unwrap();
+            let version: i64 = reopened
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 9);
+            drop(reopened);
+
+            let second_identity = std::fs::symlink_metadata(&path).unwrap();
+            assert!(same_file_identity(&first_identity, &second_identity));
+        }
+    }
 
     #[test]
     fn configured_connections_fail_closed_on_schema_and_temp_storage() {

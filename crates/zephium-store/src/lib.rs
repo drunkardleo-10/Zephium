@@ -144,6 +144,7 @@ enum Cmd {
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
+    FreshFaviconRaster(ProfileId, String, i64, Sender<Option<Vec<u8>>>),
     SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
     FaviconBytes(ProfileId, String, Sender<Option<(Option<String>, Vec<u8>)>>),
     FaviconRasters(ProfileId, Vec<String>, Sender<Vec<(String, Vec<u8>)>>),
@@ -498,6 +499,27 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
+    fn fresh_favicon_raster(
+        &self,
+        profile: ProfileId,
+        origin: &str,
+        max_age_seconds: i64,
+    ) -> Option<Vec<u8>> {
+        if !hub::valid_favicon_origin(origin) || max_age_seconds < 0 {
+            return None;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .try_send(Cmd::FreshFaviconRaster(
+                profile,
+                origin.into(),
+                max_age_seconds,
+                tx,
+            ))
+            .ok()?;
+        rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
+    }
+
     fn favicon_rasters(&self, profile: ProfileId, origins: &[String]) -> Vec<(String, Vec<u8>)> {
         if origins.len() > MAX_FAVICON_BATCH_ORIGINS
             || origins
@@ -791,6 +813,9 @@ fn actor(
             }
             Some(Cmd::FaviconAge(profile, origin, reply)) => {
                 let _ = reply.send(hub.favicon_age(profile, &origin));
+            }
+            Some(Cmd::FreshFaviconRaster(profile, origin, max_age_seconds, reply)) => {
+                let _ = reply.send(hub.fresh_favicon_raster(profile, &origin, max_age_seconds));
             }
             Some(Cmd::SaveFavicon(profile, origin, content_type, bytes)) => {
                 hub.save_favicon(profile, &origin, content_type.as_deref(), &bytes);
@@ -1635,6 +1660,10 @@ mod tests {
             store.favicon_bytes(ProfileId::from(1), "https://example.com"),
             None
         );
+        assert_eq!(
+            store.fresh_favicon_raster(ProfileId::from(1), "https://example.com", 7 * 24 * 3600),
+            None
+        );
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 
@@ -1726,6 +1755,11 @@ mod tests {
         let (ct, stored) = hub.favicon_bytes(profile, origin).unwrap();
         assert_eq!(ct.as_deref(), Some(zephium_core::icon::RGBA32_MIME));
         assert_eq!(stored, bytes);
+        assert_eq!(
+            hub.fresh_favicon_raster(profile, origin, 7 * 24 * 3600),
+            Some(bytes.clone())
+        );
+        assert_eq!(hub.fresh_favicon_raster(profile, origin, -1), None);
 
         hub.save_favicon(profile, "https://example.com/path", None, &rgba());
         hub.save_favicon(profile, "https://invalid.example", None, &[1, 2, 3]);
@@ -1733,6 +1767,10 @@ mod tests {
         assert_eq!(hub.favicon_bytes(profile, "https://invalid.example"), None);
 
         assert_eq!(hub.favicon_bytes(ProfileId::from(99), origin), None);
+        assert_eq!(
+            hub.fresh_favicon_raster(ProfileId::from(99), origin, 3600),
+            None
+        );
     }
 
     #[test]
@@ -2415,6 +2453,33 @@ mod tests {
     }
 
     #[test]
+    fn unknown_meta_schema_is_rejected_before_a_writable_sqlite_open() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Hub::open(dir.path().to_path_buf()).unwrap());
+        let path = dir.path().join("meta.sqlite");
+        let meta = Connection::open(&path).unwrap();
+        meta.execute_batch(
+            "CREATE VIEW unexpected_meta_view AS SELECT id FROM profiles;
+             PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode=DELETE;",
+        )
+        .unwrap();
+        drop(meta);
+        let preserved = artifact_bytes(&path);
+
+        let error = match Hub::open(dir.path().to_path_buf()) {
+            Ok(_) => panic!("unknown authoritative schema was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("sqlite_schema"), "{error}");
+        assert_eq!(
+            artifact_bytes(&path),
+            preserved,
+            "failed validation modified authoritative storage"
+        );
+    }
+
+    #[test]
     fn registered_hard_link_violation_still_fails_startup_globally() {
         let dir = tempfile::tempdir().unwrap();
         let state = two_profile_sample();
@@ -2652,6 +2717,180 @@ mod tests {
         assert!(!path.exists());
         assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
         assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+        assert!(hub.pending_profile_deletions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn windows_style_local_deletion_keeps_authorization_until_restart_confirms_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(1);
+        let path = dir.path().join(format!("profile-{profile}.sqlite"));
+        {
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            hub.save(&sample()).unwrap();
+            hub.record_visit(profile, "https://private.example/", "Private");
+            assert_eq!(
+                hub.authorize_profile_deletion(profile, &SessionState::default())
+                    .unwrap(),
+                ProfileDeletionAuthorizeOutcome::Authorized
+            );
+
+            assert!(hub
+                .finalize_profile_deletion_requiring_restart_confirmation(profile)
+                .unwrap());
+            assert!(!path.exists());
+            // Completion is visible to the current shell, but the internal
+            // authorization deliberately remains durable on disk.
+            assert!(hub.pending_profile_deletions().unwrap().is_empty());
+            assert_eq!(
+                hub.completed_profile_deletion_tombstones().unwrap(),
+                vec![profile]
+            );
+        }
+
+        // Reopening storage inside the same process is not a restart and must
+        // not retire the completed tombstone.
+        let hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.pending_profile_deletions().unwrap().is_empty());
+        assert_eq!(
+            hub.completed_profile_deletion_tombstones().unwrap(),
+            vec![profile]
+        );
+        drop(hub);
+
+        // A new process generation occurs after filesystem recovery. Only
+        // this observation is allowed to retire the Windows tombstone.
+        let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+        assert!(hub.pending_profile_deletions().unwrap().is_empty());
+        assert!(hub
+            .completed_profile_deletion_tombstones()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restart_never_reaps_a_completed_tombstone_without_authoritative_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(1);
+        {
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            hub.save(&sample()).unwrap();
+            hub.record_visit(profile, "https://private.example/", "Private");
+            assert_eq!(
+                hub.authorize_profile_deletion(profile, &SessionState::default())
+                    .unwrap(),
+                ProfileDeletionAuthorizeOutcome::Authorized
+            );
+            assert!(hub
+                .finalize_profile_deletion_requiring_restart_confirmation(profile)
+                .unwrap());
+        }
+
+        // Model meta corruption that removes the authoritative survivor
+        // snapshot. Restart must fail closed before absence verification can
+        // retire the only remaining deletion authorization.
+        let meta_path = dir.path().join("meta.sqlite");
+        let meta = rusqlite::Connection::open(&meta_path).unwrap();
+        assert_eq!(meta.execute("DELETE FROM session_snapshot", []).unwrap(), 1);
+        drop(meta);
+        assert!(Hub::open_for_new_process(dir.path().to_path_buf()).is_err());
+
+        let meta = rusqlite::Connection::open(meta_path).unwrap();
+        let retained: i64 = meta
+            .query_row("SELECT count(*) FROM profile_deletion_journal", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(retained, 1);
+    }
+
+    #[test]
+    fn restart_reopens_local_cleanup_if_a_completed_artifact_is_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(1);
+        let path = dir.path().join(format!("profile-{profile}.sqlite"));
+        let wal_path = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        {
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            hub.save(&sample()).unwrap();
+            hub.record_visit(profile, "https://private.example/", "Private");
+            assert_eq!(
+                hub.authorize_profile_deletion(profile, &SessionState::default())
+                    .unwrap(),
+                ProfileDeletionAuthorizeOutcome::Authorized
+            );
+            assert!(hub
+                .finalize_profile_deletion_requiring_restart_confirmation(profile)
+                .unwrap());
+        }
+
+        // Model an unlink that was acknowledged before a power cut but whose
+        // namespace update did not survive recovery.
+        std::fs::write(&wal_path, b"resurrected private WAL bytes").unwrap();
+        {
+            let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+            let pending = hub.pending_profile_deletions().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].native_erasure_verified);
+            assert!(hub
+                .completed_profile_deletion_tombstones()
+                .unwrap()
+                .is_empty());
+
+            // Native proof is preserved; only the local authorized artifact
+            // is retried and tombstoned for another restart observation.
+            assert!(hub
+                .finalize_profile_deletion_requiring_restart_confirmation(profile)
+                .unwrap());
+            assert!(!wal_path.exists());
+            assert!(hub.pending_profile_deletions().unwrap().is_empty());
+            assert_eq!(
+                hub.completed_profile_deletion_tombstones().unwrap(),
+                vec![profile]
+            );
+        }
+
+        let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+        assert!(hub.pending_profile_deletions().unwrap().is_empty());
+        assert!(hub
+            .completed_profile_deletion_tombstones()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn crash_after_unlink_but_before_completion_marker_keeps_authorization_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(1);
+        let path = dir.path().join(format!("profile-{profile}.sqlite"));
+        {
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            hub.save(&sample()).unwrap();
+            hub.record_visit(profile, "https://private.example/", "Private");
+            assert_eq!(
+                hub.authorize_profile_deletion(profile, &SessionState::default())
+                    .unwrap(),
+                ProfileDeletionAuthorizeOutcome::Authorized
+            );
+            hub.fail_next_profile_deletion_after_local_purge();
+            assert!(hub
+                .finalize_profile_deletion_requiring_restart_confirmation(profile)
+                .is_err());
+            assert!(!path.exists());
+            let pending = hub.pending_profile_deletions().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].native_erasure_verified);
+            assert!(hub
+                .completed_profile_deletion_tombstones()
+                .unwrap()
+                .is_empty());
+        }
+
+        let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+        let pending = hub.pending_profile_deletions().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].native_erasure_verified);
+        assert!(hub.finalize_profile_deletion(profile).unwrap());
         assert!(hub.pending_profile_deletions().unwrap().is_empty());
     }
 

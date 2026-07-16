@@ -387,6 +387,53 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 8,
+        up: |tx| {
+            tx.execute_batch(
+                "ALTER TABLE profile_deletion_journal
+                 ADD COLUMN local_unlink_completed INTEGER NOT NULL DEFAULT 0
+                 CHECK (local_unlink_completed IN (0, 1));",
+            )
+        },
+    },
+    Migration {
+        version: 9,
+        up: |tx| {
+            let invalid_completion = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM profile_deletion_journal
+                     WHERE local_unlink_completed = 1
+                       AND native_erasure_verified != 1
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if invalid_completion {
+                return Err(invalid_schema(
+                    "profile deletion completed local unlink without native proof",
+                ));
+            }
+            tx.execute_batch(
+                // Version 8 was exercised by development builds and is an
+                // immutable on-disk boundary. Preserve its completion bit as
+                // a prior-process tombstone while introducing the
+                // generation-bearing representation used by the durable
+                // Windows deletion protocol. The all-zero ULID is a valid,
+                // reserved legacy generation that can never equal the
+                // nonzero current-process token. Keep the legacy column: an
+                // ADD-only migration avoids SQLite-version-dependent table
+                // rewriting and makes this boundary stable across upgrades.
+                "ALTER TABLE profile_deletion_journal
+                 ADD COLUMN local_unlink_process TEXT
+                 CHECK (local_unlink_process IS NULL OR
+                        length(CAST(local_unlink_process AS BLOB)) = 26);
+                 UPDATE profile_deletion_journal
+                 SET local_unlink_process = '00000000000000000000000000'
+                 WHERE local_unlink_completed = 1;",
+            )
+        },
+    },
 ];
 
 pub static PROFILE: &[Migration] = &[
@@ -570,6 +617,101 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, 10_000);
+    }
+
+    #[test]
+    fn meta_v8_completion_boundary_migrates_without_losing_deletion_authorization() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..7]).unwrap();
+        // Reproduce the exact schema already written by the version-8
+        // development build. Do not build this fixture by invoking migration
+        // 8: the test must detect any future edit to that shipped boundary.
+        conn.execute_batch(
+            "ALTER TABLE profile_deletion_journal
+             ADD COLUMN local_unlink_completed INTEGER NOT NULL DEFAULT 0
+             CHECK (local_unlink_completed IN (0, 1));
+             PRAGMA user_version=8;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO profile_deletion_journal(
+                 profile_id,
+                 authorized_at,
+                 native_erasure_verified,
+                 local_unlink_completed
+             ) VALUES ('01J00000000000000000000000', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let process: Option<String> = conn
+            .query_row(
+                "SELECT local_unlink_process
+                 FROM profile_deletion_journal
+                 WHERE profile_id = '01J00000000000000000000000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(process.as_deref(), Some("00000000000000000000000000"));
+        let parsed = zephium_core::ids::ProfileId::parse(process.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed.to_string(), "00000000000000000000000000");
+        let legacy_column: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('profile_deletion_journal')
+                 WHERE name = 'local_unlink_completed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_column, 1);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
+    }
+
+    #[test]
+    fn meta_v9_rejects_impossible_legacy_completion_without_mutating_v8() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..8]).unwrap();
+        conn.execute(
+            "INSERT INTO profile_deletion_journal(
+                 profile_id,
+                 authorized_at,
+                 native_erasure_verified,
+                 local_unlink_completed
+             ) VALUES ('01J00000000000000000000000', 1, 0, 1)",
+            [],
+        )
+        .unwrap();
+
+        let error = apply(&mut conn, META).unwrap_err().to_string();
+        assert!(error.contains("without native proof"), "{error}");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        let generation_column: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('profile_deletion_journal')
+                 WHERE name = 'local_unlink_process'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation_column, 0, "failed migration was not rolled back");
+        let retained: (i64, i64) = conn
+            .query_row(
+                "SELECT native_erasure_verified, local_unlink_completed
+                 FROM profile_deletion_journal",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, (0, 1));
     }
 
     #[test]
