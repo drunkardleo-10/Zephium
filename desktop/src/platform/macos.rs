@@ -17,7 +17,10 @@ use objc2_web_kit::{
 };
 use tauri::WebviewWindow;
 
-use zephium_app::SharedChrome;
+use zephium_app::{
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, PresentationChrome,
+    SharedChrome,
+};
 use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_engine::MainThreadDispatch;
@@ -27,9 +30,6 @@ static NEXT_CHROME_GENERATION: AtomicU64 = AtomicU64::new(1);
 static NEXT_PRIVILEGED_DELEGATE_GENERATION: AtomicU64 = AtomicU64::new(1);
 static CHROME_ORIGIN: Mutex<ChromeOrigin> = Mutex::new(ChromeOrigin::empty());
 const MAX_PRIVILEGED_UI_DELEGATES: usize = 2;
-// 2026-06-29T00:00:00Z. Keep this synchronized with
-// `zephium_core::macos::SECURITY_FLOOR_PUBLISHED_ON`.
-const SECURITY_REVIEW_PUBLISHED_UNIX_SECONDS: u64 = 1_782_691_200;
 
 struct ChromeViewState {
     generation: u64,
@@ -171,7 +171,7 @@ pub fn enforce_runtime_security_floor() -> Result<(), String> {
 fn enforce_security_review_time(now: u64) -> Result<(), String> {
     // A clock older than the review cannot prove that this short-lived
     // admission policy has not expired; reject rollback as well as expiry.
-    if now < SECURITY_REVIEW_PUBLISHED_UNIX_SECONDS {
+    if now < zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
         return Err(format!(
             "system UTC clock predates the macOS/WebKit security review published on {}; correct the clock before starting Zephium",
             zephium_core::macos::SECURITY_FLOOR_PUBLISHED_ON,
@@ -416,23 +416,34 @@ pub fn material() -> bool {
     true
 }
 
-pub fn make_chrome(_window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
+pub fn make_chrome(window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter {
+        window: window.clone(),
         dispatch,
         generation: CHROME_GENERATION.load(Ordering::Acquire),
+        layout: Arc::new(Mutex::new(ChromeLayoutState::default())),
     })
 }
 
 struct ChromeAdapter {
+    window: WebviewWindow,
     dispatch: MainThreadDispatch,
     generation: u64,
+    layout: Arc<Mutex<ChromeLayoutState>>,
+}
+
+#[derive(Default)]
+struct ChromeLayoutState {
+    pending: Option<ChromeFrame>,
+    applied: Option<ChromeFrame>,
+    scheduled: bool,
 }
 
 impl Chrome for ChromeAdapter {
-    fn position(&self, frame: ChromeFrame) {
+    fn position(&self, frame: ChromeFrame) -> bool {
         let generation = self.generation;
         if generation == 0 || CHROME_GENERATION.load(Ordering::Acquire) != generation {
-            return;
+            return false;
         }
         let published = CHROME_GENERATION.load(Ordering::Acquire);
         if !CHROME_ORIGIN
@@ -440,12 +451,93 @@ impl Chrome for ChromeAdapter {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .publish_if_current(published, generation, frame.rect.x, frame.rect.y)
         {
-            return;
+            return false;
         }
-        let _ = (self.dispatch)(Box::new(move || {
-            let _ = with_chrome_view(generation, |webview| set_chrome_frame(webview, frame));
-        }));
+        let schedule = {
+            let mut layout = self
+                .layout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if layout.pending == Some(frame)
+                || (layout.pending.is_none() && layout.applied == Some(frame))
+            {
+                return true;
+            }
+            layout.pending = Some(frame);
+            if layout.scheduled {
+                false
+            } else {
+                layout.scheduled = true;
+                true
+            }
+        };
+        if schedule
+            && !dispatch_chrome_layout(self.dispatch.clone(), generation, self.layout.clone())
+        {
+            let mut layout = self
+                .layout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            layout.pending = None;
+            layout.scheduled = false;
+            eprintln!("layout: macOS chrome frame was rejected by the main event loop");
+            return false;
+        }
+        true
     }
+}
+
+impl PresentationChrome for ChromeAdapter {
+    fn apply_tab_for_presentation(
+        &self,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::apply_chrome_presentation(&self.window, presentation, done)
+    }
+}
+
+fn dispatch_chrome_layout(
+    dispatch: MainThreadDispatch,
+    generation: u64,
+    layout: Arc<Mutex<ChromeLayoutState>>,
+) -> bool {
+    let next_dispatch = dispatch.clone();
+    dispatch(Box::new(move || {
+        let frame = layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending
+            .take();
+        if let Some(frame) = frame {
+            if with_chrome_view(generation, |webview| set_chrome_frame(webview, frame)).is_some() {
+                layout
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .applied = Some(frame);
+            }
+        }
+
+        let reschedule = {
+            let mut state = layout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.pending.is_some() {
+                true
+            } else {
+                state.scheduled = false;
+                false
+            }
+        };
+        if reschedule && !dispatch_chrome_layout(next_dispatch, generation, layout.clone()) {
+            let mut state = layout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.pending = None;
+            state.scheduled = false;
+            eprintln!("layout: coalesced macOS chrome frame was rejected by the main event loop");
+        }
+    }))
 }
 
 impl Drop for ChromeAdapter {
@@ -557,12 +649,59 @@ fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) {
     );
     view.setTranslatesAutoresizingMaskIntoConstraints(true);
     view.setAutoresizingMask(mask);
-    view.setFrame(f);
+    let current = view.frame();
+    if current.origin.x != f.origin.x
+        || current.origin.y != f.origin.y
+        || current.size.width != f.size.width
+        || current.size.height != f.size.height
+    {
+        view.setFrame(f);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_layout_mailbox_applies_one_latest_frame_per_main_loop_turn() {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+        let tasks = Arc::new(Mutex::new(Vec::<Task>::new()));
+        let queued = tasks.clone();
+        let dispatch: MainThreadDispatch = Arc::new(move |task| {
+            queued
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(task);
+            true
+        });
+        let frame = ChromeFrame {
+            rect: zephium_core::geometry::Rect::new(8.0, 8.0, 240.0, 700.0),
+            fill_width: false,
+        };
+        let layout = Arc::new(Mutex::new(ChromeLayoutState {
+            pending: Some(frame),
+            applied: None,
+            scheduled: true,
+        }));
+
+        assert!(dispatch_chrome_layout(dispatch, 0, layout.clone()));
+        let task = tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap();
+        task();
+
+        let layout = layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Generation zero has no live chrome view. A failed native lookup
+        // must not poison duplicate suppression with a frame never applied.
+        assert_eq!(layout.applied, None);
+        assert!(layout.pending.is_none());
+        assert!(!layout.scheduled);
+    }
 
     #[test]
     fn privileged_ui_delegate_class_registers() {
@@ -587,8 +726,14 @@ mod tests {
 
     #[test]
     fn runtime_security_review_window_rejects_clock_rollback_and_expiry() {
-        assert!(enforce_security_review_time(SECURITY_REVIEW_PUBLISHED_UNIX_SECONDS).is_ok());
-        assert!(enforce_security_review_time(SECURITY_REVIEW_PUBLISHED_UNIX_SECONDS - 1).is_err());
+        assert!(enforce_security_review_time(
+            zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+        )
+        .is_ok());
+        assert!(enforce_security_review_time(
+            zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
+        )
+        .is_err());
         assert!(enforce_security_review_time(
             zephium_core::macos::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1,
         )

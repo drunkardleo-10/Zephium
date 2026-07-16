@@ -1,13 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Zone-2 UI webviews: the chrome and the overlay panel",
+  "identifier": "main",
+  "description": "Zone-2 main chrome: its own window controls only",
   "windows": [
-    "main",
-    "panel"
+    "main"
   ],
   "permissions": [
-    "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",

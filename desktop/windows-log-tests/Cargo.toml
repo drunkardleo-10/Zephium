@@ -1,0 +1,15 @@
+[package]
+name = "zephium-windows-log-tests"
+version = "0.0.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+path = "../src/platform/windows_log.rs"
+
+[dependencies]
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes"] }
+
+# Keep this loader-independent policy harness out of the application workspace.
+[workspace]

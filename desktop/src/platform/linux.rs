@@ -5,7 +5,10 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use tauri::WebviewWindow;
 
-use zephium_app::SharedChrome;
+use zephium_app::{
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, PresentationChrome,
+    SharedChrome,
+};
 use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::Shortcut;
@@ -60,8 +63,13 @@ mod zero_fixed {
 // resize handler resolves the window via webview.parent().parent() and
 // aborts on deeper nesting. The chrome tracks the window size; the sidebar
 // is a region of its DOM and content views overlay it.
-pub fn init(window: &WebviewWindow) {
-    let _ = window.with_webview(move |webview| {
+pub fn init(window: &WebviewWindow) -> bool {
+    if !harden_privileged(window) {
+        return false;
+    }
+    let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let completed = installed.clone();
+    let scheduled = window.with_webview(move |webview| {
         let chrome = webview.inner();
         let Some(vbox) = chrome
             .parent()
@@ -84,8 +92,64 @@ pub fn init(window: &WebviewWindow) {
         fixed.connect_size_allocate(move |_, alloc| {
             chrome.set_size_request(alloc.width(), alloc.height());
         });
-        zephium_engine::install_container(fixed.clone());
+        if zephium_engine::install_container(fixed.clone()).is_ok() {
+            completed.store(true, std::sync::atomic::Ordering::Release);
+        }
     });
+    scheduled.is_ok() && installed.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Tauri has no permission-handler builder. The top-level response policy
+/// blocks ambient APIs before script runs; this native signal is a second
+/// fail-closed layer for every privileged WebKitGTK view.
+pub fn harden_privileged(window: &WebviewWindow) -> bool {
+    let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let completed = installed.clone();
+    let scheduled = window.with_webview(move |webview| {
+        use webkit2gtk::{
+            DownloadExt, FileChooserRequestExt, PermissionRequestExt, WebContextExt, WebViewExt,
+        };
+        let chrome = webview.inner();
+        chrome.connect_permission_request(|_, request| {
+            request.deny();
+            true
+        });
+        chrome.connect_run_file_chooser(|_, request| {
+            request.cancel();
+            true
+        });
+        chrome.connect_script_dialog(|_, dialog| {
+            dialog.close();
+            true
+        });
+        chrome.connect_context_menu(|_, _, _, _| true);
+        let Some(context) = chrome.context() else {
+            return;
+        };
+        if !context.is_ephemeral() {
+            eprintln!("security: privileged WebKitGTK context is persistent");
+            return;
+        }
+        if !context.is_sandbox_enabled() {
+            eprintln!("security: privileged WebKitGTK process sandbox is disabled");
+            return;
+        }
+        if !context.is_process_swap_on_cross_site_navigation_enabled() {
+            eprintln!("security: privileged WebKitGTK process swapping is disabled");
+            return;
+        }
+        const DOWNLOAD_DENY_MARKER: &str = "zephium-privileged-download-deny-installed";
+        // SAFETY: this private key is used only as a bool in this module and
+        // is destroyed with the GLib WebContext.
+        let download_deny = unsafe { context.data::<bool>(DOWNLOAD_DENY_MARKER).is_some() };
+        if !download_deny {
+            context.connect_download_started(|_, download| download.cancel());
+            // SAFETY: see the typed private-key invariant above.
+            unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
+        }
+        completed.store(true, std::sync::atomic::Ordering::Release);
+    });
+    scheduled.is_ok() && installed.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Browser shortcuts fire regardless of focus: handlers connected on the
@@ -161,14 +225,30 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
 
-pub fn make_chrome(_window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
-    Arc::new(ChromeAdapter)
+pub fn make_chrome(window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
+    Arc::new(ChromeAdapter {
+        window: window.clone(),
+    })
 }
 
-struct ChromeAdapter;
+struct ChromeAdapter {
+    window: WebviewWindow,
+}
 
 impl Chrome for ChromeAdapter {
-    fn position(&self, _frame: ChromeFrame) {}
+    fn position(&self, _frame: ChromeFrame) -> bool {
+        true
+    }
+}
+
+impl PresentationChrome for ChromeAdapter {
+    fn apply_tab_for_presentation(
+        &self,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::apply_chrome_presentation(&self.window, presentation, done)
+    }
 }
 
 pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
