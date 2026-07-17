@@ -1,4 +1,4 @@
-use crate::*;
+use super::*;
 use std::sync::Mutex;
 use zephium_core::ids::WindowId;
 use zephium_core::ports::engine::{ContentScope, NavigationRequestId, UserContent, ZoomRequestId};

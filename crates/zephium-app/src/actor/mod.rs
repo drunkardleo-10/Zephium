@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::thread::JoinHandle;
 
-use crate::store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderStopGuard};
-use crate::{
-    Command, EmitFn, SharedChrome, SharedEngine, SharedStore, Shell, ShutdownOutcome,
-    END_TO_END_SHUTDOWN_TIMEOUT, MAINTENANCE_INTERVAL, MAX_OPERATION_ID_BYTES,
+use crate::shell::{
+    Shell, END_TO_END_SHUTDOWN_TIMEOUT, MAINTENANCE_INTERVAL, MAX_OPERATION_ID_BYTES,
 };
+use crate::store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderStopGuard};
+use crate::{Command, EmitFn, SharedChrome, SharedEngine, SharedStore, ShutdownOutcome};
 
 pub struct Handle {
     pub(super) queue: CommandQueue,
@@ -391,13 +391,13 @@ pub fn spawn(
     let actor_queue = queue.clone();
     let actor_store_reads = store_reads.clone();
     let mut shell = Shell::with_store_reads(engine, store, chrome, emit, store_reads.clone());
-    shell.self_queue = Some(queue.clone());
+    shell.attach_queue(queue.clone());
     let actor = match spawn_worker("zephium-shell", move || {
         let _exit_guard = ActorExitGuard(actor_queue.clone());
         let _store_reader_guard = StoreReaderStopGuard::new(actor_store_reads);
         while let Some(command) = actor_queue.recv() {
             shell.handle(command);
-            if shell.shutdown_result.is_some() {
+            if shell.is_shutdown() {
                 break;
             }
         }
