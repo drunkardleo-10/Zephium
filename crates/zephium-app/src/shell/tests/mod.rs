@@ -1,0 +1,746 @@
+use super::*;
+use std::sync::Mutex;
+use zephium_core::ids::WindowId;
+use zephium_core::ports::engine::{ContentScope, NavigationRequestId, UserContent, ZoomRequestId};
+use zephium_core::session::{
+    PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
+};
+
+type HeldErasure = (ProfileId, Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>);
+
+#[derive(Default)]
+struct FakeEngine {
+    calls: Mutex<Vec<String>>,
+    navigation_requests: Mutex<Vec<NavigationRequestId>>,
+    zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
+    shutdown_result: Mutex<Option<bool>>,
+    skip_shutdown_callback: std::sync::atomic::AtomicBool,
+    reject_create_dispatch: std::sync::atomic::AtomicBool,
+    reject_navigation_dispatch: std::sync::atomic::AtomicBool,
+    reject_native_dispatch: std::sync::atomic::AtomicBool,
+    unsupported_presentation: std::sync::atomic::AtomicBool,
+    runtime_restart_required: std::sync::atomic::AtomicBool,
+    erasure_outcomes: Mutex<VecDeque<ProfileDataErasureOutcome>>,
+    held_erasures: Mutex<Vec<HeldErasure>>,
+    hold_erasures: std::sync::atomic::AtomicBool,
+}
+
+impl FakeEngine {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+    fn log(&self, s: String) {
+        self.calls.lock().unwrap().push(s);
+    }
+    fn last_layout(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|c| {
+                c.split_once(' ')
+                    .filter(|(head, _)| head.starts_with("layout@"))
+                    .map(|(_, rest)| rest)
+            })
+            .map(|s| {
+                s.split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(Into::into)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn last_navigation_request(&self) -> NavigationRequestId {
+        *self
+            .navigation_requests
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a navigation request must have been admitted")
+    }
+
+    fn last_zoom_request(&self) -> (ItemId, f64, ZoomRequestId) {
+        *self
+            .zoom_requests
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a zoom request must have been admitted")
+    }
+
+    fn native_admission(&self) -> NativeDispatch {
+        if self
+            .reject_native_dispatch
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            NativeDispatch::Rejected
+        } else {
+            NativeDispatch::Scheduled
+        }
+    }
+
+    fn push_erasure_outcomes(&self, outcomes: impl IntoIterator<Item = ProfileDataErasureOutcome>) {
+        self.erasure_outcomes.lock().unwrap().extend(outcomes);
+    }
+
+    fn complete_held_erasure(&self, outcome: ProfileDataErasureOutcome) {
+        let (_, done) = self.held_erasures.lock().unwrap().remove(0);
+        done(outcome);
+    }
+}
+
+impl Engine for FakeEngine {
+    fn runtime_restart_required(&self) -> bool {
+        self.runtime_restart_required
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn create_view(&self, id: ItemId, partition: Partition, url: &str, _bounds: Rect) -> bool {
+        if self
+            .reject_create_dispatch
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        let kind = match partition {
+            Partition::Default(_) => "default",
+            Partition::Persistent(_) => "persistent",
+            Partition::Ephemeral(_) => "ephemeral",
+        };
+        self.log(format!("create {id} {url} [{kind}]"));
+        true
+    }
+    fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
+        if self
+            .reject_navigation_dispatch
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        self.navigation_requests.lock().unwrap().push(request);
+        self.log(format!("navigate {id} {url}"));
+        true
+    }
+    fn present_navigation(
+        &self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        self.log(format!("present {id} {}", navigation.into_raw()));
+        if self
+            .unsupported_presentation
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            NativeDispatch::Unsupported
+        } else {
+            self.native_admission()
+        }
+    }
+    fn reload(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("reload {id}"));
+        self.native_admission()
+    }
+    fn stop(&self, _id: ItemId) -> NativeDispatch {
+        self.native_admission()
+    }
+    fn go_back(&self, _id: ItemId) -> NativeDispatch {
+        self.native_admission()
+    }
+    fn go_forward(&self, _id: ItemId) -> NativeDispatch {
+        self.native_admission()
+    }
+    fn close(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("close {id}"));
+        self.native_admission()
+    }
+    fn set_content(
+        &self,
+        window: WindowId,
+        tree: Option<Pane>,
+        region: Option<Rect>,
+    ) -> NativeDispatch {
+        let ids: Vec<String> = match (tree, region) {
+            (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
+            _ => Vec::new(),
+        };
+        self.log(format!("layout@{window} {}", ids.join(",")));
+        self.native_admission()
+    }
+    fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
+        self.native_admission()
+    }
+    fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
+        self.log(format!("zoom {id} {scale}"));
+        let admission = self.native_admission();
+        if admission == NativeDispatch::Scheduled {
+            self.zoom_requests
+                .lock()
+                .unwrap()
+                .push((id, scale, request));
+        }
+        admission
+    }
+    fn set_muted(&self, _id: ItemId, _muted: bool) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    fn find(&self, _id: ItemId, _query: Option<&str>) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    fn capture(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    fn extract_html(&self, _id: ItemId) -> NativeDispatch {
+        self.native_admission()
+    }
+    fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("discover {id}"));
+        self.native_admission()
+    }
+    fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        self.log(format!("probe-discard {id} {}", probe.0));
+        true
+    }
+    fn discard_view(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        self.log(format!("discard {id} {}", probe.0));
+        true
+    }
+    fn set_dormant(&self, ids: Vec<ItemId>) {
+        let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        ids.sort();
+        self.log(format!("dormant {}", ids.join(",")));
+    }
+    fn print(&self, _id: ItemId) -> NativeDispatch {
+        self.native_admission()
+    }
+    fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
+    fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
+    fn set_content_rules(&self, _profile: ProfileId, _compiled: String) {}
+    fn erase_profile_data(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(zephium_core::ports::engine::ProfileDataErasureOutcome) + Send>,
+    ) {
+        self.log(format!("erase-profile {profile}"));
+        if self
+            .hold_erasures
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.held_erasures.lock().unwrap().push((profile, done));
+            return;
+        }
+        let outcome = self
+            .erasure_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(ProfileDataErasureOutcome::Failed);
+        done(outcome);
+    }
+    fn shutdown(&self, done: Box<dyn FnOnce(bool) + Send>) {
+        if !self
+            .skip_shutdown_callback
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            done(self.shutdown_result.lock().unwrap().unwrap_or(true));
+        }
+    }
+}
+
+#[derive(Default)]
+struct FakeStore {
+    saved: Mutex<Option<SessionState>>,
+    events: Mutex<Vec<&'static str>>,
+    flush_result: Mutex<Option<bool>>,
+    load_failed: Mutex<bool>,
+    recovery_reason: Mutex<Option<String>>,
+    degraded_profiles: Mutex<Vec<ProfileId>>,
+    panic_on_load: std::sync::atomic::AtomicBool,
+    history: Vec<zephium_core::ports::store::HistoryHit>,
+    history_delay_ms: std::sync::atomic::AtomicU64,
+    visits: Mutex<Vec<String>>,
+    icon_ages: Mutex<std::collections::HashMap<String, i64>>,
+    icons: Mutex<Vec<(String, Vec<u8>)>>,
+    reject_settings: std::sync::atomic::AtomicBool,
+    pending_deletions: Mutex<Vec<PendingProfileDeletion>>,
+    pending_load_failures: std::sync::atomic::AtomicUsize,
+    authorize_outcomes: Mutex<VecDeque<ProfileDeletionAuthorizeOutcome>>,
+    authorize_unknown_commits: std::sync::atomic::AtomicBool,
+    authorized_sessions: Mutex<Vec<(ProfileId, SessionState)>>,
+    finalize_outcomes: Mutex<VecDeque<ProfileDeletionFinalizeOutcome>>,
+    finalize_unknown_completes: std::sync::atomic::AtomicBool,
+}
+
+impl Store for FakeStore {
+    fn save_session(&self, session: SessionState) {
+        *self.saved.lock().unwrap() = Some(session);
+        self.events.lock().unwrap().push("save");
+    }
+    fn flush(&self) -> bool {
+        self.events.lock().unwrap().push("flush");
+        self.flush_result.lock().unwrap().unwrap_or(true)
+    }
+    fn load_session(&self) -> SessionLoad {
+        assert!(
+            !self
+                .panic_on_load
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected store panic"
+        );
+        if *self.load_failed.lock().unwrap() {
+            return SessionLoad::Failed;
+        }
+        if let Some(reason) = self.recovery_reason.lock().unwrap().clone() {
+            return SessionLoad::RecoveryRequired { reason };
+        }
+        let Some(state) = self.saved.lock().unwrap().clone() else {
+            return SessionLoad::Absent;
+        };
+        let profiles = self.degraded_profiles.lock().unwrap().clone();
+        if profiles.is_empty() {
+            SessionLoad::Loaded(state)
+        } else {
+            SessionLoad::LoadedWithDegradedProfiles { state, profiles }
+        }
+    }
+    fn record_visit(&self, _profile: ProfileId, url: String, _title: String) {
+        self.visits.lock().unwrap().push(url);
+    }
+    fn app_setting(&self, _key: &str) -> Option<String> {
+        None
+    }
+    fn set_app_setting(&self, _key: String, _value: String) -> bool {
+        !self
+            .reject_settings
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn search_history(
+        &self,
+        _profile: ProfileId,
+        _query: &str,
+        _limit: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryHit> {
+        let delay = self
+            .history_delay_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        if delay != 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        self.history.clone()
+    }
+    fn favicon_age(&self, _profile: ProfileId, origin: &str) -> Option<i64> {
+        self.icon_ages.lock().unwrap().get(origin).copied()
+    }
+    fn save_favicon(
+        &self,
+        _profile: ProfileId,
+        origin: String,
+        _content_type: Option<String>,
+        bytes: Vec<u8>,
+    ) {
+        self.icons.lock().unwrap().push((origin, bytes));
+    }
+    fn favicon_bytes(
+        &self,
+        _profile: ProfileId,
+        origin: &str,
+    ) -> Option<(Option<String>, Vec<u8>)> {
+        self.icons
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(stored_origin, _)| stored_origin == origin)
+            .map(|(_, bytes)| {
+                (
+                    Some(zephium_core::icon::RGBA32_MIME.to_owned()),
+                    bytes.clone(),
+                )
+            })
+    }
+    fn fresh_favicon_raster(
+        &self,
+        profile: ProfileId,
+        origin: &str,
+        max_age_seconds: i64,
+    ) -> Option<Vec<u8>> {
+        self.favicon_age(profile, origin)
+            .is_some_and(|age| age <= max_age_seconds)
+            .then(|| self.favicon_bytes(profile, origin))
+            .flatten()
+            .map(|(_, bytes)| bytes)
+    }
+    fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
+        if self
+            .pending_load_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return ProfileDeletionLoad::Failed;
+        }
+        ProfileDeletionLoad::Loaded(self.pending_deletions.lock().unwrap().clone())
+    }
+    fn authorize_profile_deletion(
+        &self,
+        profile: ProfileId,
+        filtered_session: SessionState,
+        _deadline: std::time::Instant,
+    ) -> ProfileDeletionAuthorizeOutcome {
+        self.events.lock().unwrap().push("authorize-delete");
+        self.authorized_sessions
+            .lock()
+            .unwrap()
+            .push((profile, filtered_session.clone()));
+        let outcome = self
+            .authorize_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(ProfileDeletionAuthorizeOutcome::NotRegistered);
+        if matches!(
+            outcome,
+            ProfileDeletionAuthorizeOutcome::Authorized
+                | ProfileDeletionAuthorizeOutcome::AlreadyAuthorized
+        ) || (outcome == ProfileDeletionAuthorizeOutcome::OutcomeUnknown
+            && self
+                .authorize_unknown_commits
+                .load(std::sync::atomic::Ordering::Acquire))
+        {
+            *self.saved.lock().unwrap() = Some(filtered_session);
+            let mut pending = self.pending_deletions.lock().unwrap();
+            if !pending.iter().any(|deletion| deletion.profile == profile) {
+                pending.push(PendingProfileDeletion {
+                    profile,
+                    native_erasure_verified: false,
+                });
+            }
+        }
+        outcome
+    }
+    fn finalize_profile_deletion(
+        &self,
+        profile: ProfileId,
+        _deadline: std::time::Instant,
+    ) -> ProfileDeletionFinalizeOutcome {
+        self.events.lock().unwrap().push("finalize-delete");
+        let outcome = self
+            .finalize_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(ProfileDeletionFinalizeOutcome::NotAuthorized);
+        if outcome == ProfileDeletionFinalizeOutcome::Completed
+            || (outcome == ProfileDeletionFinalizeOutcome::OutcomeUnknown
+                && self
+                    .finalize_unknown_completes
+                    .load(std::sync::atomic::Ordering::Acquire))
+        {
+            self.pending_deletions
+                .lock()
+                .unwrap()
+                .retain(|deletion| deletion.profile != profile);
+        } else if let Some(deletion) = self
+            .pending_deletions
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|deletion| deletion.profile == profile)
+        {
+            // A finalize attempt durably records native proof before its
+            // local purge can fail.
+            deletion.native_erasure_verified = true;
+        }
+        outcome
+    }
+}
+
+struct FakeChrome;
+impl GeometryChrome for FakeChrome {
+    fn position(&self, _frame: ChromeFrame) -> bool {
+        true
+    }
+}
+impl PresentationChrome for FakeChrome {
+    fn apply_tab_for_presentation(
+        &self,
+        _presentation: ChromePresentation,
+        _done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        ChromePresentationDispatch::Applied
+    }
+}
+
+#[derive(Default)]
+struct AsyncChrome {
+    pending: Mutex<VecDeque<(ChromePresentation, ChromePresentationCallback)>>,
+    reject_admission: std::sync::atomic::AtomicBool,
+}
+
+impl GeometryChrome for AsyncChrome {
+    fn position(&self, _frame: ChromeFrame) -> bool {
+        true
+    }
+}
+
+impl PresentationChrome for AsyncChrome {
+    fn apply_tab_for_presentation(
+        &self,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        if self
+            .reject_admission
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return ChromePresentationDispatch::Rejected;
+        }
+        self.pending.lock().unwrap().push_back((presentation, done));
+        ChromePresentationDispatch::Scheduled
+    }
+}
+
+impl AsyncChrome {
+    fn presentations(&self) -> Vec<ChromePresentation> {
+        self.pending
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(presentation, _)| presentation.clone())
+            .collect()
+    }
+
+    fn complete_next(&self, applied: bool) -> ChromePresentation {
+        let (presentation, done) = self
+            .pending
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("an exact privileged presentation must be pending");
+        done(applied);
+        presentation
+    }
+}
+
+// Materializes projections the way the frontend store does: snapshots
+// replace, deltas patch one row.
+type Screen = Arc<Mutex<ItemsState>>;
+
+fn apply_projection(view: &mut ItemsState, p: Projection) {
+    match p {
+        Projection::Items(s) => *view = s,
+        Projection::Tab(t) => {
+            if let Some(slot) = view.tabs.iter_mut().find(|x| x.id == t.id) {
+                *slot = t;
+            }
+        }
+        Projection::UiCommand(_) => {}
+        Projection::Search(_) => {}
+        Projection::Layout(_) => {}
+        Projection::RuntimeStatus(_) => {}
+        Projection::OperationProcessed(_) => {}
+    }
+}
+
+fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
+    let engine = Arc::new(FakeEngine::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        tabs: Vec::new(),
+        active: None,
+    }));
+    let sink = screen.clone();
+    let mut shell = Shell::new(
+        engine.clone(),
+        store,
+        Arc::new(FakeChrome),
+        Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    (shell, engine, screen)
+}
+
+fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
+    setup_with(Arc::new(FakeStore::default()))
+}
+
+fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Screen) {
+    let engine = Arc::new(FakeEngine::default());
+    let chrome = Arc::new(AsyncChrome::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        tabs: Vec::new(),
+        active: None,
+    }));
+    let sink = screen.clone();
+    let mut shell = Shell::new(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        chrome.clone(),
+        Box::new(move |projection| apply_projection(&mut sink.lock().unwrap(), projection)),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    (shell, engine, chrome, screen)
+}
+
+type OperationLog = Arc<Mutex<Vec<OperationDisposition>>>;
+
+fn setup_with_operation_log(
+    store: Arc<FakeStore>,
+) -> (Shell, Arc<FakeEngine>, Screen, OperationLog) {
+    let engine = Arc::new(FakeEngine::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        tabs: Vec::new(),
+        active: None,
+    }));
+    let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
+    let sink = screen.clone();
+    let operation_sink = operations.clone();
+    let mut shell = Shell::new(
+        engine.clone(),
+        store,
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::OperationProcessed(completion) = &projection {
+                operation_sink.lock().unwrap().push(completion.clone());
+            }
+            apply_projection(&mut sink.lock().unwrap(), projection);
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    (shell, engine, screen, operations)
+}
+
+fn add_inactive_named_profile(shell: &mut Shell, seed: u128) -> ProfileId {
+    let profile = ProfileId::from(seed);
+    let space = SpaceId::from(seed + 1);
+    assert!(shell.profiles.insert(Profile {
+        id: profile,
+        name: "Deletable".into(),
+        kind: ProfileKind::Named,
+    }));
+    assert!(shell.spaces.insert(Space {
+        id: space,
+        profile,
+        name: "Deletable".into(),
+    }));
+    profile
+}
+
+fn delete_operation(operation_id: &str, profile: ProfileId) -> Command {
+    Command::Operation {
+        operation_id: operation_id.into(),
+        command: Box::new(Command::DeleteProfile(profile)),
+    }
+}
+
+fn test_shutdown_deadline() -> std::time::Instant {
+    std::time::Instant::now() + END_TO_END_SHUTDOWN_TIMEOUT
+}
+
+fn last(screen: &Screen) -> ItemsState {
+    screen.lock().unwrap().clone()
+}
+
+fn active_id(screen: &Screen) -> ItemId {
+    ItemId::parse(&last(screen).active.unwrap()).unwrap()
+}
+
+fn persisted_zoom(store: &FakeStore, id: ItemId) -> f64 {
+    let saved = store.saved.lock().unwrap().clone().unwrap();
+    let item = saved.items.iter().find(|item| item.id == id).unwrap();
+    let PersistedKind::Tab { zoom, .. } = &item.kind else {
+        panic!("expected persisted tab")
+    };
+    *zoom
+}
+
+fn navigate_and_commit(shell: &mut Shell, id: ItemId, input: &str) {
+    let url = navigation::classify(input)
+        .expect("test navigation must be valid")
+        .to_string();
+    shell.handle(Command::Navigate {
+        id,
+        input: input.into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id,
+        url: url.clone(),
+    }));
+    present_committed(shell, id, &url);
+}
+
+fn present_committed(shell: &mut Shell, id: ItemId, url: &str) {
+    static NEXT_PRESENTATION: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(10_000);
+    let navigation = NEXT_PRESENTATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Engine(presentation_pending(
+        id,
+        NavigationPresentationId::from_raw(navigation),
+        url,
+    )));
+}
+
+fn commit_url(shell: &mut Shell, id: ItemId, url: &str) {
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id,
+        url: url.into(),
+    }));
+}
+
+fn presentation_pending(
+    id: ItemId,
+    navigation: NavigationPresentationId,
+    url: &str,
+) -> EngineEvent {
+    EngineEvent::PresentationPending {
+        id,
+        navigation,
+        url: url.into(),
+    }
+}
+
+fn presentation_ready(id: ItemId, navigation: NavigationPresentationId, url: &str) -> EngineEvent {
+    EngineEvent::PresentationReady {
+        id,
+        navigation,
+        url: url.into(),
+    }
+}
+
+fn first_probing_discard(shell: &Shell) -> (ItemId, DiscardProbeId) {
+    shell
+        .residency
+        .discard_probes
+        .iter()
+        .find_map(|(id, state)| match state {
+            PendingDiscardProbe::Probing { probe, .. } => Some((*id, *probe)),
+            PendingDiscardProbe::Closing { .. } => None,
+        })
+        .expect("a discard probe must be in flight")
+}
+
+fn acknowledge_safe_discard(shell: &mut Shell, id: ItemId, probe: DiscardProbeId) {
+    let profile = shell.profile_of_item(id).unwrap();
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id,
+        probe,
+        can_discard: true,
+    }));
+    assert!(matches!(
+        shell.residency.discard_probes.get(&id),
+        Some(PendingDiscardProbe::Closing { probe: pending, .. }) if *pending == probe
+    ));
+    shell.handle(Command::Engine(EngineEvent::ViewDiscarded {
+        id,
+        profile,
+        probe,
+    }));
+}
+
+mod remaining;
