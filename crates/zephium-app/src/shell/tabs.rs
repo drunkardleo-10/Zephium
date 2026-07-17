@@ -42,8 +42,8 @@ impl Shell {
             self.items.set_lifecycle(prev, Lifecycle::Inactive);
         }
         self.items.set_lifecycle(id, Lifecycle::Active);
-        self.recent.retain(|r| *r != id);
-        self.recent.push(id);
+        self.residency.recent.retain(|r| *r != id);
+        self.residency.recent.push(id);
         self.touch(id);
         self.items.ensure_view(id)
     }
@@ -55,13 +55,13 @@ impl Shell {
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
         if matches!(
-            self.discard_probes.get(&id),
+            self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
         ) {
             // Native destruction is already admitted. Clear the logical view
             // before `remove` so it does not issue a second same-id close.
             self.items.mark_view_discarded(id);
-            self.discard_probes.remove(&id);
+            self.residency.discard_probes.remove(&id);
             if let Some(queue) = &self.self_queue {
                 queue.cancel_discard_probe(id);
             }

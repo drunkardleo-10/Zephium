@@ -228,13 +228,14 @@ impl Shell {
             self.cancel_favicon_attempt(id);
         }
         let discard_items: Vec<ItemId> = self
+            .residency
             .discard_probes
             .keys()
             .copied()
             .filter(|id| self.profile_of_item(*id) == Some(profile))
             .collect();
         for id in discard_items {
-            self.discard_probes.remove(&id);
+            self.residency.discard_probes.remove(&id);
             if let Some(queue) = &self.self_queue {
                 queue.cancel_discard_probe(id);
             }
@@ -244,16 +245,25 @@ impl Shell {
         let _native_erasure_owns_close = self.items.remove_for_profile(&removed_spaces);
         self.profiles.remove(profile);
 
-        self.recent.retain(|id| self.items.tab(*id).is_some());
-        self.last_focus
+        self.residency
+            .recent
+            .retain(|id| self.items.tab(*id).is_some());
+        self.residency
+            .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());
         self.last_visits
             .retain(|id, _| self.items.tab(*id).is_some());
-        self.dormant_sent.retain(|id| self.items.tab(*id).is_some());
-        self.discard_protected_until
+        self.residency
+            .dormant_sent
+            .retain(|id| self.items.tab(*id).is_some());
+        self.residency
+            .discard_protected_until
             .retain(|id, _| self.items.tab(*id).is_some());
-        self.crashes.retain(|id, _| self.items.tab(*id).is_some());
-        self.crash_presentations
+        self.crash
+            .crashes
+            .retain(|id, _| self.items.tab(*id).is_some());
+        self.crash
+            .presentations
             .retain(|id| self.items.tab(*id).is_some());
         self.favicons
             .icons_checked

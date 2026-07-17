@@ -31,6 +31,46 @@ pub(super) enum PendingDiscardProbe {
     },
 }
 
+pub(super) struct ResidencyState {
+    pub(super) recent: Vec<ItemId>,
+    pub(super) last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
+    pub(super) dormant_min: std::time::Duration,
+    pub(super) dormant_sent: Vec<ItemId>,
+    pub(super) discard_idle_min: std::time::Duration,
+    pub(super) discard_probe_timeout: std::time::Duration,
+    pub(super) discard_protected_retry: std::time::Duration,
+    pub(super) live_view_soft_limit: usize,
+    pub(super) live_view_pressure_limit: usize,
+    pub(super) next_discard_probe: u64,
+    pub(super) discard_probes: std::collections::HashMap<ItemId, PendingDiscardProbe>,
+    pub(super) discard_protected_until: std::collections::HashMap<ItemId, std::time::Instant>,
+}
+
+impl Default for ResidencyState {
+    fn default() -> Self {
+        Self {
+            recent: Vec::new(),
+            last_focus: std::collections::HashMap::new(),
+            dormant_min: std::time::Duration::from_secs(5 * 60),
+            dormant_sent: Vec::new(),
+            discard_idle_min: DISCARD_IDLE_GRACE,
+            discard_probe_timeout: DISCARD_PROBE_TIMEOUT,
+            discard_protected_retry: DISCARD_PROTECTED_RETRY,
+            live_view_soft_limit: LIVE_VIEW_SOFT_LIMIT,
+            live_view_pressure_limit: LIVE_VIEW_PRESSURE_LIMIT,
+            next_discard_probe: 0,
+            discard_probes: std::collections::HashMap::new(),
+            discard_protected_until: std::collections::HashMap::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CrashState {
+    pub(super) crashes: std::collections::HashMap<ItemId, std::time::Instant>,
+    pub(super) presentations: std::collections::HashSet<ItemId>,
+}
+
 impl Shell {
     pub(super) fn on_view_creation_failed(&mut self, id: ItemId) {
         self.zoom.pending.remove(&id);
@@ -54,8 +94,11 @@ impl Shell {
     // discard. Positive renderer results are only advisory until this actor
     // rechecks URL, loading, visibility, idle age, and the current budget.
     pub(super) fn maintain_views(&mut self) -> bool {
-        self.crashes.retain(|id, _| self.items.tab(*id).is_some());
-        self.crash_presentations
+        self.crash
+            .crashes
+            .retain(|id, _| self.items.tab(*id).is_some());
+        self.crash
+            .presentations
             .retain(|id| self.items.tab(*id).is_some());
         self.zoom
             .pending
@@ -70,12 +113,15 @@ impl Shell {
         } else {
             std::collections::HashSet::new()
         };
-        self.recent.retain(|id| self.items.tab(*id).is_some());
-        self.last_focus
+        self.residency
+            .recent
+            .retain(|id| self.items.tab(*id).is_some());
+        self.residency
+            .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());
         self.last_visits
             .retain(|id, _| self.items.tab(*id).is_some());
-        self.discard_protected_until.retain(|id, until| {
+        self.residency.discard_protected_until.retain(|id, until| {
             self.items.tab(*id).is_some() && *until > std::time::Instant::now()
         });
 
@@ -83,6 +129,7 @@ impl Shell {
         // during a full lifecycle burst. The maintenance pass independently
         // expires the same fixed set so overload cannot strand all probe slots.
         let expired: Vec<ItemId> = self
+            .residency
             .discard_probes
             .iter()
             .filter_map(|(id, state)| match state {
@@ -95,7 +142,7 @@ impl Shell {
             })
             .collect();
         for id in expired {
-            self.discard_probes.remove(&id);
+            self.residency.discard_probes.remove(&id);
             if let Some(queue) = &self.self_queue {
                 queue.cancel_discard_probe(id);
             }
@@ -108,11 +155,12 @@ impl Shell {
         let protected = self.discard_protected_leaves();
         let live_count = self.items.view_ids().len();
         let invalid_probes: Vec<ItemId> = self
+            .residency
             .discard_probes
             .iter()
             .filter_map(|(id, state)| match state {
                 PendingDiscardProbe::Probing { committed_url, .. } => {
-                    let valid = live_count > self.live_view_soft_limit
+                    let valid = live_count > self.residency.live_view_soft_limit
                         && !protected.contains(id)
                         && self.items.tab(*id).is_some_and(|tab| {
                             tab.has_view()
@@ -129,7 +177,7 @@ impl Shell {
             .collect();
         for id in invalid_probes {
             if self.items.tab(id).is_none() {
-                self.discard_probes.remove(&id);
+                self.residency.discard_probes.remove(&id);
                 if let Some(queue) = &self.self_queue {
                     queue.cancel_discard_probe(id);
                 }
@@ -144,17 +192,17 @@ impl Shell {
             .into_iter()
             .filter(|id| {
                 !shown.contains(id)
-                    && !self.discard_probes.contains_key(id)
-                    && self.idle_for(*id, self.dormant_min)
+                    && !self.residency.discard_probes.contains_key(id)
+                    && self.idle_for(*id, self.residency.dormant_min)
             })
             .collect();
         dormant.sort();
-        if dormant != self.dormant_sent {
-            self.dormant_sent = dormant.clone();
+        if dormant != self.residency.dormant_sent {
+            self.residency.dormant_sent = dormant.clone();
             self.engine.set_dormant(dormant);
         }
 
-        if live_count <= self.live_view_soft_limit {
+        if live_count <= self.residency.live_view_soft_limit {
             return false;
         }
         let mut candidates: Vec<ItemId> = self
@@ -163,8 +211,9 @@ impl Shell {
             .into_iter()
             .filter(|id| {
                 !protected.contains(id)
-                    && !self.discard_probes.contains_key(id)
+                    && !self.residency.discard_probes.contains_key(id)
                     && self
+                        .residency
                         .discard_protected_until
                         .get(id)
                         .is_none_or(|until| *until <= std::time::Instant::now())
@@ -172,23 +221,24 @@ impl Shell {
                         tab.has_view()
                             && !tab.loading
                             && tab.url.is_some()
-                            && (live_count > self.live_view_pressure_limit
-                                || self.idle_for(*id, self.discard_idle_min))
+                            && (live_count > self.residency.live_view_pressure_limit
+                                || self.idle_for(*id, self.residency.discard_idle_min))
                     })
             })
             .collect();
-        candidates.sort_by_key(|id| (self.last_focus.get(id).copied(), *id));
+        candidates.sort_by_key(|id| (self.residency.last_focus.get(id).copied(), *id));
 
-        let available = MAX_CONCURRENT_DISCARD_PROBES.saturating_sub(self.discard_probes.len());
+        let available =
+            MAX_CONCURRENT_DISCARD_PROBES.saturating_sub(self.residency.discard_probes.len());
         for id in candidates.into_iter().take(available) {
-            let Some(next) = self.next_discard_probe.checked_add(1) else {
+            let Some(next) = self.residency.next_discard_probe.checked_add(1) else {
                 // Reusing a process-local correlation id could accept a very
                 // late callback. Saturation permanently disables new probes.
                 break;
             };
-            self.next_discard_probe = next;
+            self.residency.next_discard_probe = next;
             let probe = DiscardProbeId(next);
-            let deadline = std::time::Instant::now() + self.discard_probe_timeout;
+            let deadline = std::time::Instant::now() + self.residency.discard_probe_timeout;
             let Some(committed_url) = self
                 .items
                 .tab(id)
@@ -197,7 +247,7 @@ impl Shell {
             else {
                 continue;
             };
-            self.discard_probes.insert(
+            self.residency.discard_probes.insert(
                 id,
                 PendingDiscardProbe::Probing {
                     probe,
@@ -208,12 +258,12 @@ impl Shell {
             // A suspended WebView2 cannot reliably execute the DOM query.
             // Replace the desired dormant set first; main-thread FIFO then
             // guarantees resume is requested before the probe evaluation.
-            if self.dormant_sent.contains(&id) {
-                self.dormant_sent.retain(|dormant| *dormant != id);
-                self.engine.set_dormant(self.dormant_sent.clone());
+            if self.residency.dormant_sent.contains(&id) {
+                self.residency.dormant_sent.retain(|dormant| *dormant != id);
+                self.engine.set_dormant(self.residency.dormant_sent.clone());
             }
             if !self.engine.probe_discard_safety(id, probe) {
-                self.discard_probes.remove(&id);
+                self.residency.discard_probes.remove(&id);
                 self.protect_discard_candidate(id);
                 continue;
             }
@@ -232,7 +282,7 @@ impl Shell {
 
     fn candidate_is_still_discardable(&self, id: ItemId, committed_url: &str) -> bool {
         let live_count = self.items.view_ids().len();
-        live_count > self.live_view_soft_limit
+        live_count > self.residency.live_view_soft_limit
             && !self.discard_protected_leaves().contains(&id)
             && self.items.tab(id).is_some_and(|tab| {
                 tab.has_view()
@@ -242,24 +292,26 @@ impl Shell {
                         .as_ref()
                         .is_some_and(|url| url.as_str() == committed_url)
             })
-            && (live_count > self.live_view_pressure_limit
-                || self.idle_for(id, self.discard_idle_min))
+            && (live_count > self.residency.live_view_pressure_limit
+                || self.idle_for(id, self.residency.discard_idle_min))
     }
 
     fn protect_discard_candidate(&mut self, id: ItemId) {
-        self.discard_protected_until
-            .insert(id, std::time::Instant::now() + self.discard_protected_retry);
+        self.residency.discard_protected_until.insert(
+            id,
+            std::time::Instant::now() + self.residency.discard_protected_retry,
+        );
     }
 
     pub(super) fn cancel_discard_probe(&mut self, id: ItemId) {
-        match self.discard_probes.get_mut(&id) {
+        match self.residency.discard_probes.get_mut(&id) {
             Some(PendingDiscardProbe::Closing { recreate, .. }) => {
                 // Physical close already owns the native generation. Preserve
                 // the acknowledgement obligation and recreate after it lands.
                 *recreate = true;
             }
             Some(PendingDiscardProbe::Probing { .. }) => {
-                self.discard_probes.remove(&id);
+                self.residency.discard_probes.remove(&id);
                 if let Some(queue) = &self.self_queue {
                     queue.cancel_discard_probe(id);
                 }
@@ -270,7 +322,7 @@ impl Shell {
 
     pub(super) fn recreate_after_inflight_discard(&mut self, id: ItemId) -> bool {
         if let Some(PendingDiscardProbe::Closing { recreate, .. }) =
-            self.discard_probes.get_mut(&id)
+            self.residency.discard_probes.get_mut(&id)
         {
             *recreate = true;
             true
@@ -281,11 +333,11 @@ impl Shell {
 
     pub(super) fn on_discard_probe_timeout(&mut self, id: ItemId, probe: DiscardProbeId) {
         let exact = matches!(
-            self.discard_probes.get(&id),
+            self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Probing { probe: pending, .. }) if *pending == probe
         );
         if exact {
-            self.discard_probes.remove(&id);
+            self.residency.discard_probes.remove(&id);
             self.protect_discard_candidate(id);
             self.maintain_views();
         }
@@ -301,7 +353,7 @@ impl Shell {
             probe: pending,
             committed_url,
             ..
-        }) = self.discard_probes.get(&id).cloned()
+        }) = self.residency.discard_probes.get(&id).cloned()
         else {
             return;
         };
@@ -312,7 +364,7 @@ impl Shell {
             queue.cancel_discard_probe(id);
         }
         if !can_discard || !self.candidate_is_still_discardable(id, &committed_url) {
-            self.discard_probes.remove(&id);
+            self.residency.discard_probes.remove(&id);
             if !can_discard {
                 self.protect_discard_candidate(id);
             }
@@ -320,7 +372,7 @@ impl Shell {
             return;
         }
 
-        self.discard_probes.insert(
+        self.residency.discard_probes.insert(
             id,
             PendingDiscardProbe::Closing {
                 probe,
@@ -349,7 +401,7 @@ impl Shell {
             probe: pending,
             recreate,
             deferred_navigation,
-        }) = self.discard_probes.get(&id).cloned()
+        }) = self.residency.discard_probes.get(&id).cloned()
         else {
             return;
         };
@@ -358,7 +410,7 @@ impl Shell {
         }
         self.zoom.pending.remove(&id);
         self.cancel_pending_presentation(id);
-        self.discard_probes.remove(&id);
+        self.residency.discard_probes.remove(&id);
         if !self.items.mark_view_discarded(id) {
             return;
         }
@@ -382,7 +434,10 @@ impl Shell {
     }
 
     fn idle_for(&self, id: ItemId, min: std::time::Duration) -> bool {
-        self.last_focus.get(&id).is_none_or(|t| t.elapsed() >= min)
+        self.residency
+            .last_focus
+            .get(&id)
+            .is_none_or(|t| t.elapsed() >= min)
     }
 
     fn retire_crashed_view(&mut self, id: ItemId) {
@@ -395,7 +450,7 @@ impl Shell {
             // state and must not replace the last committed document title.
             self.items.set_title(id, title);
         }
-        self.crash_presentations.insert(id);
+        self.crash.presentations.insert(id);
     }
 
     // One automatic relaunch per crash burst: a second death inside the
@@ -415,6 +470,7 @@ impl Shell {
         self.retire_crashed_view(id);
         self.items.set_loading(id, false);
         let recent = self
+            .crash
             .crashes
             .insert(id, std::time::Instant::now())
             .is_some_and(|t| t.elapsed() < RETRY_WINDOW);
@@ -449,6 +505,7 @@ impl Shell {
             self.cancel_pending_presentation(id);
             self.cancel_discard_probe(id);
             let repeated = self
+                .crash
                 .crashes
                 .insert(id, std::time::Instant::now())
                 .is_some_and(|time| time.elapsed() < RETRY_WINDOW);
@@ -488,6 +545,8 @@ impl Shell {
 
     pub(super) fn touch(&mut self, id: ItemId) {
         self.cancel_discard_probe(id);
-        self.last_focus.insert(id, std::time::Instant::now());
+        self.residency
+            .last_focus
+            .insert(id, std::time::Instant::now());
     }
 }

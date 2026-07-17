@@ -30,12 +30,9 @@ use profile_deletion::{
     PROFILE_DELETION_STORE_TIMEOUT,
 };
 use search::SearchState;
+use view_lifecycle::{CrashState, PendingDiscardProbe, ResidencyState, LIVE_VIEW_ABSOLUTE_LIMIT};
 #[cfg(test)]
-use view_lifecycle::MAX_CONCURRENT_DISCARD_PROBES;
-use view_lifecycle::{
-    PendingDiscardProbe, DISCARD_IDLE_GRACE, DISCARD_PROBE_TIMEOUT, DISCARD_PROTECTED_RETRY,
-    LIVE_VIEW_ABSOLUTE_LIMIT, LIVE_VIEW_PRESSURE_LIMIT, LIVE_VIEW_SOFT_LIMIT,
-};
+use view_lifecycle::{LIVE_VIEW_PRESSURE_LIMIT, MAX_CONCURRENT_DISCARD_PROBES};
 use window_layout::GrabbedDivider;
 use zoom::ZoomState;
 
@@ -120,23 +117,11 @@ pub struct Shell {
     presentation: PresentationState,
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
-    recent: Vec<ItemId>,
-    last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
+    residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
-    dormant_min: std::time::Duration,
-    dormant_sent: Vec<ItemId>,
-    discard_idle_min: std::time::Duration,
-    discard_probe_timeout: std::time::Duration,
-    discard_protected_retry: std::time::Duration,
-    live_view_soft_limit: usize,
-    live_view_pressure_limit: usize,
-    next_discard_probe: u64,
-    discard_probes: std::collections::HashMap<ItemId, PendingDiscardProbe>,
-    discard_protected_until: std::collections::HashMap<ItemId, std::time::Instant>,
     window_visible: bool,
     runtime_restart_required: bool,
-    crashes: std::collections::HashMap<ItemId, std::time::Instant>,
-    crash_presentations: std::collections::HashSet<ItemId>,
+    crash: CrashState,
     bootstrapped: bool,
     /// Monotonic process-local identity for the session state represented by
     /// persistence scheduling. A u128 wrap would require more mutations than
@@ -191,23 +176,11 @@ impl Shell {
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
-            recent: Vec::new(),
-            last_focus: std::collections::HashMap::new(),
+            residency: ResidencyState::default(),
             last_visits: std::collections::HashMap::new(),
-            dormant_min: std::time::Duration::from_secs(5 * 60),
-            dormant_sent: Vec::new(),
-            discard_idle_min: DISCARD_IDLE_GRACE,
-            discard_probe_timeout: DISCARD_PROBE_TIMEOUT,
-            discard_protected_retry: DISCARD_PROTECTED_RETRY,
-            live_view_soft_limit: LIVE_VIEW_SOFT_LIMIT,
-            live_view_pressure_limit: LIVE_VIEW_PRESSURE_LIMIT,
-            next_discard_probe: 0,
-            discard_probes: std::collections::HashMap::new(),
-            discard_protected_until: std::collections::HashMap::new(),
             window_visible: true,
             runtime_restart_required: false,
-            crashes: std::collections::HashMap::new(),
-            crash_presentations: std::collections::HashSet::new(),
+            crash: CrashState::default(),
             bootstrapped: false,
             session_revision: 0,
             persist_first_dirty: None,

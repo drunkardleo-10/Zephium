@@ -715,6 +715,7 @@ fn presentation_ready(id: ItemId, navigation: NavigationPresentationId, url: &st
 
 fn first_probing_discard(shell: &Shell) -> (ItemId, DiscardProbeId) {
     shell
+        .residency
         .discard_probes
         .iter()
         .find_map(|(id, state)| match state {
@@ -732,7 +733,7 @@ fn acknowledge_safe_discard(shell: &mut Shell, id: ItemId, probe: DiscardProbeId
         can_discard: true,
     }));
     assert!(matches!(
-        shell.discard_probes.get(&id),
+        shell.residency.discard_probes.get(&id),
         Some(PendingDiscardProbe::Closing { probe: pending, .. }) if *pending == probe
     ));
     shell.handle(Command::Engine(EngineEvent::ViewDiscarded {
@@ -2507,7 +2508,10 @@ fn repeated_crash_leaf_temporarily_collapses_to_a_live_split_sibling() {
         axis: Axis::Row,
     });
     let profile = shell.profile_of_item(second).unwrap();
-    shell.crashes.insert(second, std::time::Instant::now());
+    shell
+        .crash
+        .crashes
+        .insert(second, std::time::Instant::now());
 
     shell.handle(Command::Engine(EngineEvent::ProfileProcessExited {
         profile,
@@ -2574,7 +2578,7 @@ fn hidden_idle_views_go_dormant_and_wake_on_show() {
     assert!(!engine.calls().iter().any(|c| c.starts_with("dormant")));
 
     // once idle, the hidden view suspends; the shown one does not
-    shell.dormant_min = std::time::Duration::ZERO;
+    shell.residency.dormant_min = std::time::Duration::ZERO;
     shell.handle(Command::Tick);
     assert!(engine
         .calls()
@@ -2602,9 +2606,9 @@ fn hidden_idle_views_go_dormant_and_wake_on_show() {
 #[test]
 fn live_view_budget_discards_only_exactly_acknowledged_hidden_pages() {
     let (mut shell, _engine, screen) = setup();
-    shell.live_view_soft_limit = 2;
-    shell.live_view_pressure_limit = 3;
-    shell.discard_idle_min = std::time::Duration::ZERO;
+    shell.residency.live_view_soft_limit = 2;
+    shell.residency.live_view_pressure_limit = 3;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
     navigate_and_commit(&mut shell, first, "budget0.example");
@@ -2615,7 +2619,7 @@ fn live_view_budget_discards_only_exactly_acknowledged_hidden_pages() {
     }
     assert_eq!(shell.items.view_ids().len(), 6);
 
-    while shell.items.view_ids().len() > shell.live_view_soft_limit {
+    while shell.items.view_ids().len() > shell.residency.live_view_soft_limit {
         let (id, probe) = first_probing_discard(&shell);
         acknowledge_safe_discard(&mut shell, id, probe);
     }
@@ -2635,9 +2639,9 @@ fn live_view_budget_discards_only_exactly_acknowledged_hidden_pages() {
 #[test]
 fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
     let (mut shell, engine, screen) = setup();
-    shell.live_view_soft_limit = 1;
-    shell.live_view_pressure_limit = 1;
-    shell.discard_idle_min = std::time::Duration::ZERO;
+    shell.residency.live_view_soft_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
     let protected = active_id(&screen);
     navigate_and_commit(&mut shell, protected, "dirty.example");
@@ -2655,7 +2659,10 @@ fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
     shell.handle(Command::Tick);
 
     assert_eq!(shell.items.view_ids().len(), 2);
-    assert!(shell.discard_protected_until.contains_key(&protected));
+    assert!(shell
+        .residency
+        .discard_protected_until
+        .contains_key(&protected));
     assert_eq!(
         engine
             .calls()
@@ -2669,9 +2676,9 @@ fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
 #[test]
 fn missing_probe_callback_times_out_fail_closed_with_bounded_state() {
     let (mut shell, _engine, screen) = setup();
-    shell.live_view_soft_limit = 1;
-    shell.live_view_pressure_limit = 1;
-    shell.discard_idle_min = std::time::Duration::ZERO;
+    shell.residency.live_view_soft_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
     let candidate = active_id(&screen);
     navigate_and_commit(&mut shell, candidate, "timeout.example");
@@ -2683,8 +2690,11 @@ fn missing_probe_callback_times_out_fail_closed_with_bounded_state() {
     shell.handle(Command::DiscardProbeTimeout { id, probe });
 
     assert!(shell.items.tab(candidate).unwrap().has_view());
-    assert!(shell.discard_probes.is_empty());
-    assert!(shell.discard_protected_until.contains_key(&candidate));
+    assert!(shell.residency.discard_probes.is_empty());
+    assert!(shell
+        .residency
+        .discard_protected_until
+        .contains_key(&candidate));
 }
 
 #[test]
@@ -2728,7 +2738,7 @@ fn common_tab_counts_probe_before_and_never_exceed_the_resident_view_ceiling() {
             0
         };
         assert_eq!(
-            shell.discard_probes.len(),
+            shell.residency.discard_probes.len(),
             expected_probes,
             "pressure probing must start before absolute admission is exhausted"
         );
@@ -2827,9 +2837,9 @@ fn optimistic_multi_leaf_batch_admits_available_slots_in_effect_order() {
 #[test]
 fn stale_or_navigation_cancelled_discard_probe_cannot_close_a_view() {
     let (mut shell, engine, screen) = setup();
-    shell.live_view_soft_limit = 1;
-    shell.live_view_pressure_limit = 1;
-    shell.discard_idle_min = std::time::Duration::ZERO;
+    shell.residency.live_view_soft_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
     let candidate = active_id(&screen);
     navigate_and_commit(&mut shell, candidate, "old.example");
@@ -2881,9 +2891,9 @@ fn every_currently_visible_split_leaf_is_outside_the_discard_candidate_set() {
         other: first,
         axis: Axis::Row,
     });
-    shell.live_view_soft_limit = 0;
-    shell.live_view_pressure_limit = 0;
-    shell.discard_idle_min = std::time::Duration::ZERO;
+    shell.residency.live_view_soft_limit = 0;
+    shell.residency.live_view_pressure_limit = 0;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Tick);
 
     assert!(shell.items.tab(first).unwrap().has_view());
@@ -2897,9 +2907,9 @@ fn every_currently_visible_split_leaf_is_outside_the_discard_candidate_set() {
 #[test]
 fn acknowledged_discard_preserves_url_and_activation_recreates_lazily() {
     let (mut shell, engine, screen) = setup();
-    shell.live_view_soft_limit = 1;
-    shell.live_view_pressure_limit = 1;
-    shell.discard_idle_min = std::time::Duration::ZERO;
+    shell.residency.live_view_soft_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
     let sleeping = active_id(&screen);
     navigate_and_commit(&mut shell, sleeping, "sleeping.example/path");
@@ -2948,7 +2958,7 @@ fn minimized_window_hides_before_dormancy_and_wakes_focused_view() {
         id: second,
         input: "second.example".into(),
     });
-    shell.dormant_min = std::time::Duration::ZERO;
+    shell.residency.dormant_min = std::time::Duration::ZERO;
 
     shell.handle(Command::SetWindowVisible(false));
     assert!(engine.last_layout().is_empty());
@@ -5766,7 +5776,7 @@ fn navigation_waits_for_exact_inflight_discard_instead_of_claiming_success() {
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
     navigate_and_commit(&mut shell, id, "before-discard.example");
-    shell.discard_probes.insert(
+    shell.residency.discard_probes.insert(
         id,
         PendingDiscardProbe::Closing {
             probe: DiscardProbeId(77),
@@ -5782,7 +5792,7 @@ fn navigation_waits_for_exact_inflight_discard_instead_of_claiming_success() {
     assert_eq!(completion.outcome, OperationOutcome::Deferred);
     assert_eq!(completion.reason, OperationReason::DiscardCompletionPending);
     assert!(matches!(
-        shell.discard_probes.get(&id),
+        shell.residency.discard_probes.get(&id),
         Some(PendingDiscardProbe::Closing {
             recreate: true,
             deferred_navigation: Some(input),

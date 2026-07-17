@@ -104,7 +104,7 @@ impl Shell {
         favicon: Option<String>,
     ) -> TabView {
         let mut view = tab_view(id, tab, favicon, self.next_projection_revision());
-        if self.crash_presentations.contains(&id) {
+        if self.crash.presentations.contains(&id) {
             view.title = "Page crashed".into();
         }
         view

@@ -130,14 +130,14 @@ impl Shell {
             EngineEvent::HtmlExtracted { .. } => {}
             EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
-                self.crash_presentations.remove(&id);
+                self.crash.presentations.remove(&id);
                 self.items.set_title(id, title);
                 self.project_tab(id);
             }
             EngineEvent::LoadingChanged { id, loading } => {
                 if loading {
                     self.cancel_discard_probe(id);
-                    self.crash_presentations.remove(&id);
+                    self.crash.presentations.remove(&id);
                 }
                 self.items.set_loading(id, loading);
                 self.project_tab(id);

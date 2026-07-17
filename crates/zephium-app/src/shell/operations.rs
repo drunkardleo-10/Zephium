@@ -65,7 +65,7 @@ impl Shell {
         let active = self.windows.focused().and_then(|window| window.active);
         let has_view = self.items.tab(id).is_some_and(TabState::has_view);
         let discard_closing = matches!(
-            self.discard_probes.get(&id),
+            self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
         );
         if active == Some(id) && has_view && !discard_closing {
@@ -89,7 +89,7 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         let discard_closing = matches!(
-            self.discard_probes.get(&id),
+            self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
         );
         let native = self.close(id);
@@ -114,7 +114,7 @@ impl Shell {
             recreate,
             deferred_navigation,
             ..
-        }) = self.discard_probes.get_mut(&id)
+        }) = self.residency.discard_probes.get_mut(&id)
         {
             *recreate = true;
             *deferred_navigation = Some(input);
@@ -220,7 +220,7 @@ impl Shell {
         }
         let closing = [active, other].into_iter().any(|id| {
             matches!(
-                self.discard_probes.get(&id),
+                self.residency.discard_probes.get(&id),
                 Some(PendingDiscardProbe::Closing { .. })
             )
         });
