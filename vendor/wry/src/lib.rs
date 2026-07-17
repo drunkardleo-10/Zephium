@@ -3054,6 +3054,28 @@ mod tests {
   }
 
   #[test]
+  fn webkitgtk_linux_api_floor_and_bindings_are_guarded_on_every_host() {
+    let source = include_str!("webkitgtk/mod.rs");
+    let synthetic_mouse_source = include_str!("webkitgtk/synthetic_mouse_events.rs");
+    let web_context_source = include_str!("webkitgtk/web_context.rs");
+    let manifest = include_str!("../Cargo.toml");
+
+    assert!(manifest
+      .contains("webkit2gtk = { version = \"=2.0.2\", features = [\"v2_40\"], optional = true }"));
+    assert!(manifest.contains(
+      "webkit2gtk-sys = { version = \"=2.0.2\", features = [\"v2_40\"], optional = true }"
+    ));
+    assert!(source.contains("webkit_user_media_permission_is_for_display_device(request.as_ptr())"));
+    assert!(source.contains("user_media_request_is_for_display_device(media_request)"));
+    assert!(!source.contains("feature = \"v2_42\""));
+    assert!(!source.contains(".run_javascript("));
+    assert!(!synthetic_mouse_source.contains(".run_javascript("));
+    assert!(source.contains(".evaluate_javascript(js, None, None, cancellable"));
+    assert!(synthetic_mouse_source.contains("webview.evaluate_javascript("));
+    assert!(web_context_source.contains("URIRequest, URIRequestExt,"));
+  }
+
+  #[test]
   #[cfg_attr(miri, ignore)]
   fn should_get_webview_version() {
     if let Err(error) = webview_version() {

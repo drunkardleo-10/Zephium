@@ -28,8 +28,8 @@ use std::{
 };
 use webkit2gtk::{
   ApplicationInfo, AutomationSessionExt, CookiePersistentStorage, DownloadExt, SecurityManagerExt,
-  URIRequest, URISchemeRequest, URISchemeRequestExt, URISchemeResponse, URISchemeResponseExt,
-  WebContext, WebContextExt as Webkit2gtkContextExt, WebView, WebViewExt,
+  URIRequest, URIRequestExt, URISchemeRequest, URISchemeRequestExt, URISchemeResponse,
+  URISchemeResponseExt, WebContext, WebContextExt as Webkit2gtkContextExt, WebView, WebViewExt,
 };
 use webkit2gtk_sys::{
   webkit_uri_request_get_uri, webkit_uri_scheme_request_get_http_method,

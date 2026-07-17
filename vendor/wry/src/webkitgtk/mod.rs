@@ -51,7 +51,8 @@ use webkit2gtk::{
 use webkit2gtk_sys::{
   webkit_get_major_version, webkit_get_micro_version, webkit_get_minor_version,
   webkit_policy_decision_ignore, webkit_policy_decision_use, webkit_uri_request_get_uri,
-  webkit_web_view_get_title, webkit_web_view_get_uri,
+  webkit_user_media_permission_is_for_display_device, webkit_web_view_get_title,
+  webkit_web_view_get_uri,
 };
 #[cfg(feature = "x11")]
 use x11_dl::xlib::*;
@@ -201,6 +202,13 @@ fn bounded_webview_uri(webview: &WebView) -> Option<String> {
 fn bounded_request_uri(request: &URIRequest) -> Option<String> {
   // SAFETY: WebKit owns the request and returned URI pointer through this call.
   unsafe { bounded_utf8_c_string(webkit_uri_request_get_uri(request.as_ptr()), PAGE_URL_LIMIT) }
+}
+
+fn user_media_request_is_for_display_device(request: &UserMediaPermissionRequest) -> bool {
+  // SAFETY: the typed GLib wrapper keeps this native request alive for the
+  // duration of the permission callback. WebKitGTK added this read-only query
+  // in 2.34; Wry's v2_40 API floor guarantees that the symbol is available.
+  unsafe { webkit_user_media_permission_is_for_display_device(request.as_ptr()) != 0 }
 }
 
 /// WebKitGTK exposes one ordered main-frame load sequence per WebView but no
@@ -665,7 +673,7 @@ impl InnerWebView {
         if let Some(pending_scripts) = pending_scripts_.take() {
           let cancellable: Option<&Cancellable> = None;
           for script in pending_scripts {
-            webview.run_javascript(&script, cancellable, |_| ());
+            webview.evaluate_javascript(&script, None, None, cancellable, |_| ());
           }
         }
       }
@@ -979,10 +987,7 @@ impl InnerWebView {
         let is_audio = media_request.is_for_audio_device();
         let is_video = media_request.is_for_video_device();
 
-        #[cfg(feature = "v2_42")]
-        let is_display = media_request.is_for_display_device();
-        #[cfg(not(feature = "v2_42"))]
-        let is_display = !is_audio && !is_video;
+        let is_display = user_media_request_is_for_display_device(media_request);
 
         if is_display {
           // Screen sharing request
@@ -1252,20 +1257,22 @@ impl InnerWebView {
     #[cfg(feature = "tracing")]
     let span = tracing::debug_span!("wry::eval");
 
-    self.webview.run_javascript(js, cancellable, |result| {
-      #[cfg(feature = "tracing")]
-      let _span = span.enter();
+    self
+      .webview
+      .evaluate_javascript(js, None, None, cancellable, |result| {
+        #[cfg(feature = "tracing")]
+        let _span = span.enter();
 
-      if let Some(callback) = callback {
-        let result = result
-          .map(|r| r.js_value().and_then(|js| js.to_json(0)))
-          .unwrap_or_default()
-          .unwrap_or_default()
-          .to_string();
+        if let Some(callback) = callback {
+          let result = result
+            .map(|js| js.to_json(0))
+            .unwrap_or_default()
+            .unwrap_or_default()
+            .to_string();
 
-        callback(result);
-      }
-    });
+          callback(result);
+        }
+      });
 
     Ok(())
   }
