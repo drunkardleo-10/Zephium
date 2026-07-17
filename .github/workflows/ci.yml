@@ -37,6 +37,9 @@ jobs:
       - name: Enforce immutable workflow action and container sources
         run: ruby scripts/release/test_workflow_sources.rb
 
+      - name: Test WebKitGTK version proof helper
+        run: bash scripts/ci/test_verify_webkitgtk_version.sh
+
       - name: Validate every GitHub Actions workflow with pinned actionlint
         run: |
           set -euo pipefail
@@ -270,17 +273,8 @@ jobs:
           packaged="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
           required="${ZEPHIUM_MIN_WEBKITGTK_VERSION}"
           echo "Native WebKitGTK under test: package=${packaged}; pkg-config=${installed}; required >= ${required}"
-          if [[ ! "${packaged}" =~ ^2\.52\.([0-9]+)$ ]]; then
-            echo "::error title=Unreviewed WebKitGTK release line::Native security evidence is accepted only for the reviewed stable 2.52.x line, not ${packaged}."
-            exit 1
-          fi
-          packaged_patch="${BASH_REMATCH[1]}"
-          if (( 10#${packaged_patch} < 5 )); then
-            echo "::error title=Unsupported WebKitGTK patch::Native security evidence requires WebKitGTK 2.52.5 or newer, not ${packaged}."
-            exit 1
-          fi
-          if ! rpm -q --whatprovides "webkit2gtk4.1 >= ${required}" >/dev/null || \
-             [[ "${installed}" != "${packaged}" ]]; then
+          if ! bash scripts/ci/verify_webkitgtk_version.sh \
+            "${packaged}" "${installed}" "${required}"; then
             echo "::error title=Unproven WebKitGTK runtime::Fedora package ${packaged} and pkg-config ${installed} do not prove the required engine ${required}."
             exit 1
           fi

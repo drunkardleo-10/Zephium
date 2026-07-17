@@ -361,21 +361,9 @@ jobs:
           packaged="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
           required="${ZEPHIUM_MIN_WEBKITGTK_VERSION}"
           echo "Fedora WebKitGTK package: ${packaged}; pkg-config: ${installed}; required: >= ${required}"
-          if [[ ! "${packaged}" =~ ^2\.52\.([0-9]+)$ ]]; then
-            echo "::error title=Unreviewed WebKitGTK release line::Refusing to build Linux artifacts against ${packaged}; only the reviewed stable 2.52.x line is admitted."
-            exit 1
-          fi
-          packaged_patch="${BASH_REMATCH[1]}"
-          if (( 10#${packaged_patch} < 5 )); then
-            echo "::error title=Unsupported WebKitGTK patch::Refusing to build Linux artifacts against ${packaged}; patch 2.52.5 or newer is required."
-            exit 1
-          fi
-          if ! rpm -q --whatprovides "webkit2gtk4.1 >= ${required}" >/dev/null; then
-            echo "::error title=Unsupported WebKitGTK build host::Refusing to build Linux artifacts with WebKitGTK ${packaged}; version ${required} or newer is required."
-            exit 1
-          fi
-          if [[ "${installed}" != "${packaged}" ]]; then
-            echo "::error title=WebKitGTK provenance mismatch::pkg-config resolved ${installed}, but Fedora's installed package is ${packaged}."
+          if ! bash scripts/ci/verify_webkitgtk_version.sh \
+            "${packaged}" "${installed}" "${required}"; then
+            echo "::error title=Unsupported WebKitGTK build host::Fedora package ${packaged} and pkg-config ${installed} do not prove the required engine ${required}."
             exit 1
           fi
           command -v bwrap >/dev/null
@@ -493,17 +481,9 @@ jobs:
           set -euo pipefail
           build_engine="$(pkg-config --modversion webkit2gtk-4.1)"
           packaged_engine="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
-          if [[ ! "${packaged_engine}" =~ ^2\.52\.([0-9]+)$ ]]; then
-            echo "::error title=WebKitGTK release line changed during build::Refusing to publish an RPM built against unreviewed WebKitGTK ${packaged_engine}."
-            exit 1
-          fi
-          packaged_patch="${BASH_REMATCH[1]}"
-          if (( 10#${packaged_patch} < 5 )); then
-            echo "::error title=WebKitGTK patch changed during build::Refusing to publish an RPM built against unsupported WebKitGTK ${packaged_engine}."
-            exit 1
-          fi
-          if ! rpm -q --whatprovides "webkit2gtk4.1 >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}" >/dev/null || \
-             [[ "${build_engine}" != "${packaged_engine}" ]]; then
+          if ! bash scripts/ci/verify_webkitgtk_version.sh \
+            "${packaged_engine}" "${build_engine}" \
+            "${ZEPHIUM_MIN_WEBKITGTK_VERSION}"; then
             echo "::error title=WebKitGTK changed during build::Refusing to publish an RPM built against ${build_engine}; signed Fedora package ${packaged_engine}, required >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}."
             exit 1
           fi
