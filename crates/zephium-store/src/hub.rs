@@ -2243,9 +2243,9 @@ fn remove_legacy_source(path: &Path) -> rusqlite::Result<()> {
 
 fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     let path = canonical_child_path(path)?;
-    let expected_metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_file() && has_single_link(&metadata) => metadata,
-        Ok(_) => return Err(rusqlite::Error::InvalidPath(path)),
+    let expected_identity = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => verified_file_identity(&path, &metadata)
+            .ok_or_else(|| rusqlite::Error::InvalidPath(path.clone()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut options = std::fs::OpenOptions::new();
             options.read(true).write(true).create_new(true);
@@ -2259,18 +2259,14 @@ fn open_database(path: &Path) -> rusqlite::Result<Connection> {
                     drop(file);
                     let metadata = std::fs::symlink_metadata(&path)
                         .map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
-                    if !metadata.file_type().is_file() || !has_single_link(&metadata) {
-                        return Err(rusqlite::Error::InvalidPath(path));
-                    }
-                    metadata
+                    verified_file_identity(&path, &metadata)
+                        .ok_or_else(|| rusqlite::Error::InvalidPath(path.clone()))?
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let metadata = std::fs::symlink_metadata(&path)
                         .map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
-                    if !metadata.file_type().is_file() || !has_single_link(&metadata) {
-                        return Err(rusqlite::Error::InvalidPath(path));
-                    }
-                    metadata
+                    verified_file_identity(&path, &metadata)
+                        .ok_or_else(|| rusqlite::Error::InvalidPath(path.clone()))?
                 }
                 Err(error) => {
                     return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
@@ -2287,10 +2283,11 @@ fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     )?;
     let current_metadata =
         std::fs::symlink_metadata(&path).map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
-    if !current_metadata.file_type().is_file()
-        || !has_single_link(&current_metadata)
-        || !same_file_identity(&expected_metadata, &current_metadata)
-    {
+    let Some(current_identity) = verified_file_identity(&path, &current_metadata) else {
+        drop(connection);
+        return Err(rusqlite::Error::InvalidPath(path));
+    };
+    if !same_file_identity(&expected_identity, &current_identity) {
         drop(connection);
         return Err(rusqlite::Error::InvalidPath(path));
     }
@@ -2305,7 +2302,10 @@ fn open_meta_database(path: &Path) -> rusqlite::Result<Connection> {
     let path = canonical_child_path(path)?;
     for _ in 0..4 {
         match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() && has_single_link(&metadata) => {
+            Ok(metadata) => {
+                if verified_file_identity(&path, &metadata).is_none() {
+                    return Err(rusqlite::Error::InvalidPath(path));
+                }
                 let (validation, validation_metadata) = open_existing_database(
                     &path,
                     OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -2327,7 +2327,6 @@ fn open_meta_database(path: &Path) -> rusqlite::Result<Connection> {
                 drop(validation);
                 return Ok(writable);
             }
-            Ok(_) => return Err(rusqlite::Error::InvalidPath(path)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut options = std::fs::OpenOptions::new();
                 options.read(true).write(true).create_new(true);
@@ -2341,18 +2340,15 @@ fn open_meta_database(path: &Path) -> rusqlite::Result<Connection> {
                         drop(file);
                         let created_metadata = std::fs::symlink_metadata(&path)
                             .map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
-                        if !created_metadata.file_type().is_file()
-                            || !has_single_link(&created_metadata)
-                        {
-                            return Err(rusqlite::Error::InvalidPath(path));
-                        }
+                        let created_identity = verified_file_identity(&path, &created_metadata)
+                            .ok_or_else(|| rusqlite::Error::InvalidPath(path.clone()))?;
                         let (writable, writable_metadata) = open_existing_database(
                             &path,
                             OpenFlags::SQLITE_OPEN_READ_WRITE
                                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
                         )?;
-                        if !same_file_identity(&created_metadata, &writable_metadata) {
+                        if !same_file_identity(&created_identity, &writable_metadata) {
                             return Err(rusqlite::Error::InvalidPath(path));
                         }
                         return Ok(writable);
@@ -2375,24 +2371,25 @@ fn open_meta_database(path: &Path) -> rusqlite::Result<Connection> {
 fn open_existing_database(
     path: &Path,
     flags: OpenFlags,
-) -> rusqlite::Result<(Connection, std::fs::Metadata)> {
+) -> rusqlite::Result<(Connection, FileIdentity)> {
     let path = canonical_child_path(path)?;
-    let expected_metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_file() && has_single_link(&metadata) => metadata,
-        Ok(_) => return Err(rusqlite::Error::InvalidPath(path)),
+    let expected_identity = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => verified_file_identity(&path, &metadata)
+            .ok_or_else(|| rusqlite::Error::InvalidPath(path.clone()))?,
         Err(_) => return Err(rusqlite::Error::InvalidPath(path)),
     };
     let connection = Connection::open_with_flags(&path, flags)?;
     let current_metadata =
         std::fs::symlink_metadata(&path).map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
-    if !current_metadata.file_type().is_file()
-        || !has_single_link(&current_metadata)
-        || !same_file_identity(&expected_metadata, &current_metadata)
-    {
+    let Some(current_identity) = verified_file_identity(&path, &current_metadata) else {
+        drop(connection);
+        return Err(rusqlite::Error::InvalidPath(path));
+    };
+    if !same_file_identity(&expected_identity, &current_identity) {
         drop(connection);
         return Err(rusqlite::Error::InvalidPath(path));
     }
-    Ok((connection, current_metadata))
+    Ok((connection, current_identity))
 }
 
 fn canonical_child_path(path: &Path) -> rusqlite::Result<PathBuf> {
@@ -2409,48 +2406,61 @@ fn canonical_child_path(path: &Path) -> rusqlite::Result<PathBuf> {
 
 fn regular_file_exists(path: &Path) -> rusqlite::Result<bool> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && has_single_link(&metadata) => Ok(true),
-        Ok(_) => Err(rusqlite::Error::InvalidPath(path.into())),
+        Ok(metadata) => verified_file_identity(path, &metadata)
+            .map(|_| true)
+            .ok_or_else(|| rusqlite::Error::InvalidPath(path.into())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(rusqlite::Error::InvalidPath(path.into())),
     }
 }
 
 #[cfg(unix)]
-fn has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    metadata.nlink() == 1
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
 }
 
 #[cfg(target_os = "windows")]
-fn has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.number_of_links() == Some(1)
-}
+type FileIdentity = crate::windows_file_identity::WindowsFileIdentity;
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn has_single_link(_metadata: &std::fs::Metadata) -> bool {
-    true
-}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity;
 
+/// Captures the identity of an exact regular, single-link file.
+///
+/// Windows' `std::os::windows::fs::MetadataExt` identity and link-count
+/// accessors are still unstable. Querying the native handle directly also
+/// makes the security property explicit: the link count and identity come
+/// from one successfully opened non-reparse handle, rather than from path-only
+/// metadata assembled by a different API. Identity uses `FileIdInfo`'s full
+/// 128-bit file identifier; the legacy 64-bit index is not unique on ReFS.
 #[cfg(unix)]
-fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+fn verified_file_identity(_path: &Path, metadata: &std::fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    before.dev() == after.dev() && before.ino() == after.ino()
+
+    (metadata.file_type().is_file() && metadata.nlink() == 1).then_some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 #[cfg(target_os = "windows")]
-fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    before.volume_serial_number().is_some()
-        && before.volume_serial_number() == after.volume_serial_number()
-        && before.file_index().is_some()
-        && before.file_index() == after.file_index()
+fn verified_file_identity(path: &Path, metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    crate::windows_file_identity::verified_file_identity(path)
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn same_file_identity(_before: &std::fs::Metadata, _after: &std::fs::Metadata) -> bool {
-    true
+fn verified_file_identity(_path: &Path, metadata: &std::fs::Metadata) -> Option<FileIdentity> {
+    metadata.file_type().is_file().then_some(FileIdentity)
+}
+
+fn same_file_identity(before: &FileIdentity, after: &FileIdentity) -> bool {
+    before == after
 }
 
 fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlite::Result<bool> {
@@ -2805,7 +2815,8 @@ mod connection_hardening_tests {
             configure(&connection).unwrap();
             migrations::apply(&mut connection, migrations::META).unwrap();
             drop(connection);
-            let first_identity = std::fs::symlink_metadata(&path).unwrap();
+            let first_metadata = std::fs::symlink_metadata(&path).unwrap();
+            let first_identity = verified_file_identity(&path, &first_metadata).unwrap();
 
             let mut reopened = open_meta_database(&path).unwrap();
             configure(&reopened).unwrap();
@@ -2816,7 +2827,8 @@ mod connection_hardening_tests {
             assert_eq!(version, 9);
             drop(reopened);
 
-            let second_identity = std::fs::symlink_metadata(&path).unwrap();
+            let second_metadata = std::fs::symlink_metadata(&path).unwrap();
+            let second_identity = verified_file_identity(&path, &second_metadata).unwrap();
             assert!(same_file_identity(&first_identity, &second_identity));
         }
     }

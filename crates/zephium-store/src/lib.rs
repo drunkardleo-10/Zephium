@@ -9,6 +9,8 @@ mod hub;
 mod legacy;
 mod migrations;
 mod pane;
+#[cfg(target_os = "windows")]
+mod windows_file_identity;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

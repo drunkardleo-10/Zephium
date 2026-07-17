@@ -5547,6 +5547,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
+ "windows",
  "zephium-core",
 ]
 
