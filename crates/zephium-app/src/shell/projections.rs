@@ -50,7 +50,11 @@ impl Shell {
     }
 
     fn record_tab_projection_revisions(&self, tabs: &[TabView]) {
-        let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() else {
+        let Ok(mut revisions) = self
+            .presentation
+            .last_tab_projection_revision
+            .try_borrow_mut()
+        else {
             // The shell actor is single-threaded and these borrows never span
             // callbacks. Retaining the older value fails closed by making an
             // otherwise valid presentation callback stale.
@@ -64,14 +68,22 @@ impl Shell {
     }
 
     pub(super) fn record_tab_projection_revision(&self, id: ItemId, revision: &str) {
-        if let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() {
+        if let Ok(mut revisions) = self
+            .presentation
+            .last_tab_projection_revision
+            .try_borrow_mut()
+        {
             revisions.insert(id, revision.to_owned());
         }
     }
 
     fn generic_tab_view(&self, id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
         let mut view = self.presentation_tab_view(id, tab, self.favicon_key(tab, profile));
-        if self.deferred_first_content_layout.contains(&id) {
+        if self
+            .presentation
+            .deferred_first_content_layout
+            .contains(&id)
+        {
             // A full Items snapshot may still be necessary for focus or tab
             // topology. Preserve that delivery while ensuring the exact
             // presentation eval remains the first URL-bearing projection.
@@ -101,8 +113,12 @@ impl Shell {
     fn next_projection_revision(&self) -> u128 {
         // Saturation is fail-closed: subsequent equal revisions are ignored
         // by privileged chrome, so no older projection can become current.
-        let next = self.projection_sequence.get().saturating_add(1);
-        self.projection_sequence.set(next);
+        let next = self
+            .presentation
+            .projection_sequence
+            .get()
+            .saturating_add(1);
+        self.presentation.projection_sequence.set(next);
         next
     }
 

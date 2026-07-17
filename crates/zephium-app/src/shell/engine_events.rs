@@ -199,7 +199,7 @@ impl Shell {
                     // frame until the exact presentation eval replaces it.
                     // All generic projections remain URL-free for this item,
                     // so they cannot create an empty gap ahead of that eval.
-                    self.deferred_first_content_layout.insert(id);
+                    self.presentation.deferred_first_content_layout.insert(id);
                 } else {
                     self.project_tab(id);
                 }

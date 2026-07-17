@@ -20,7 +20,9 @@ use effects::{mutation_result, operation_result, NativeWork};
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
+#[cfg(test)]
 use presentation::PendingPresentation;
+use presentation::PresentationState;
 #[cfg(test)]
 use presentation::MAX_PRESENTATION_ADMISSION_REJECTIONS;
 use profile_deletion::{
@@ -115,18 +117,7 @@ pub struct Shell {
     pending_size: Size,
     favicons: FaviconState,
     search: SearchState,
-    pending_presentations: std::collections::HashMap<ItemId, PendingPresentation>,
-    presented_navigations: std::collections::HashMap<ItemId, (NavigationPresentationId, String)>,
-    /// A fresh tab keeps its real privileged New Tab document until the first
-    /// exact committed-URL presentation eval replaces and verifies it. Native
-    /// content geometry is admitted only after that callback.
-    deferred_first_content_layout: std::collections::HashSet<ItemId>,
-    /// Last revision actually offered to privileged chrome for each item.
-    /// Exact eval callbacks must still match this value when the actor
-    /// receives them; a newer masked or full projection invalidates an older
-    /// success without unrelated-tab churn causing starvation.
-    last_tab_projection_revision: std::cell::RefCell<std::collections::HashMap<ItemId, String>>,
-    projection_sequence: std::cell::Cell<u128>,
+    presentation: PresentationState,
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
     recent: Vec<ItemId>,
@@ -197,11 +188,7 @@ impl Shell {
             pending_size: Size::default(),
             favicons: FaviconState::default(),
             search: SearchState::default(),
-            pending_presentations: std::collections::HashMap::new(),
-            presented_navigations: std::collections::HashMap::new(),
-            deferred_first_content_layout: std::collections::HashSet::new(),
-            last_tab_projection_revision: std::cell::RefCell::new(std::collections::HashMap::new()),
-            projection_sequence: std::cell::Cell::new(0),
+            presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
             recent: Vec::new(),
@@ -518,7 +505,7 @@ impl Shell {
             // obligation when the retryable barrier reopens. Both maps remain
             // bounded to one entry per logical item.
             let now = std::time::Instant::now();
-            for (id, pending) in &self.pending_presentations {
+            for (id, pending) in &self.presentation.pending_presentations {
                 queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
             }
         }

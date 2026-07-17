@@ -41,7 +41,7 @@ impl Shell {
                     self.items.tab(*id).is_some_and(|tab| {
                         tab.has_view()
                             && tab.url.is_some()
-                            && !self.deferred_first_content_layout.contains(id)
+                            && !self.presentation.deferred_first_content_layout.contains(id)
                     })
                 })
             });

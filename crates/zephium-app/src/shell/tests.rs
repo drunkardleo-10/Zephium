@@ -905,7 +905,7 @@ fn raw_presentation_waits_for_exact_privileged_chrome_callback() {
         .calls()
         .iter()
         .any(|call| call == &format!("present {id} 4201")));
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert!(!queue
         .inner
         .timer_state
@@ -934,7 +934,7 @@ fn newer_same_tab_projection_invalidates_a_queued_chrome_success_callback() {
         "https://ordered.example/",
     )));
     let first = chrome.presentations().into_iter().next().unwrap();
-    let hard_deadline = shell.pending_presentations[&id].hard_deadline;
+    let hard_deadline = shell.presentation.pending_presentations[&id].hard_deadline;
 
     // The native eval reports success, but its callback has not yet
     // reached the actor. Model every generic projection source that may
@@ -956,6 +956,7 @@ fn newer_same_tab_projection_invalidates_a_queued_chrome_success_callback() {
     }));
     shell.project_items();
     let latest_revision = shell
+        .presentation
         .last_tab_projection_revision
         .borrow()
         .get(&id)
@@ -976,7 +977,7 @@ fn newer_same_tab_projection_invalidates_a_queued_chrome_success_callback() {
         .calls()
         .iter()
         .any(|call| call == &format!("present {id} 4211")));
-    assert!(shell.pending_presentations.contains_key(&id));
+    assert!(shell.presentation.pending_presentations.contains_key(&id));
 
     // The existing exact timer reprojects the newest authoritative tab.
     shell.on_presentation_fallback(id, navigation, hard_deadline);
@@ -990,7 +991,7 @@ fn newer_same_tab_projection_invalidates_a_queued_chrome_success_callback() {
         .calls()
         .iter()
         .any(|call| call == &format!("present {id} 4211")));
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
 }
 
 #[test]
@@ -1035,7 +1036,10 @@ fn overlapping_privileged_callbacks_cannot_acknowledge_the_newer_document() {
         .calls()
         .iter()
         .any(|call| call == &format!("present {id} 4202")));
-    assert_eq!(shell.pending_presentations[&id].navigation, current);
+    assert_eq!(
+        shell.presentation.pending_presentations[&id].navigation,
+        current
+    );
 
     let second = chrome.complete_next(true);
     assert_eq!(second.navigation, current);
@@ -1065,12 +1069,15 @@ fn lost_privileged_callback_keeps_one_exact_retry_and_never_timeout_reveals() {
         navigation,
         "https://lost-callback.example/",
     )));
-    let first = shell.pending_presentations[&id].clone();
+    let first = shell.presentation.pending_presentations[&id].clone();
     assert!(first.chrome_request_in_flight);
 
     shell.on_presentation_fallback(id, navigation, first.hard_deadline);
     assert_eq!(chrome.presentations().len(), 2);
-    assert_eq!(shell.pending_presentations[&id].admission_rejections, 1);
+    assert_eq!(
+        shell.presentation.pending_presentations[&id].admission_rejections,
+        1
+    );
     assert!(!engine
         .calls()
         .iter()
@@ -1078,6 +1085,7 @@ fn lost_privileged_callback_keeps_one_exact_retry_and_never_timeout_reveals() {
 
     let expired = std::time::Instant::now();
     shell
+        .presentation
         .pending_presentations
         .get_mut(&id)
         .unwrap()
@@ -1184,7 +1192,7 @@ fn loading_state_never_delays_exact_committed_url_presentation() {
         .calls()
         .iter()
         .any(|call| call == &format!("present {id} 42")));
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert!(queue
         .inner
         .timer_state
@@ -1211,7 +1219,7 @@ fn presentation_hard_limit_retires_hidden_content_instead_of_timeout_revealing()
     let hard_deadline = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_millis(1))
         .unwrap_or_else(std::time::Instant::now);
-    shell.pending_presentations.insert(
+    shell.presentation.pending_presentations.insert(
         id,
         PendingPresentation {
             navigation,
@@ -1234,7 +1242,7 @@ fn presentation_hard_limit_retires_hidden_content_instead_of_timeout_revealing()
         .iter()
         .any(|call| call == &format!("close {id}")));
     assert!(!shell.items.tab(id).unwrap().has_view());
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert!(!queue
         .inner
         .timer_state
@@ -1269,7 +1277,7 @@ fn ready_presentation_rejection_retains_and_retries_the_exact_obligation() {
         "https://example.test/",
     )));
 
-    let pending = shell.pending_presentations[&id].clone();
+    let pending = shell.presentation.pending_presentations[&id].clone();
     assert_eq!(pending.navigation, navigation);
     assert_eq!(pending.admission_rejections, 1);
     assert_eq!(
@@ -1289,7 +1297,7 @@ fn ready_presentation_rejection_retains_and_retries_the_exact_obligation() {
     queue.cancel_presentation(id);
     shell.on_presentation_fallback(id, navigation, pending.hard_deadline);
 
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert_eq!(
         engine
             .calls()
@@ -1323,9 +1331,12 @@ fn fallback_presentation_rejection_retains_and_retries_the_exact_obligation() {
         navigation,
         "https://example.test/",
     )));
-    let hard_deadline = shell.pending_presentations[&id].hard_deadline;
+    let hard_deadline = shell.presentation.pending_presentations[&id].hard_deadline;
 
-    assert_eq!(shell.pending_presentations[&id].admission_rejections, 1);
+    assert_eq!(
+        shell.presentation.pending_presentations[&id].admission_rejections,
+        1
+    );
     assert_eq!(
         queue
             .inner
@@ -1343,7 +1354,7 @@ fn fallback_presentation_rejection_retains_and_retries_the_exact_obligation() {
     queue.cancel_presentation(id);
     shell.on_presentation_fallback(id, navigation, hard_deadline);
 
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert!(!queue
         .inner
         .timer_state
@@ -1375,9 +1386,12 @@ fn permanently_rejected_presentation_retires_the_exact_hidden_view() {
         navigation,
         "https://example.test/",
     )));
-    let hard_deadline = shell.pending_presentations[&id].hard_deadline;
+    let hard_deadline = shell.presentation.pending_presentations[&id].hard_deadline;
 
-    assert_eq!(shell.pending_presentations[&id].admission_rejections, 1);
+    assert_eq!(
+        shell.presentation.pending_presentations[&id].admission_rejections,
+        1
+    );
     for rejection in 2..=MAX_PRESENTATION_ADMISSION_REJECTIONS {
         // Model each coalesced timer wake entering the actor. There can be
         // only one timer and one shell obligation for this item.
@@ -1385,7 +1399,7 @@ fn permanently_rejected_presentation_retires_the_exact_hidden_view() {
         shell.on_presentation_fallback(id, navigation, hard_deadline);
         if rejection < MAX_PRESENTATION_ADMISSION_REJECTIONS {
             assert_eq!(
-                shell.pending_presentations[&id].admission_rejections,
+                shell.presentation.pending_presentations[&id].admission_rejections,
                 rejection
             );
             assert_eq!(
@@ -1401,7 +1415,7 @@ fn permanently_rejected_presentation_retires_the_exact_hidden_view() {
         }
     }
 
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert!(!shell.items.tab(id).unwrap().has_view());
     assert!(!queue
         .inner
@@ -1439,7 +1453,7 @@ fn unsupported_acknowledgement_is_an_exact_view_lifecycle_failure() {
         "https://example.test/",
     )));
 
-    assert!(!shell.pending_presentations.contains_key(&id));
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
     assert!(!shell.items.tab(id).unwrap().has_view());
     assert!(engine
         .calls()
@@ -1468,7 +1482,7 @@ fn retryable_shutdown_rearms_a_presentation_wake_rejected_by_the_barrier() {
         navigation,
         "https://example.test/",
     )));
-    let pending = shell.pending_presentations[&id].clone();
+    let pending = shell.presentation.pending_presentations[&id].clone();
 
     let (barrier_ack, _barrier_done) = sync_channel(1);
     queue
@@ -1505,7 +1519,7 @@ fn retryable_shutdown_rearms_a_presentation_wake_rejected_by_the_barrier() {
         retry_done.recv().unwrap(),
         ShutdownOutcome::RetryableFailure
     );
-    assert_eq!(shell.pending_presentations[&id], pending);
+    assert_eq!(shell.presentation.pending_presentations[&id], pending);
     assert_eq!(
         queue
             .inner
@@ -1542,19 +1556,22 @@ fn escaped_stale_presentation_fallback_cannot_rearm_over_a_new_navigation() {
         retired,
         "https://first.example/",
     )));
-    let retired_hard = shell.pending_presentations[&id].hard_deadline;
+    let retired_hard = shell.presentation.pending_presentations[&id].hard_deadline;
     commit_url(&mut shell, id, "https://second.example/");
     shell.handle(Command::Engine(presentation_pending(
         id,
         current,
         "https://second.example/",
     )));
-    let current_pending = shell.pending_presentations[&id].clone();
+    let current_pending = shell.presentation.pending_presentations[&id].clone();
     let calls_before_stale_wake = engine.calls().len();
 
     shell.on_presentation_fallback(id, retired, retired_hard);
 
-    assert_eq!(shell.pending_presentations[&id], current_pending);
+    assert_eq!(
+        shell.presentation.pending_presentations[&id],
+        current_pending
+    );
     assert_eq!(
         queue
             .inner

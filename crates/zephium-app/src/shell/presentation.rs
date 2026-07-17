@@ -28,6 +28,24 @@ pub(super) struct PendingPresentation {
     pub(super) chrome_request_in_flight: bool,
 }
 
+#[derive(Default)]
+pub(super) struct PresentationState {
+    pub(super) pending_presentations: std::collections::HashMap<ItemId, PendingPresentation>,
+    pub(super) presented_navigations:
+        std::collections::HashMap<ItemId, (NavigationPresentationId, String)>,
+    /// A fresh tab keeps its real privileged New Tab document until the first
+    /// exact committed-URL presentation eval replaces and verifies it. Native
+    /// content geometry is admitted only after that callback.
+    pub(super) deferred_first_content_layout: std::collections::HashSet<ItemId>,
+    /// Last revision actually offered to privileged chrome for each item.
+    /// Exact eval callbacks must still match this value when the actor
+    /// receives them; a newer masked or full projection invalidates an older
+    /// success without unrelated-tab churn causing starvation.
+    pub(super) last_tab_projection_revision:
+        std::cell::RefCell<std::collections::HashMap<ItemId, String>>,
+    pub(super) projection_sequence: std::cell::Cell<u128>,
+}
+
 impl Shell {
     fn track_pending_presentation(
         &mut self,
@@ -39,7 +57,7 @@ impl Shell {
         let candidate_hard = now
             .checked_add(PRESENTATION_ADMISSION_HARD_LIMIT)
             .unwrap_or(now);
-        let pending = match self.pending_presentations.entry(id) {
+        let pending = match self.presentation.pending_presentations.entry(id) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 // A hidden view may commit another navigation before the
                 // first one presents. Advance the exact identity but preserve
@@ -76,10 +94,14 @@ impl Shell {
     }
 
     pub(super) fn cancel_pending_presentation(&mut self, id: ItemId) {
-        self.pending_presentations.remove(&id);
-        self.presented_navigations.remove(&id);
-        self.deferred_first_content_layout.remove(&id);
-        if let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() {
+        self.presentation.pending_presentations.remove(&id);
+        self.presentation.presented_navigations.remove(&id);
+        self.presentation.deferred_first_content_layout.remove(&id);
+        if let Ok(mut revisions) = self
+            .presentation
+            .last_tab_projection_revision
+            .try_borrow_mut()
+        {
             revisions.remove(&id);
         }
         if let Some(queue) = &self.self_queue {
@@ -93,13 +115,14 @@ impl Shell {
         navigation: NavigationPresentationId,
     ) -> bool {
         if !self
+            .presentation
             .pending_presentations
             .get(&id)
             .is_some_and(|pending| pending.navigation == navigation)
         {
             return false;
         }
-        self.pending_presentations.remove(&id);
+        self.presentation.pending_presentations.remove(&id);
         if let Some(queue) = &self.self_queue {
             queue.cancel_presentation(id);
         }
@@ -124,6 +147,7 @@ impl Shell {
     ) {
         let now = std::time::Instant::now();
         let Some(current) = self
+            .presentation
             .pending_presentations
             .get_mut(&id)
             .filter(|current| current.navigation == navigation)
@@ -161,6 +185,7 @@ impl Shell {
     /// never blocks the shell actor or a native UI thread.
     fn request_chrome_presentation(&mut self, id: ItemId, navigation: NavigationPresentationId) {
         let Some(pending) = self
+            .presentation
             .pending_presentations
             .get(&id)
             .cloned()
@@ -238,6 +263,7 @@ impl Shell {
         let callback_active = active;
         let callback_projection_revision = projection_revision.clone();
         if let Some(current) = self
+            .presentation
             .pending_presentations
             .get_mut(&id)
             .filter(|current| current.navigation == navigation)
@@ -306,15 +332,20 @@ impl Shell {
         projection_revision: String,
         applied: bool,
     ) {
-        let pending_exact = self.pending_presentations.get(&id).is_some_and(|pending| {
-            pending.navigation == navigation
-                && pending.url == url
-                && self.presentation_matches_current_url(id, pending)
-        });
+        let pending_exact = self
+            .presentation
+            .pending_presentations
+            .get(&id)
+            .is_some_and(|pending| {
+                pending.navigation == navigation
+                    && pending.url == url
+                    && self.presentation_matches_current_url(id, pending)
+            });
         if !pending_exact {
             return;
         }
         let revision_exact = self
+            .presentation
             .last_tab_projection_revision
             .try_borrow()
             .is_ok_and(|revisions| revisions.get(&id) == Some(&projection_revision));
@@ -333,7 +364,7 @@ impl Shell {
             );
             return;
         }
-        if let Some(pending) = self.pending_presentations.get_mut(&id) {
+        if let Some(pending) = self.presentation.pending_presentations.get_mut(&id) {
             pending.chrome_applied = true;
             pending.chrome_request_in_flight = false;
         }
@@ -353,6 +384,7 @@ impl Shell {
         navigation: NavigationPresentationId,
     ) -> NativeDispatch {
         let Some(pending) = self
+            .presentation
             .pending_presentations
             .get(&id)
             .cloned()
@@ -373,7 +405,11 @@ impl Shell {
         // content geometry only afterward, on the same ordered native
         // dispatcher used by presentation. Refusal retains the hidden exact
         // obligation and follows the ordinary bounded retry path.
-        if self.deferred_first_content_layout.contains(&id) {
+        if self
+            .presentation
+            .deferred_first_content_layout
+            .contains(&id)
+        {
             let layout = self.relayout();
             if layout != NativeDispatch::Scheduled {
                 self.schedule_exact_presentation_retry(
@@ -391,9 +427,10 @@ impl Shell {
                 // The native task is generation/epoch checked again when it
                 // executes. Clear only the same obligation: a re-entrant newer
                 // commit must retain its own hidden-document gate and timer.
-                self.presented_navigations
+                self.presentation
+                    .presented_navigations
                     .insert(id, (navigation, pending.url.clone()));
-                self.deferred_first_content_layout.remove(&id);
+                self.presentation.deferred_first_content_layout.remove(&id);
                 self.cancel_exact_pending_presentation(id, navigation);
             }
             NativeDispatch::Rejected => {
@@ -425,6 +462,7 @@ impl Shell {
         reason: &'static str,
     ) {
         if !self
+            .presentation
             .pending_presentations
             .get(&id)
             .is_some_and(|pending| pending.navigation == navigation)
@@ -447,7 +485,7 @@ impl Shell {
         navigation: NavigationPresentationId,
         hard_deadline: std::time::Instant,
     ) {
-        let Some(pending) = self.pending_presentations.get(&id).cloned() else {
+        let Some(pending) = self.presentation.pending_presentations.get(&id).cloned() else {
             return;
         };
         if pending.navigation != navigation || pending.hard_deadline != hard_deadline {
@@ -469,7 +507,7 @@ impl Shell {
             return;
         }
         if pending.chrome_request_in_flight {
-            if let Some(current) = self.pending_presentations.get_mut(&id) {
+            if let Some(current) = self.presentation.pending_presentations.get_mut(&id) {
                 current.chrome_request_in_flight = false;
                 current.admission_rejections = current.admission_rejections.saturating_add(1);
                 if current.admission_rejections >= MAX_PRESENTATION_ADMISSION_REJECTIONS {
@@ -508,6 +546,7 @@ impl Shell {
             return;
         }
         if self
+            .presentation
             .presented_navigations
             .get(&id)
             .is_some_and(|(presented, presented_url)| {
@@ -521,6 +560,7 @@ impl Shell {
             return;
         }
         if self
+            .presentation
             .pending_presentations
             .get(&id)
             .is_some_and(|pending| pending.navigation != navigation)
