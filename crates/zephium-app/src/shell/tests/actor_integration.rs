@@ -119,10 +119,6 @@ fn tracked_operation_has_exact_admission_and_actor_disposition_id() {
             command: Box::new(Command::Open),
         },
     ));
-    assert!(tracked_operation_command(&Command::DividerRelease {
-        x: None,
-        y: None,
-    }));
 }
 
 #[test]

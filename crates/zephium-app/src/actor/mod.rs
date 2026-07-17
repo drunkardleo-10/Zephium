@@ -1,13 +1,10 @@
 //! Actor ownership, worker lifetime, and terminal shutdown.
 
 mod mailbox;
+#[cfg(test)]
+mod tests;
 
 use mailbox::CommandQueueInner;
-#[cfg(test)]
-pub(super) use mailbox::{
-    enqueue, PresentationDeadline, COMMAND_QUEUE_CAPACITY, LIFECYCLE_COMMAND_CAPACITY,
-    NORMAL_COMMAND_CAPACITY,
-};
 pub(super) use mailbox::{CommandQueue, TimerWake, TryPushError};
 
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -326,13 +323,13 @@ impl Handle {
     }
 }
 
-pub(super) fn finish_shutdown(command: Command, outcome: ShutdownOutcome) {
+fn finish_shutdown(command: Command, outcome: ShutdownOutcome) {
     if let Command::Shutdown { ack, .. } = command {
         let _ = ack.send(outcome);
     }
 }
 
-pub(super) fn tracked_operation_command(command: &Command) -> bool {
+fn tracked_operation_command(command: &Command) -> bool {
     matches!(
         command,
         Command::Open
@@ -353,7 +350,7 @@ pub(super) fn tracked_operation_command(command: &Command) -> bool {
     )
 }
 
-pub(super) struct ActorExitGuard(pub(super) CommandQueue);
+struct ActorExitGuard(CommandQueue);
 
 impl Drop for ActorExitGuard {
     fn drop(&mut self) {

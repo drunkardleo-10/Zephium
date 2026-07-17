@@ -41,11 +41,7 @@ use persistence::PersistenceState;
 use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
 
 #[cfg(test)]
-use crate::actor::{
-    enqueue, finish_shutdown, spawn, tracked_operation_command, ActorExitGuard, Handle,
-    PresentationDeadline, TimerWake, TryPushError, COMMAND_QUEUE_CAPACITY,
-    LIFECYCLE_COMMAND_CAPACITY, NORMAL_COMMAND_CAPACITY,
-};
+use crate::actor::{spawn, Handle, TryPushError};
 use crate::actor::{CallbackHandle, CommandQueue};
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, EmitFn, SharedChrome, SharedEngine,

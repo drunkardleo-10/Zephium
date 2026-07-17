@@ -753,7 +753,6 @@ mod operations;
 mod persistence;
 mod presentation;
 mod profile_deletion;
-mod remaining;
 mod search;
 mod shutdown;
 mod tabs;

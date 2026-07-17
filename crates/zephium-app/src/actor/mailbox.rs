@@ -1,5 +1,8 @@
 //! Bounded command admission, coalescing, and timer scheduling.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -60,7 +63,7 @@ impl CoalescedKey {
 // latest URL, view-state and navigation result per maximum session item plus
 // profile/split/runtime-update facts and the final shutdown barrier. A shared WebKit process
 // may terminate all 1,024 live views in one native callback burst.
-pub(crate) const NORMAL_COMMAND_CAPACITY: usize = 960;
+const NORMAL_COMMAND_CAPACITY: usize = 960;
 // Each tracked tab can have one latest URL, presentation, navigation failure,
 // terminal view-state, zoom settlement, and native-action failure fact. Each
 // profile can independently have one process-
@@ -71,9 +74,8 @@ pub(crate) const NORMAL_COMMAND_CAPACITY: usize = 960;
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
     + zephium_core::session::MAX_SESSION_PROFILES * 2
     + 2;
-pub(crate) const COMMAND_QUEUE_CAPACITY: usize =
-    NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
-pub(crate) const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
+const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
+const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
 // During a failed store barrier, keep at most the bounded set of lifecycle
 // facts the native engine can produce for the maximum item/profile counts.
 const POST_BARRIER_CRITICAL_CAPACITY: usize = MAX_CRITICAL_LIFECYCLE_FACTS;
@@ -705,7 +707,7 @@ impl CommandQueue {
 /// may replace an older value only inside the trailing engine-only burst. It
 /// can never cross a UI command, crash/result event, or shutdown barrier, so
 /// a newer callback cannot make an older state appear after navigation.
-pub(crate) fn enqueue(
+fn enqueue(
     commands: &mut VecDeque<Command>,
     command: Command,
     hard_capacity: usize,
