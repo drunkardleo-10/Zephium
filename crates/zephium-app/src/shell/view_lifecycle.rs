@@ -49,6 +49,10 @@ impl Shell {
         }
     }
 
+    // Sleeping-tabs model: hidden views carry a low-memory hint, then a
+    // bounded set of exact-generation/epoch probes may authorize full native
+    // discard. Positive renderer results are only advisory until this actor
+    // rechecks URL, loading, visibility, idle age, and the current budget.
     pub(super) fn maintain_views(&mut self) -> bool {
         self.crashes.retain(|id, _| self.items.tab(*id).is_some());
         self.crash_presentations
@@ -393,6 +397,9 @@ impl Shell {
         self.crash_presentations.insert(id);
     }
 
+    // One automatic relaunch per crash burst: a second death inside the
+    // window means the page kills its web process deterministically, and a
+    // reload loop would peg the machine.
     pub(super) fn on_crashed(&mut self, id: ItemId) {
         const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
         if self.items.tab(id).is_none() {
