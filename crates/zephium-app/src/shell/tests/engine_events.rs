@@ -1,0 +1,81 @@
+use super::*;
+
+#[test]
+fn engine_events_fold_into_projection() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id,
+        title: "Example".into(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: false,
+    }));
+
+    let key = id.to_string();
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|t| t.id == key)
+        .unwrap();
+    assert_eq!(tab.title, "Example");
+    assert!(!tab.loading);
+}
+
+#[test]
+fn runtime_restart_requirement_is_sticky_deduplicated_and_replayed_on_bootstrap() {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let sink = statuses.clone();
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RuntimeStatus(status) = projection {
+                sink.lock().unwrap().push(status.restart_required);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Engine(EngineEvent::RuntimeRestartRequired));
+    shell.handle(Command::Engine(EngineEvent::RuntimeRestartRequired));
+    shell.handle(Command::Bootstrap);
+
+    assert_eq!(*statuses.lock().unwrap(), vec![false, true, true]);
+    assert!(shell.runtime_restart_required);
+}
+
+#[test]
+fn maintenance_reconciles_a_runtime_event_lost_before_shell_admission() {
+    let engine = Arc::new(FakeEngine::default());
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let sink = statuses.clone();
+    let mut shell = Shell::new(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RuntimeStatus(status) = projection {
+                sink.lock().unwrap().push(status.restart_required);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    engine
+        .runtime_restart_required
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    shell.handle(Command::Tick);
+    shell.handle(Command::Tick);
+
+    assert_eq!(*statuses.lock().unwrap(), vec![false, true]);
+}

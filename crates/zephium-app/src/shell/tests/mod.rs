@@ -743,4 +743,8 @@ fn acknowledge_safe_discard(shell: &mut Shell, id: ItemId, probe: DiscardProbeId
     }));
 }
 
+mod engine_events;
+#[path = "navigation.rs"]
+mod navigation_tests;
+mod presentation;
 mod remaining;
