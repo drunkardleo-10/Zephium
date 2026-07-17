@@ -35,7 +35,7 @@ use view_lifecycle::{
     LIVE_VIEW_ABSOLUTE_LIMIT, LIVE_VIEW_PRESSURE_LIMIT, LIVE_VIEW_SOFT_LIMIT,
 };
 use window_layout::GrabbedDivider;
-use zoom::PendingZoom;
+use zoom::ZoomState;
 
 #[cfg(test)]
 use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
@@ -127,8 +127,7 @@ pub struct Shell {
     /// success without unrelated-tab churn causing starvation.
     last_tab_projection_revision: std::cell::RefCell<std::collections::HashMap<ItemId, String>>,
     projection_sequence: std::cell::Cell<u128>,
-    next_zoom_request: u64,
-    pending_zooms: std::collections::HashMap<ItemId, PendingZoom>,
+    zoom: ZoomState,
     divider: Option<GrabbedDivider>,
     recent: Vec<ItemId>,
     last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
@@ -203,8 +202,7 @@ impl Shell {
             deferred_first_content_layout: std::collections::HashSet::new(),
             last_tab_projection_revision: std::cell::RefCell::new(std::collections::HashMap::new()),
             projection_sequence: std::cell::Cell::new(0),
-            next_zoom_request: 0,
-            pending_zooms: std::collections::HashMap::new(),
+            zoom: ZoomState::default(),
             divider: None,
             recent: Vec::new(),
             last_focus: std::collections::HashMap::new(),

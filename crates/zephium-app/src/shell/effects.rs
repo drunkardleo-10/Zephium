@@ -110,7 +110,7 @@ impl Shell {
             match effect {
                 Effect::CreateView { id, url } => {
                     if logical_residents >= LIVE_VIEW_ABSOLUTE_LIMIT {
-                        self.pending_zooms.remove(&id);
+                        self.zoom.pending.remove(&id);
                         self.items.view_creation_failed(id);
                         rejected_creates.insert(id);
                         native.rejected = true;
@@ -122,7 +122,7 @@ impl Shell {
                     {
                         // Dispatch rejection is synchronous and must not rely
                         // on a callback entering an already-overloaded queue.
-                        self.pending_zooms.remove(&id);
+                        self.zoom.pending.remove(&id);
                         self.items.view_creation_failed(id);
                         rejected_creates.insert(id);
                         native.rejected = true;
@@ -160,7 +160,7 @@ impl Shell {
                     }
                 }
                 Effect::Close { id } => {
-                    self.pending_zooms.remove(&id);
+                    self.zoom.pending.remove(&id);
                     native.record(self.engine.close(id));
                 }
             }

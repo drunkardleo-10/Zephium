@@ -3621,7 +3621,7 @@ fn zoom_stays_out_of_authoritative_state_until_exact_native_settlement() {
     }));
     assert_eq!(shell.items.tab(id).unwrap().zoom, 1.2);
     assert_eq!(persisted_zoom(&store, id), 1.2);
-    assert!(!shell.pending_zooms.contains_key(&id));
+    assert!(!shell.zoom.pending.contains_key(&id));
 }
 
 #[test]
@@ -3649,7 +3649,7 @@ fn newest_zoom_failure_reports_the_cumulative_native_scale_after_coalescing() {
     }));
     assert_eq!(shell.items.tab(id).unwrap().zoom, 1.1);
     assert_eq!(persisted_zoom(&store, id), 1.1);
-    assert!(!shell.pending_zooms.contains_key(&id));
+    assert!(!shell.zoom.pending.contains_key(&id));
 }
 
 #[test]
@@ -3662,7 +3662,7 @@ fn exact_malformed_zoom_settlement_retires_only_its_pending_obligation() {
 
     shell.handle(Command::Run("zoom.in".into()));
     let (_, _, request) = engine.last_zoom_request();
-    assert!(shell.pending_zooms.contains_key(&id));
+    assert!(shell.zoom.pending.contains_key(&id));
 
     shell.handle(Command::Engine(EngineEvent::ZoomSettled {
         id,
@@ -3671,7 +3671,7 @@ fn exact_malformed_zoom_settlement_retires_only_its_pending_obligation() {
         succeeded: true,
     }));
 
-    assert!(!shell.pending_zooms.contains_key(&id));
+    assert!(!shell.zoom.pending.contains_key(&id));
     assert_eq!(shell.items.tab(id).unwrap().zoom, 1.0);
     assert_eq!(persisted_zoom(&store, id), 1.0);
 }
@@ -3701,9 +3701,9 @@ fn recreated_view_zoom_failure_rolls_back_and_terminal_lifecycle_clears_pending(
     assert_eq!(persisted_zoom(&store, id), 1.0);
 
     shell.handle(Command::Run("zoom.in".into()));
-    assert!(shell.pending_zooms.contains_key(&id));
+    assert!(shell.zoom.pending.contains_key(&id));
     shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id }));
-    assert!(!shell.pending_zooms.contains_key(&id));
+    assert!(!shell.zoom.pending.contains_key(&id));
 }
 
 #[test]

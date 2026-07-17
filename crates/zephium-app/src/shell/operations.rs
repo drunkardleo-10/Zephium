@@ -392,7 +392,8 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         let current = self
-            .pending_zooms
+            .zoom
+            .pending
             .get(&active)
             .map_or(settled, |pending| pending.desired_scale);
         let zoom = match delta {

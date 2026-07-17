@@ -33,7 +33,7 @@ pub(super) enum PendingDiscardProbe {
 
 impl Shell {
     pub(super) fn on_view_creation_failed(&mut self, id: ItemId) {
-        self.pending_zooms.remove(&id);
+        self.zoom.pending.remove(&id);
         self.cancel_pending_presentation(id);
         self.cancel_discard_probe(id);
         self.items.view_creation_failed(id);
@@ -57,7 +57,8 @@ impl Shell {
         self.crashes.retain(|id, _| self.items.tab(*id).is_some());
         self.crash_presentations
             .retain(|id| self.items.tab(*id).is_some());
-        self.pending_zooms
+        self.zoom
+            .pending
             .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
         if self.windows.focused().is_none() {
             return false;
@@ -329,7 +330,7 @@ impl Shell {
         );
         // `discard_view` retires the exact native generation at its public
         // boundary. Any queued zoom result is now terminally stale.
-        self.pending_zooms.remove(&id);
+        self.zoom.pending.remove(&id);
         if !self.engine.discard_view(id, probe) {
             // Engine dispatch failure after lifecycle retirement is terminal
             // at the native boundary. Keep the closing obligation visible;
@@ -355,7 +356,7 @@ impl Shell {
         if pending != probe || self.profile_of_item(id) != Some(profile) {
             return;
         }
-        self.pending_zooms.remove(&id);
+        self.zoom.pending.remove(&id);
         self.cancel_pending_presentation(id);
         self.discard_probes.remove(&id);
         if !self.items.mark_view_discarded(id) {
@@ -385,7 +386,7 @@ impl Shell {
     }
 
     fn retire_crashed_view(&mut self, id: ItemId) {
-        self.pending_zooms.remove(&id);
+        self.zoom.pending.remove(&id);
         let title = self.items.tab(id).map(|tab| tab.title.clone());
         self.items.view_creation_failed(id);
         if let Some(title) = title {

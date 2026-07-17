@@ -8,18 +8,24 @@ pub(super) struct PendingZoom {
     pub(super) desired_scale: f64,
 }
 
+#[derive(Default)]
+pub(super) struct ZoomState {
+    pub(super) next_request: u64,
+    pub(super) pending: std::collections::HashMap<ItemId, PendingZoom>,
+}
+
 impl Shell {
     pub(super) fn request_zoom(&mut self, id: ItemId, desired_scale: f64) -> NativeDispatch {
-        let Some(next) = self.next_zoom_request.checked_add(1) else {
+        let Some(next) = self.zoom.next_request.checked_add(1) else {
             // Reusing an identity could let a late result settle a newer
             // request. Saturation permanently rejects new zoom work.
             return NativeDispatch::Rejected;
         };
-        self.next_zoom_request = next;
+        self.zoom.next_request = next;
         let request = ZoomRequestId(next);
         let admission = self.engine.zoom(id, desired_scale, request);
         if admission == NativeDispatch::Scheduled {
-            self.pending_zooms.insert(
+            self.zoom.pending.insert(
                 id,
                 PendingZoom {
                     request,
@@ -37,7 +43,7 @@ impl Shell {
         applied_scale: f64,
         succeeded: bool,
     ) {
-        let Some(pending) = self.pending_zooms.get(&id).copied() else {
+        let Some(pending) = self.zoom.pending.get(&id).copied() else {
             return;
         };
         if pending.request != request {
@@ -50,7 +56,7 @@ impl Shell {
         // payload is malformed. Retire it before validation so a corrupt or
         // incompatible engine response cannot leave all future zoom input
         // based on a value that will never settle.
-        self.pending_zooms.remove(&id);
+        self.zoom.pending.remove(&id);
         if !applied_scale.is_finite() || !(0.3..=3.0).contains(&applied_scale) {
             eprintln!("engine: rejected malformed native zoom settlement");
             return;
