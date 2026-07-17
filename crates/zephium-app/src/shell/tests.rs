@@ -5914,7 +5914,7 @@ fn url_checkpoint_deadline_is_global_and_structure_preempts_it() {
     shell.self_queue = Some(queue.clone());
     let id = active_id(&screen);
     let checkpoint_floor = std::time::Instant::now();
-    shell.last_url_checkpoint = checkpoint_floor;
+    shell.persistence.last_url_checkpoint = checkpoint_floor;
 
     for value in 0..100 {
         shell.handle(Command::Engine(EngineEvent::UrlChanged {
@@ -5930,7 +5930,7 @@ fn url_checkpoint_deadline_is_global_and_structure_preempts_it() {
         .persist_deadline
         .unwrap();
     assert!(url_deadline >= checkpoint_floor + URL_CHECKPOINT_INTERVAL);
-    assert_eq!(shell.url_checkpoint_dirty.len(), 1);
+    assert_eq!(shell.persistence.url_checkpoint_dirty.len(), 1);
 
     let structural_started = std::time::Instant::now();
     shell.schedule_persist();

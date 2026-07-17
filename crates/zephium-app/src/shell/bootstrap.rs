@@ -122,7 +122,7 @@ impl Shell {
             };
             self.profile_deletions.insert(
                 profile,
-                ProfileDeletionState::new(phase, None, self.session_revision),
+                ProfileDeletionState::new(phase, None, self.persistence.session_revision),
             );
             // Normally no aggregate row remains. This defensive cleanup also
             // cancels any runtime-only work restored by a future caller.

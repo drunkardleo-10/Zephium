@@ -81,7 +81,7 @@ impl Shell {
             );
         };
         let deadline = std::time::Instant::now() + PROFILE_DELETION_STORE_TIMEOUT;
-        let authorization_revision = self.session_revision;
+        let authorization_revision = self.persistence.session_revision;
         let outcome = self
             .store
             .authorize_profile_deletion(profile, filtered, deadline);
@@ -293,9 +293,9 @@ impl Shell {
 
         // The authorization transaction already published the exact session.
         // An older debounce must never later overwrite that barrier.
-        self.persist_first_dirty = None;
-        self.url_checkpoint_dirty.clear();
-        self.last_url_checkpoint = std::time::Instant::now();
+        self.persistence.persist_first_dirty = None;
+        self.persistence.url_checkpoint_dirty.clear();
+        self.persistence.last_url_checkpoint = std::time::Instant::now();
         if let Some(queue) = &self.self_queue {
             queue.cancel_persist();
         }
@@ -376,7 +376,7 @@ impl Shell {
                     return;
                 };
                 if let Some(state) = self.profile_deletions.get_mut(&profile) {
-                    state.authorization_revision = self.session_revision;
+                    state.authorization_revision = self.persistence.session_revision;
                 }
                 let outcome = self.store.authorize_profile_deletion(
                     profile,
@@ -448,7 +448,7 @@ impl Shell {
         let survivor_state_changed = self
             .profile_deletions
             .get(&profile)
-            .is_some_and(|state| state.authorization_revision != self.session_revision);
+            .is_some_and(|state| state.authorization_revision != self.persistence.session_revision);
         self.apply_profile_tombstone(profile);
         if let Some(state) = self.profile_deletions.get_mut(&profile) {
             state.phase = if native_verified {

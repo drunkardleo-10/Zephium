@@ -36,6 +36,7 @@ use view_lifecycle::{LIVE_VIEW_PRESSURE_LIMIT, MAX_CONCURRENT_DISCARD_PROBES};
 use window_layout::GrabbedDivider;
 use zoom::ZoomState;
 
+use persistence::PersistenceState;
 #[cfg(test)]
 use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
 
@@ -123,14 +124,7 @@ pub struct Shell {
     runtime_restart_required: bool,
     crash: CrashState,
     bootstrapped: bool,
-    /// Monotonic process-local identity for the session state represented by
-    /// persistence scheduling. A u128 wrap would require more mutations than
-    /// the process can physically execute; wrapping keeps this path infallible
-    /// in release builds while preserving a fail-safe practical bound.
-    session_revision: u128,
-    persist_first_dirty: Option<std::time::Instant>,
-    url_checkpoint_dirty: std::collections::HashSet<ItemId>,
-    last_url_checkpoint: std::time::Instant,
+    persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
     profile_deletions: std::collections::HashMap<ProfileId, ProfileDeletionState>,
@@ -182,10 +176,7 @@ impl Shell {
             runtime_restart_required: false,
             crash: CrashState::default(),
             bootstrapped: false,
-            session_revision: 0,
-            persist_first_dirty: None,
-            url_checkpoint_dirty: std::collections::HashSet::new(),
-            last_url_checkpoint: std::time::Instant::now(),
+            persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,
             profile_deletions: std::collections::HashMap::new(),
