@@ -1,0 +1,182 @@
+use super::*;
+
+#[test]
+fn shutdown_snapshots_flushes_and_seals_the_actor_once() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "example.com");
+    // Title updates are normally not session writes. The shutdown-owned
+    // snapshot must nevertheless capture the actor's latest truth.
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id,
+        title: "Final title".into(),
+    }));
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+
+    let events = store.events.lock().unwrap().clone();
+    assert!(events.ends_with(&["save", "flush"]), "{events:?}");
+    assert_eq!(events.iter().filter(|event| **event == "flush").count(), 1);
+    let saved = store.saved.lock().unwrap().clone().unwrap();
+    let tab = saved.items.iter().find(|item| item.id == id).unwrap();
+    let PersistedKind::Tab { title, .. } = &tab.kind else {
+        panic!("active item must remain a tab");
+    };
+    assert_eq!(title, "Final title");
+
+    // Late UI/engine/timer work cannot mutate state after the barrier.
+    let tabs = last(&screen).tabs.len();
+    shell.handle(Command::Open);
+    assert_eq!(last(&screen).tabs.len(), tabs);
+
+    // A repeated close request receives the same completion without a
+    // second snapshot or flush.
+    let before = store.events.lock().unwrap().clone();
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(*store.events.lock().unwrap(), before);
+}
+
+#[test]
+fn shutdown_deadline_includes_time_spent_waiting_before_actor_processing() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let (ack, done) = sync_channel(1);
+
+    shell.handle(Command::Shutdown {
+        deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
+        ack,
+    });
+
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert!(shell.shutdown_result.is_none());
+    assert!(store.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn failed_shutdown_barrier_keeps_state_live_for_retry() {
+    let store = Arc::new(FakeStore::default());
+    *store.flush_result.lock().unwrap() = Some(false);
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+
+    let before = last(&screen).tabs.len();
+    shell.handle(Command::Open);
+    assert_eq!(last(&screen).tabs.len(), before + 1);
+
+    *store.flush_result.lock().unwrap() = Some(true);
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+}
+
+#[test]
+fn failed_shutdown_folds_racing_native_failure_before_resuming() {
+    let store = Arc::new(FakeStore::default());
+    *store.flush_result.lock().unwrap() = Some(false);
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "example.com");
+
+    let queue = CommandQueue::new();
+    shell.self_queue = Some(queue.clone());
+    let handle = Handle::new(queue.clone());
+    let (ack, done) = sync_channel(1);
+    queue
+        .try_push(Command::Shutdown {
+            deadline: test_shutdown_deadline(),
+            ack,
+        })
+        .ok()
+        .unwrap();
+    let shutdown = queue.try_recv().unwrap();
+    assert!(!handle.dispatch(Command::Engine(EngineEvent::Crashed { id })));
+
+    shell.handle(shutdown);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("close {id}")));
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with(&format!("create {id} ")))
+            .count(),
+        2
+    );
+    assert!(handle.dispatch(Command::Open));
+}
+
+#[test]
+fn native_shutdown_timeout_is_bounded_and_terminal() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    engine
+        .skip_shutdown_callback
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let before = last(&screen).tabs.len();
+    let started = std::time::Instant::now();
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+    // Native teardown may have happened even without its callback. The
+    // shell must never resume and issue operations into a partial engine.
+    shell.handle(Command::Open);
+    assert_eq!(last(&screen).tabs.len(), before);
+}
+
+#[test]
+fn native_cleanup_rejection_is_terminal_and_sticky() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    *engine.shutdown_result.lock().unwrap() = Some(false);
+
+    let before = last(&screen).tabs.len();
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+
+    shell.handle(Command::Open);
+    assert_eq!(last(&screen).tabs.len(), before);
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+}
