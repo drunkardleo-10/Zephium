@@ -59,6 +59,22 @@ impl ProfileDeletionState {
 pub(super) type ProfileDeletionInbox =
     Arc<Mutex<std::collections::HashMap<ProfileId, (u64, ProfileDataErasureOutcome)>>>;
 
+pub(super) struct ProfileDeletionCoordinator {
+    pub(super) states: std::collections::HashMap<ProfileId, ProfileDeletionState>,
+    pub(super) inbox: ProfileDeletionInbox,
+    pub(super) batch_deadline: Option<std::time::Instant>,
+}
+
+impl Default for ProfileDeletionCoordinator {
+    fn default() -> Self {
+        Self {
+            states: std::collections::HashMap::new(),
+            inbox: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            batch_deadline: None,
+        }
+    }
+}
+
 impl Shell {
     pub(super) fn begin_profile_deletion(
         &mut self,
@@ -68,7 +84,7 @@ impl Shell {
         // One foreground deletion at a time keeps durable/native ownership
         // unambiguous. Crash-recovered journal rows may coexist, but a new
         // deletion waits until those obligations are resolved.
-        if !self.profile_deletions.is_empty() {
+        if !self.profile_deletion.states.is_empty() {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ProfileDeletionInProgress,
@@ -87,7 +103,7 @@ impl Shell {
             .authorize_profile_deletion(profile, filtered, deadline);
         match outcome {
             ProfileDeletionAuthorizeOutcome::Authorized => {
-                self.profile_deletions.insert(
+                self.profile_deletion.states.insert(
                     profile,
                     ProfileDeletionState::new(
                         ProfileDeletionPhase::NativeReady,
@@ -102,7 +118,7 @@ impl Shell {
                 )
             }
             ProfileDeletionAuthorizeOutcome::AlreadyAuthorized => {
-                self.profile_deletions.insert(
+                self.profile_deletion.states.insert(
                     profile,
                     ProfileDeletionState::new(
                         ProfileDeletionPhase::ResolveAuthorizedJournal,
@@ -117,7 +133,7 @@ impl Shell {
                 )
             }
             ProfileDeletionAuthorizeOutcome::OutcomeUnknown => {
-                self.profile_deletions.insert(
+                self.profile_deletion.states.insert(
                     profile,
                     ProfileDeletionState::new(
                         ProfileDeletionPhase::Authorizing {
@@ -312,7 +328,7 @@ impl Shell {
         }
 
         let action = {
-            let Some(state) = self.profile_deletions.get_mut(&profile) else {
+            let Some(state) = self.profile_deletion.states.get_mut(&profile) else {
                 return;
             };
             match state.phase {
@@ -375,7 +391,7 @@ impl Shell {
                     );
                     return;
                 };
-                if let Some(state) = self.profile_deletions.get_mut(&profile) {
+                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                     state.authorization_revision = self.persistence.session_revision;
                 }
                 let outcome = self.store.authorize_profile_deletion(
@@ -400,7 +416,7 @@ impl Shell {
             }
             ProfileDeletionAuthorizeOutcome::AlreadyAuthorized => {
                 self.apply_profile_tombstone(profile);
-                if let Some(state) = self.profile_deletions.get_mut(&profile) {
+                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                     state.phase = ProfileDeletionPhase::ResolveAuthorizedJournal;
                     state.retry_exponent = 0;
                 }
@@ -446,11 +462,12 @@ impl Shell {
 
     fn authorization_is_durable(&mut self, profile: ProfileId, native_verified: bool) {
         let survivor_state_changed = self
-            .profile_deletions
+            .profile_deletion
+            .states
             .get(&profile)
             .is_some_and(|state| state.authorization_revision != self.persistence.session_revision);
         self.apply_profile_tombstone(profile);
-        if let Some(state) = self.profile_deletions.get_mut(&profile) {
+        if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
             state.phase = if native_verified {
                 ProfileDeletionPhase::FinalizeReady
             } else {
@@ -470,7 +487,7 @@ impl Shell {
     }
 
     fn start_native_profile_erasure(&mut self, profile: ProfileId, attempt: u64) {
-        let inbox = self.profile_deletion_inbox.clone();
+        let inbox = self.profile_deletion.inbox.clone();
         let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
             queue: Arc::downgrade(&queue.inner),
         });
@@ -498,7 +515,8 @@ impl Shell {
 
     pub(super) fn drain_profile_deletion_inbox(&mut self) {
         let profiles: Vec<ProfileId> = self
-            .profile_deletion_inbox
+            .profile_deletion
+            .inbox
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .keys()
@@ -511,34 +529,39 @@ impl Shell {
 
     pub(super) fn consume_profile_deletion_outcome(&mut self, profile: ProfileId) {
         let pending = self
-            .profile_deletion_inbox
+            .profile_deletion
+            .inbox
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&profile);
         let Some((attempt, outcome)) = pending else {
             return;
         };
-        let exact = self.profile_deletions.get(&profile).is_some_and(|state| {
-            matches!(
-                state.phase,
-                ProfileDeletionPhase::NativeInFlight {
-                    attempt: expected
-                } if expected == attempt
-            )
-        });
+        let exact = self
+            .profile_deletion
+            .states
+            .get(&profile)
+            .is_some_and(|state| {
+                matches!(
+                    state.phase,
+                    ProfileDeletionPhase::NativeInFlight {
+                        attempt: expected
+                    } if expected == attempt
+                )
+            });
         if !exact {
             return;
         }
         match outcome {
             ProfileDataErasureOutcome::Verified => {
-                if let Some(state) = self.profile_deletions.get_mut(&profile) {
+                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                     state.phase = ProfileDeletionPhase::FinalizeReady;
                     state.retry_exponent = 0;
                 }
                 self.drive_profile_deletion(profile);
             }
             ProfileDataErasureOutcome::Failed | ProfileDataErasureOutcome::TimedOut => {
-                if let Some(state) = self.profile_deletions.get_mut(&profile) {
+                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                     state.phase = ProfileDeletionPhase::NativeReady;
                 }
                 self.schedule_profile_deletion_retry(profile);
@@ -548,7 +571,8 @@ impl Shell {
 
     fn finalize_profile_deletion(&mut self, profile: ProfileId) {
         let deadline = self
-            .profile_deletion_batch_deadline
+            .profile_deletion
+            .batch_deadline
             .unwrap_or_else(|| std::time::Instant::now() + PROFILE_DELETION_STORE_TIMEOUT);
         if std::time::Instant::now() >= deadline {
             self.schedule_profile_deletion_retry(profile);
@@ -578,7 +602,7 @@ impl Shell {
         match self.store.pending_profile_deletions() {
             ProfileDeletionLoad::Loaded(pending) => {
                 if pending.iter().any(|deletion| deletion.profile == profile) {
-                    if let Some(state) = self.profile_deletions.get_mut(&profile) {
+                    if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                         state.phase = ProfileDeletionPhase::FinalizeReady;
                     }
                     self.schedule_profile_deletion_retry(profile);
@@ -611,13 +635,15 @@ impl Shell {
             self.degraded_storage_profiles.remove(&profile);
         }
         let operation_id = self
-            .profile_deletions
+            .profile_deletion
+            .states
             .remove(&profile)
             .and_then(|state| state.operation_id);
         if let Some(queue) = &self.self_queue {
             queue.cancel_profile_deletion(profile);
         }
-        self.profile_deletion_inbox
+        self.profile_deletion
+            .inbox
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&profile);
@@ -631,7 +657,7 @@ impl Shell {
     }
 
     pub(super) fn schedule_profile_deletion_retry(&mut self, profile: ProfileId) {
-        let Some(state) = self.profile_deletions.get_mut(&profile) else {
+        let Some(state) = self.profile_deletion.states.get_mut(&profile) else {
             return;
         };
         if let ProfileDeletionPhase::Authorizing {

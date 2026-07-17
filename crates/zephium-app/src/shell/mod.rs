@@ -26,7 +26,7 @@ use presentation::PresentationState;
 #[cfg(test)]
 use presentation::MAX_PRESENTATION_ADMISSION_REJECTIONS;
 use profile_deletion::{
-    ProfileDeletionInbox, ProfileDeletionPhase, ProfileDeletionState,
+    ProfileDeletionCoordinator, ProfileDeletionPhase, ProfileDeletionState,
     PROFILE_DELETION_STORE_TIMEOUT,
 };
 use search::SearchState;
@@ -127,13 +127,11 @@ pub struct Shell {
     persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
-    profile_deletions: std::collections::HashMap<ProfileId, ProfileDeletionState>,
+    profile_deletion: ProfileDeletionCoordinator,
     /// Exact startup cohort whose per-profile history/favicon database was
     /// preserved but disabled by storage validation. Session/meta state and
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
-    profile_deletion_inbox: ProfileDeletionInbox,
-    profile_deletion_batch_deadline: Option<std::time::Instant>,
     engine: SharedEngine,
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
@@ -179,10 +177,8 @@ impl Shell {
             persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,
-            profile_deletions: std::collections::HashMap::new(),
+            profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
-            profile_deletion_inbox: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            profile_deletion_batch_deadline: None,
             engine,
             store,
             store_reads: store_reads.into(),
@@ -362,7 +358,8 @@ impl Shell {
                 generation,
             } => {
                 if self
-                    .profile_deletions
+                    .profile_deletion
+                    .states
                     .get(&profile)
                     .is_some_and(|state| state.retry_generation == generation)
                 {

@@ -4036,7 +4036,8 @@ fn profile_deletion_retry_emits_no_intermediate_or_duplicate_completion() {
     assert!(operations.lock().unwrap().is_empty());
     assert!(shell.profiles.get(profile).is_none());
     let generation = shell
-        .profile_deletions
+        .profile_deletion
+        .states
         .get(&profile)
         .unwrap()
         .retry_generation;
@@ -4158,7 +4159,8 @@ fn uncertain_profile_deletion_reauthorization_rebuilds_the_survivor_snapshot() {
     navigate_and_commit(&mut shell, survivor, "new-survivor.example");
     engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
     let generation = shell
-        .profile_deletions
+        .profile_deletion
+        .states
         .get(&profile)
         .unwrap()
         .retry_generation;
@@ -4227,7 +4229,8 @@ fn delayed_authorization_proof_reschedules_newer_survivor_durability() {
     navigate_and_commit(&mut shell, survivor, "post-barrier.example");
     engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
     let generation = shell
-        .profile_deletions
+        .profile_deletion
+        .states
         .get(&profile)
         .unwrap()
         .retry_generation;
@@ -4299,7 +4302,7 @@ fn restart_resumes_journaled_native_erasure_before_creating_views() {
         .unwrap();
     assert!(erase < first_create);
     assert!(store.pending_deletions.lock().unwrap().is_empty());
-    assert!(restarted.profile_deletions.is_empty());
+    assert!(restarted.profile_deletion.states.is_empty());
 }
 
 #[test]

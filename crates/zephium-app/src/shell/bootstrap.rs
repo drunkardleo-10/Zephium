@@ -120,7 +120,7 @@ impl Shell {
             } else {
                 ProfileDeletionPhase::NativeReady
             };
-            self.profile_deletions.insert(
+            self.profile_deletion.states.insert(
                 profile,
                 ProfileDeletionState::new(phase, None, self.persistence.session_revision),
             );
@@ -128,9 +128,10 @@ impl Shell {
             // cancels any runtime-only work restored by a future caller.
             self.apply_profile_tombstone(profile);
         }
-        let recovered_deletions: Vec<ProfileId> = self.profile_deletions.keys().copied().collect();
+        let recovered_deletions: Vec<ProfileId> =
+            self.profile_deletion.states.keys().copied().collect();
         let recovery_deadline = std::time::Instant::now() + PROFILE_DELETION_STORE_TIMEOUT;
-        self.profile_deletion_batch_deadline = Some(recovery_deadline);
+        self.profile_deletion.batch_deadline = Some(recovery_deadline);
         for profile in recovered_deletions {
             if std::time::Instant::now() < recovery_deadline {
                 self.drive_profile_deletion(profile);
@@ -138,7 +139,7 @@ impl Shell {
                 self.schedule_profile_deletion_retry(profile);
             }
         }
-        self.profile_deletion_batch_deadline = None;
+        self.profile_deletion.batch_deadline = None;
         if splits
             .as_ref()
             .is_some_and(|tree| tree.tabs().len() > MAX_VISIBLE_PANES)
