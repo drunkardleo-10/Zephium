@@ -17,7 +17,7 @@ mod window_layout;
 mod zoom;
 
 use effects::{mutation_result, operation_result, NativeWork};
-use favicons::{origin_of, IconAttempt, PendingFaviconBatch, PendingFaviconStoreRead};
+use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
 use presentation::PendingPresentation;
@@ -27,7 +27,7 @@ use profile_deletion::{
     ProfileDeletionInbox, ProfileDeletionPhase, ProfileDeletionState,
     PROFILE_DELETION_STORE_TIMEOUT,
 };
-use search::PendingSearch;
+use search::SearchState;
 #[cfg(test)]
 use view_lifecycle::MAX_CONCURRENT_DISCARD_PROBES;
 use view_lifecycle::{
@@ -57,6 +57,7 @@ use crate::api::{ChromePresentationCallback, PresentationChrome};
 use crate::store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
 use crate::store_reads::{StoreReadQueue, StoreReadResult};
 
+#[cfg(test)]
 use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -112,17 +113,8 @@ pub struct Shell {
     items: Items,
     windows: Windows,
     pending_size: Size,
-    icons_checked: std::collections::HashSet<(ProfileId, String)>,
-    icon_values: std::collections::HashMap<(ProfileId, String), String>,
-    icon_cache_order: VecDeque<(ProfileId, String)>,
-    icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
-    icon_load_completion_pending: std::collections::HashMap<ItemId, (ProfileId, String)>,
-    favicon_store_reads: std::collections::HashMap<ItemId, PendingFaviconStoreRead>,
-    favicon_store_generation: u64,
-    pending_favicon_batch: Option<PendingFaviconBatch>,
-    favicon_batch_generation: u64,
-    pending_search: Option<PendingSearch>,
-    search_generation: u64,
+    favicons: FaviconState,
+    search: SearchState,
     pending_presentations: std::collections::HashMap<ItemId, PendingPresentation>,
     presented_navigations: std::collections::HashMap<ItemId, (NavigationPresentationId, String)>,
     /// A fresh tab keeps its real privileged New Tab document until the first
@@ -204,17 +196,8 @@ impl Shell {
             items: Items::default(),
             windows: Windows::default(),
             pending_size: Size::default(),
-            icons_checked: std::collections::HashSet::new(),
-            icon_values: std::collections::HashMap::new(),
-            icon_cache_order: VecDeque::new(),
-            icon_attempts: std::collections::HashMap::new(),
-            icon_load_completion_pending: std::collections::HashMap::new(),
-            favicon_store_reads: std::collections::HashMap::new(),
-            favicon_store_generation: 0,
-            pending_favicon_batch: None,
-            favicon_batch_generation: 0,
-            pending_search: None,
-            search_generation: 0,
+            favicons: FaviconState::default(),
+            search: SearchState::default(),
             pending_presentations: std::collections::HashMap::new(),
             presented_navigations: std::collections::HashMap::new(),
             deferred_first_content_layout: std::collections::HashSet::new(),
@@ -564,9 +547,9 @@ impl Shell {
     }
 
     fn clear_pending_store_reads(&mut self) {
-        self.pending_search = None;
-        self.pending_favicon_batch = None;
-        self.favicon_store_reads.clear();
+        self.search.pending = None;
+        self.favicons.pending_batch = None;
+        self.favicons.store_reads.clear();
     }
 
     fn on_store_read(&mut self, result: StoreReadResult) {

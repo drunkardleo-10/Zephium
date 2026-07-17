@@ -13,6 +13,12 @@ pub(super) struct PendingSearch {
     pub(super) base_results: Vec<SearchResult>,
 }
 
+#[derive(Default)]
+pub(super) struct SearchState {
+    pub(super) pending: Option<PendingSearch>,
+    pub(super) generation: u64,
+}
+
 impl Shell {
     pub(super) fn search(&mut self, query: &str) {
         let Some((profile, space)) = self
@@ -26,12 +32,12 @@ impl Shell {
         let needle = q.to_lowercase();
         let tabs = self.today_tabs(space);
         let mut results = Vec::new();
-        self.search_generation = self.search_generation.wrapping_add(1);
-        if self.search_generation == 0 {
-            self.search_generation = 1;
+        self.search.generation = self.search.generation.wrapping_add(1);
+        if self.search.generation == 0 {
+            self.search.generation = 1;
         }
-        let generation = self.search_generation;
-        self.pending_search = None;
+        let generation = self.search.generation;
+        self.search.pending = None;
 
         if q.is_empty() {
             results.extend(
@@ -116,7 +122,7 @@ impl Shell {
             if q.len() > MAX_ASYNC_SEARCH_QUERY_BYTES {
                 return;
             }
-            self.pending_search = Some(PendingSearch {
+            self.search.pending = Some(PendingSearch {
                 generation,
                 profile,
                 lookup_query: q.to_owned(),
@@ -126,7 +132,7 @@ impl Shell {
             });
             if let Some(reads) = &self.store_reads {
                 if !reads.request_history(generation, profile, q.to_owned()) {
-                    self.pending_search = None;
+                    self.search.pending = None;
                 }
             } else {
                 #[cfg(test)]
@@ -144,7 +150,7 @@ impl Shell {
                     // Production construction always installs the reader.
                     // Keep this defensive branch nonblocking if a future
                     // internal constructor violates that invariant.
-                    self.pending_search = None;
+                    self.search.pending = None;
                 }
             }
             return;
@@ -163,7 +169,7 @@ impl Shell {
         query: String,
         hits: Vec<zephium_core::ports::store::HistoryHit>,
     ) {
-        let exact = self.pending_search.as_ref().is_some_and(|pending| {
+        let exact = self.search.pending.as_ref().is_some_and(|pending| {
             pending.generation == generation
                 && pending.profile == profile
                 && pending.lookup_query == query
@@ -171,7 +177,7 @@ impl Shell {
         if !exact {
             return;
         }
-        let Some(pending) = self.pending_search.take() else {
+        let Some(pending) = self.search.pending.take() else {
             return;
         };
         if self

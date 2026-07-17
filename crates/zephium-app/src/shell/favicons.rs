@@ -36,6 +36,19 @@ pub(super) struct PendingFaviconBatch {
     pub(super) requested: std::collections::HashSet<String>,
 }
 
+#[derive(Default)]
+pub(super) struct FaviconState {
+    pub(super) icons_checked: std::collections::HashSet<(ProfileId, String)>,
+    pub(super) icon_values: std::collections::HashMap<(ProfileId, String), String>,
+    pub(super) icon_cache_order: std::collections::VecDeque<(ProfileId, String)>,
+    pub(super) icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
+    pub(super) icon_load_completion_pending: std::collections::HashMap<ItemId, (ProfileId, String)>,
+    pub(super) store_reads: std::collections::HashMap<ItemId, PendingFaviconStoreRead>,
+    pub(super) store_generation: u64,
+    pub(super) pending_batch: Option<PendingFaviconBatch>,
+    pub(super) batch_generation: u64,
+}
+
 impl Shell {
     fn item_origin(&self, id: ItemId) -> Option<(ProfileId, String)> {
         let profile = self.profile_of_item(id)?;
@@ -69,12 +82,12 @@ impl Shell {
         if origins.is_empty() {
             return;
         }
-        self.favicon_batch_generation = self.favicon_batch_generation.wrapping_add(1);
-        if self.favicon_batch_generation == 0 {
-            self.favicon_batch_generation = 1;
+        self.favicons.batch_generation = self.favicons.batch_generation.wrapping_add(1);
+        if self.favicons.batch_generation == 0 {
+            self.favicons.batch_generation = 1;
         }
-        let generation = self.favicon_batch_generation;
-        self.pending_favicon_batch = Some(PendingFaviconBatch {
+        let generation = self.favicons.batch_generation;
+        self.favicons.pending_batch = Some(PendingFaviconBatch {
             generation,
             profile,
             space,
@@ -82,7 +95,7 @@ impl Shell {
         });
         if let Some(reads) = &self.store_reads {
             if !reads.request_favicon_batch(generation, profile, space, origins) {
-                self.pending_favicon_batch = None;
+                self.favicons.pending_batch = None;
             }
         } else {
             #[cfg(test)]
@@ -98,7 +111,7 @@ impl Shell {
             }
             #[cfg(not(test))]
             {
-                self.pending_favicon_batch = None;
+                self.favicons.pending_batch = None;
             }
         }
     }
@@ -111,7 +124,7 @@ impl Shell {
         origin: String,
         rgba: Option<Vec<u8>>,
     ) {
-        let exact = self.favicon_store_reads.get(&id).is_some_and(|pending| {
+        let exact = self.favicons.store_reads.get(&id).is_some_and(|pending| {
             pending.generation == generation
                 && pending.profile == profile
                 && pending.origin == origin
@@ -119,7 +132,7 @@ impl Shell {
         if !exact {
             return;
         }
-        self.favicon_store_reads.remove(&id);
+        self.favicons.store_reads.remove(&id);
         if let Some(queue) = &self.self_queue {
             queue.cancel_favicon(id);
         }
@@ -131,7 +144,7 @@ impl Shell {
             .as_deref()
             .is_some_and(|bytes| self.cache_icon(key.clone(), bytes))
         {
-            self.icons_checked.insert(key);
+            self.favicons.icons_checked.insert(key);
             self.project_tab(id);
         } else {
             self.start_favicon_discovery(id, profile, origin);
@@ -146,13 +159,13 @@ impl Shell {
         origins: Vec<String>,
         rasters: Vec<(String, Vec<u8>)>,
     ) {
-        let exact = self.pending_favicon_batch.as_ref().is_some_and(|pending| {
+        let exact = self.favicons.pending_batch.as_ref().is_some_and(|pending| {
             pending.generation == generation && pending.profile == profile && pending.space == space
         });
         if !exact {
             return;
         }
-        let Some(pending) = self.pending_favicon_batch.take() else {
+        let Some(pending) = self.favicons.pending_batch.take() else {
             return;
         };
         let origin_set: std::collections::HashSet<_> = origins.iter().cloned().collect();
@@ -190,10 +203,14 @@ impl Shell {
         let Some((profile, origin)) = self.item_origin(id) else {
             return;
         };
-        if self.icons_checked.contains(&(profile, origin.clone())) {
+        if self
+            .favicons
+            .icons_checked
+            .contains(&(profile, origin.clone()))
+        {
             return;
         }
-        if self.icons_checked.len() >= TRACKED_ICON_ORIGIN_CAPACITY {
+        if self.favicons.icons_checked.len() >= TRACKED_ICON_ORIGIN_CAPACITY {
             return;
         }
 
@@ -210,19 +227,20 @@ impl Shell {
         }
 
         let exact_pending = self
-            .favicon_store_reads
+            .favicons
+            .store_reads
             .get(&id)
             .is_some_and(|pending| pending.profile == profile && pending.origin == origin);
         if exact_pending {
             return;
         }
         self.cancel_favicon_attempt(id);
-        self.favicon_store_generation = self.favicon_store_generation.wrapping_add(1);
-        if self.favicon_store_generation == 0 {
-            self.favicon_store_generation = 1;
+        self.favicons.store_generation = self.favicons.store_generation.wrapping_add(1);
+        if self.favicons.store_generation == 0 {
+            self.favicons.store_generation = 1;
         }
-        let generation = self.favicon_store_generation;
-        self.favicon_store_reads.insert(
+        let generation = self.favicons.store_generation;
+        self.favicons.store_reads.insert(
             id,
             PendingFaviconStoreRead {
                 generation,
@@ -241,7 +259,7 @@ impl Shell {
                 }
                 return;
             }
-            self.favicon_store_reads.remove(&id);
+            self.favicons.store_reads.remove(&id);
         } else {
             #[cfg(test)]
             {
@@ -261,7 +279,7 @@ impl Shell {
             }
             #[cfg(not(test))]
             {
-                self.favicon_store_reads.remove(&id);
+                self.favicons.store_reads.remove(&id);
             }
         }
         // Store-read pressure must not make favicons permanently disappear;
@@ -273,6 +291,7 @@ impl Shell {
 
     fn start_favicon_discovery(&mut self, id: ItemId, profile: ProfileId, origin: String) {
         if self
+            .favicons
             .icon_attempts
             .get(&id)
             .is_some_and(|attempt| attempt.profile == profile && attempt.origin == origin)
@@ -280,6 +299,7 @@ impl Shell {
             return;
         }
         if self
+            .favicons
             .icon_load_completion_pending
             .get(&id)
             .is_some_and(|pending| pending == &(profile, origin.clone()))
@@ -290,7 +310,7 @@ impl Shell {
             return;
         }
         self.cancel_favicon_attempt(id);
-        self.icon_attempts.insert(
+        self.favicons.icon_attempts.insert(
             id,
             IconAttempt {
                 profile,
@@ -312,9 +332,9 @@ impl Shell {
     }
 
     pub(super) fn cancel_favicon_attempt(&mut self, id: ItemId) {
-        self.icon_attempts.remove(&id);
-        self.icon_load_completion_pending.remove(&id);
-        self.favicon_store_reads.remove(&id);
+        self.favicons.icon_attempts.remove(&id);
+        self.favicons.icon_load_completion_pending.remove(&id);
+        self.favicons.store_reads.remove(&id);
         if let Some(reads) = &self.store_reads {
             reads.cancel_favicon(id);
         }
@@ -324,7 +344,7 @@ impl Shell {
     }
 
     pub(super) fn favicon_load_completed(&mut self, id: ItemId) {
-        if self.icon_attempts.contains_key(&id) {
+        if self.favicons.icon_attempts.contains_key(&id) {
             let _ = self.engine.discover_favicon(id);
             return;
         }
@@ -332,13 +352,13 @@ impl Shell {
         // no such marker exists, maybe_discover_favicon still respects the
         // per-origin terminal no-icon cache and therefore stays bounded under
         // duplicate load-complete notifications.
-        self.icon_load_completion_pending.remove(&id);
+        self.favicons.icon_load_completion_pending.remove(&id);
         self.maybe_discover_favicon(id);
     }
 
     pub(super) fn poll_favicon(&mut self, id: ItemId, attempt: u8) {
         if attempt == 0 {
-            let Some(pending) = self.favicon_store_reads.remove(&id) else {
+            let Some(pending) = self.favicons.store_reads.remove(&id) else {
                 return;
             };
             if let Some(reads) = &self.store_reads {
@@ -349,7 +369,7 @@ impl Shell {
             }
             return;
         }
-        let Some(current) = self.icon_attempts.get(&id).cloned() else {
+        let Some(current) = self.favicons.icon_attempts.get(&id).cloned() else {
             return;
         };
         if current.next_attempt != attempt
@@ -362,21 +382,24 @@ impl Shell {
         let _ = self.engine.discover_favicon(id);
         let next = attempt.saturating_add(1);
         if usize::from(next) <= FAVICON_POLL_DELAYS.len() {
-            if let Some(active) = self.icon_attempts.get_mut(&id) {
+            if let Some(active) = self.favicons.icon_attempts.get_mut(&id) {
                 active.next_attempt = next;
             }
             self.schedule_favicon_poll(id, next);
         } else {
-            self.icon_attempts.remove(&id);
+            self.favicons.icon_attempts.remove(&id);
             if self.items.tab(id).is_some_and(|tab| tab.loading) {
-                self.icon_load_completion_pending
+                self.favicons
+                    .icon_load_completion_pending
                     .insert(id, (current.profile, current.origin));
             } else {
                 // A fully loaded document with no pixels has conclusively
                 // consumed its bounded budget. Cache that negative result so
                 // repeated completion events cannot rebuild forever.
-                self.icon_load_completion_pending.remove(&id);
-                self.icons_checked.insert((current.profile, current.origin));
+                self.favicons.icon_load_completion_pending.remove(&id);
+                self.favicons
+                    .icons_checked
+                    .insert((current.profile, current.origin));
             }
         }
     }
@@ -395,15 +418,15 @@ impl Shell {
             return;
         }
         let key = (profile, origin.clone());
-        if self.icons_checked.len() >= TRACKED_ICON_ORIGIN_CAPACITY
-            && !self.icons_checked.contains(&key)
+        if self.favicons.icons_checked.len() >= TRACKED_ICON_ORIGIN_CAPACITY
+            && !self.favicons.icons_checked.contains(&key)
         {
             return;
         }
         if !self.cache_icon(key.clone(), &rgba) {
             return;
         }
-        self.icons_checked.insert(key);
+        self.favicons.icons_checked.insert(key);
         self.cancel_favicon_attempt(id);
         if self
             .profiles
@@ -424,21 +447,24 @@ impl Shell {
         let Some(value) = zephium_core::icon::chrome_value(rgba) else {
             return false;
         };
-        self.icon_cache_order.retain(|candidate| candidate != &key);
-        while self.icon_values.len() >= ICON_CACHE_CAPACITY && !self.icon_values.contains_key(&key)
+        self.favicons
+            .icon_cache_order
+            .retain(|candidate| candidate != &key);
+        while self.favicons.icon_values.len() >= ICON_CACHE_CAPACITY
+            && !self.favicons.icon_values.contains_key(&key)
         {
-            let Some(evicted) = self.icon_cache_order.pop_front() else {
+            let Some(evicted) = self.favicons.icon_cache_order.pop_front() else {
                 break;
             };
-            self.icon_values.remove(&evicted);
+            self.favicons.icon_values.remove(&evicted);
             // `icons_checked` also carries terminal negative results. A
             // positive entry that leaves the bounded raster cache must lose
             // only its positive terminal marker so a later visit may hydrate
             // it from SQLite (or rediscover it for a private profile).
-            self.icons_checked.remove(&evicted);
+            self.favicons.icons_checked.remove(&evicted);
         }
-        self.icon_values.insert(key.clone(), value);
-        self.icon_cache_order.push_back(key);
+        self.favicons.icon_values.insert(key.clone(), value);
+        self.favicons.icon_cache_order.push_back(key);
         true
     }
 }

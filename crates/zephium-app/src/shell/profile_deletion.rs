@@ -207,17 +207,20 @@ impl Shell {
     /// profile erasure owns closure and exact retirement of every view.
     pub(super) fn apply_profile_tombstone(&mut self, profile: ProfileId) {
         let mut favicon_items: std::collections::HashSet<ItemId> = self
+            .favicons
             .icon_attempts
             .iter()
             .filter_map(|(id, attempt)| (attempt.profile == profile).then_some(*id))
             .collect();
         favicon_items.extend(
-            self.icon_load_completion_pending
+            self.favicons
+                .icon_load_completion_pending
                 .iter()
                 .filter_map(|(id, (item_profile, _))| (*item_profile == profile).then_some(*id)),
         );
         favicon_items.extend(
-            self.favicon_store_reads
+            self.favicons
+                .store_reads
                 .iter()
                 .filter_map(|(id, pending)| (pending.profile == profile).then_some(*id)),
         );
@@ -252,25 +255,30 @@ impl Shell {
         self.crashes.retain(|id, _| self.items.tab(*id).is_some());
         self.crash_presentations
             .retain(|id| self.items.tab(*id).is_some());
-        self.icons_checked
+        self.favicons
+            .icons_checked
             .retain(|(item_profile, _)| *item_profile != profile);
-        self.icon_values
+        self.favicons
+            .icon_values
             .retain(|(item_profile, _), _| *item_profile != profile);
-        self.icon_cache_order
+        self.favicons
+            .icon_cache_order
             .retain(|(item_profile, _)| *item_profile != profile);
         if self
-            .pending_favicon_batch
+            .favicons
+            .pending_batch
             .as_ref()
             .is_some_and(|pending| pending.profile == profile)
         {
-            self.pending_favicon_batch = None;
+            self.favicons.pending_batch = None;
         }
         if self
-            .pending_search
+            .search
+            .pending
             .as_ref()
             .is_some_and(|pending| pending.profile == profile)
         {
-            self.pending_search = None;
+            self.search.pending = None;
         }
 
         // The authorization transaction already published the exact session.

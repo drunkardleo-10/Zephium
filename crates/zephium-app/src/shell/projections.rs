@@ -114,7 +114,10 @@ impl Shell {
     }
 
     fn favicon_key_for(&self, profile: ProfileId, origin: &str) -> Option<String> {
-        self.icon_values.get(&(profile, origin.to_owned())).cloned()
+        self.favicons
+            .icon_values
+            .get(&(profile, origin.to_owned()))
+            .cloned()
     }
 
     pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {

@@ -3807,9 +3807,9 @@ fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
     let profile = shell.windows.focused().unwrap().profile;
 
     shell.handle(Command::Search("old".into()));
-    let old_generation = shell.pending_search.as_ref().unwrap().generation;
+    let old_generation = shell.search.pending.as_ref().unwrap().generation;
     shell.handle(Command::Search("new".into()));
-    let new_generation = shell.pending_search.as_ref().unwrap().generation;
+    let new_generation = shell.search.pending.as_ref().unwrap().generation;
     shell.handle(Command::StoreRead(StoreReadResult::History {
         generation: old_generation,
         profile,
@@ -3822,7 +3822,8 @@ fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
     }));
     assert_eq!(
         shell
-            .pending_search
+            .search
+            .pending
             .as_ref()
             .map(|pending| pending.generation),
         Some(new_generation)
@@ -4568,12 +4569,12 @@ fn stale_favicon_store_reply_cannot_cross_a_navigation_generation() {
         id,
         url: "https://first.example/".into(),
     }));
-    let first_generation = shell.favicon_store_reads.get(&id).unwrap().generation;
+    let first_generation = shell.favicons.store_reads.get(&id).unwrap().generation;
     shell.handle(Command::Engine(EngineEvent::UrlChanged {
         id,
         url: "https://second.example/".into(),
     }));
-    let second_generation = shell.favicon_store_reads.get(&id).unwrap().generation;
+    let second_generation = shell.favicons.store_reads.get(&id).unwrap().generation;
     let rgba = vec![91; zephium_core::icon::RGBA32_BYTES];
 
     shell.handle(Command::StoreRead(StoreReadResult::Favicon {
@@ -4588,7 +4589,8 @@ fn stale_favicon_store_reply_cannot_cross_a_navigation_generation() {
         .is_none());
     assert_eq!(
         shell
-            .favicon_store_reads
+            .favicons
+            .store_reads
             .get(&id)
             .map(|pending| pending.generation),
         Some(second_generation)
@@ -4617,14 +4619,14 @@ fn lost_favicon_store_completion_falls_back_instead_of_sticking_pending() {
         id,
         url: "https://fallback.example/".into(),
     }));
-    assert!(shell.favicon_store_reads.contains_key(&id));
+    assert!(shell.favicons.store_reads.contains_key(&id));
     assert!(engine
         .calls()
         .iter()
         .all(|call| call != &format!("discover {id}")));
 
     shell.handle(Command::FaviconPoll { id, attempt: 0 });
-    assert!(!shell.favicon_store_reads.contains_key(&id));
+    assert!(!shell.favicons.store_reads.contains_key(&id));
     assert!(engine
         .calls()
         .iter()
@@ -4679,12 +4681,12 @@ fn positive_cache_eviction_allows_later_rehydration() {
     for index in 0..=ICON_CACHE_CAPACITY {
         let key = (profile, format!("https://icon-{index}.example"));
         assert!(shell.cache_icon(key.clone(), &rgba));
-        shell.icons_checked.insert(key);
+        shell.favicons.icons_checked.insert(key);
     }
 
-    assert!(!shell.icon_values.contains_key(&first));
+    assert!(!shell.favicons.icon_values.contains_key(&first));
     assert!(
-        !shell.icons_checked.contains(&first),
+        !shell.favicons.icons_checked.contains(&first),
         "an evicted positive must not become a permanent negative cache entry"
     );
 }
@@ -4715,9 +4717,12 @@ fn slow_load_gets_one_fresh_bounded_favicon_pass_after_completion() {
         shell.profile_of_item(id).unwrap(),
         "https://slow-icon.example".to_owned(),
     );
-    assert!(!shell.icon_attempts.contains_key(&id));
-    assert_eq!(shell.icon_load_completion_pending.get(&id), Some(&key));
-    assert!(!shell.icons_checked.contains(&key));
+    assert!(!shell.favicons.icon_attempts.contains_key(&id));
+    assert_eq!(
+        shell.favicons.icon_load_completion_pending.get(&id),
+        Some(&key)
+    );
+    assert!(!shell.favicons.icons_checked.contains(&key));
     let discover = format!("discover {id}");
     let before_completion = engine
         .calls()
@@ -4738,8 +4743,11 @@ fn slow_load_gets_one_fresh_bounded_favicon_pass_after_completion() {
             .count(),
         before_completion + 1
     );
-    assert!(shell.icon_attempts.contains_key(&id));
-    assert!(!shell.icon_load_completion_pending.contains_key(&id));
+    assert!(shell.favicons.icon_attempts.contains_key(&id));
+    assert!(!shell
+        .favicons
+        .icon_load_completion_pending
+        .contains_key(&id));
 
     shell.handle(Command::Engine(EngineEvent::FaviconPixels {
         id,
