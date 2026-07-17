@@ -1,5 +1,12 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
+mod persistence;
+mod projections;
+mod scope;
+
+#[cfg(test)]
+use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
+
 #[cfg(test)]
 use crate::actor::{
     enqueue, finish_shutdown, spawn, tracked_operation_command, ActorExitGuard, Handle,
@@ -82,8 +89,6 @@ const PRESENTATION_ADMISSION_RETRY_DELAYS: [std::time::Duration; 7] = [
 ];
 const MAX_PRESENTATION_ADMISSION_REJECTIONS: u8 = 12;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
-const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
-const PERSIST_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 // A normal browsing set stays warm up to the soft target. Above the pressure
 // watermark, hidden pages enter bounded exact-safety probing before the long
@@ -103,11 +108,6 @@ const PROFILE_DELETION_RETRY_BASE: std::time::Duration = std::time::Duration::fr
 const PROFILE_DELETION_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_ASYNC_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const STORE_READ_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-// URL-only native observations are recoverability checkpoints, not structural
-// mutations. Structural changes retain the fast debounce; URL churn is
-// globally coalesced to one full snapshot per five minutes.
-const URL_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-const URL_CHECKPOINT_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
 // native teardown, and thread joins consume this one caller-owned deadline.
@@ -3569,67 +3569,6 @@ impl Shell {
         true
     }
 
-    fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
-        match self.items.get(id)?.placement {
-            Placement::Favorites { profile } => Some(profile),
-            Placement::Space { space, .. } => self.spaces.get(space).map(|s| s.profile),
-        }
-    }
-
-    /// A space is an authorization boundary for UI-directed item IDs. Tabs
-    /// placed in a space require an exact match; profile-wide favorites may
-    /// appear in any space owned by that same profile.
-    fn item_in_scope(&self, id: ItemId, profile: ProfileId, space: SpaceId) -> bool {
-        if self
-            .spaces
-            .get(space)
-            .is_none_or(|candidate| candidate.profile != profile)
-        {
-            return false;
-        }
-        let Some(item) = self.items.get(id).filter(|item| item.tab().is_some()) else {
-            return false;
-        };
-        match item.placement {
-            Placement::Favorites {
-                profile: item_profile,
-            } => item_profile == profile,
-            Placement::Space {
-                space: item_space, ..
-            } => item_space == space,
-        }
-    }
-
-    fn item_in_focused_scope(&self, id: ItemId) -> bool {
-        self.windows
-            .focused()
-            .is_some_and(|win| self.item_in_scope(id, win.profile, win.space))
-    }
-
-    fn pane_in_scope(&self, tree: &Pane, profile: ProfileId, space: SpaceId) -> bool {
-        let tabs = tree.tabs();
-        tabs.len() <= MAX_VISIBLE_PANES
-            && tabs
-                .into_iter()
-                .all(|id| self.item_in_scope(id, profile, space))
-    }
-
-    fn partition_of(&self, id: ItemId) -> Partition {
-        let profile = self
-            .profile_of_item(id)
-            .or_else(|| self.windows.focused().map(|w| w.profile))
-            .unwrap_or_else(|| {
-                self.profiles
-                    .default_profile()
-                    .unwrap_or(ProfileId::from(0))
-            });
-        match self.profiles.get(profile).map(|p| p.kind) {
-            Some(ProfileKind::Named) => Partition::Persistent(profile),
-            Some(ProfileKind::Incognito) => Partition::Ephemeral(profile),
-            Some(ProfileKind::Default) | None => Partition::Default(profile),
-        }
-    }
-
     /// window.open / target=_blank lands as a new Today tab next to its
     /// source, routed through the same navigation policy. The split group
     /// survives: the new tab shows alone, the group stays a tab away.
@@ -4366,223 +4305,6 @@ impl Shell {
             .content
             .unwrap_or_default()
     }
-
-    fn today_tabs(&self, space: SpaceId) -> Vec<ItemId> {
-        self.items
-            .roots(Placement::Space {
-                space,
-                section: SpaceSection::Today,
-            })
-            .iter()
-            .copied()
-            .filter(|id| self.items.tab(*id).is_some())
-            .collect()
-    }
-
-    fn schedule_persist(&mut self) {
-        if !self.bootstrapped {
-            return;
-        }
-        self.session_revision = self.session_revision.wrapping_add(1);
-        self.schedule_current_session_persist();
-    }
-
-    fn schedule_url_checkpoint(&mut self, id: ItemId) {
-        if !self.bootstrapped || self.items.tab(id).is_none() {
-            return;
-        }
-        self.session_revision = self.session_revision.wrapping_add(1);
-        let first_url_dirty = self.url_checkpoint_dirty.is_empty();
-        self.url_checkpoint_dirty.insert(id);
-        // A pending structural snapshot already includes the newest URL and
-        // retains its much shorter durability deadline.
-        if self.persist_first_dirty.is_some() || !first_url_dirty {
-            return;
-        }
-        let now = std::time::Instant::now();
-        let interval_floor = self
-            .last_url_checkpoint
-            .checked_add(URL_CHECKPOINT_INTERVAL)
-            .unwrap_or(now + URL_CHECKPOINT_INTERVAL);
-        let deadline = interval_floor.max(now + URL_CHECKPOINT_DEBOUNCE);
-        if let Some(queue) = self.self_queue.as_ref() {
-            queue.schedule_persist(deadline);
-        } else {
-            #[cfg(test)]
-            {
-                // Deterministic unit shells do not own the production timer.
-                self.persist();
-            }
-            #[cfg(not(test))]
-            {
-                // Production construction always installs the timer before
-                // the actor can receive a URL. If that invariant changes,
-                // defer to the exact shutdown snapshot instead of restoring
-                // hostile per-URL full rewrites.
-                eprintln!("persistence: URL checkpoint timer is unavailable");
-            }
-        }
-    }
-
-    /// Schedules the current authoritative state without advancing its logical
-    /// revision. Used after a durable deletion barrier when mutations already
-    /// counted by `schedule_persist` need a new post-barrier debounce.
-    fn schedule_current_session_persist(&mut self) {
-        if !self.bootstrapped {
-            return;
-        }
-        let now = std::time::Instant::now();
-        let first = *self.persist_first_dirty.get_or_insert(now);
-        let deadline = (now + PERSIST_DEBOUNCE).min(first + PERSIST_MAX_AGE);
-        if let Some(queue) = self.self_queue.as_ref() {
-            queue.schedule_persist(deadline);
-        } else {
-            // Directly-constructed shells are used by deterministic unit
-            // tests and embedders without the production timer thread.
-            self.persist();
-        }
-    }
-
-    fn persist(&mut self) {
-        self.persist_first_dirty = None;
-        // The durable session is loaded by Bootstrap. Before that ordered
-        // point, an empty in-memory shell is not authoritative: persisting it
-        // during an immediate quit would erase a valid previous session.
-        if !self.bootstrapped {
-            return;
-        }
-        self.url_checkpoint_dirty.clear();
-        self.last_url_checkpoint = std::time::Instant::now();
-        let win = self.windows.focused();
-        let state = session::snapshot(
-            &self.profiles,
-            &self.spaces,
-            &self.items,
-            win.map(|w| w.space),
-            win.and_then(|w| w.active),
-            win.and_then(|w| w.splits.as_ref()),
-        );
-        self.store.save_session(state);
-    }
-
-    fn project_runtime_status(&self) {
-        (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
-            restart_required: self.runtime_restart_required,
-        }));
-    }
-
-    fn reconcile_runtime_restart_requirement(&mut self) -> bool {
-        if self.runtime_restart_required || !self.engine.runtime_restart_required() {
-            return false;
-        }
-        self.runtime_restart_required = true;
-        self.project_runtime_status();
-        true
-    }
-
-    fn project_items(&self) {
-        let Some(win) = self.windows.focused() else {
-            return;
-        };
-        let profile = win.profile;
-        let tabs: Vec<TabView> = self
-            .today_tabs(win.space)
-            .into_iter()
-            .filter_map(|id| {
-                self.items
-                    .tab(id)
-                    .map(|tab| self.generic_tab_view(id, tab, Some(profile)))
-            })
-            .collect();
-        self.record_tab_projection_revisions(&tabs);
-        (self.emit)(Projection::Items(ItemsState {
-            projection_revision: format!("{:032x}", self.next_projection_revision()),
-            tabs,
-            active: win.active.map(|i| i.to_string()),
-        }));
-    }
-
-    fn project_tab(&self, id: ItemId) {
-        let profile = self.profile_of_item(id);
-        if let Some(tab) = self.items.tab(id) {
-            let projection = self.generic_tab_view(id, tab, profile);
-            self.record_tab_projection_revision(id, &projection.projection_revision);
-            (self.emit)(Projection::Tab(projection));
-        }
-    }
-
-    fn record_tab_projection_revisions(&self, tabs: &[TabView]) {
-        let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() else {
-            // The shell actor is single-threaded and these borrows never span
-            // callbacks. Retaining the older value fails closed by making an
-            // otherwise valid presentation callback stale.
-            return;
-        };
-        for tab in tabs {
-            if let Some(id) = ItemId::parse(&tab.id) {
-                revisions.insert(id, tab.projection_revision.clone());
-            }
-        }
-    }
-
-    fn record_tab_projection_revision(&self, id: ItemId, revision: &str) {
-        if let Ok(mut revisions) = self.last_tab_projection_revision.try_borrow_mut() {
-            revisions.insert(id, revision.to_owned());
-        }
-    }
-
-    fn generic_tab_view(&self, id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
-        let mut view = self.presentation_tab_view(id, tab, self.favicon_key(tab, profile));
-        if self.deferred_first_content_layout.contains(&id) {
-            // A full Items snapshot may still be necessary for focus or tab
-            // topology. Preserve that delivery while ensuring the exact
-            // presentation eval remains the first URL-bearing projection.
-            view.url = None;
-            view.title = "New Tab".into();
-            view.loading = false;
-            view.can_go_back = false;
-            view.can_go_forward = false;
-            view.favicon = None;
-        }
-        view
-    }
-
-    fn presentation_tab_view(
-        &self,
-        id: ItemId,
-        tab: &TabState,
-        favicon: Option<String>,
-    ) -> TabView {
-        let mut view = tab_view(id, tab, favicon, self.next_projection_revision());
-        if self.crash_presentations.contains(&id) {
-            view.title = "Page crashed".into();
-        }
-        view
-    }
-
-    fn next_projection_revision(&self) -> u128 {
-        // Saturation is fail-closed: subsequent equal revisions are ignored
-        // by privileged chrome, so no older projection can become current.
-        let next = self.projection_sequence.get().saturating_add(1);
-        self.projection_sequence.set(next);
-        next
-    }
-
-    // Chrome receives only a fixed-shape raster value; it never constructs a
-    // page-controlled image URL or invokes a privileged image decoder.
-    fn favicon_key(&self, tab: &TabState, profile: Option<ProfileId>) -> Option<String> {
-        let origin = tab.url.as_ref().and_then(origin_of)?;
-        self.favicon_key_for(profile?, &origin)
-    }
-
-    fn favicon_key_for(&self, profile: ProfileId, origin: &str) -> Option<String> {
-        self.icon_values.get(&(profile, origin.to_owned())).cloned()
-    }
-
-    fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
-        let parsed = url::Url::parse(url).ok()?;
-        self.favicon_key_for(profile, &origin_of(&parsed)?)
-    }
 }
 
 fn tab_result(id: ItemId, tab: &TabState, favicon: Option<String>) -> SearchResult {
@@ -4597,19 +4319,6 @@ fn tab_result(id: ItemId, tab: &TabState, favicon: Option<String>) -> SearchResu
         detail,
         favicon,
         action: SearchAction::ActivateTab { id: id.to_string() },
-    }
-}
-
-fn tab_view(id: ItemId, tab: &TabState, favicon: Option<String>, revision: u128) -> TabView {
-    TabView {
-        id: id.to_string(),
-        projection_revision: format!("{revision:032x}"),
-        title: tab.title.clone(),
-        url: tab.url.as_ref().map(ToString::to_string),
-        loading: tab.loading,
-        can_go_back: tab.can_go_back,
-        can_go_forward: tab.can_go_forward,
-        favicon,
     }
 }
 
