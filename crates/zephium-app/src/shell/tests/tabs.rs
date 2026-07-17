@@ -1,0 +1,233 @@
+use super::*;
+
+#[test]
+fn switching_tabs_shows_only_active() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: first,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: second,
+        input: "github.com".into(),
+    });
+    assert_eq!(engine.last_layout(), vec![second.to_string()]);
+
+    shell.handle(Command::Activate(first));
+    assert_eq!(engine.last_layout(), vec![first.to_string()]);
+}
+
+#[test]
+fn forged_runtime_ids_cannot_cross_the_focused_space_or_profile() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let local = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: local,
+        input: "local.example".into(),
+    });
+    let (profile, space, window) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space, win.id))
+        .unwrap();
+
+    let sibling_space = SpaceId::from(9001);
+    assert!(shell.spaces.insert(Space {
+        id: sibling_space,
+        profile,
+        name: "Sibling".into(),
+    }));
+    let foreign_profile = ProfileId::from(9002);
+    let foreign_space = SpaceId::from(9003);
+    assert!(shell.profiles.insert(Profile {
+        id: foreign_profile,
+        name: "Foreign".into(),
+        kind: ProfileKind::Named,
+    }));
+    assert!(shell.spaces.insert(Space {
+        id: foreign_space,
+        profile: foreign_profile,
+        name: "Foreign".into(),
+    }));
+
+    let sibling = ItemId::from(9004);
+    let foreign = ItemId::from(9005);
+    assert!(shell.items.insert_tab(
+        sibling,
+        Placement::Space {
+            space: sibling_space,
+            section: SpaceSection::Today,
+        },
+    ));
+    assert!(shell.items.insert_tab(
+        foreign,
+        Placement::Space {
+            space: foreign_space,
+            section: SpaceSection::Today,
+        },
+    ));
+
+    let focused = shell.windows.get(window).unwrap();
+    let region = layout::compute(focused.size, focused.mode, focused.metrics, true)
+        .content
+        .unwrap();
+    let (drop_x, drop_y) = (region.x + 1.0, region.y + region.height / 2.0);
+    assert!(shell.resolve_drop(drop_x, drop_y).is_some());
+
+    for (attacker, attacker_space) in [(sibling, sibling_space), (foreign, foreign_space)] {
+        let calls_before = engine.calls();
+        let roots_before = shell
+            .items
+            .roots(Placement::Space {
+                space: attacker_space,
+                section: SpaceSection::Today,
+            })
+            .len();
+
+        shell.handle(Command::Activate(attacker));
+        shell.handle(Command::Navigate {
+            id: attacker,
+            input: "attacker.example".into(),
+        });
+        shell.handle(Command::Reload(attacker));
+        shell.handle(Command::SplitWith {
+            other: attacker,
+            axis: Axis::Row,
+        });
+        shell.handle(Command::DropTab {
+            id: attacker,
+            x: drop_x,
+            y: drop_y,
+        });
+        shell.handle(Command::Engine(EngineEvent::NewWindowRequested {
+            id: attacker,
+            url: "https://popup.example/".into(),
+        }));
+        shell.handle(Command::Close(attacker));
+
+        assert_eq!(shell.windows.focused().unwrap().active, Some(local));
+        assert!(shell.windows.focused().unwrap().splits.is_none());
+        assert!(shell.items.get(attacker).is_some());
+        assert!(shell.items.tab(attacker).unwrap().url.is_none());
+        assert_eq!(
+            shell
+                .items
+                .roots(Placement::Space {
+                    space: attacker_space,
+                    section: SpaceSection::Today,
+                })
+                .len(),
+            roots_before,
+            "a foreign popup source must not create a tab in its space"
+        );
+        assert_eq!(engine.calls(), calls_before);
+    }
+
+    assert_eq!(active_id(&screen), local);
+    assert_eq!(shell.windows.focused().unwrap().space, space);
+    assert_eq!(shell.windows.focused().unwrap().profile, profile);
+}
+
+#[test]
+fn linked_tab_shows_alone_and_split_group_survives() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: first,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: second,
+        input: "github.com".into(),
+    });
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    assert_eq!(engine.last_layout().len(), 2);
+
+    // page JS opens a link: the popup shows alone
+    shell.handle(Command::Engine(EngineEvent::NewWindowRequested {
+        id: second,
+        url: "https://wikipedia.org/".into(),
+    }));
+    assert_eq!(engine.last_layout().len(), 1);
+
+    // returning to a member restores the whole group
+    shell.handle(Command::Activate(first));
+    assert_eq!(engine.last_layout().len(), 2);
+}
+
+#[test]
+fn url_focus_emits_ui_command() {
+    let engine = Arc::new(FakeEngine::default());
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let mut shell = Shell::new(
+        engine,
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |p| {
+            if let Projection::UiCommand(id) = p {
+                sink.lock().unwrap().push(id);
+            }
+        }),
+    );
+    shell.handle(Command::Run("url.focus".into()));
+    assert_eq!(seen.lock().unwrap().as_slice(), ["url.focus"]);
+}
+
+#[test]
+fn open_url_lands_in_a_new_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::OpenUrl("github.com".into()));
+    let second = active_id(&screen);
+    assert_ne!(first, second);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|c| c == &format!("create {second} https://github.com/ [default]")));
+}
+
+#[test]
+fn open_url_at_item_limit_never_navigates_the_active_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "kept.example");
+    let space = shell.windows.focused().unwrap().space;
+    for value in 0..(zephium_core::session::MAX_SESSION_ITEMS - 1) {
+        assert!(shell.items.insert_tab(
+            ItemId::from(100_000 + value as u128),
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        ));
+    }
+    let calls_before = engine.calls().len();
+
+    let completion = shell.handle_operation(Command::OpenUrl("must-not-replace.example".into()));
+
+    assert_eq!(completion.outcome, OperationOutcome::Rejected);
+    assert_eq!(completion.reason, OperationReason::ItemLimitReached);
+    assert_eq!(shell.windows.focused().unwrap().active, Some(active));
+    assert_eq!(
+        shell
+            .items
+            .tab(active)
+            .and_then(|tab| tab.url.as_ref().map(url::Url::as_str)),
+        Some("https://kept.example/")
+    );
+    assert_eq!(engine.calls().len(), calls_before);
+}
