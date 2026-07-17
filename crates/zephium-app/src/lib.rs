@@ -26,7 +26,6 @@ use zephium_core::ports::engine::{
     DiscardProbeId, Engine, EngineEvent, NativeAction, NativeDispatch, NavigationPresentationId,
     Partition, ProfileDataErasureOutcome, ZoomRequestId,
 };
-use zephium_core::ports::net::Net;
 use zephium_core::ports::store::{
     PendingProfileDeletion, ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome,
     ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome, MAX_FAVICON_BATCH_ORIGINS,
@@ -44,7 +43,6 @@ use zephium_ipc::{
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
-pub type SharedNet = Arc<dyn Net + Send + Sync>;
 pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
 pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
 
@@ -1508,7 +1506,6 @@ pub fn spawn(
     engine: SharedEngine,
     store: SharedStore,
     chrome: SharedChrome,
-    net: SharedNet,
     emit: EmitFn,
 ) -> Result<Handle, SpawnError> {
     // A hostile page can generate title/load/navigation events much faster
@@ -1528,7 +1525,7 @@ pub fn spawn(
     workers.install_store_reader(store_reader);
     let actor_queue = queue.clone();
     let actor_store_reads = store_reads.clone();
-    let mut shell = Shell::with_store_reads(engine, store, chrome, net, emit, store_reads.clone());
+    let mut shell = Shell::with_store_reads(engine, store, chrome, emit, store_reads.clone());
     shell.self_queue = Some(queue.clone());
     let actor = match spawn_worker("zephium-shell", move || {
         let _exit_guard = ActorExitGuard(actor_queue.clone());
@@ -1836,7 +1833,6 @@ pub struct Shell {
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
     chrome: SharedChrome,
-    _net: SharedNet,
     emit: EmitFn,
 }
 
@@ -1846,17 +1842,15 @@ impl Shell {
         engine: SharedEngine,
         store: SharedStore,
         chrome: SharedChrome,
-        net: SharedNet,
         emit: EmitFn,
     ) -> Self {
-        Self::with_store_reads(engine, store, chrome, net, emit, None)
+        Self::with_store_reads(engine, store, chrome, emit, None)
     }
 
     fn with_store_reads(
         engine: SharedEngine,
         store: SharedStore,
         chrome: SharedChrome,
-        net: SharedNet,
         emit: EmitFn,
         store_reads: impl Into<Option<StoreReadQueue>>,
     ) -> Self {
@@ -1917,7 +1911,6 @@ impl Shell {
             store,
             store_reads: store_reads.into(),
             chrome,
-            _net: net,
             emit,
         }
     }
@@ -6629,38 +6622,6 @@ mod tests {
         }
     }
 
-    type CannedFetch = Option<(Option<String>, Vec<u8>)>;
-
-    #[derive(Default)]
-    struct FakeNet {
-        replies: Mutex<Vec<CannedFetch>>,
-        urls: Mutex<Vec<String>>,
-    }
-
-    impl Net for FakeNet {
-        fn fetch(
-            &self,
-            url: String,
-            _max_bytes: usize,
-            done: Box<dyn FnOnce(Option<zephium_core::ports::net::Fetched>) + Send>,
-        ) -> bool {
-            self.urls.lock().unwrap().push(url);
-            let mut replies = self.replies.lock().unwrap();
-            let reply = if replies.is_empty() {
-                None
-            } else {
-                replies.remove(0)
-            };
-            done(
-                reply.map(|(content_type, bytes)| zephium_core::ports::net::Fetched {
-                    content_type,
-                    bytes,
-                }),
-            );
-            true
-        }
-    }
-
     // Materializes projections the way the frontend store does: snapshots
     // replace, deltas patch one row.
     type Screen = Arc<Mutex<ItemsState>>;
@@ -6693,7 +6654,6 @@ mod tests {
             engine.clone(),
             store,
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -6717,7 +6677,6 @@ mod tests {
             engine.clone(),
             Arc::new(FakeStore::default()),
             chrome.clone(),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| apply_projection(&mut sink.lock().unwrap(), projection)),
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -6742,7 +6701,6 @@ mod tests {
             engine.clone(),
             store,
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 if let Projection::OperationProcessed(completion) = &projection {
                     operation_sink.lock().unwrap().push(completion.clone());
@@ -9306,7 +9264,6 @@ mod tests {
             engine,
             store.clone(),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |p| match p {
                 Projection::Layout(l) => *strip_sink.lock().unwrap() = l.dividers,
                 p => apply_projection(&mut sink.lock().unwrap(), p),
@@ -9859,7 +9816,6 @@ mod tests {
             engine,
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |p| {
                 if let Projection::UiCommand(id) = p {
                     sink.lock().unwrap().push(id);
@@ -9896,7 +9852,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             store,
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             emit,
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -9945,7 +9900,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             emit,
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -10639,7 +10593,6 @@ mod tests {
     fn favicon_pipeline_accepts_only_fixed_renderer_rasters_for_current_origin() {
         let engine = Arc::new(FakeEngine::default());
         let store = Arc::new(FakeStore::default());
-        let net = Arc::new(FakeNet::default());
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
             projection_revision: String::new(),
             tabs: Vec::new(),
@@ -10650,7 +10603,6 @@ mod tests {
             engine.clone(),
             store.clone(),
             Arc::new(FakeChrome),
-            net.clone(),
             Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
         );
         shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
@@ -10676,7 +10628,6 @@ mod tests {
             page_url: "https://attacker.example/".into(),
             rgba: vec![1; zephium_core::icon::RGBA32_BYTES],
         }));
-        assert!(net.urls.lock().unwrap().is_empty());
         assert!(store.icons.lock().unwrap().is_empty());
 
         shell.handle(Command::Engine(EngineEvent::FaviconPixels {
@@ -10951,7 +10902,6 @@ mod tests {
     fn private_favicon_is_visible_but_never_written_to_persistent_storage() {
         let engine = Arc::new(FakeEngine::default());
         let store = Arc::new(FakeStore::default());
-        let net = Arc::new(FakeNet::default());
         let screen: Screen = Arc::new(Mutex::new(ItemsState {
             projection_revision: String::new(),
             tabs: Vec::new(),
@@ -10962,7 +10912,6 @@ mod tests {
             engine,
             store.clone(),
             Arc::new(FakeChrome),
-            net,
             Box::new(move |projection| {
                 apply_projection(&mut sink.lock().unwrap(), projection);
             }),
@@ -11647,7 +11596,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             store,
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(|_| {}),
         )
         .expect("spawn test shell");
@@ -11670,7 +11618,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |s| {
                 let _ = tx.send(s);
             }),
@@ -11699,7 +11646,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             store,
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 let _ = tx.send(projection);
             }),
@@ -11735,7 +11681,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 let _ = tx.send(projection);
             }),
@@ -11777,7 +11722,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 if let Projection::RuntimeStatus(status) = projection {
                     sink.lock().unwrap().push(status.restart_required);
@@ -11803,7 +11747,6 @@ mod tests {
             engine.clone(),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 if let Projection::RuntimeStatus(status) = projection {
                     sink.lock().unwrap().push(status.restart_required);
@@ -11968,7 +11911,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             store.clone(),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 let _ = tx.send(projection);
             }),
@@ -12083,7 +12025,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             store.clone(),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(move |projection| {
                 let _ = tx.send(projection);
             }),
@@ -12147,7 +12088,6 @@ mod tests {
             Arc::new(FakeEngine::default()),
             Arc::new(FakeStore::default()),
             Arc::new(FakeChrome),
-            Arc::new(FakeNet::default()),
             Box::new(|_| {}),
         )
         .expect("spawn test shell");

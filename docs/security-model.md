@@ -451,14 +451,15 @@ generation quarantined. A later startup never reuses it: the shared bounded gene
 manager reclaims only exact marked prior-boot data, baselines legacy data for one reboot,
 and keeps same-boot or opaque state quarantined. Hitting a crash-loop budget produces a
 recoverable full-Windows-restart instruction instead of an irreversible assertion.
-Store and inactive native-network worker queues are also bounded. Page-controlled
-history growth and extraction results are capped. These are denial-of-service controls,
-not proof that arbitrary web pages cannot exhaust an engine renderer.
+Store worker queues are also bounded. Page-controlled history growth and extraction
+results are capped. These are denial-of-service controls, not proof that arbitrary web
+pages cannot exhaust an engine renderer.
 
-**Page-derived native networking and images.** The standalone native HTTP client is not
-wired into the desktop composition root because it cannot share the exact profile's
-proxy, DNS, cookie, and shutdown policy. Favicon network access and codec parsing run
-inside the exact sandboxed site renderer instead. The host polls an asynchronous,
+**Page-derived native networking and images.** There is no generic native HTTP client or
+page-derived fetch port. Such a client could not share the exact profile's proxy, DNS,
+cookie, partition, and shutdown policy, so page-derived network access remains inside
+the exact profile-scoped native engine session. Favicon network access and codec parsing
+run inside the exact sandboxed site renderer. The host polls an asynchronous,
 same-origin image load under the current immutable WebView generation and navigation
 epoch, then accepts only a canonical base64 encoding of exactly 32x32 RGBA pixels
 (4,096 bytes). Rust validates and stores only that fixed raster; privileged chrome
@@ -474,6 +475,11 @@ and makes one final discovery pass at the authoritative load-complete edge befor
 caching a negative result. Cross-origin/CDN-declared icons are intentionally unsupported
 until a profile-scoped network broker can preserve the exact proxy, cookie, DNS, and
 shutdown policy; such sites may still show a fallback icon.
+
+Future application-owned downloads, including maintained filter lists and signed update
+metadata, are distinct from browsing traffic. They require purpose-built bounded
+components with explicit source, redirect, proxy, integrity, retention, and shutdown
+policies; they must not restore a generic fetch capability for page-controlled URLs.
 
 **Dependency policy.** Wry is vendored from the immutable upstream revision recorded in
 `vendor/wry/UPSTREAM.md`. Relative to that revision, Zephium's source patch covers

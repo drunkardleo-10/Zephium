@@ -63,23 +63,6 @@ const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
 #[cfg(any(target_os = "windows", test))]
 const PRIVILEGED_WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI";
 
-/// Page-derived resource fetches must share the exact profile network session
-/// (proxy, DNS, cookies, partition and shutdown). The standalone HTTP client
-/// cannot prove that, so keep this feature disabled until the engine exposes
-/// a profile-scoped broker instead of leaking a second network fingerprint.
-struct DisabledPageNet;
-
-impl zephium_core::ports::net::Net for DisabledPageNet {
-    fn fetch(
-        &self,
-        _url: String,
-        _max_bytes: usize,
-        _done: Box<dyn FnOnce(Option<zephium_core::ports::net::Fetched>) + Send>,
-    ) -> bool {
-        false
-    }
-}
-
 #[derive(Clone)]
 struct ShutdownCoordinator {
     started: Arc<AtomicBool>,
@@ -2289,8 +2272,7 @@ pub fn run() {
 
             let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
 
-            let net = Arc::new(DisabledPageNet);
-            let shell = zephium_app::spawn(engine.clone(), store, chrome, net, emit)?;
+            let shell = zephium_app::spawn(engine.clone(), store, chrome, emit)?;
             if !app.manage(shell.clone()) {
                 return Err(std::io::Error::other(
                     "shell cleanup state is already installed",

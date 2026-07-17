@@ -95,7 +95,8 @@ Three webview classes, mapping to the trust zones in security-model.md:
 
 Attack surface we own: the IPC/bridge boundary, parsers of semi-trusted input
 (filter lists, URLs, themes, config, extension manifests), FFI to the webview,
-and the single outbound-network module.
+and any purpose-built application downloaders added for trusted browser data
+such as filter lists or signed updates.
 
 v1 is a single main process with async tasks; the untrusted code is already
 process-isolated by the engine.
@@ -221,7 +222,8 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 
 **Dependency rules (CI-enforced):** core depends on no internal or I/O crate;
 only `desktop` knows tauri; `unsafe` only in engine/native adapters with
-`# Safety` notes; outbound network only in the net module.
+`# Safety` notes. Page-derived network access stays inside the exact
+profile-scoped engine session; the application has no generic URL-fetch port.
 
 ---
 
@@ -403,6 +405,12 @@ profile-scoped broker can share the engine's exact cookies, proxy, DNS, and
 shutdown policy; affected sites may show the fallback rather than their
 declared icon.
 
+Future application-owned downloads, such as maintained filter lists or signed
+updates, are not page-derived browsing traffic. Each must use a purpose-built,
+bounded component with its own source allowlist, redirect, proxy, integrity,
+retention, and shutdown policy. A generic native fetch seam must not be
+reintroduced for page-controlled URLs.
+
 ---
 
 ## 9. Blocker (planned next track, adblock-rust)
@@ -420,9 +428,10 @@ behind one policy port, never per-request logic in core:
 
 Expected, documented gap: no runtime `$redirect`/scriptlets on WebKit;
 declarative rule-count caps (split large lists). Cosmetic injection runs before
-render to avoid ad flash. List pipeline: fetch -> parse/validate (fuzz later)
--> compile -> cache per profile -> hot reload. A local-root-CA MITM proxy is
-rejected: unacceptable trust liability in a privacy browser.
+render to avoid ad flash. List pipeline: purpose-built allowlisted downloader ->
+parse/validate (fuzz later) -> compile -> cache per profile -> hot reload. A
+local-root-CA MITM proxy is rejected: unacceptable trust liability in a privacy
+browser.
 
 ---
 
@@ -679,7 +688,9 @@ FTS5; a test guards it).
 1. The domain stays pure and `unsafe`-free.
 2. No UI surface ever holds authoritative state.
 3. All mutations to persistable aggregates go through their reducer.
-4. Only `desktop` knows Tauri; only the net module reaches the network.
+4. Only `desktop` knows Tauri. Page-derived network access stays inside the
+   exact profile-scoped native engine; app-owned downloads require dedicated
+   policy components rather than a generic fetch port.
 5. Content webviews are NEVER given a bridge (see security-model.md).
 6. `unsafe` only in engine/native adapters, each block documented.
 7. In-app overlays position relative to the main window, never absolute.
