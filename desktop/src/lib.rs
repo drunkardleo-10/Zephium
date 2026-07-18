@@ -2149,14 +2149,21 @@ pub fn run() {
                 &privileged_runtime.main,
                 runtime_update_notifier.clone(),
             );
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
             let platform_initialized = platform::imp::init(&window);
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if !platform_initialized {
                 return Err(std::io::Error::other(
                     "required privileged-WebView hardening or native composition failed",
                 )
                 .into());
             }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            platform::imp::init(&window).map_err(|error| {
+                std::io::Error::other(format!(
+                    "required privileged WebKitGTK hardening or GTK composition failed: {error}"
+                ))
+            })?;
             // The engine is owned by the shell. Retaining a strong Handle in
             // its callback would form Shell -> Engine -> Handle -> queue and
             // keep the actor/ticker alive after every application owner drops.
@@ -2471,12 +2478,11 @@ pub fn run() {
                 platform::imp::apply_material(&panel_window, true);
             }
             #[cfg(all(unix, not(target_os = "macos")))]
-            if !platform::imp::harden_privileged(&panel_window) {
-                return Err(std::io::Error::other(
-                    "required privileged panel WebKitGTK hardening failed",
-                )
-                .into());
-            }
+            platform::imp::harden_privileged(&panel_window).map_err(|error| {
+                std::io::Error::other(format!(
+                    "required privileged panel WebKitGTK hardening failed: {error}"
+                ))
+            })?;
 
             let overlay = overlay::Overlay::new(panel_window.clone());
             let blur_overlay = overlay.clone();
