@@ -2,7 +2,7 @@
 //! database deliberately owns the profile registry, application settings, and
 //! the complete restorable non-private session, so a profile is not a
 //! file-level isolation boundary. The hub owns every connection; a single
-//! actor thread (lib.rs) serializes all access.
+//! actor thread (`actor.rs`) serializes all access.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
