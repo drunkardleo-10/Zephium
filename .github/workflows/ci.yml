@@ -129,6 +129,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Clippy production workspace libraries
+        run: cargo clippy --workspace --lib --locked -- -D warnings
+
       - name: Check vendored Wry security adapter directly
         run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
@@ -136,6 +139,11 @@ jobs:
         run: >-
           cargo clippy --manifest-path vendor/wry/Cargo.toml
           --locked --all-targets -- -D warnings
+
+      - name: Clippy vendored Wry production library directly
+        run: >-
+          cargo clippy --manifest-path vendor/wry/Cargo.toml
+          --locked --lib -- -D warnings
 
       - name: Unused crates (advisory)
         run: cargo machete
@@ -183,6 +191,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Clippy production workspace libraries
+        run: cargo clippy --workspace --lib --locked -- -D warnings
+
       - name: Check vendored Wry security adapter directly
         run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
@@ -190,6 +201,11 @@ jobs:
         run: >-
           cargo clippy --manifest-path vendor/wry/Cargo.toml
           --locked --all-targets -- -D warnings
+
+      - name: Clippy vendored Wry production library directly
+        run: >-
+          cargo clippy --manifest-path vendor/wry/Cargo.toml
+          --locked --lib -- -D warnings
 
       # The desktop test binary needs the WebView2 loader at run time, which
       # plain Windows runners do not provide. macOS must run the full native

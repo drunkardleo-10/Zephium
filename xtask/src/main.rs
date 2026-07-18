@@ -219,6 +219,16 @@ fn ci() {
     run(
         "cargo",
         &[
+            "fmt",
+            "--manifest-path",
+            "vendor/wry/Cargo.toml",
+            "--",
+            "--check",
+        ],
+    );
+    run(
+        "cargo",
+        &[
             "clippy",
             "--workspace",
             "--all-targets",
@@ -227,9 +237,59 @@ fn ci() {
             "warnings",
         ],
     );
+    // `--all-targets` enables test-only references while linting library
+    // artifacts, which can hide dead production paths behind cfg(test).
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--workspace",
+            "--lib",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            "vendor/wry/Cargo.toml",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            "vendor/wry/Cargo.toml",
+            "--lib",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    );
     // The desktop test suite regenerates frame/src/ipc/bindings.ts, so the
     // frontend typecheck after it doubles as a Rust/TS drift check.
     run("cargo", &["test", "--workspace"]);
+    run(
+        "cargo",
+        &[
+            "test",
+            "--manifest-path",
+            "vendor/wry/Cargo.toml",
+            "--all-targets",
+            "--locked",
+        ],
+    );
     run("pnpm", &["--dir", "frame", "run", "check"]);
 }
 
