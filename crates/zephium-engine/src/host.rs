@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{DownloadPolicy, WebView, WebViewBuilder};
@@ -732,7 +733,7 @@ fn decode_favicon_eval_result(result: &str) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn install(
-    parent: RawWindowHandle,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     data_root: PathBuf,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
@@ -769,6 +770,7 @@ pub(crate) fn install(
             return Err("engine host is already installed on this thread".to_owned());
         }
         *host = Some(EngineHost {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             parent: ParentHandle(parent),
             #[cfg(not(target_os = "macos"))]
             profiles_root,
@@ -1523,8 +1525,10 @@ fn queue_navigation_failure(
     });
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct ParentHandle(RawWindowHandle);
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl HasWindowHandle for ParentHandle {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         // SAFETY: the parent is the app window, which outlives every child
@@ -1909,8 +1913,7 @@ fn profile_value_is_isolated<T>(
 }
 
 pub(crate) struct EngineHost {
-    // Views are parented via the gtk container on Linux, not the raw handle.
-    #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     parent: ParentHandle,
     // Content web data never shares a directory or WebContext with the
     // privileged Tauri chrome. A context is further partitioned per profile.

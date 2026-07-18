@@ -16,7 +16,6 @@ json-patch = "3"
 
 [dependencies]
 tauri.workspace = true
-raw-window-handle.workspace = true
 zephium-core.workspace = true
 zephium-ipc.workspace = true
 zephium-app.workspace = true
@@ -32,6 +31,7 @@ specta-typescript.workspace = true
 tauri-specta.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle.workspace = true
 webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes"] }
 
@@ -45,3 +45,4 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 objc2-web-kit = "0.3"
+raw-window-handle.workspace = true

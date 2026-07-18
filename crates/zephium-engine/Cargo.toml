@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 zephium-core.workspace = true
 wry.workspace = true
-raw-window-handle.workspace = true
 serde_json.workspace = true
 url.workspace = true
 
@@ -15,6 +14,7 @@ url.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle.workspace = true
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
@@ -40,3 +40,4 @@ objc2-core-graphics = "0.3"
 objc2-foundation = "0.3"
 objc2-web-kit = "0.3"
 objc2-quartz-core = "0.3"
+raw-window-handle.workspace = true

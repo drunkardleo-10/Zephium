@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::HasWindowHandle;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State, WebviewWindow};
@@ -2109,6 +2110,7 @@ pub fn run() {
                         "could not start UI startup watchdog: {error}"
                     ))
                 })?;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let parent = window.window_handle()?.as_raw();
             let handle = app.handle().clone();
 
@@ -2162,6 +2164,7 @@ pub fn run() {
             let sink_app = handle.clone();
             let terminal_failure_app = handle.clone();
             let engine = Arc::new(zephium_engine::install(
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 parent,
                 dispatch.clone(),
                 data_dir.join("web-content"),
@@ -2880,6 +2883,14 @@ mod tests {
             .expect("main privileged WebView construction");
         assert!(watchdog < storage);
         assert!(storage < main_webview);
+
+        let parent_handle = setup
+            .find("let parent = window.window_handle()?.as_raw()")
+            .expect("native parent-handle acquisition");
+        let parent_gate = setup[..parent_handle]
+            .rfind("#[cfg(any(target_os = \"macos\", target_os = \"windows\"))]")
+            .expect("native parent-handle platform gate");
+        assert!(parent_handle - parent_gate < 100);
 
         let engine_install = setup
             .find("let engine = Arc::new(zephium_engine::install")

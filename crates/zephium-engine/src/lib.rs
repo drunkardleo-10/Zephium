@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
@@ -748,10 +749,11 @@ struct PendingLayout {
     item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
 }
 
-/// Install on the main thread at startup. `parent` is the app window the child
-/// content webviews are attached to.
+/// Install on the main thread at startup. macOS and Windows attach child
+/// content views to `parent`; Linux uses the previously installed GTK
+/// composition container and deliberately has no raw-window-handle input.
 pub fn install(
-    parent: RawWindowHandle,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     dispatch: MainThreadDispatch,
     data_root: PathBuf,
     sink: impl Fn(EngineEvent) + Send + Sync + 'static,
@@ -771,7 +773,13 @@ pub fn install(
             fail_native_host_admission(&event_delivery, &retirement, &fatal, reason)
         }) as Arc<dyn Fn(&'static str) + Send + Sync>
     };
-    host::install(parent, data_root, sink.clone(), native_terminal_failure)?;
+    host::install(
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        parent,
+        data_root,
+        sink.clone(),
+        native_terminal_failure,
+    )?;
     Ok(WebviewEngine {
         dispatch,
         sink,
