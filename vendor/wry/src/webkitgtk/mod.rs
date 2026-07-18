@@ -250,6 +250,7 @@ impl GtkNavigationSequence {
     Some(id)
   }
 
+  #[cfg(test)]
   fn active(&self) -> Option<NavigationId> {
     self
       .active
