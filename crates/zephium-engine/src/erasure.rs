@@ -452,30 +452,6 @@ pub(crate) fn remove_profile_directories_verified(roots: &[PathBuf], profile: Pr
     verified
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn remove_profile_directories_async(
-    roots: Vec<PathBuf>,
-    profile: ProfileId,
-    completion: Arc<Completion>,
-) {
-    let failed = completion.clone();
-    let task = move || {
-        let outcome = if remove_profile_directories_verified(&roots, profile) {
-            ProfileDataErasureOutcome::Verified
-        } else {
-            ProfileDataErasureOutcome::Failed
-        };
-        completion.finish(outcome);
-    };
-    if let Err(error) = std::thread::Builder::new()
-        .name("zephium-profile-delete".into())
-        .spawn(task)
-    {
-        eprintln!("privacy: cannot start profile-directory deletion: {error}");
-        failed.finish(ProfileDataErasureOutcome::Failed);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

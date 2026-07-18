@@ -1334,6 +1334,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
 struct Sink(crate::EngineEventIngressSink);
 
 impl Sink {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn emit(&self, ev: EngineEvent) {
         (self.0)(crate::EngineEventIngress::global(ev));
     }
@@ -1353,12 +1354,14 @@ struct EventPermit {
 }
 
 enum EventPermitState {
+    #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
     Inactive,
     Bound(Weak<AtomicBool>),
     Revoked,
 }
 
 impl EventPermit {
+    #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
     fn inactive() -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Inactive)),
@@ -1371,12 +1374,14 @@ impl EventPermit {
         }
     }
 
+    #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
     fn bind_once(&self, token: &Arc<AtomicBool>) -> bool {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match *state {
+            #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
             EventPermitState::Inactive => {
                 *state = EventPermitState::Bound(Arc::downgrade(token));
                 true
@@ -1401,7 +1406,9 @@ impl EventPermit {
             EventPermitState::Bound(token) => token
                 .upgrade()
                 .filter(|token| token.load(Ordering::Acquire)),
-            EventPermitState::Inactive | EventPermitState::Revoked => None,
+            #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
+            EventPermitState::Inactive => None,
+            EventPermitState::Revoked => None,
         }
     }
 
@@ -1423,6 +1430,7 @@ impl EventPermit {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match &*state {
+            #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
             EventPermitState::Inactive => target == "about:blank",
             EventPermitState::Bound(token) => token
                 .upgrade()
@@ -2046,6 +2054,7 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
+        #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
         if let Some(mut spare) = self.spare.take_if(|s| s.partition == partition) {
             // Update the logical id before binding. Neither this Cell write,
             // binding, nor epoch advance enters native code, so a queued
