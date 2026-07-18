@@ -334,6 +334,17 @@ jobs:
           wry_contexts_enable_sandbox_and_cross_site_process_swap
           -- --ignored
 
+      - name: Prove native Wry GTK invariants
+        run: >-
+          xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked
+          tauri_style_incognito_and_gtk_reparent_invariants_are_native_and_fail_closed
+          -- --ignored
+
+      - name: Prove Linux privileged composition transaction
+        run: >-
+          xvfb-run -a cargo test --locked -p zephium-desktop
+          linux_composition_transaction -- --ignored
+
   coverage:
     runs-on: ubuntu-22.04
     needs: rust
