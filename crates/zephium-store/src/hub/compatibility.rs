@@ -14,9 +14,8 @@ use zephium_core::session::{
 use crate::{legacy, pane};
 
 use super::filesystem::{harden_registered_profile_files, regular_file_exists};
-use super::{
-    enforce_history_budget, invalid_data, Hub, MAX_NAME_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES,
-};
+use super::history::enforce_history_budget;
+use super::{invalid_data, Hub, MAX_NAME_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES};
 
 pub(crate) const LEGACY_IMPORT_STATE_KEY: &str = "internal.legacy_import_state";
 pub(crate) const LEGACY_HISTORY_MARKER: &str = "internal.legacy_history_imported";

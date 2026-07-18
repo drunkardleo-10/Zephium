@@ -9,7 +9,7 @@ use zephium_core::ids::ProfileId;
 use crate::migrations;
 
 use super::compatibility::clear_legacy_session_rows_once;
-use super::enforce_history_budget;
+use super::history::enforce_history_budget;
 
 pub(super) fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     let path = canonical_child_path(path)?;
