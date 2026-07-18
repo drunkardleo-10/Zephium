@@ -813,7 +813,8 @@ struct WebViewAttributes<'a> {
   pub document_title_changed_handler: Option<Box<dyn Fn(String)>>,
 
   /// Run the WebView with incognito mode. On WebKitGTK, a supplied WebContext
-  /// must be explicitly ephemeral; otherwise construction fails.
+  /// must be explicitly ephemeral; pathless contexts are ephemeral by
+  /// default in this fork.
   ///
   /// ## Platform-specific:
   ///
@@ -1594,7 +1595,8 @@ impl<'a> WebViewBuilder<'a> {
   }
 
   /// Run the WebView with incognito mode. On WebKitGTK, a supplied WebContext
-  /// must be explicitly ephemeral; otherwise construction fails.
+  /// must be explicitly ephemeral; pathless contexts are ephemeral by
+  /// default in this fork.
   ///
   /// ## Platform-specific:
   ///
@@ -3051,6 +3053,65 @@ mod tests {
     assert!(opacity < navigation);
     assert!(opacity < mapping);
     assert!(constructor.contains("if attributes.visible {\n      w.webview.show_all();"));
+  }
+
+  #[test]
+  fn webkitgtk_container_routing_accepts_gtk_subclasses_on_every_host() {
+    let source = include_str!("webkitgtk/mod.rs");
+    let initial_parenting = source
+      .split("fn add_to_container<W>(")
+      .nth(1)
+      .and_then(|source| source.split("fn attach_ipc_handler(").next())
+      .expect("WebKitGTK initial container routing");
+    let reparenting = source
+      .split("pub fn reparent<W>(")
+      .nth(1)
+      .and_then(|source| source.split("pub fn platform_webview_version(").next())
+      .expect("WebKitGTK reparent container routing");
+
+    for routing in [initial_parenting, reparenting] {
+      assert!(routing.contains("dynamic_cast_ref::<gtk::Box>()"));
+      assert!(routing.contains("dynamic_cast_ref::<gtk::Fixed>()"));
+      assert!(!routing.contains("container.type_().name()"));
+      assert!(!routing.contains("container_type == \"GtkBox\""));
+      assert!(!routing.contains("container_type == \"GtkFixed\""));
+    }
+
+    let set_bounds = source
+      .split("pub fn set_bounds(&self, bounds: Rect)")
+      .nth(1)
+      .and_then(|source| source.split("fn set_visible_x11(").next())
+      .expect("WebKitGTK bounds routing");
+    assert!(source.contains("is_in_fixed_parent: Cell<bool>"));
+    assert!(set_bounds.contains("self.is_in_fixed_parent.get()"));
+    assert!(reparenting.contains("self.is_in_fixed_parent.set(false)"));
+    assert!(reparenting.contains("self.is_in_fixed_parent.set(true)"));
+    assert!(reparenting.contains("Err(Error::GtkReparentFailed)"));
+  }
+
+  #[test]
+  fn webkitgtk_pathless_contexts_are_ephemeral_before_native_allocation() {
+    let constructor = include_str!("webkitgtk/mod.rs")
+      .split("pub fn new_gtk<W>(")
+      .nth(1)
+      .expect("WebKitGTK constructor");
+    let incognito_check = constructor
+      .find("if !context.context().is_ephemeral()")
+      .expect("supplied-context incognito check");
+    let allocate = constructor
+      .find("Self::create_webview(web_context")
+      .expect("native WebView allocation");
+    let context_source = include_str!("webkitgtk/web_context.rs");
+    let pathless = context_source
+      .find("let Some(data_directory) = data_directory else")
+      .expect("pathless context policy");
+    let persistent_builder = context_source
+      .find("let mut context_builder =")
+      .expect("persistent context builder");
+
+    assert!(incognito_check < allocate);
+    assert!(pathless < persistent_builder);
+    assert!(context_source.contains("return Self::create_ephemeral();"));
   }
 
   #[test]

@@ -39,6 +39,9 @@ impl WebContext {
   ///
   /// ## Platform-specific:
   ///
+  /// - **Linux / BSD**: `None` creates an ephemeral native context in this
+  ///   fork. Persistent storage requires an explicit profile data directory;
+  ///   an unspecified platform-default persistence location is never used.
   /// - **Windows**: Webview instances with different `CoreWebView2EnvironmentOptions` must have different `data_directory`s [^1]
   ///
   /// [^1]: <https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2environment.createcorewebview2controllerasync?view=webview2-dotnet-1.0.3719.77#:~:text=WebView%20creation%20fails%20if%20a%20running%20instance%20using%20the%20same%20user%20data%20folder%20exists%2C%20and%20the%20Environment%20objects%20have%20different%20CoreWebView2EnvironmentOptions.>
@@ -108,8 +111,69 @@ impl WebContext {
 }
 
 impl Default for WebContext {
+  /// Creates a pathless context. On Linux/BSD this is ephemeral; persistent
+  /// contexts must use [`WebContext::new`] with an explicit data directory.
   fn default() -> Self {
     Self::new(None)
+  }
+}
+
+#[cfg(all(test, gtk))]
+mod tests {
+  use super::*;
+  use crate::webkitgtk::WebContextExt as _;
+  use crate::{WebViewBuilder, WebViewBuilderExtUnix as _, WebViewExtUnix as _};
+  use gtk::prelude::*;
+  use webkit2gtk::WebContextExt as _;
+
+  #[test]
+  #[ignore = "requires a native GTK display"]
+  fn tauri_style_incognito_and_gtk_reparent_invariants_are_native_and_fail_closed() {
+    gtk::init().expect("GTK display");
+    let mut context = WebContext::try_new(None).expect("verified pathless context");
+    assert!(context.context().is_ephemeral());
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    let fixed = gtk::Fixed::new();
+    window.add(&fixed);
+    let view = WebViewBuilder::new_with_web_context(&mut context)
+      .with_incognito(true)
+      .build_gtk(&fixed)
+      .expect("Tauri-style supplied incognito context");
+    assert!(view.webview().is_ephemeral());
+    assert_eq!(
+      view
+        .webview()
+        .context()
+        .as_ref()
+        .map(|value| value.as_ptr()),
+      Some(context.context().as_ptr())
+    );
+    drop(view);
+    drop(window);
+
+    let nonce = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .expect("system clock")
+      .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+      "wry-persistent-incognito-rejection-{}-{nonce}",
+      std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let mut persistent =
+      WebContext::try_new(Some(directory.clone())).expect("verified persistent context");
+    assert!(!persistent.context().is_ephemeral());
+    let detached = gtk::Fixed::new();
+    assert!(matches!(
+      WebViewBuilder::new_with_web_context(&mut persistent)
+        .with_incognito(true)
+        .build_gtk(&detached),
+      Err(crate::Error::NonEphemeralIncognitoContext)
+    ));
+    drop(persistent);
+    let _ = std::fs::remove_dir_all(directory);
+
+    crate::webkitgtk::assert_native_gtk_reparent_invariants();
   }
 }
 

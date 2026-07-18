@@ -13,7 +13,7 @@ use gdkx11::{
 };
 #[cfg(feature = "x11")]
 use gtk::glib::{self, translate::FromGlibPtrFull};
-use gtk::glib::{Cast, IsA, ObjectType};
+use gtk::glib::{Cast, IsA};
 use gtk::{
   gdk::{self},
   gio::Cancellable,
@@ -354,7 +354,7 @@ pub(crate) struct InnerWebView {
   #[cfg(any(debug_assertions, feature = "devtools"))]
   is_inspector_open: Arc<AtomicBool>,
   pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
-  is_in_fixed_parent: bool,
+  is_in_fixed_parent: Cell<bool>,
 
   #[cfg(feature = "x11")]
   x11: Option<X11Data>,
@@ -647,7 +647,7 @@ impl InnerWebView {
       webview,
       pending_scripts: Arc::new(Mutex::new(Some(Vec::new()))),
 
-      is_in_fixed_parent,
+      is_in_fixed_parent: Cell::new(is_in_fixed_parent),
       #[cfg(feature = "x11")]
       x11: None,
 
@@ -1106,14 +1106,9 @@ impl InnerWebView {
   {
     let mut is_in_fixed_parent = false;
 
-    let container_type = container.type_().name();
-    if container_type == "GtkBox" {
-      if let Some(container) = container.dynamic_cast_ref::<gtk::Box>() {
-        container.pack_start(webview, true, true, 0);
-      } else {
-        container.add(webview);
-      }
-    } else if container_type == "GtkFixed" {
+    if let Some(container) = container.dynamic_cast_ref::<gtk::Box>() {
+      container.pack_start(webview, true, true, 0);
+    } else if let Some(container) = container.dynamic_cast_ref::<gtk::Fixed>() {
       let scale_factor = webview.scale_factor() as f64;
       let (width, height) = attributes
         .bounds
@@ -1127,13 +1122,8 @@ impl InnerWebView {
         .unwrap_or((0, 0));
 
       webview.set_size_request(width, height);
-
-      if let Some(container) = container.dynamic_cast_ref::<gtk::Fixed>() {
-        container.put(webview, x, y);
-        is_in_fixed_parent = true;
-      } else {
-        container.add(webview);
-      }
+      container.put(webview, x, y);
+      is_in_fixed_parent = true;
     } else {
       container.add(webview);
     }
@@ -1443,7 +1433,7 @@ impl InnerWebView {
       window.size_allocate(&gtk::Allocation::new(0, 0, width, height));
     }
 
-    if self.is_in_fixed_parent {
+    if self.is_in_fixed_parent.get() {
       self
         .webview
         .size_allocate(&gtk::Allocation::new(x, y, width, height));
@@ -1695,33 +1685,160 @@ impl InnerWebView {
   where
     W: gtk::prelude::IsA<gtk::Container>,
   {
-    if let Some(parent) = self
-      .webview
-      .parent()
-      .and_then(|p| p.dynamic_cast::<gtk::Container>().ok())
-    {
-      parent.remove(&self.webview);
+    let destination = if container.dynamic_cast_ref::<gtk::Box>().is_some() {
+      GtkParentKind::Box
+    } else if container.dynamic_cast_ref::<gtk::Fixed>().is_some() {
+      GtkParentKind::Fixed
+    } else {
+      GtkParentKind::Generic
+    };
+    let Some(parent_widget) = self.webview.parent() else {
+      self.is_in_fixed_parent.set(false);
+      return Err(Error::GtkReparentFailed);
+    };
+    let actual_was_fixed = parent_widget.dynamic_cast_ref::<gtk::Fixed>().is_some();
+    let Ok(parent) = parent_widget.dynamic_cast::<gtk::Container>() else {
+      self.is_in_fixed_parent.set(actual_was_fixed);
+      return Err(Error::GtkReparentFailed);
+    };
+    // GTK container operations may synchronously emit signals. Publish the
+    // detached mode before removal, then the target mode before insertion so
+    // reentrant bounds updates never use stale geometry semantics.
+    self.is_in_fixed_parent.set(false);
+    parent.remove(&self.webview);
 
-      let container_type = container.type_().name();
-      if container_type == "GtkBox" {
-        if let Some(container) = container.dynamic_cast_ref::<gtk::Box>() {
-          container.pack_start(&self.webview, true, true, 0);
-        } else {
-          container.add(&self.webview);
-        }
-      } else if container_type == "GtkFixed" {
-        if let Some(container) = container.dynamic_cast_ref::<gtk::Fixed>() {
-          container.put(&self.webview, 0, 0);
-        } else {
-          container.add(&self.webview);
-        }
-      } else {
+    match destination {
+      GtkParentKind::Box => {
+        let container = container
+          .dynamic_cast_ref::<gtk::Box>()
+          .ok_or(Error::GtkReparentFailed)?;
+        container.pack_start(&self.webview, true, true, 0);
+      }
+      GtkParentKind::Fixed => {
+        let container = container
+          .dynamic_cast_ref::<gtk::Fixed>()
+          .ok_or(Error::GtkReparentFailed)?;
+        self.is_in_fixed_parent.set(true);
+        container.put(&self.webview, 0, 0);
+      }
+      GtkParentKind::Generic => {
         container.add(&self.webview);
       }
     }
 
-    Ok(())
+    let expected_container: &gtk::Container = container.as_ref();
+    let expected_parent: &gtk::Widget = expected_container.upcast_ref();
+    if self.webview.parent().as_ref() == Some(expected_parent) {
+      return Ok(());
+    }
+
+    let actual_is_fixed = self
+      .webview
+      .parent()
+      .as_ref()
+      .and_then(|parent| parent.dynamic_cast_ref::<gtk::Fixed>())
+      .is_some();
+    self.is_in_fixed_parent.set(actual_is_fixed);
+    Err(Error::GtkReparentFailed)
   }
+}
+
+#[derive(Clone, Copy)]
+enum GtkParentKind {
+  Box,
+  Fixed,
+  Generic,
+}
+
+#[cfg(test)]
+mod native_reparent_tests {
+  use super::*;
+  use crate::{WebViewBuilder, WebViewBuilderExtUnix as _};
+  use gtk::subclass::prelude::*;
+
+  mod test_fixed {
+    use super::*;
+    use gtk::glib;
+
+    mod imp {
+      use super::*;
+
+      #[derive(Default)]
+      pub struct TestFixed;
+
+      #[glib::object_subclass]
+      impl ObjectSubclass for TestFixed {
+        const NAME: &'static str = "WryNativeReparentTestFixed";
+        type Type = super::TestFixed;
+        type ParentType = gtk::Fixed;
+      }
+
+      impl ObjectImpl for TestFixed {}
+      impl WidgetImpl for TestFixed {}
+      impl ContainerImpl for TestFixed {}
+      impl FixedImpl for TestFixed {}
+    }
+
+    glib::wrapper! {
+      pub struct TestFixed(ObjectSubclass<imp::TestFixed>)
+          @extends gtk::Fixed, gtk::Container, gtk::Widget;
+    }
+
+    impl TestFixed {
+      pub(super) fn new() -> Self {
+        glib::Object::new()
+      }
+    }
+  }
+
+  pub(super) fn assert_native_invariants() {
+    let mut context = WebContext::new_ephemeral().expect("secure ephemeral WebContext");
+    let first_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let view = WebViewBuilder::new_with_web_context(&mut context)
+      .build_gtk(&first_box)
+      .expect("WebView in GtkBox");
+    assert!(!view.webview.is_in_fixed_parent.get());
+
+    let fixed = test_fixed::TestFixed::new();
+    view
+      .webview
+      .reparent(&fixed)
+      .expect("reparent into GtkFixed subclass");
+    assert!(view.webview.is_in_fixed_parent.get());
+    view
+      .set_bounds(Rect {
+        position: dpi::LogicalPosition::new(41, 43).into(),
+        size: dpi::LogicalSize::new(211, 127).into(),
+      })
+      .expect("fixed-parent bounds");
+    let allocation = view.webview.webview.allocation();
+    assert_eq!(
+      (
+        allocation.x(),
+        allocation.y(),
+        allocation.width(),
+        allocation.height()
+      ),
+      (41, 43, 211, 127)
+    );
+
+    let second_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    view
+      .webview
+      .reparent(&second_box)
+      .expect("reparent back into GtkBox");
+    assert!(!view.webview.is_in_fixed_parent.get());
+    view
+      .webview
+      .reparent(&fixed)
+      .expect("reuse GtkFixed subclass");
+    assert!(view.webview.is_in_fixed_parent.get());
+  }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_native_gtk_reparent_invariants() {
+  native_reparent_tests::assert_native_invariants();
 }
 
 pub fn platform_webview_version() -> Result<String> {

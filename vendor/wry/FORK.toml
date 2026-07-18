@@ -18,8 +18,8 @@ name = "deny-by-default permissions and IPC"
 paths = ["src/lib.rs", "src/permissions.rs", "src/android", "src/webkitgtk", "src/webview2", "src/wkwebview"]
 
 [[patch_sets]]
-name = "GTK process and private-profile isolation"
-paths = ["src/web_context.rs", "src/webkitgtk/web_context.rs", "src/webkitgtk/mod.rs"]
+name = "GTK process, private-profile, and composition isolation"
+paths = ["src/error.rs", "src/web_context.rs", "src/webkitgtk/web_context.rs", "src/webkitgtk/mod.rs"]
 
 [[patch_sets]]
 name = "WebView2 staged construction and teardown"

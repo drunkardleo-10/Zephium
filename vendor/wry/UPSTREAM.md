@@ -19,8 +19,12 @@ Its security-relevant deltas currently enforce these invariants:
   constructed. Construction is fallible when either postcondition cannot be
   proved; it never asserts in a release process. `try_new` reports this at
   context creation, while source-compatible `new` is revalidated by
-  `build_gtk` before WebView/WebProcess creation. Incognito related views must
-  use the exact supplied ephemeral context.
+  `build_gtk` before WebView/WebProcess creation. Pathless GTK contexts are
+  ephemeral from initial native allocation in this fork; persistent browser
+  contexts require an explicit profile data directory. Incognito views reject
+  a supplied persistent context rather than reclassifying it after potential
+  filesystem access. Incognito related views must use the exact supplied
+  ephemeral context.
 - WebView2 construction exposes a pre-controller hardening hook and tracks
   partially constructed controller ownership so failures remain cleanable.
   `native_cleanup.rs` models the ordered, retryable ownership debt. The Windows
@@ -73,6 +77,11 @@ Its security-relevant deltas currently enforce these invariants:
   Destroying Wry's child container/widget is an explicit builder policy for
   embedders that can also reconcile native and logical-view ownership; a page
   cannot otherwise leave the host tracking a stale HWND or GTK widget.
+- WebKitGTK container routing uses GTK subtype checks rather than exact runtime
+  class names. Security-owned `GtkFixed` subclasses therefore retain native
+  fixed positioning and bounds updates instead of falling through to generic
+  one-child container behavior. Reparenting publishes geometry mode before
+  reentrant GTK signals and verifies the actual native parent afterward.
 - Raw WebKit link previews, Picture-in-Picture, macOS fullscreen, and
   WebKitGTK fullscreen are disabled until the embedder has an
   origin/gesture-labelled native-surface broker. The macOS fullscreen and PiP

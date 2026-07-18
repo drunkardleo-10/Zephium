@@ -41,6 +41,9 @@ pub enum Error {
   #[cfg(gtk)]
   #[error("WebKitGTK did not enable required cross-site Web-process swapping")]
   GtkProcessSwapUnavailable,
+  #[cfg(gtk)]
+  #[error("WebKitGTK did not attach the WebView to the requested GTK container")]
+  GtkReparentFailed,
   #[cfg(all(gtk, feature = "x11"))]
   #[error(transparent)]
   XlibError(#[from] x11_dl::error::OpenError),

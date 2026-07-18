@@ -70,31 +70,38 @@ pub struct WebContextImpl {
 impl WebContextImpl {
   pub fn new(data_directory: Option<&Path>) -> Self {
     use webkit2gtk::{CookieManagerExt, WebsiteDataManager, WebsiteDataManagerExt};
+    let Some(data_directory) = data_directory else {
+      return Self::create_ephemeral();
+    };
     // Zephium security patch: this property is construct-only and defaults to
-    // false in WebKit2GTK 4.1. Every persistent/default context must opt into
+    // false in WebKit2GTK 4.1. Every persistent context must opt into
     // a fresh Web process when the top-level site changes.
     let mut context_builder =
       WebContext::builder().process_swap_on_cross_site_navigation_enabled(true);
-    if let Some(data_directory) = data_directory {
-      let data_manager = WebsiteDataManager::builder()
-        // TODO: Consider taking a cache_directory so this can be in XDG_CACHE_HOME.
-        .base_cache_directory(data_directory.to_string_lossy())
-        .base_data_directory(data_directory.to_string_lossy())
-        .build();
-      if let Some(cookie_manager) = data_manager.cookie_manager() {
-        cookie_manager.set_persistent_storage(
-          &data_directory.join("cookies").to_string_lossy(),
-          CookiePersistentStorage::Text,
-        );
-      }
-      context_builder = context_builder.website_data_manager(&data_manager);
+    let data_manager = WebsiteDataManager::builder()
+      // TODO: Consider taking a cache_directory so this can be in XDG_CACHE_HOME.
+      .base_cache_directory(data_directory.to_string_lossy())
+      .base_data_directory(data_directory.to_string_lossy())
+      .build();
+    if let Some(cookie_manager) = data_manager.cookie_manager() {
+      cookie_manager.set_persistent_storage(
+        &data_directory.join("cookies").to_string_lossy(),
+        CookiePersistentStorage::Text,
+      );
     }
+    context_builder = context_builder.website_data_manager(&data_manager);
     let context = context_builder.build();
 
     Self::create_context(context)
   }
 
   pub fn new_ephemeral() -> crate::Result<Self> {
+    let context = Self::create_ephemeral();
+    context.validate_security()?;
+    Ok(context)
+  }
+
+  fn create_ephemeral() -> Self {
     // `WebContext::new_ephemeral()` offers no builder hook for construct-only
     // process policy. Recreate its documented shape with an ephemeral data
     // manager and the mandatory process-swap property in one construction.
@@ -104,9 +111,7 @@ impl WebContextImpl {
       .website_data_manager(&data_manager)
       .build();
 
-    let context = Self::create_context(context);
-    context.validate_security()?;
-    Ok(context)
+    Self::create_context(context)
   }
 
   pub fn create_context(context: WebContext) -> Self {
