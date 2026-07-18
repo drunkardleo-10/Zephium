@@ -5367,6 +5367,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "gtk",
+ "json-patch",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -5381,6 +5382,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
  "tauri-specta",
+ "tauri-utils",
  "webkit2gtk",
  "webview2-com",
  "window-vibrancy 0.7.1",

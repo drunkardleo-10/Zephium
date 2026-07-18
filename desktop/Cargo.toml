@@ -10,6 +10,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build.workspace = true
+tauri-utils = "2"
+serde_json.workspace = true
+json-patch = "3"
 
 [dependencies]
 tauri.workspace = true

@@ -2808,6 +2808,42 @@ mod tests {
     }
 
     #[test]
+    fn every_tauri_config_leaves_privileged_window_construction_to_rust() {
+        for (name, source, must_define_windows) in [
+            ("base", include_str!("../tauri.conf.json"), true),
+            ("macOS", include_str!("../tauri.macos.conf.json"), false),
+            ("Windows", include_str!("../tauri.windows.conf.json"), false),
+            ("Linux", include_str!("../tauri.linux.conf.json"), false),
+        ] {
+            let config: serde_json::Value =
+                serde_json::from_str(source).expect("valid Tauri configuration JSON");
+            let windows = config
+                .pointer("/app/windows")
+                .and_then(serde_json::Value::as_array);
+            let Some(windows) = windows else {
+                assert!(
+                    !must_define_windows,
+                    "{name} must define the inherited main template"
+                );
+                continue;
+            };
+            assert_eq!(windows.len(), 1, "{name} must define one main template");
+            assert_eq!(
+                windows[0].get("label").and_then(serde_json::Value::as_str),
+                Some(super::MAIN_LABEL),
+                "{name} must preserve the main label when replacing app.windows"
+            );
+            assert_eq!(
+                windows[0]
+                    .get("create")
+                    .and_then(serde_json::Value::as_bool),
+                Some(false),
+                "{name} must not auto-create privileged chrome before Rust installs its guards"
+            );
+        }
+    }
+
+    #[test]
     fn setup_stages_storage_and_cleanup_owners_before_native_failure_points() {
         let source = include_str!("lib.rs");
         let production = source
