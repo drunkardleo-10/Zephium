@@ -573,6 +573,22 @@ impl Hub {
     }
 }
 
+fn kind_to_str(kind: ProfileKind) -> Option<&'static str> {
+    match kind {
+        ProfileKind::Default => Some("default"),
+        ProfileKind::Named => Some("named"),
+        ProfileKind::Incognito => None,
+    }
+}
+
+fn kind_from_str(s: &str) -> Option<ProfileKind> {
+    match s {
+        "default" => Some(ProfileKind::Default),
+        "named" => Some(ProfileKind::Named),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod bounded_snapshot_tests {
     use super::*;
