@@ -1,0 +1,45 @@
+schema = 1
+fork = "Zephium Tauri Wry runtime adapter"
+reviewed_on = "2026-07-19"
+production_status = "pre-production; native packaged tests and external review remain required"
+
+[upstream]
+repository = "https://github.com/tauri-apps/tauri"
+package = "tauri-runtime-wry"
+version = "2.11.3"
+commit = "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"
+
+[reproducibility]
+standalone_manifest = "Cargo.toml"
+standalone_lockfile = "Cargo.lock"
+application_lockfile = "../../Cargo.lock"
+standalone_wry_patch = "../wry"
+
+[[patch_sets]]
+name = "transactional window and WebView construction acknowledgements"
+paths = ["src/lib.rs"]
+
+[[patch_sets]]
+name = "fallible-construction bookkeeping rollback"
+paths = ["src/lib.rs"]
+
+[[patch_sets]]
+name = "fail-closed GTK composition getters"
+paths = ["src/lib.rs"]
+
+[[patch_sets]]
+name = "current objc2 AppKit API compatibility"
+paths = ["src/window/macos.rs"]
+
+[release_gates]
+standalone_fmt = "cargo fmt --manifest-path vendor/tauri-runtime-wry/Cargo.toml -- --check"
+standalone_check = "cargo check --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api"
+standalone_test = "cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api"
+standalone_clippy = "cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api -- -D warnings"
+standalone_release = "cargo check --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --release --features macos-private-api"
+native_platforms = ["windows", "macos", "linux"]
+
+[maintenance]
+procedure = "REBASE.md"
+minimum_reviewers = 2
+update_policy = "review the complete upstream range and disposition every patch set"
