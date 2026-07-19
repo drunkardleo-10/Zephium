@@ -189,7 +189,13 @@ export function Sidebar() {
           <Icon icon={TableColumnsSplitIcon} size={15} />
         </NavButton>
         <Show when={!IS_MAC}>
-          <NavButton label="Menu" onClick={() => void commands.menuPopup()}>
+          <NavButton
+            label="Menu"
+            onClick={(event) => {
+              const anchor = event.currentTarget.getBoundingClientRect();
+              void commands.menuPopup(anchor.left, anchor.bottom);
+            }}
+          >
             <Icon icon={MoreHorizontalIcon} />
           </NavButton>
         </Show>
@@ -299,7 +305,7 @@ function WindowButton(props: { label: string; onClick: () => void; children: JSX
 
 function NavButton(props: {
   label: string;
-  onClick: () => void;
+  onClick: (event: MouseEvent & { currentTarget: HTMLButtonElement }) => void;
   active?: boolean;
   children: JSX.Element;
 }) {

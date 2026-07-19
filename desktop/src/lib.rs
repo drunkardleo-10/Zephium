@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::HasWindowHandle;
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State, WebviewWindow};
+use tauri::{LogicalPosition, Manager, State, WebviewWindow};
 use tauri_specta::{collect_commands, collect_events, Event};
 
 use zephium_app::{
@@ -1678,16 +1678,51 @@ fn ui_ready(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
     gate.mark_frontend_ready(&caller)
 }
 
+fn menu_popup_anchor(x: f64, y: f64, width: f64, height: f64) -> Option<LogicalPosition<f64>> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || x < 0.0
+        || y < 0.0
+        || x > width
+        || y > height
+    {
+        return None;
+    }
+    Some(LogicalPosition::new(x, y))
+}
+
 #[tauri::command]
 #[specta::specta]
-fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle) {
+fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "menu_popup") {
-        return;
+        return false;
     }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
     let keymap = load_keymap();
-    if let (Some(window), Ok(menu)) = (app.get_webview_window("main"), build_menu(&app, &keymap)) {
-        let _ = window.popup_menu(&menu);
-    }
+    let Ok(menu) = build_menu(&app, &keymap) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
 #[tauri::command]
@@ -2762,6 +2797,41 @@ mod tests {
                 "../frame/src/ipc/bindings.ts",
             )
             .expect("export bindings");
+    }
+
+    #[test]
+    fn native_menu_anchor_accepts_only_finite_window_local_coordinates() {
+        assert_eq!(
+            super::menu_popup_anchor(12.5, 40.0, 800.0, 600.0),
+            Some(tauri::LogicalPosition::new(12.5, 40.0))
+        );
+        for invalid in [
+            super::menu_popup_anchor(-1.0, 40.0, 800.0, 600.0),
+            super::menu_popup_anchor(12.5, -1.0, 800.0, 600.0),
+            super::menu_popup_anchor(801.0, 40.0, 800.0, 600.0),
+            super::menu_popup_anchor(12.5, 601.0, 800.0, 600.0),
+            super::menu_popup_anchor(f64::NAN, 40.0, 800.0, 600.0),
+            super::menu_popup_anchor(12.5, f64::INFINITY, 800.0, 600.0),
+            super::menu_popup_anchor(12.5, 40.0, 0.0, 600.0),
+            super::menu_popup_anchor(12.5, 40.0, 800.0, f64::NAN),
+        ] {
+            assert_eq!(invalid, None);
+        }
+    }
+
+    #[test]
+    fn native_menu_is_never_positioned_from_the_global_pointer() {
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("fn menu_popup(caller:")
+            .nth(1)
+            .expect("menu popup command")
+            .split("fn setting_get")
+            .next()
+            .expect("bounded menu popup command");
+        assert!(command.contains("caller.popup_menu_at(&menu, anchor)"));
+        assert!(!command.contains("popup_menu(&menu)"));
+        assert!(!command.contains("cursor_position"));
     }
 
     #[test]
