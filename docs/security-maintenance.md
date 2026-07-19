@@ -114,6 +114,15 @@ candidate commit. Passing macOS tests does not substitute for Windows or Linux,
 and unit tests do not substitute for packaged hostile-page, teardown, erasure,
 and endurance tests.
 
+The Linux Wayland device pass must also force GlobalShortcuts portal denial
+(and separately restart the portal process) and verify that the configured
+launcher chord still opens from the focused main window and closes from the
+focused launcher panel. After permission is restored, verify one activation per
+press, immediate fallback after an authoritative `ShortcutsChanged` removal,
+and no activation after browser shutdown begins. Run this against the packaged
+artifact whose installed entry is exactly `app.zephium.desktop`; raw `cargo`
+or `tauri dev` execution does not prove portal application identity.
+
 ## Release evidence
 
 For every candidate, retain:

@@ -560,6 +560,22 @@ jobs:
             echo "::error title=Unexpected executable payload::Expected exactly one application executable, found ${#executables[@]}."
             exit 1
           fi
+          mapfile -t desktop_entries < <(find "${payload_root}/usr/share/applications" -maxdepth 1 -type f -name '*.desktop' -print)
+          expected_desktop_entry="${payload_root}/usr/share/applications/app.zephium.desktop"
+          if [[ "${#desktop_entries[@]}" -ne 1 ]] || [[ "${desktop_entries[0]}" != "${expected_desktop_entry}" ]]; then
+            echo "::error title=Unexpected desktop identity::RPM must contain exactly /usr/share/applications/app.zephium.desktop."
+            exit 1
+          fi
+          for line in \
+            'Name=Zephium' \
+            'StartupWMClass=app.zephium' \
+            'Exec=zephium-desktop' \
+            'Icon=zephium-desktop'; do
+            if [[ "$(grep -Fxc -- "${line}" "${expected_desktop_entry}")" -ne 1 ]]; then
+              echo "::error title=Invalid desktop entry::Expected exactly one ${line} line in the packaged desktop entry."
+              exit 1
+            fi
+          done
           elf_header="$(readelf -h "${executables[0]}")"
           program_headers="$(readelf -W -l "${executables[0]}")"
           dynamic="$(readelf -d "${executables[0]}")"
@@ -599,6 +615,8 @@ jobs:
             echo
             echo "Build WebKitGTK: ${build_engine} (Fedora package ${packaged_engine})"
             echo "Media runtime: host Fedora GStreamer packages listed above; no media framework is embedded."
+            echo "Desktop entry: /usr/share/applications/app.zephium.desktop"
+            cat "${expected_desktop_entry}"
             echo
             cat "${RUNNER_TEMP}/zephium-fedora-build-inputs.txt"
             echo

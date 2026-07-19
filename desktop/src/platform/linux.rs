@@ -1,5 +1,9 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gtk::glib;
 use gtk::prelude::*;
@@ -81,6 +85,7 @@ pub(crate) enum LinuxInitError {
     ContainerInstall(String),
     CompositionRollbackFailed(String),
     TopLevelHideFailed,
+    TopLevelShowFailed,
 }
 
 impl fmt::Display for LinuxInitError {
@@ -143,6 +148,8 @@ impl fmt::Display for LinuxInitError {
             ),
             Self::TopLevelHideFailed => formatter
                 .write_str("privileged GTK top-level window could not be hidden fail-closed"),
+            Self::TopLevelShowFailed => formatter
+                .write_str("initialized privileged GTK top-level window did not become visible"),
         }
     }
 }
@@ -332,6 +339,27 @@ fn require_hidden(gtk_window: &gtk::ApplicationWindow) -> Result<(), LinuxInitEr
     }
 }
 
+/// Reveal the initialized toplevel without recursively changing native-child
+/// visibility. Tao's Linux `Window::show` uses `gtk_window.show_all()`, which
+/// would override the content stage's hidden WebKitGTK widgets after session
+/// restoration and place their native input surfaces above trusted chrome.
+pub fn show_initialized_top_level(window: &WebviewWindow) -> Result<(), LinuxInitError> {
+    require_gtk_main_thread()?;
+    let gtk_window = window
+        .gtk_window()
+        .map_err(|error| LinuxInitError::GtkWindowUnavailable(error.to_string()))?;
+    show_top_level_only(&gtk_window)
+}
+
+fn show_top_level_only(gtk_window: &gtk::ApplicationWindow) -> Result<(), LinuxInitError> {
+    gtk_window.show();
+    if gtk_window.is_visible() {
+        Ok(())
+    } else {
+        Err(LinuxInitError::TopLevelShowFailed)
+    }
+}
+
 fn remove_from_actual_parent(widget: &gtk::Widget) {
     if let Some(parent) = widget
         .parent()
@@ -439,6 +467,30 @@ mod native_composition_tests {
         ));
         assert!(!exposed_window.is_visible());
         assert!(!exposed_window.is_mapped());
+
+        let (reveal_window, reveal_vbox, reveal_chrome, _reveal_context) = tauri_tree(&application);
+        let stage = gtk::Fixed::new();
+        reveal_vbox.remove(&reveal_chrome);
+        reveal_window.remove(&reveal_vbox);
+        stage.put(&reveal_chrome, 0, 0);
+        let hidden_content = gtk::DrawingArea::new();
+        stage.put(&hidden_content, 0, 0);
+        reveal_window.add(&stage);
+        stage.show_all();
+        hidden_content.set_sensitive(false);
+        hidden_content.set_child_visible(false);
+        hidden_content.hide();
+
+        show_top_level_only(&reveal_window).expect("non-recursive top-level reveal");
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        assert!(reveal_window.is_visible());
+        assert!(stage.is_visible());
+        assert!(reveal_chrome.is_visible());
+        assert!(!hidden_content.is_child_visible());
+        assert!(!hidden_content.is_mapped());
+        assert!(!hidden_content.is_sensitive());
     }
 }
 
@@ -449,32 +501,211 @@ mod native_composition_tests {
 pub fn install_shortcuts(
     window: &WebviewWindow,
     shortcuts: Vec<Shortcut>,
+    presses: FocusedShortcutPresses,
     on: impl Fn(&str) + 'static,
 ) {
     let Ok(gtk_window) = window.gtk_window() else {
         return;
     };
+    presses.register_window(&gtk_window);
+    let pressed = presses.clone();
     gtk_window.connect_key_press_event(move |_, event| {
         let state = event.state();
-        let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-        let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-        let alt = state.contains(gtk::gdk::ModifierType::MOD1_MASK);
+        let modifiers = observed_shortcut_modifiers(state);
+        let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let alt = modifiers.contains(gtk::gdk::ModifierType::MOD1_MASK);
         if !ctrl && !alt {
             return glib::Propagation::Proceed;
         }
         let keyval = normalize_keyval(event.keyval());
         for s in &shortcuts {
-            if s.ctrl == ctrl
-                && s.shift == shift
-                && s.alt == alt
-                && vk_keyval(s.key) == Some(keyval)
-            {
-                on(&s.id);
+            if shortcut_modifiers(s) == modifiers && vk_keyval(s.key) == Some(keyval) {
+                if pressed.admit(event.hardware_keycode()) {
+                    on(&s.id);
+                }
                 return glib::Propagation::Stop;
             }
         }
         glib::Propagation::Proceed
     });
+
+    let released = presses.clone();
+    gtk_window.connect_key_release_event(move |_, event| {
+        released.release_after_repeat_grace(event.hardware_keycode());
+        glib::Propagation::Proceed
+    });
+
+    // A release can be delivered to another application after focus leaves
+    // Zephium. Clear only after the compositor has had time to transfer focus
+    // between Zephium's main and panel windows; clearing synchronously on the
+    // main window's focus-out would let the same held key repeat into the
+    // newly-focused launcher and immediately close it again.
+    let focus_presses = presses;
+    gtk_window.connect_focus_out_event(move |_, _| {
+        focus_presses.clear_if_application_unfocused_after_grace();
+        glib::Propagation::Proceed
+    });
+}
+
+const KEY_RELEASE_REPEAT_GRACE: Duration = Duration::from_millis(40);
+const APPLICATION_FOCUS_TRANSFER_GRACE: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Default)]
+pub struct FocusedShortcutPresses {
+    inner: Rc<RefCell<FocusedShortcutPressState>>,
+}
+
+#[derive(Default)]
+struct FocusedShortcutPressState {
+    pressed: BTreeMap<u16, u64>,
+    next_generation: u64,
+    windows: Vec<glib::WeakRef<gtk::Window>>,
+}
+
+impl FocusedShortcutPresses {
+    fn register_window(&self, window: &gtk::ApplicationWindow) {
+        let weak = glib::WeakRef::new();
+        weak.set(Some(&window.clone().upcast::<gtk::Window>()));
+        self.inner.borrow_mut().windows.push(weak);
+    }
+
+    fn admit(&self, hardware_keycode: u16) -> bool {
+        let mut state = self.inner.borrow_mut();
+        state.next_generation = state.next_generation.wrapping_add(1);
+        if state.next_generation == 0 {
+            state.next_generation = 1;
+        }
+        let generation = state.next_generation;
+        let first = !state.pressed.contains_key(&hardware_keycode);
+        state.pressed.insert(hardware_keycode, generation);
+        first
+    }
+
+    fn release_after_repeat_grace(&self, hardware_keycode: u16) {
+        let generation = self.inner.borrow().pressed.get(&hardware_keycode).copied();
+        let Some(generation) = generation else {
+            return;
+        };
+        let state = self.clone();
+        glib::timeout_add_local_once(KEY_RELEASE_REPEAT_GRACE, move || {
+            let mut state = state.inner.borrow_mut();
+            if state.pressed.get(&hardware_keycode) == Some(&generation) {
+                state.pressed.remove(&hardware_keycode);
+            }
+        });
+    }
+
+    fn clear_if_application_unfocused_after_grace(&self) {
+        let state = self.clone();
+        glib::timeout_add_local_once(APPLICATION_FOCUS_TRANSFER_GRACE, move || {
+            // Never hold the RefCell across a GObject accessor: a platform
+            // call may dispatch nested GTK work. Detach weak references,
+            // resolve them, then restore the still-live set before querying
+            // native focus state.
+            let weak_windows = {
+                let mut inner = state.inner.borrow_mut();
+                std::mem::take(&mut inner.windows)
+            };
+            let mut live_weak = Vec::with_capacity(weak_windows.len());
+            let mut live_windows = Vec::with_capacity(weak_windows.len());
+            for weak in weak_windows {
+                if let Some(window) = weak.upgrade() {
+                    live_windows.push(window);
+                    live_weak.push(weak);
+                }
+            }
+            let generation = {
+                let mut inner = state.inner.borrow_mut();
+                inner.windows.extend(live_weak);
+                inner.next_generation
+            };
+            let application_is_focused = live_windows.iter().any(|window| window.is_active());
+            if !application_is_focused {
+                let mut inner = state.inner.borrow_mut();
+                if inner.next_generation == generation {
+                    inner.pressed.clear();
+                }
+            }
+        });
+    }
+}
+
+fn shortcut_modifiers(shortcut: &Shortcut) -> gtk::gdk::ModifierType {
+    let mut modifiers = gtk::gdk::ModifierType::empty();
+    if shortcut.ctrl {
+        modifiers |= gtk::gdk::ModifierType::CONTROL_MASK;
+    }
+    if shortcut.shift {
+        modifiers |= gtk::gdk::ModifierType::SHIFT_MASK;
+    }
+    if shortcut.alt {
+        modifiers |= gtk::gdk::ModifierType::MOD1_MASK;
+    }
+    modifiers
+}
+
+fn observed_shortcut_modifiers(state: gtk::gdk::ModifierType) -> gtk::gdk::ModifierType {
+    // GTK's default accelerator mask deliberately excludes lock modifiers.
+    // Keep the virtual modifiers explicit as a defense against a process-wide
+    // mask override: the shared Linux parser rejects Meta/Super/Hyper, so the
+    // focused fallback must never accept them as an invisible extra chord.
+    let relevant = gtk::accelerator_get_default_mod_mask()
+        | gtk::gdk::ModifierType::SUPER_MASK
+        | gtk::gdk::ModifierType::HYPER_MASK
+        | gtk::gdk::ModifierType::META_MASK;
+    state & relevant
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    fn launcher_shortcut() -> Shortcut {
+        Shortcut {
+            id: "launcher.toggle".to_owned(),
+            ctrl: true,
+            shift: true,
+            alt: false,
+            key: 0x20,
+        }
+    }
+
+    #[test]
+    fn focused_shortcut_requires_exact_non_lock_modifiers() {
+        let expected = shortcut_modifiers(&launcher_shortcut());
+        assert_eq!(
+            observed_shortcut_modifiers(
+                expected | gtk::gdk::ModifierType::LOCK_MASK | gtk::gdk::ModifierType::MOD2_MASK,
+            ),
+            expected
+        );
+        for unexpected in [
+            gtk::gdk::ModifierType::SUPER_MASK,
+            gtk::gdk::ModifierType::HYPER_MASK,
+            gtk::gdk::ModifierType::META_MASK,
+        ] {
+            assert_ne!(observed_shortcut_modifiers(expected | unexpected), expected);
+        }
+    }
+
+    #[test]
+    fn focused_shortcut_press_is_shared_and_repeat_suppressed() {
+        let presses = FocusedShortcutPresses::default();
+        assert!(presses.admit(65));
+        assert!(!presses.admit(65));
+        assert!(presses.admit(66));
+
+        let source = include_str!("linux.rs");
+        let adapter = source
+            .split("pub fn install_shortcuts(")
+            .nth(1)
+            .and_then(|source| source.split("const KEY_RELEASE_REPEAT_GRACE").next())
+            .expect("focused GTK shortcut adapter");
+        assert!(adapter.contains("connect_key_release_event"));
+        assert!(adapter.contains("release_after_repeat_grace"));
+        assert!(adapter.contains("connect_focus_out_event"));
+        assert!(adapter.contains("clear_if_application_unfocused_after_grace"));
+    }
 }
 
 // Shift+Tab arrives as ISO_Left_Tab; letters arrive in shifted case.

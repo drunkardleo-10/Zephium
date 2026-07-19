@@ -159,19 +159,48 @@ order: native menu > overlay panel > DOM.
   it reuses the specta IPC and asset protocol as-is; the frame routes by
   window label. The pool grows to 1-2 recycled surfaces only when two must
   coexist.
-- **The launcher is ONE surface with one behavior**: free-floating, centered,
-  independent of the main window; in-app and global hotkeys both just show it.
+- **The launcher is ONE surface with one behavior**: a reusable auxiliary
+  window shown by both focused and global shortcuts. X11, Windows and macOS
+  place it near the top-center of the active monitor. Native Wayland exposes
+  no global coordinates, so the compositor owns its final placement.
   Allocation-time non-activating NSPanel semantics require a supported
   Tao/Tauri constructor seam and are not claimed by the current NSWindow.
 - Anchored overlays (find-bar, modals over content) attach the same panel as a
   child window of the main window and position relative to its frame.
 - Per-platform backends: macOS auxiliary NSWindow (with a future
-  allocation-time NSPanel seam); Windows tool window +
-  RegisterHotKey; X11 free positioning; Hyprland wlr-layer-shell (gtk-layer-
-  shell); **GNOME Wayland degrades honestly**: no global placement exists, the
-  launcher shows over the main window (GtkOverlay in-window for anchored
-  surfaces). Global hotkey on Wayland goes through the XDG GlobalShortcuts
-  portal or compositor config.
+  allocation-time NSPanel seam); Windows tool window plus the native global
+  shortcut adapter; Linux uses a separate GTK Tauri window. X11 uses an
+  asynchronously installed, reply-checked direct grab and free positioning.
+  Its worker verifies detectable XKB repeat behavior, derives active lock masks
+  from the server keymap, and publishes capability only after every grab is
+  acknowledged; connection or mapping changes immediately retire the stale
+  grab and restore the focused fallback. Direct X11 global registration is
+  currently limited to layout-independent Space/Tab keys. Configured text keys
+  remain available through the focused GTK path rather than being guessed
+  across XKB groups/levels.
+  Native Wayland uses the XDG GlobalShortcuts
+  portal, accepts only the exact returned binding/session, and consumes the
+  portal activation token before presenting the window. The worker watches
+  the portal owner before Registry admission, pins subsequent calls to that
+  exact unique D-Bus owner, and retries a bounded three times on restart or a
+  bounded non-interactive call timeout. A user-interactive Bind response is
+  never timed out. `ShortcutsChanged` is subscribed before the authoritative
+  List/Bind exchange; removal or malformed state revokes the global-capability
+  bit before parsing so the focused fallback resumes immediately. If the
+  portal is absent, rejects the exact Registry identity, is denied, times out,
+  restarts, or closes the session, the
+  focused-window shortcut remains available in both the main and panel
+  windows and no background-shortcut capability is claimed. Passing an XDG
+  `parent_window` handle remains future, device-tested permission-dialog UX
+  hardening; it is not required for capability correctness.
+- Packaged Linux identity is one exact value: Tauri's Linux-only product name,
+  installed desktop basename, GTK application id, and host Registry id are
+  `app.zephium`; a custom desktop template keeps the visible `Name=Zephium`.
+  The release workflow verifies the extracted RPM entry before signing. A raw
+  development binary has no installed desktop-entry proof, so its attempted
+  Registry identity may be rejected and cannot be treated as proven. Zephium
+  never falls through to automatic cgroup identity after such a rejection; the
+  focused fallback is the dependable development path.
 - A future true NSPanel must be allocated with a Tao-compatible subclass and
   layout from the start; changing a live TaoWindow to a sibling Objective-C
   class is forbidden. A raw zone-2 Wry view in an owned panel remains another
@@ -535,8 +564,8 @@ inherent surface; no `dyn`):
 | Divider drag | mouseDown/Dragged/Up | WM_LBUTTON*/MOUSEMOVE | button/motion events |
 | Drop indicator | layer-backed NSView | layered child HWND | GtkDrawingArea overlay |
 | Window material | NSVisualEffect (window-vibrancy) | Mica/Acrylic (window-vibrancy) | solid (no portable blur) |
-| In-app overlay | child NSWindow | owned popup HWND | GtkOverlay in-window |
-| Global launcher | non-activating NSPanel | tool window + RegisterHotKey | X11 free / Hyprland layer-shell / GNOME degrade to in-app |
+| In-app overlay | auxiliary NSWindow | Tauri tool window | separate GTK Tauri window |
+| Global launcher | auxiliary NSWindow + native shortcut | tool window + native shortcut | X11 direct grab / Wayland XDG portal; compositor-owned Wayland placement |
 | Content size | superview bounds | client RECT | GTK allocation |
 | Per-pane corner radius | layer cornerRadius | skipped (no clean per-control rounding) | GTK CSS / cairo clip |
 

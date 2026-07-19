@@ -63,9 +63,15 @@ architecture.md covers the system, security-model.md the trust rules.
    watchdog intentionally exits instead of displaying partial privileged chrome.
 - `ui/*.tsx` - shared primitives (FavIcon, Icon). New shared components go
   here; feature-specific ones live in their feature folder.
-- Keyboard: global shortcuts are native (menu/accelerators); chrome-local
-  keys go through the `CHROME_KEYS` table in `App.tsx` and dispatch
-  `commands.runCommand(id)` - command ids come from the Rust registry.
+- Keyboard: global shortcuts are native (menu/accelerators). Linux uses a
+  checked, worker-owned X11 grab or an exact XDG GlobalShortcuts portal binding
+  on Wayland; its focused GTK fallback stays enabled whenever the native worker
+  has not proved a live grab/session, reports connection loss, or receives an
+  authoritative binding removal. The same focused table is installed on the
+  main and launcher-panel windows, so a denied portal can still close a focused
+  launcher with the configured chord.
+  Chrome-local keys go through the `CHROME_KEYS` table in `App.tsx` and
+  dispatch `commands.runCommand(id)` - command ids come from the Rust registry.
 - Theme: `state/theme.ts` owns `data-theme`/`data-material`; appearance is
   persisted Rust-side (`setting_get/set`, allowlisted keys).
 

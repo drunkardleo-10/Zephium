@@ -1,6 +1,14 @@
 //! Composition root: the only crate that knows Tauri. Wires the dependency graph
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
+#[cfg(target_os = "linux")]
+mod linux_global_shortcuts;
+#[cfg(any(target_os = "linux", test))]
+mod linux_shortcut;
+#[cfg(any(target_os = "linux", test))]
+mod linux_shortcut_portal;
+#[cfg(any(target_os = "linux", test))]
+mod linux_x11_shortcut;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
@@ -193,11 +201,13 @@ impl UiStartupGate {
             return;
         }
 
-        if let Err(error) = window.show() {
+        if let Err(error) = show_initialized_main_window(window) {
             request_startup_failure(
                 window.app_handle(),
                 format_args!("could not show initialized main window: {error}"),
             );
+        } else {
+            on_main_window_mapped(window);
         }
     }
 
@@ -206,9 +216,33 @@ impl UiStartupGate {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn on_main_window_mapped(window: &WebviewWindow) {
+    linux_global_shortcuts::main_window_mapped(window);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_main_window_mapped(_window: &WebviewWindow) {}
+
+fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Tao implements Window::show as gtk_window.show_all(), which also
+        // remaps raw content children that the native stage deliberately hid
+        // while the trusted frontend initialized. The Linux composition root
+        // has already marked chrome and its container visible; reveal only
+        // the top-level widget and preserve every stage-owned child state.
+        platform::imp::show_initialized_top_level(window).map_err(|error| error.to_string())
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        window.show().map_err(|error| error.to_string())
+    }
+}
+
 const NO_AUTHORIZED_EXIT_CODE: i32 = -1;
 
-fn write_diagnostic(arguments: std::fmt::Arguments<'_>) {
+pub(crate) fn write_diagnostic(arguments: std::fmt::Arguments<'_>) {
     // `eprintln!` panics when stderr writes fail. Several callers are native
     // Objective-C/COM/GTK callbacks where unwinding is forbidden, so keep
     // diagnostics best-effort and make failure unobservable to control flow.
@@ -1414,6 +1448,22 @@ fn shortcut_table(
         .collect()
 }
 
+#[cfg(target_os = "linux")]
+fn linux_shortcut_table(
+    keymap: &std::collections::HashMap<String, String>,
+    launcher: Option<linux_shortcut::LinuxLauncherShortcut>,
+) -> Vec<zephium_core::ports::engine::Shortcut> {
+    let mut shortcuts: Vec<_> = zephium_core::commands::resolve(keymap)
+        .iter()
+        .filter(|command| command.id != linux_shortcut::LAUNCHER_COMMAND_ID)
+        .filter_map(|command| parse_accel(command.id, command.accelerator.as_deref()?))
+        .collect();
+    if let Some(launcher) = launcher {
+        shortcuts.push(launcher.focused_shortcut());
+    }
+    shortcuts
+}
+
 fn parse_accel(id: &str, accel: &str) -> Option<zephium_core::ports::engine::Shortcut> {
     let mut shortcut = zephium_core::ports::engine::Shortcut {
         id: id.to_string(),
@@ -1870,6 +1920,13 @@ fn build_menu(
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(target_os = "linux")]
+    if matches!(
+        &event,
+        tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+    ) {
+        linux_global_shortcuts::shutdown(app);
+    }
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
         return;
     };
@@ -1955,7 +2012,7 @@ pub fn run() {
     let attempted_privileged_environments = Arc::new(AtomicU8::new(0));
     #[cfg(target_os = "windows")]
     let setup_privileged_environments = attempted_privileged_environments.clone();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
@@ -1967,8 +2024,14 @@ pub fn run() {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
-        }))
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        }));
+    // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
+    // native Wayland session can report success while receiving no keys (or
+    // fail startup when Xwayland is absent). Linux selects an actual GDK
+    // backend below and uses either direct X11 grabs or the desktop portal.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    let app = builder
         .invoke_handler(specta.invoke_handler())
         // This state must predate the setup hook: every environmental failure
         // is contained inside that native Ready callback and converted into a
@@ -2228,7 +2291,45 @@ pub fn run() {
                 let _ = execute_command(app, event.id().0.as_str());
             });
             engine.set_shortcuts(shortcut_table(&keymap));
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(target_os = "linux")]
+            let global_registration = linux_shortcut_portal::GlobalRegistration::default();
+            #[cfg(target_os = "linux")]
+            let focused_shortcut_presses = platform::imp::FocusedShortcutPresses::default();
+            #[cfg(target_os = "linux")]
+            let linux_launcher_shortcut = {
+                let accelerator = zephium_core::commands::resolve(&keymap)
+                    .iter()
+                    .find(|command| command.id == linux_shortcut::LAUNCHER_COMMAND_ID)
+                    .and_then(|command| command.accelerator.clone());
+                let shortcut = accelerator
+                    .as_deref()
+                    .and_then(linux_shortcut::LinuxLauncherShortcut::parse);
+                if accelerator.is_some() && shortcut.is_none() {
+                    write_diagnostic(format_args!(
+                        "global shortcut: launcher accelerator is not representable consistently on Linux; focused and global registration are disabled"
+                    ));
+                }
+                shortcut
+            };
+            #[cfg(target_os = "linux")]
+            {
+                let focused_registration = global_registration.clone();
+                let shortcut_app = handle.clone();
+                platform::imp::install_shortcuts(
+                    &window,
+                    linux_shortcut_table(&keymap, linux_launcher_shortcut),
+                    focused_shortcut_presses.clone(),
+                    move |id| {
+                        if id == linux_shortcut::LAUNCHER_COMMAND_ID
+                            && focused_registration.is_live()
+                        {
+                            return;
+                        }
+                        let _ = execute_command(&shortcut_app, id);
+                    },
+                );
+            }
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
             {
                 let shortcut_app = handle.clone();
                 platform::imp::install_shortcuts(&window, shortcut_table(&keymap), move |id| {
@@ -2484,6 +2585,28 @@ pub fn run() {
                 ))
             })?;
 
+            #[cfg(target_os = "linux")]
+            {
+                // When portal/direct-X11 registration is unavailable the
+                // focused fallback must also close a launcher whose panel,
+                // rather than the main window, owns keyboard focus.
+                let focused_registration = global_registration.clone();
+                let shortcut_app = handle.clone();
+                platform::imp::install_shortcuts(
+                    &panel_window,
+                    linux_shortcut_table(&keymap, linux_launcher_shortcut),
+                    focused_shortcut_presses,
+                    move |id| {
+                        if id == linux_shortcut::LAUNCHER_COMMAND_ID
+                            && focused_registration.is_live()
+                        {
+                            return;
+                        }
+                        let _ = execute_command(&shortcut_app, id);
+                    },
+                );
+            }
+
             let overlay = overlay::Overlay::new(panel_window.clone());
             let blur_overlay = overlay.clone();
             panel_window.on_window_event(move |event| match event {
@@ -2498,6 +2621,7 @@ pub fn run() {
             });
             app.manage(overlay);
 
+            #[cfg(not(target_os = "linux"))]
             {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
                 let resolved = zephium_core::commands::resolve(&keymap);
@@ -2517,6 +2641,32 @@ pub fn run() {
                     if let Err(e) = registered {
                         eprintln!("global shortcut {accel} unavailable: {e}");
                     }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let shortcut_app = handle.clone();
+                let global_shortcuts = linux_global_shortcuts::LinuxGlobalShortcuts::install(
+                    &window,
+                    linux_launcher_shortcut,
+                    global_registration,
+                    move |context| {
+                        if shutdown_started(&shortcut_app) {
+                            return;
+                        }
+                        if let Some(overlay) = shortcut_app.try_state::<overlay::Overlay>() {
+                            overlay.toggle_with_activation(
+                                context.activation_token,
+                                context.timestamp,
+                            );
+                        }
+                    },
+                );
+                if !app.manage(global_shortcuts) {
+                    return Err(std::io::Error::other(
+                        "Linux global-shortcut lifecycle state is already installed",
+                    )
+                    .into());
                 }
             }
 
@@ -2555,10 +2705,12 @@ pub fn run() {
 
     #[cfg(target_os = "windows")]
     {
-        // Unlike `App::run`, `run_return` lets the WebView2 controllers and
-        // environments drop before we erase their private UDFs. A failure is
-        // visible in the process status; the generation remains quarantined
-        // and a later process will never reuse it.
+        // The reviewed local Tauri runtime seals and drains its native window
+        // registry before `run_return` completes, including dispatcher cycles
+        // retained by window listeners. Only then can Environment5 plus the
+        // exact process HANDLE authorize deletion of these private UDFs. A
+        // failure remains visible in the process status and quarantines the
+        // generation for a later verified cleanup pass.
         let exit_code = app.run_return(handle_run_event);
         // Setup can fail after zero or one privileged environment exists.
         // Every attempted build may have created native state before returning
@@ -2860,6 +3012,112 @@ mod tests {
     }
 
     #[test]
+    fn linux_global_shortcut_lifecycle_preserves_fallback_and_startup_order() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("desktop production source");
+        let plugin = production
+            .find("let builder = builder.plugin(tauri_plugin_global_shortcut")
+            .expect("non-Linux Tauri global-shortcut plugin");
+        let plugin_gate = production[..plugin]
+            .rfind("#[cfg(not(target_os = \"linux\"))]")
+            .expect("Linux exclusion for X11-only Tauri plugin");
+        assert!(plugin - plugin_gate < 100);
+
+        let setup = production
+            .split(".setup(move |app| {")
+            .nth(1)
+            .expect("desktop setup hook")
+            .split(".build(tauri::generate_context!())")
+            .next()
+            .expect("bounded desktop setup hook");
+        let state = setup
+            .find("let global_registration = linux_shortcut_portal::GlobalRegistration::default()")
+            .expect("Linux global registration state");
+        let focused = setup[state..]
+            .find("platform::imp::install_shortcuts")
+            .map(|offset| state + offset)
+            .expect("focused Linux shortcut fallback");
+        let global = setup[focused..]
+            .find("LinuxGlobalShortcuts::install")
+            .map(|offset| focused + offset)
+            .expect("native Linux global-shortcut backend");
+        let navigation = setup
+            .find("window.navigate(app_url)?")
+            .expect("main privileged navigation");
+        assert!(state < focused && focused < global && global < navigation);
+        assert!(setup.contains("id == linux_shortcut::LAUNCHER_COMMAND_ID"));
+        assert_eq!(
+            setup
+                .matches("linux_shortcut::LinuxLauncherShortcut::parse")
+                .count(),
+            1,
+            "the Linux launcher accelerator must be parsed into one shared IR exactly once"
+        );
+        let panel_fallback = setup
+            .split("let panel_window = panel_builder")
+            .nth(1)
+            .and_then(|body| body.split("let overlay = overlay::Overlay::new").next())
+            .expect("panel construction and hardening");
+        assert!(panel_fallback.contains("platform::imp::install_shortcuts("));
+        assert!(panel_fallback.contains("global_registration.clone()"));
+
+        let startup_gate = production
+            .split("fn show_if_ready(&self, window: &WebviewWindow)")
+            .nth(1)
+            .and_then(|body| body.split("fn is_visible").next())
+            .expect("bounded main-window startup gate");
+        let reveal = startup_gate
+            .find("show_initialized_main_window(window)")
+            .expect("native top-level reveal");
+        let mapped = startup_gate
+            .find("on_main_window_mapped(window)")
+            .expect("post-reveal shortcut startup");
+        assert!(reveal < mapped);
+
+        let linux_backend = include_str!("linux_global_shortcuts.rs");
+        let portal_start = linux_backend
+            .split("pub(crate) fn start_after_main_mapped")
+            .nth(1)
+            .and_then(|body| body.split("pub(crate) fn shutdown").next())
+            .expect("bounded post-map Wayland startup");
+        assert!(portal_start.contains("zephium-wayland-shortcut"));
+    }
+
+    #[test]
+    fn linux_packaging_uses_one_canonical_machine_identity_and_visible_name() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.linux.conf.json"))
+                .expect("valid Linux Tauri configuration");
+        assert_eq!(
+            config
+                .get("productName")
+                .and_then(serde_json::Value::as_str),
+            Some("app.zephium")
+        );
+        for pointer in [
+            "/bundle/linux/deb/desktopTemplate",
+            "/bundle/linux/rpm/desktopTemplate",
+        ] {
+            assert_eq!(
+                config.pointer(pointer).and_then(serde_json::Value::as_str),
+                Some("linux/zephium.desktop.hbs")
+            );
+        }
+        let template = include_str!("../linux/zephium.desktop.hbs");
+        for exact in [
+            "Name=Zephium",
+            "StartupWMClass=app.zephium",
+            "Exec={{exec}}",
+            "Icon={{icon}}",
+        ] {
+            assert_eq!(template.lines().filter(|line| *line == exact).count(), 1);
+        }
+    }
+
+    #[test]
     fn setup_stages_storage_and_cleanup_owners_before_native_failure_points() {
         let source = include_str!("lib.rs");
         let production = source
@@ -2968,6 +3226,54 @@ mod tests {
             ),
             vec![super::MAIN_LABEL, super::overlay::PANEL_LABEL]
         );
+    }
+
+    #[test]
+    fn vendored_runtime_drains_privileged_webviews_before_windows_process_proof() {
+        let runtime = include_str!("../../vendor/tauri-runtime-wry/src/lib.rs");
+        let request_exit = runtime
+            .split_once("Message::RequestExit(code) => {")
+            .expect("Tauri runtime exit handler")
+            .1
+            .split_once("Message::Window(id, WindowMessage::Close)")
+            .expect("bounded Tauri runtime exit handler")
+            .0;
+        let drain = request_exit
+            .find("drain_windows_for_exit(&windows, &window_id_map)")
+            .expect("terminal native-window drain");
+        let loop_exit = request_exit
+            .find("*control_flow = ControlFlow::ExitWithCode(code)")
+            .expect("event-loop exit transition");
+        assert!(drain < loop_exit);
+        assert!(!request_exit.contains("*control_flow = ControlFlow::Exit;"));
+
+        let wrapper_teardown = runtime
+            .split_once("fn teardown_for_exit(mut self)")
+            .expect("ordered native WindowWrapper teardown")
+            .1
+            .split_once("fn drain_windows_for_exit")
+            .expect("bounded native WindowWrapper teardown")
+            .0;
+        let child_webviews = wrapper_teardown
+            .find("self.webviews.clear()")
+            .expect("child WebView release");
+        let parent_window = wrapper_teardown
+            .find("self.inner.take()")
+            .expect("Tao parent release");
+        assert!(child_webviews < parent_window);
+
+        let desktop = include_str!("lib.rs");
+        let run_return = desktop
+            .find("app.run_return(handle_run_event)")
+            .expect("returning Windows event loop");
+        let process_proof = desktop
+            .find("platform::imp::finalize_privileged_environment_observers")
+            .expect("privileged Environment5/PID/HANDLE proof");
+        let private_cleanup = desktop
+            .find("process_exit_proven && cleanup_privileged_runtime_after_exit()")
+            .expect("proof-gated privileged UDF cleanup");
+        assert!(run_return < process_proof);
+        assert!(process_proof < private_cleanup);
     }
 
     #[test]
@@ -3103,6 +3409,36 @@ mod tests {
         assert!(!super::ui_navigation_allowed(
             &Url::parse("file:///etc/passwd").unwrap()
         ));
+    }
+
+    #[test]
+    fn linux_initialized_reveal_never_uses_recursive_tao_visibility() {
+        let desktop = include_str!("lib.rs");
+        let reveal = desktop
+            .split("fn show_initialized_main_window")
+            .nth(1)
+            .and_then(|source| source.split("const NO_AUTHORIZED_EXIT_CODE").next())
+            .expect("main-window reveal seam");
+        let linux = reveal
+            .split("#[cfg(all(unix, not(target_os = \"macos\")))]")
+            .nth(1)
+            .and_then(|source| {
+                source
+                    .split("#[cfg(not(all(unix, not(target_os = \"macos\"))))]")
+                    .next()
+            })
+            .expect("Linux reveal branch");
+        assert!(linux.contains("platform::imp::show_initialized_top_level(window)"));
+        assert!(!linux.contains("window.show()"));
+
+        let adapter = include_str!("platform/linux.rs");
+        let top_level = adapter
+            .split("fn show_top_level_only")
+            .nth(1)
+            .and_then(|source| source.split("fn remove_from_actual_parent").next())
+            .expect("native top-level-only reveal");
+        assert!(top_level.contains("gtk_window.show()"));
+        assert!(!top_level.contains("show_all"));
     }
 
     #[test]

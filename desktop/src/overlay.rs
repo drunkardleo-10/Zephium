@@ -24,10 +24,28 @@ impl Overlay {
 
     pub fn toggle(&self) {
         self.on_main(|w| {
+            #[cfg(target_os = "linux")]
+            if crate::shutdown_started(w.app_handle()) {
+                return;
+            }
             if visible(w) {
                 do_hide(w);
             } else {
                 do_show(w);
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn toggle_with_activation(&self, activation_token: Option<String>, timestamp: Option<u32>) {
+        self.on_main(move |window| {
+            if crate::shutdown_started(window.app_handle()) {
+                return;
+            }
+            if visible(window) {
+                do_hide(window);
+            } else {
+                do_show_with_activation(window, activation_token.as_deref(), timestamp);
             }
         });
     }
@@ -64,6 +82,33 @@ fn do_show(window: &WebviewWindow) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn do_show_with_activation(
+    window: &WebviewWindow,
+    activation_token: Option<&str>,
+    timestamp: Option<u32>,
+) {
+    use gtk::prelude::*;
+
+    position_on_cursor_monitor(window);
+    let Ok(gtk_window) = window.gtk_window() else {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    };
+    // GNOME treats a global-shortcut focus request as unrelated unless the
+    // portal's opaque activation token is installed before the panel maps.
+    if let Some(token) = activation_token {
+        gtk_window.set_startup_id(token);
+    }
+    let _ = window.show();
+    if let Some(timestamp) = timestamp {
+        gtk_window.present_with_time(timestamp);
+    } else {
+        gtk_window.present();
+    }
+}
+
 fn do_hide(window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
     crate::panel::hide(window);
@@ -71,9 +116,9 @@ fn do_hide(window: &WebviewWindow) {
     let _ = window.hide();
 }
 
-// Centered on the monitor the cursor is on, top third, Raycast-style. On
-// Wayland (phase 3) global placement does not exist and this becomes a
-// GtkOverlay over the main window instead.
+// Centered on the monitor under the cursor, near its top third, when the
+// windowing backend exposes global coordinates. Native Wayland deliberately
+// does not; there the compositor owns final placement.
 fn position_on_cursor_monitor(window: &WebviewWindow) {
     let Ok(cursor) = window.app_handle().cursor_position() else {
         return;
@@ -102,4 +147,26 @@ fn position_on_cursor_monitor(window: &WebviewWindow) {
     let x = pos.x as f64 + (size.width as f64 - w) / 2.0;
     let y = pos.y as f64 + (size.height as f64 - h) * 0.22;
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn queued_linux_toggles_recheck_shutdown_on_the_ui_thread() {
+        let source = include_str!("overlay.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production overlay module");
+        let global_toggle = source
+            .split("pub fn toggle_with_activation")
+            .nth(1)
+            .and_then(|source| source.split("pub fn hide").next())
+            .expect("Linux activation toggle");
+        assert!(global_toggle.contains("crate::shutdown_started(window.app_handle())"));
+        assert!(global_toggle.find("shutdown_started").is_some_and(|check| {
+            global_toggle
+                .find("do_show_with_activation")
+                .is_some_and(|show| check < show)
+        }));
+    }
 }

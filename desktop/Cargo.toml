@@ -21,7 +21,6 @@ zephium-ipc.workspace = true
 zephium-app.workspace = true
 zephium-engine.workspace = true
 zephium-store.workspace = true
-tauri-plugin-global-shortcut.workspace = true
 tauri-plugin-single-instance.workspace = true
 window-vibrancy = "0.7"
 serde.workspace = true
@@ -29,6 +28,14 @@ serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
+
+[dev-dependencies]
+async-io = "=2.6.0"
+futures-lite = "=2.6.1"
+getrandom = "=0.3.4"
+x11rb = { version = "=0.13.2", features = ["xkb"] }
+xkeysym = "=0.2.1"
+zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle.workspace = true
@@ -38,6 +45,17 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dw
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-io = "=2.6.0"
+futures-lite = "=2.6.1"
+getrandom = "=0.3.4"
+x11rb = { version = "=0.13.2", features = ["xkb"] }
+xkeysym = "=0.2.1"
+zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tauri-plugin-global-shortcut.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

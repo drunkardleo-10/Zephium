@@ -269,6 +269,14 @@ jobs:
           cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api
           cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta"
 
+      - name: Enforce accepted Windows exit drain ordering
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml
+          --locked --features macos-private-api --lib
+          construction_tests::accepted_exit_seals_and_drains_native_windows_before_loop_exit
+          -- --exact
+
   linux-native-security:
     # Ubuntu's currently published WebKitGTK is below WSA-2026-0004's fixed
     # boundary. Fedora 44 updates-testing currently carries Fedora's signed
@@ -375,20 +383,39 @@ jobs:
       # actually engaged.
       - name: Prove Wry WebKitWebProcess confinement
         run: >-
-          xvfb-run -a cargo test --locked -p zephium-engine
-          wry_contexts_enable_sandbox_and_cross_site_process_swap
-          -- --ignored
+          xvfb-run -a cargo test --locked -p zephium-engine --lib
+          platform::linux::tests::wry_contexts_enable_sandbox_and_cross_site_process_swap
+          -- --ignored --exact
 
       - name: Prove native Wry GTK invariants
         run: >-
-          xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked
-          tauri_style_incognito_and_gtk_reparent_invariants_are_native_and_fail_closed
-          -- --ignored
+          xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked --lib
+          web_context::tests::tauri_style_incognito_and_gtk_reparent_invariants_are_native_and_fail_closed
+          -- --ignored --exact
+
+      - name: Prove guarded Wry GTK construction and first map
+        run: >-
+          xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked --lib
+          web_context::tests::guarded_webkitgtk_construction_commit_and_first_map_are_native_and_fail_closed
+          -- --ignored --exact
 
       - name: Prove Linux privileged composition transaction
         run: >-
-          xvfb-run -a cargo test --locked -p zephium-desktop
-          linux_composition_transaction -- --ignored
+          xvfb-run -a cargo test --locked -p zephium-desktop --lib
+          platform::linux::native_composition_tests::linux_composition_transaction_preserves_hidden_state_and_rolls_back_exactly
+          -- --ignored --exact
+
+      - name: Prove exact X11 shortcut registration lifecycle
+        run: >-
+          xvfb-run -a cargo test --locked -p zephium-desktop --lib
+          linux_x11_shortcut::tests::native_registration_is_live_collision_checked_and_releasable
+          -- --ignored --exact --test-threads=1
+
+      - name: Prove Linux stage mapping and input gates
+        run: >-
+          xvfb-run -a cargo test --locked -p zephium-engine --lib
+          platform::linux::stage::tests::stage_parks_pending_views_and_hidden_children_survive_ancestor_show_all
+          -- --ignored --exact
 
       - name: Prove the complete Tauri Linux startup transaction
         run: |
