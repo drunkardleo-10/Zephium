@@ -25,14 +25,17 @@
    fail-closed. Tao also emits `LoopDestroyed` when the deprecated
    `run_iteration` returns; that synthetic boundary must never drain live
    windows.
-7. Keep the standalone Wry path patch. Regenerate this lockfile from this
+7. Keep native reply waits fallible. A caller racing terminal event-loop
+   shutdown must receive `FailedToReceiveMessage`; never restore a
+   `recv().unwrap()` abort in the raw-window, reparent, or cookie paths.
+8. Keep the standalone Wry path patch. Regenerate this lockfile from this
    manifest and the workspace lockfile from the repository root; review both
    complete diffs and all changed sources and licenses.
-8. Run standalone format, locked tests, strict Clippy, and release checks on
+9. Run standalone format, locked tests, strict Clippy, and release checks on
    Windows, macOS, and supported Fedora, followed by the full workspace matrix.
    Exercise native success, injected construction failures, missing/reentrant
    parent removal, dropped callers, startup, shutdown, and renderer crashes.
-9. Update `FORK.toml` and `UPSTREAM.md` only after two maintainers have reviewed
+10. Update `FORK.toml` and `UPSTREAM.md` only after two maintainers have reviewed
    the full delta. Stable release still requires packaged cross-platform tests
    and external native-boundary review.
 

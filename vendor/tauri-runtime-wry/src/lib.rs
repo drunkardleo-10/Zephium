@@ -328,7 +328,11 @@ pub(crate) fn send_user_message<T: UserEvent>(
 }
 
 fn await_creation(receiver: Receiver<Result<()>>) -> Result<()> {
-  receiver.recv().map_err(|_| Error::FailedToReceiveMessage)?
+  receive_message(&receiver)?
+}
+
+fn receive_message<T>(receiver: &Receiver<T>) -> Result<T> {
+  receiver.recv().map_err(|_| Error::FailedToReceiveMessage)
 }
 
 fn complete_creation<T>(
@@ -1987,7 +1991,7 @@ impl<T: UserEvent> WebviewDispatch<T> for WryWebviewDispatcher<T> {
       ),
     )?;
 
-    rx.recv().unwrap()?;
+    receive_message(&rx)??;
 
     *current_window_id = window_id;
     Ok(())
@@ -2004,7 +2008,7 @@ impl<T: UserEvent> WebviewDispatch<T> for WryWebviewDispatcher<T> {
       ),
     )?;
 
-    rx.recv().unwrap()
+    receive_message(&rx)?
   }
 
   fn cookies(&self) -> Result<Vec<Cookie<'static>>> {
@@ -2974,7 +2978,7 @@ impl<T: UserEvent> WryHandle<T> {
     let id = self.context.next_window_id();
     let (tx, rx) = channel();
     send_user_message(&self.context, Message::CreateRawWindow(id, Box::new(f), tx))?;
-    rx.recv().unwrap()
+    receive_message(&rx)?
   }
 
   /// Gets the [`WindowId`] associated with the given [`TaoWindowId`].
@@ -5853,6 +5857,19 @@ mod construction_tests {
       await_creation(receiver),
       Err(Error::FailedToReceiveMessage)
     ));
+  }
+
+  #[test]
+  fn every_explicit_native_reply_wait_is_fallible() {
+    let (sender, receiver) = channel::<()>();
+    drop(sender);
+    assert!(matches!(
+      receive_message(&receiver),
+      Err(Error::FailedToReceiveMessage)
+    ));
+
+    let source = include_str!("lib.rs");
+    assert!(!source.contains(concat!("rx.recv()", ".unwrap()")));
   }
 
   #[test]

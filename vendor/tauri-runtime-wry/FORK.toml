@@ -32,6 +32,10 @@ name = "transactional whole-runtime native window teardown"
 paths = ["src/lib.rs"]
 
 [[patch_sets]]
+name = "fallible native reply delivery during shutdown"
+paths = ["src/lib.rs"]
+
+[[patch_sets]]
 name = "current objc2 AppKit API compatibility"
 paths = ["src/window/macos.rs"]
 
