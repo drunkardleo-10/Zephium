@@ -2131,8 +2131,8 @@ impl EngineHost {
     /// A latest-value layout can occupy an earlier main-loop queue position
     /// than a native view construction that was accepted later. Reconcile the
     /// newly-owned view against every stage's retained authoritative tree so
-    /// it cannot remain absent (or, on mapped WebKitGTK, visible at stale
-    /// construction bounds) until an unrelated future resize.
+    /// it cannot remain absent from the exact layout until an unrelated future
+    /// resize. On WebKitGTK this handoff also owns the first offscreen map.
     fn finish_new_view_insertion(&mut self, id: ItemId, event_token: &Arc<AtomicBool>) {
         let reconciled = self.reconcile_new_view_with_stages(id);
 
@@ -2239,9 +2239,9 @@ impl EngineHost {
             return false;
         };
         if expected.is_empty() {
-            // WebKitGTK must be mapped during construction, but a layout that
-            // has already moved on must not leave that widget painted at its
-            // builder bounds. A later stage insertion remaps and redraws it.
+            // Guarded WebKitGTK construction stays unmapped. Preserve that
+            // fail-closed state when the retained layout has already moved on;
+            // a later stage insertion performs the first offscreen map.
             crate::platform::imp::Stage::exclude_unstaged(view);
             return true;
         }
@@ -2307,9 +2307,9 @@ impl EngineHost {
         }
     }
 
-    // An unstaged WebKitGTK view is mapped and keeps a renderer alive, while
-    // an unmapped one can fail to acquire a compositing surface. Do not warm a
-    // Linux spare until it has a measured, lifecycle-safe implementation.
+    // Linux's guarded first-map protocol belongs to a measured Stage. A warm
+    // spare has no pane/stage on which to perform that offscreen map, so do not
+    // create one until it has a measured, lifecycle-safe implementation.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub(crate) fn ensure_spare(&mut self, partition: Partition) {
         if !self.erasure_tombstones.contains(&partition.profile())
@@ -2883,8 +2883,9 @@ impl EngineHost {
             // Construction itself may enter a native message loop. On
             // WKWebView/WebView2 start hidden so their default white backing
             // store cannot paint before the host installs the view in its
-            // presentation-gated stage. WebKitGTK must remain mapped while loading
-            // or it can fail to allocate a compositing surface permanently.
+            // presentation-gated stage. Linux retains a visible intent, but
+            // the guarded Wry adapter keeps the GTK child unmapped until its
+            // Stage performs the validated offscreen first map.
             .with_visible(cfg!(all(unix, not(target_os = "macos"))))
             // Native construction must never steal keyboard focus from the
             // privileged chrome. This is especially important for hidden
@@ -3433,10 +3434,10 @@ impl EngineHost {
                 return None;
             }
         };
-        // Not on Linux: webkitgtk never builds a compositing surface for a
-        // view that loads while unmapped, and the widget stays blank after it
-        // is shown (why the Linux spare is disabled). The stage hides
-        // non-visible views at the first layout instead.
+        // Linux uses a stronger native mapping barrier than Wry's generic
+        // visibility API: the Stage performs its first offscreen map and is
+        // the only component allowed to restore paint and input. This is also
+        // why an unstaged Linux warm spare remains disabled.
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let _ = view.set_visible(false);
         if !event_permit.allows_navigation(url) {
@@ -7031,13 +7032,15 @@ mod tests {
         assert!(linux_placement.contains("rounded_native_size"));
         assert!(linux_placement.contains("pane.is_some()"));
         let linux_geometry = linux
-            .split("// Position and map only transparent widgets")
+            .split("// Keep provisional current-layout widgets mapped")
             .nth(1)
             .expect("Linux native geometry")
-            .split("for (id, view, _, mapped)")
+            .split("fn revision_is_current")
             .next()
             .expect("bounded Linux native geometry");
         assert!(!linux_geometry.contains("max(1.0)"));
+        assert!(linux_geometry.contains("fixed.move_(&view.view, parked_x, 0)"));
+        assert!(linux_geometry.contains("view.view.set_size_request"));
 
         let mac = include_str!("platform/macos/stage.rs");
         let resize = mac
@@ -7168,7 +7171,21 @@ mod tests {
         assert!(retry.contains("Rc::downgrade(state)"));
         assert!(retry.contains("sync_scheduled.set(false)"));
         assert!(retry.contains("sync(&state, &sync_scheduled)"));
-        assert!(retry.contains("view.set_opacity(0.0)"));
+        assert!(retry.contains("revoke_and_unmap_for_retry(state, revision, &view.view)"));
+
+        let fail_closed = source
+            .split("fn revoke_and_unmap_for_retry")
+            .nth(1)
+            .expect("Linux fail-closed retry barrier")
+            .split("fn view_may_reveal")
+            .next()
+            .expect("bounded Linux fail-closed retry barrier");
+        assert!(fail_closed.contains("view.set_sensitive(false)"));
+        assert!(fail_closed.contains("view.set_opacity(0.0)"));
+        assert_eq!(
+            fail_closed.matches("view.set_child_visible(false)").count(),
+            2
+        );
     }
 
     #[test]
@@ -7241,7 +7258,7 @@ mod tests {
             .split("let observer = match crate::platform::imp::install_navigation_observer")
             .nth(1)
             .expect("same-document source observer")
-            .split("// Not on Linux")
+            .split("if !event_permit.allows_navigation(url)")
             .next()
             .expect("bounded same-document source observer");
         assert!(source_observer.contains("emit_navigation_observation"));
@@ -7274,13 +7291,15 @@ mod tests {
 
         let webkitgtk = include_str!("../../../vendor/wry/src/webkitgtk/mod.rs");
         let guarded_gtk = webkitgtk
-            .split("(navigation_presentation_guard.as_ref(), transition)")
+            .split("if native_committed {")
             .nth(1)
-            .expect("WebKitGTK commit guard");
-        assert!(
-            guarded_gtk.find("guard();").unwrap()
-                < guarded_gtk.find("webview.set_opacity(0.0)").unwrap()
-        );
+            .and_then(|source| source.split("// Legacy page load handler").next())
+            .expect("bounded WebKitGTK commit guard");
+        let gtk_guard = guarded_gtk.find("guard();").unwrap();
+        let gtk_input = guarded_gtk.find("webview.set_sensitive(false)").unwrap();
+        let gtk_paint = guarded_gtk.find("webview.set_opacity(0.0)").unwrap();
+        assert!(gtk_guard < gtk_input);
+        assert!(gtk_input < gtk_paint);
 
         let wkwebview = include_str!("../../../vendor/wry/src/wkwebview/navigation.rs");
         let guarded_wk = wkwebview
@@ -7328,6 +7347,16 @@ mod tests {
             .rfind("view_may_reveal(state, revision, *id, view)")
             .is_some());
         assert!(linux_sync[linux_reveal..]
+            .find("view_may_reveal(state, revision, *id, view)")
+            .is_some());
+        let linux_input = linux_sync
+            .rfind("view.view.set_sensitive(true)")
+            .expect("Linux input reveal primitive");
+        assert!(linux_reveal < linux_input);
+        assert!(linux_sync[..linux_input]
+            .rfind("view_may_reveal(state, revision, *id, view)")
+            .is_some());
+        assert!(linux_sync[linux_input..]
             .find("view_may_reveal(state, revision, *id, view)")
             .is_some());
 

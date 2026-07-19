@@ -114,6 +114,8 @@ impl Stage {
         presentation_permit: Arc<AtomicBool>,
     ) -> bool {
         let widget = view.webview();
+        widget.set_sensitive(false);
+        widget.set_child_visible(false);
         widget.set_opacity(0.0);
         let Ok(mut state) = self.state.try_borrow_mut() else {
             return false;
@@ -134,12 +136,17 @@ impl Stage {
         true
     }
 
-    /// WebKitGTK views must start mapped to establish a compositing surface.
-    /// If a newer retained layout no longer expects a just-created widget,
-    /// make it non-painting and unmap it only after construction completed.
-    /// `insert_view`/`sync` performs the measured remap-and-redraw path later.
+    /// Guarded WebKitGTK construction remains unmapped until a Stage owns the
+    /// first offscreen map. If the retained layout no longer expects a newly
+    /// constructed widget, preserve that non-painting, non-input state;
+    /// `insert_view`/`sync` performs the measured first-map path later.
     pub fn exclude_unstaged(view: &wry::WebView) {
         let widget = view.webview();
+        // Input is revoked before paint or mapping. Opacity alone does not
+        // remove a WebKitGTK native input surface, and an ancestor show_all
+        // can restore the ordinary visible property after this function.
+        widget.set_sensitive(false);
+        widget.set_child_visible(false);
         widget.set_opacity(0.0);
         if widget.is_visible() {
             widget.hide();
@@ -156,10 +163,10 @@ impl Stage {
         }
     }
 
-    /// Makes an already-mapped WebKit widget opaque only after privileged
-    /// chrome verified its attributed URL/revision. Opacity preserves the
-    /// compositing-surface requirement that an
-    /// initially unmapped WebKitGTK view does not satisfy.
+    /// Makes an offscreen-mapped WebKit widget presentable only after
+    /// privileged chrome verified its attributed URL/revision. The pending
+    /// path establishes its compositing surface without exposing paint or
+    /// input at trusted-chrome geometry.
     pub fn set_ready(&self, id: ItemId) -> bool {
         let attached = match self.state.try_borrow_mut() {
             Ok(mut state) => {
@@ -184,9 +191,9 @@ impl Stage {
     }
 
     /// Re-arm the presentation barrier for a newly committed main-frame
-    /// document. Keeping the mapped widget transparent preserves WebKitGTK's
-    /// compositing surface while preventing a newer document from borrowing
-    /// the prior document's readiness acknowledgement.
+    /// document. Wry unmaps synchronously at commit; the next Stage sync may
+    /// remap it only at the parked offscreen allocation, preventing a newer
+    /// document from borrowing the prior document's readiness acknowledgement.
     pub fn set_pending(&self, id: ItemId) -> bool {
         let attached = match self.state.try_borrow_mut() {
             Ok(mut state) => {
@@ -310,35 +317,66 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
             })
             .collect::<Vec<_>>();
 
-        // Fail closed before any mapping or geometry work. In particular,
-        // every pane removed by a tab/split switch becomes transparent before
-        // a replacement pane can be made opaque.
+        // Fail closed before any geometry or paint work. Opacity is not an
+        // input or mapping barrier: revoke sensitivity first and child-visible
+        // second. Only then may opacity, position or size change. The mapping
+        // barrier both prevents compositor black layers at the old bounds and
+        // survives Tao/GTK ancestor show_all calls.
         for (id, view, _, mapped) in &placements {
             let snapshot_ready =
                 ready.contains(id) && view.presentation_permit.load(Ordering::Acquire);
-            if (!mapped || !snapshot_ready) && view.view.opacity() != 0.0 {
-                view.view.set_opacity(0.0);
-                if !revision_is_current(state, revision) {
-                    continue 'attempt;
+            if !mapped || !snapshot_ready {
+                if view.view.is_sensitive() {
+                    view.view.set_sensitive(false);
+                    if !revision_is_current(state, revision) {
+                        revoke_and_unmap_for_retry(state, revision, &view.view);
+                        continue 'attempt;
+                    }
+                }
+                if view.view.is_child_visible() {
+                    view.view.set_child_visible(false);
+                    if !revision_is_current(state, revision) {
+                        continue 'attempt;
+                    }
+                }
+                if view.view.opacity() != 0.0 {
+                    view.view.set_opacity(0.0);
+                    if !revision_is_current(state, revision) {
+                        continue 'attempt;
+                    }
                 }
             }
-            if !mapped && view.view.is_visible() {
-                view.view.hide();
-                if !revision_is_current(state, revision) {
-                    continue 'attempt;
+            if !mapped {
+                if view.view.is_visible() {
+                    view.view.hide();
+                    if !revision_is_current(state, revision) {
+                        continue 'attempt;
+                    }
                 }
             }
         }
 
-        // Position and map only transparent widgets. GTK calls can run nested
-        // main-loop work, so stop using this snapshot after every call that
-        // can supersede its revision.
-        for (_, view, pane, mapped) in &placements {
-            if !mapped {
+        // Keep provisional current-layout widgets mapped so WebKitGTK owns a
+        // live compositing surface, but park their correctly-sized allocation
+        // fully to the left of the composition root. A transparent native child can
+        // otherwise paint a black hardware layer and intercept clicks meant
+        // for the privileged New Tab surface beneath it.
+        for (id, view, pane, mapped) in &placements {
+            let snapshot_ready =
+                ready.contains(id) && view.presentation_permit.load(Ordering::Acquire);
+            if !mapped || snapshot_ready {
                 continue;
             }
-            if let Some((r, (width, height))) = pane {
-                fixed.move_(&view.view, (origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
+            if let Some((_, (width, height))) = pane {
+                let Some(parked_x) = parked_x(*width) else {
+                    // No representable offscreen allocation exists. Keep the
+                    // child behind the mapping barrier; a later sane layout
+                    // can restore its compositing surface.
+                    continue;
+                };
+                // The child-visible barrier above is still active here, so
+                // neither call can expose the old or new native allocation.
+                fixed.move_(&view.view, parked_x, 0);
                 if !revision_is_current(state, revision) {
                     continue 'attempt;
                 }
@@ -347,32 +385,36 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
                     continue 'attempt;
                 }
             }
-            if !view.view.is_visible() {
-                // wry's own visibility path is show_all; a remapped webkitgtk
-                // view keeps a stale compositing surface until forced to relayout
-                // permanently. It must remain transparent throughout mapping.
-                if view.view.opacity() != 0.0 {
-                    view.view.set_opacity(0.0);
-                    if !revision_is_current(state, revision) {
-                        continue 'attempt;
-                    }
-                }
-                view.view.show_all();
-                if !revision_is_current(state, revision) {
-                    continue 'attempt;
-                }
-                view.view.queue_resize();
-                if !revision_is_current(state, revision) {
-                    continue 'attempt;
-                }
-                view.view.queue_draw();
+            if !view.view.is_child_visible() {
+                view.view.set_child_visible(true);
                 if !revision_is_current(state, revision) {
                     continue 'attempt;
                 }
             }
+            if !view.view.is_visible() {
+                // wry's own visibility path is show_all; a remapped webkitgtk
+                // view keeps a stale compositing surface until forced to relayout
+                // permanently. It is already parked, transparent and
+                // insensitive before this call is allowed to map it.
+                view.view.show_all();
+                if !revision_is_current(state, revision) {
+                    continue 'attempt;
+                }
+            }
+            // child-visible was synchronously cleared in the first pass even
+            // when an ancestor show_all left the ordinary visible property
+            // true. Always rebuild the just-remapped offscreen surface.
+            view.view.queue_resize();
+            if !revision_is_current(state, revision) {
+                continue 'attempt;
+            }
+            view.view.queue_draw();
+            if !revision_is_current(state, revision) {
+                continue 'attempt;
+            }
         }
 
-        for (id, view, _, mapped) in &placements {
+        for (id, view, pane, mapped) in &placements {
             if !mapped || !ready.contains(id) {
                 continue;
             }
@@ -385,17 +427,70 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
                 }
                 continue;
             }
+            let Some((r, (width, height))) = pane else {
+                continue;
+            };
+            view.view.set_size_request(*width, *height);
+            if !view_may_reveal(state, revision, *id, view) {
+                revoke_and_unmap_for_retry(state, revision, &view.view);
+                continue 'attempt;
+            }
+            fixed.move_(&view.view, (origin.0 + r.x) as i32, (origin.1 + r.y) as i32);
+            if !view_may_reveal(state, revision, *id, view) {
+                revoke_and_unmap_for_retry(state, revision, &view.view);
+                continue 'attempt;
+            }
             if view.view.opacity() != 1.0 {
                 view.view.set_opacity(1.0);
             }
             if !view_may_reveal(state, revision, *id, view) {
-                // `set_opacity` may pump a newer layout or a WebKit commit.
-                // Conceal synchronously before retrying the authoritative
-                // revision, so stale content never reaches the compositor.
-                view.view.set_opacity(0.0);
-                if !revision_is_current(state, revision) {
+                // Native calls may pump a newer layout or WebKit commit.
+                // Revoke input before paint and park synchronously before
+                // retrying, so stale content can neither render nor receive a
+                // gesture intended for the newer trusted-chrome state.
+                revoke_and_unmap_for_retry(state, revision, &view.view);
+                continue 'attempt;
+            }
+            let remapped = !view.view.is_child_visible();
+            if remapped {
+                view.view.set_child_visible(true);
+                if !view_may_reveal(state, revision, *id, view) {
+                    revoke_and_unmap_for_retry(state, revision, &view.view);
                     continue 'attempt;
                 }
+            }
+            if !view.view.is_visible() {
+                view.view.show_all();
+                if !view_may_reveal(state, revision, *id, view) {
+                    revoke_and_unmap_for_retry(state, revision, &view.view);
+                    continue 'attempt;
+                }
+            }
+            if remapped {
+                view.view.queue_resize();
+                if !view_may_reveal(state, revision, *id, view) {
+                    revoke_and_unmap_for_retry(state, revision, &view.view);
+                    continue 'attempt;
+                }
+                view.view.queue_draw();
+                if !view_may_reveal(state, revision, *id, view) {
+                    revoke_and_unmap_for_retry(state, revision, &view.view);
+                    continue 'attempt;
+                }
+            }
+            // Input is the final surface enabled. All mapping, geometry,
+            // paint and redraw calls have settled under exact checks before
+            // this point; revalidate immediately around the setter too.
+            if !view_may_reveal(state, revision, *id, view) {
+                revoke_and_unmap_for_retry(state, revision, &view.view);
+                continue 'attempt;
+            }
+            if !view.view.is_sensitive() {
+                view.view.set_sensitive(true);
+            }
+            if !view_may_reveal(state, revision, *id, view) {
+                revoke_and_unmap_for_retry(state, revision, &view.view);
+                continue 'attempt;
             }
         }
         if state
@@ -413,6 +508,37 @@ fn revision_is_current(state: &Rc<RefCell<State>>, revision: u64) -> bool {
     state
         .try_borrow()
         .is_ok_and(|state| state.revision == revision)
+}
+
+fn parked_x(child_width: i32) -> Option<i32> {
+    if child_width <= 0 {
+        return None;
+    }
+    // Park entirely to the left. A positive offscreen coordinate contributes
+    // to GtkFixed's preferred width and can grow the composition root; the
+    // right edge at -1 is clipped without changing the root requisition.
+    child_width.checked_neg()?.checked_sub(1)
+}
+
+fn revoke_and_unmap_for_retry(
+    state: &Rc<RefCell<State>>,
+    revision: u64,
+    view: &webkit2gtk::WebView,
+) -> bool {
+    // Do not return early when native re-entry supersedes `revision`: this is
+    // a terminal fail-closed transition for the stale snapshot. Re-read after
+    // every GTK call, and finish with a second mapping barrier so a nested
+    // newer sync cannot leave the outer stale surface mapped. The caller then
+    // retries from the authoritative revision immediately.
+    view.set_sensitive(false);
+    let after_sensitivity = revision_is_current(state, revision);
+    view.set_child_visible(false);
+    let after_unmap = revision_is_current(state, revision);
+    view.set_opacity(0.0);
+    let after_opacity = revision_is_current(state, revision);
+    view.set_child_visible(false);
+    let after_final_unmap = revision_is_current(state, revision);
+    after_sensitivity && after_unmap && after_opacity && after_final_unmap
 }
 
 fn view_may_reveal(state: &Rc<RefCell<State>>, revision: u64, id: ItemId, view: &HostView) -> bool {
@@ -454,16 +580,21 @@ fn conceal_views_until_retry(state: &Rc<RefCell<State>>) {
     // A GTK frame can be painted before the idle retry. Once immediate
     // convergence is exhausted, no stale tab may remain opaque beneath newer
     // browser chrome; the privileged chrome surface is the fail-closed backing.
-    let Some(views) = state
-        .try_borrow()
-        .ok()
-        .map(|state| state.views.values().cloned().collect::<Vec<_>>())
-    else {
+    let Some((revision, views)) = state.try_borrow().ok().map(|state| {
+        (
+            state.revision,
+            state.views.values().cloned().collect::<Vec<_>>(),
+        )
+    }) else {
         return;
     };
     for view in views {
-        if view.view.opacity() != 0.0 {
-            view.view.set_opacity(0.0);
+        // The already-scheduled authoritative retry remaps only expected
+        // panes. Until then, prefer a short compositing-surface interruption
+        // over one frame of stale paint or page-owned input.
+        let _ = revoke_and_unmap_for_retry(state, revision, &view.view);
+        if view.view.is_visible() {
+            view.view.hide();
         }
     }
 }
@@ -531,4 +662,220 @@ fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, radius: f64
         1.5 * std::f64::consts::PI,
     );
     cr.close_path();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gtk::prelude::ContainerExtManual;
+
+    #[test]
+    fn parking_coordinate_places_the_complete_child_left_of_the_root() {
+        assert_eq!(parked_x(720), Some(-721));
+        assert_eq!(parked_x(1), Some(-2));
+        assert_eq!(parked_x(i32::MAX), Some(i32::MIN));
+        assert_eq!(parked_x(0), None);
+        assert_eq!(parked_x(-1), None);
+    }
+
+    #[test]
+    fn concealment_revokes_input_before_paint_and_mapping() {
+        let source = include_str!("stage.rs");
+        let exclude = source
+            .split("pub fn exclude_unstaged")
+            .nth(1)
+            .and_then(|source| source.split("pub fn remove_view").next())
+            .expect("unstaged concealment body");
+        let sensitivity = exclude
+            .find("widget.set_sensitive(false)")
+            .expect("input revocation");
+        let opacity = exclude
+            .find("widget.set_opacity(0.0)")
+            .expect("paint concealment");
+        let child_visibility = exclude
+            .find("widget.set_child_visible(false)")
+            .expect("mapping concealment");
+        let hide = exclude.find("widget.hide()").expect("ordinary hide");
+        assert!(sensitivity < child_visibility);
+        assert!(child_visibility < opacity);
+        assert!(opacity < hide);
+
+        let sync_conceal = source
+            .split("// Fail closed before any geometry or paint work")
+            .nth(1)
+            .and_then(|source| {
+                source
+                    .split("// Keep provisional current-layout widgets mapped")
+                    .next()
+            })
+            .expect("synchronous stage concealment pass");
+        let sensitivity = sync_conceal
+            .find("view.view.set_sensitive(false)")
+            .expect("stage input revocation");
+        let mapping = sync_conceal
+            .find("view.view.set_child_visible(false)")
+            .expect("stage mapping barrier");
+        assert!(sensitivity < mapping);
+        let sensitivity_reentry = &sync_conceal[sensitivity..mapping];
+        assert!(sensitivity_reentry.contains("revoke_and_unmap_for_retry"));
+
+        let revoke = source
+            .split("fn revoke_and_unmap_for_retry")
+            .nth(1)
+            .and_then(|source| source.split("fn view_may_reveal").next())
+            .expect("fail-closed unmapping helper");
+        assert!(
+            revoke.find("view.set_sensitive(false)").unwrap()
+                < revoke.find("view.set_child_visible(false)").unwrap()
+        );
+        assert!(
+            revoke.find("view.set_child_visible(false)").unwrap()
+                < revoke.find("view.set_opacity(0.0)").unwrap()
+        );
+        assert_eq!(revoke.matches("view.set_child_visible(false)").count(), 2);
+
+        let pending = source
+            .split("for (id, view, pane, mapped) in &placements")
+            .nth(1)
+            .and_then(|source| {
+                source
+                    .split("for (id, view, pane, mapped) in &placements")
+                    .next()
+            })
+            .expect("pending mapped-surface pass");
+        assert!(
+            pending
+                .find("fixed.move_(&view.view, parked_x, 0)")
+                .unwrap()
+                < pending.find("view.view.set_size_request").unwrap()
+        );
+        assert!(
+            pending.find("view.view.set_size_request").unwrap()
+                < pending.find("view.view.set_child_visible(true)").unwrap()
+        );
+
+        let reveal = source
+            .split("for (id, view, pane, mapped) in &placements")
+            .nth(2)
+            .and_then(|source| source.split("if state").next())
+            .expect("exact presentation reveal pass");
+        let input = reveal
+            .rfind("view.view.set_sensitive(true)")
+            .expect("final input enablement");
+        assert!(reveal.rfind("view.view.queue_draw()").unwrap() < input);
+        assert!(reveal[..input].rfind("view_may_reveal").is_some());
+        assert!(reveal[input..].find("view_may_reveal").is_some());
+    }
+
+    #[test]
+    #[ignore = "requires a native GTK display; Linux CI runs native GTK tests under Xvfb"]
+    fn stage_parks_pending_views_and_hidden_children_survive_ancestor_show_all() {
+        gtk::init().expect("GTK display");
+        let application = gtk::Application::new(
+            Some("dev.zephium.native-stage-test"),
+            gtk::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .expect("register GTK test application");
+
+        let window = gtk::ApplicationWindow::new(&application);
+        window.set_default_size(960, 720);
+        let fixed = gtk::Fixed::new();
+        let chrome = gtk::DrawingArea::new();
+        chrome.set_size_request(960, 720);
+        fixed.put(&chrome, 0, 0);
+        let context = webkit2gtk::WebContext::new_ephemeral();
+        let content = webkit2gtk::WebView::with_context(&context);
+        fixed.put(&content, 240, 0);
+        let sibling = webkit2gtk::WebView::with_context(&context);
+        fixed.put(&sibling, 240, 360);
+        window.add(&fixed);
+        window.show_all();
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+
+        let id = ItemId::from(7);
+        let sibling_id = ItemId::from(8);
+        let permit = Arc::new(AtomicBool::new(false));
+        let sibling_permit = Arc::new(AtomicBool::new(false));
+        let stage = Stage::new(fixed.clone(), 8.0);
+        {
+            let mut state = stage.state.borrow_mut();
+            state.views.insert(
+                id,
+                HostView {
+                    view: content.clone(),
+                    presentation_permit: permit.clone(),
+                },
+            );
+            state.views.insert(
+                sibling_id,
+                HostView {
+                    view: sibling.clone(),
+                    presentation_permit: sibling_permit.clone(),
+                },
+            );
+        }
+
+        let restored_split = Pane::Branch {
+            axis: zephium_core::split::Axis::Col,
+            ratio: 0.5,
+            a: Box::new(Pane::Leaf(id)),
+            b: Box::new(Pane::Leaf(sibling_id)),
+        };
+        assert!(stage.apply(
+            Some(Rect::new(240.0, 0.0, 720.0, 720.0)),
+            Some(restored_split),
+            &[id, sibling_id],
+        ));
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        let parked: i32 = fixed.child_property(&content, "x");
+        let sibling_parked: i32 = fixed.child_property(&sibling, "x");
+        assert_eq!(parked, -721);
+        assert_eq!(sibling_parked, parked);
+        assert!(content.is_visible());
+        assert!(content.is_child_visible());
+        assert!(!content.is_sensitive());
+        assert_eq!(content.opacity(), 0.0);
+        assert!(sibling.is_visible());
+        assert!(sibling.is_child_visible());
+        assert!(!sibling.is_sensitive());
+        assert_eq!(sibling.opacity(), 0.0);
+
+        permit.store(true, Ordering::Release);
+        sibling_permit.store(true, Ordering::Release);
+        assert!(stage.set_ready(id));
+        assert!(stage.set_ready(sibling_id));
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        let presented_x: i32 = fixed.child_property(&content, "x");
+        assert_eq!(presented_x, 240);
+        assert!(content.is_sensitive());
+        assert_eq!(content.opacity(), 1.0);
+        let sibling_presented_x: i32 = fixed.child_property(&sibling, "x");
+        let sibling_presented_y: i32 = fixed.child_property(&sibling, "y");
+        assert_eq!(sibling_presented_x, 240);
+        assert!(sibling_presented_y > 0);
+        assert!(sibling.is_sensitive());
+        assert_eq!(sibling.opacity(), 1.0);
+
+        assert!(stage.apply(None, None, &[]));
+        window.show_all();
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        assert!(!content.is_child_visible());
+        assert!(!content.is_mapped());
+        assert!(!content.is_sensitive());
+        assert_eq!(content.opacity(), 0.0);
+        assert!(!sibling.is_child_visible());
+        assert!(!sibling.is_mapped());
+        assert!(!sibling.is_sensitive());
+        assert_eq!(sibling.opacity(), 0.0);
+    }
 }
