@@ -85,6 +85,8 @@ jobs:
 
   rust:
     runs-on: ubuntu-22.04
+    env:
+      CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -112,6 +114,9 @@ jobs:
       - name: Enforce advisory-exception owners and expiry
         run: cargo xtask check-advisory-exceptions
 
+      - name: Enforce native-adapter sources and fixture provenance
+        run: cargo xtask check-native-adapter-locks
+
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-nextest@0.9.137,cargo-machete@0.9.2,cargo-deny@0.20.2
@@ -122,6 +127,11 @@ jobs:
 
       - name: Format vendored Wry security adapter directly
         run: cargo fmt --manifest-path vendor/wry/Cargo.toml -- --check
+
+      - name: Format vendored Tauri native adapters directly
+        run: |
+          cargo fmt --manifest-path vendor/tauri-runtime-wry/Cargo.toml -- --check
+          cargo fmt --manifest-path vendor/tauri/Cargo.toml -- --check
 
       - name: cargo check
         run: cargo check --all-targets --locked
@@ -145,6 +155,16 @@ jobs:
           cargo clippy --manifest-path vendor/wry/Cargo.toml
           --locked --lib -- -D warnings
 
+      - name: Clippy vendored Tauri Runtime Wry adapter directly
+        run: |
+          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api -- -D warnings
+          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --lib --features macos-private-api -- -D warnings
+
+      - name: Clippy vendored Tauri policy adapter directly
+        run: |
+          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta" -- -D warnings
+          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --lib --features "macos-private-api,specta" -- -D warnings
+
       - name: Unused crates (advisory)
         run: cargo machete
         continue-on-error: true
@@ -158,6 +178,11 @@ jobs:
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
+      - name: Test vendored Tauri native adapters directly
+        run: |
+          cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api
+          cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta"
+
       - name: Bindings drift
         run: git diff --exit-code frame/src/ipc/bindings.ts
 
@@ -168,6 +193,8 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -207,6 +234,16 @@ jobs:
           cargo clippy --manifest-path vendor/wry/Cargo.toml
           --locked --lib -- -D warnings
 
+      - name: Clippy vendored Tauri Runtime Wry adapter directly
+        run: |
+          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api -- -D warnings
+          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --lib --features macos-private-api -- -D warnings
+
+      - name: Clippy vendored Tauri policy adapter directly
+        run: |
+          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta" -- -D warnings
+          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --lib --features "macos-private-api,specta" -- -D warnings
+
       # The desktop test binary needs the WebView2 loader at run time, which
       # plain Windows runners do not provide. macOS must run the full native
       # desktop tests, including Objective-C class/delegate registration.
@@ -227,6 +264,11 @@ jobs:
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
+      - name: Test vendored Tauri native adapters directly
+        run: |
+          cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api
+          cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta"
+
   linux-native-security:
     # Ubuntu's currently published WebKitGTK is below WSA-2026-0004's fixed
     # boundary. Fedora 44 updates-testing currently carries Fedora's signed
@@ -236,6 +278,8 @@ jobs:
     # ordinary Ubuntu job still verifies the oldest supported build ABI and
     # every platform-independent test.
     runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_DIR: target
     container:
       # Official Fedora 44 OCI index digest returned by Fedora's registry on
       # 2026-07-14. The tag is retained only for human readability.
@@ -258,6 +302,7 @@ jobs:
           dnf install -y \
             bubblewrap \
             curl \
+            dbus-daemon \
             gcc \
             gcc-c++ \
             git \
@@ -344,6 +389,55 @@ jobs:
         run: >-
           xvfb-run -a cargo test --locked -p zephium-desktop
           linux_composition_transaction -- --ignored
+
+      - name: Prove the complete Tauri Linux startup transaction
+        run: |
+          set -euo pipefail
+          cargo build --locked -p zephium-desktop --bin zephium-desktop --no-default-features
+
+          probe_root="$(mktemp -d)"
+          cleanup() {
+            rm -rf "${probe_root}"
+          }
+          trap cleanup EXIT
+          mkdir -p \
+            "${probe_root}/home" \
+            "${probe_root}/data" \
+            "${probe_root}/config" \
+            "${probe_root}/cache" \
+            "${probe_root}/runtime"
+          chmod 0700 "${probe_root}/runtime"
+
+          export HOME="${probe_root}/home"
+          export XDG_DATA_HOME="${probe_root}/data"
+          export XDG_CONFIG_HOME="${probe_root}/config"
+          export XDG_CACHE_HOME="${probe_root}/cache"
+          export XDG_RUNTIME_DIR="${probe_root}/runtime"
+          export ZEPHIUM_NATIVE_STARTUP_PROBE=1
+          log="${probe_root}/startup.log"
+
+          set +e
+          dbus-run-session -- xvfb-run -a \
+            timeout --signal=TERM --kill-after=3s 8s \
+            target/debug/zephium-desktop >"${log}" 2>&1
+          status=$?
+          set -e
+          cat "${log}"
+
+          if grep -F "startup: failed" "${log}" >/dev/null; then
+            echo "::error title=Linux startup failed::The complete native startup transaction reported a failure."
+            exit 1
+          fi
+          if ! grep -Fx \
+            "startup-probe: Linux privileged WebViews are hardened and composed" \
+            "${log}" >/dev/null; then
+            echo "::error title=Linux startup proof missing::The process never completed both privileged WebView hardening/composition transactions."
+            exit 1
+          fi
+          if [[ "${status}" -ne 124 ]]; then
+            echo "::error title=Linux startup terminated::Expected the healthy app to remain alive until the bounded probe timeout; status=${status}."
+            exit 1
+          fi
 
   coverage:
     runs-on: ubuntu-22.04

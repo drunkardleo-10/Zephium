@@ -3,18 +3,28 @@
 use std::process::{exit, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const NATIVE_ADAPTERS: [(&str, Option<&str>); 3] = [
+    ("vendor/wry/Cargo.toml", None),
+    (
+        "vendor/tauri-runtime-wry/Cargo.toml",
+        Some("macos-private-api"),
+    ),
+    ("vendor/tauri/Cargo.toml", Some("macos-private-api,specta")),
+];
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("ci") => ci(),
         Some("check-engine-floors") => check_engine_floors(),
         Some("check-release-engine-security") => check_release_engine_security(),
         Some("check-advisory-exceptions") => check_advisory_exceptions(),
+        Some("check-native-adapter-locks") => check_native_adapter_locks(),
         // Retain the old entrypoint for local automation while making it run
         // every engine-floor deadline, not only Windows.
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-native-adapter-locks|check-webview2-floor>"
             );
             exit(2);
         }
@@ -38,6 +48,210 @@ fn check_advisory_exceptions() {
         eprintln!("cargo-deny advisory exception policy failed: {error}");
         exit(1);
     }
+}
+
+fn check_native_adapter_locks() {
+    const ROOT_ADAPTERS: &[(&str, &str)] = &[
+        ("tauri", "2.11.3"),
+        ("tauri-runtime-wry", "2.11.3"),
+        ("wry", "0.55.1"),
+    ];
+    const RUNTIME_ADAPTERS: &[(&str, &str)] = &[("tauri-runtime-wry", "2.11.3"), ("wry", "0.55.1")];
+    const WRY_ADAPTERS: &[(&str, &str)] = &[("wry", "0.55.1")];
+
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for (relative, adapters) in [
+        ("Cargo.lock", ROOT_ADAPTERS),
+        ("vendor/tauri/Cargo.lock", ROOT_ADAPTERS),
+        ("vendor/tauri-runtime-wry/Cargo.lock", RUNTIME_ADAPTERS),
+        ("vendor/wry/Cargo.lock", WRY_ADAPTERS),
+    ] {
+        let path = repository.join(relative);
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            eprintln!("cannot read {}: {error}", path.display());
+            exit(1);
+        });
+        if let Err(error) = validate_native_adapter_lock(&source, adapters) {
+            eprintln!("native-adapter lock policy failed for {relative}: {error}");
+            exit(1);
+        }
+    }
+    check_tauri_fixture_blobs(&repository);
+}
+
+fn check_tauri_fixture_blobs(repository: &std::path::Path) {
+    const EXPECTED_COMMIT: &str = "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a";
+    const EXPECTED_FILES: [(&str, &str); 5] = [
+        (
+            "test/fixture/src-tauri/tauri.conf.json",
+            "f5b75e3eb0554e617a862d78194c02176c811fcd",
+        ),
+        (
+            "test/fixture/dist/index.html",
+            "698a3577914d350e1ebcd9279fe325563553ba24",
+        ),
+        (
+            "test/fixture/src-tauri/icons/icon.ico",
+            "b3636e4b22ba65db9061cd60a77b02c92022dfd6",
+        ),
+        (
+            "test/fixture/src-tauri/icons/icon.ico~dev",
+            "db7fd98204424b6b9b02fa06ad18f05c089f93b5",
+        ),
+        (
+            "test/fixture/src-tauri/icons/icon.png",
+            "a437dd51741e9e56e14b5d6024493cb2abfd5259",
+        ),
+    ];
+    let fork_root = repository.join("vendor/tauri");
+    let record_path = fork_root.join("TEST_FIXTURE.toml");
+    let source = std::fs::read_to_string(&record_path).unwrap_or_else(|error| {
+        eprintln!("cannot read {}: {error}", record_path.display());
+        exit(1);
+    });
+    let document = source.parse::<toml::Table>().unwrap_or_else(|error| {
+        eprintln!("{} is invalid TOML: {error}", record_path.display());
+        exit(1);
+    });
+    if document
+        .get("upstream_commit")
+        .and_then(toml::Value::as_str)
+        != Some(EXPECTED_COMMIT)
+    {
+        eprintln!("Tauri fixture record does not match the reviewed upstream commit");
+        exit(1);
+    }
+    let files = document
+        .get("files")
+        .and_then(toml::Value::as_array)
+        .filter(|files| files.len() == EXPECTED_FILES.len())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "Tauri fixture record must contain exactly {} files",
+                EXPECTED_FILES.len()
+            );
+            exit(1);
+        });
+    let mut seen = std::collections::HashSet::with_capacity(EXPECTED_FILES.len());
+    for file in files {
+        let file = file.as_table().unwrap_or_else(|| {
+            eprintln!("Tauri fixture record contains a non-table file entry");
+            exit(1);
+        });
+        let relative = file
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .map(std::path::Path::new)
+            .filter(|path| {
+                !path.is_absolute()
+                    && path
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+            })
+            .unwrap_or_else(|| {
+                eprintln!("Tauri fixture record contains an unsafe path");
+                exit(1);
+            });
+        let recorded = file
+            .get("git_blob")
+            .and_then(toml::Value::as_str)
+            .filter(|hash| hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .unwrap_or_else(|| {
+                eprintln!("Tauri fixture record contains an invalid Git blob identity");
+                exit(1);
+            });
+        let relative_text = relative.to_string_lossy();
+        let expected = EXPECTED_FILES
+            .iter()
+            .find_map(|(path, hash)| (*path == relative_text.as_ref()).then_some(*hash))
+            .unwrap_or_else(|| {
+                eprintln!("unexpected Tauri fixture path {relative_text}");
+                exit(1);
+            });
+        if !seen.insert(relative_text.into_owned()) {
+            eprintln!("duplicate Tauri fixture path {}", relative.display());
+            exit(1);
+        }
+        if recorded != expected {
+            eprintln!(
+                "Tauri fixture record assigns {recorded} to {}, expected {expected}",
+                relative.display()
+            );
+            exit(1);
+        }
+        let path = fork_root.join(relative);
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            eprintln!("cannot inspect {}: {error}", path.display());
+            exit(1);
+        });
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            eprintln!("Tauri fixture {} is not a regular file", path.display());
+            exit(1);
+        }
+        let output = Command::new("git")
+            .arg("hash-object")
+            .arg(&path)
+            .output()
+            .unwrap_or_else(|error| {
+                eprintln!("cannot hash {}: {error}", path.display());
+                exit(1);
+            });
+        let actual = std::str::from_utf8(&output.stdout)
+            .ok()
+            .map(str::trim)
+            .filter(|_| output.status.success())
+            .unwrap_or_else(|| {
+                eprintln!("git hash-object failed for {}", path.display());
+                exit(1);
+            });
+        if actual != expected {
+            eprintln!(
+                "Tauri fixture {} has Git blob {actual}, expected {expected}",
+                path.display()
+            );
+            exit(1);
+        }
+    }
+}
+
+fn validate_native_adapter_lock(source: &str, required: &[(&str, &str)]) -> Result<(), String> {
+    let document = source
+        .parse::<toml::Table>()
+        .map_err(|error| format!("invalid Cargo.lock TOML: {error}"))?;
+    let packages = document
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "Cargo.lock has no package array".to_owned())?;
+
+    for &(name, expected_version) in required {
+        let matching = packages
+            .iter()
+            .filter_map(toml::Value::as_table)
+            .filter(|package| package.get("name").and_then(toml::Value::as_str) == Some(name))
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(format!(
+                "expected exactly one `{name}` package, found {}",
+                matching.len()
+            ));
+        }
+        let package = matching[0];
+        let version = package
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("`{name}` has no version"))?;
+        if version != expected_version {
+            return Err(format!(
+                "`{name}` resolved to {version}, expected {expected_version}"
+            ));
+        }
+        if package.contains_key("source") || package.contains_key("checksum") {
+            return Err(format!(
+                "`{name}` is registry/git sourced instead of the reviewed local adapter"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_advisory_exceptions(source: &str, now: u64) -> Result<(), String> {
@@ -213,19 +427,23 @@ fn check_release_engine_security() {
 }
 
 fn ci() {
+    // Excluded adapter manifests otherwise create independent multi-gigabyte
+    // target trees. Preserve an explicit caller override, but make the normal
+    // local gate share Cargo's fingerprinted workspace output.
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::env::set_var("CARGO_TARGET_DIR", target);
+    }
     check_engine_floors();
     check_advisory_exceptions();
+    check_native_adapter_locks();
     run("cargo", &["fmt", "--all", "--", "--check"]);
-    run(
-        "cargo",
-        &[
-            "fmt",
-            "--manifest-path",
-            "vendor/wry/Cargo.toml",
-            "--",
-            "--check",
-        ],
-    );
+    for (manifest, _) in NATIVE_ADAPTERS {
+        run(
+            "cargo",
+            &["fmt", "--manifest-path", manifest, "--", "--check"],
+        );
+    }
     run(
         "cargo",
         &[
@@ -251,46 +469,40 @@ fn ci() {
             "warnings",
         ],
     );
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--manifest-path",
-            "vendor/wry/Cargo.toml",
-            "--all-targets",
-            "--locked",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    );
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--manifest-path",
-            "vendor/wry/Cargo.toml",
-            "--lib",
-            "--locked",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    );
+    for (manifest, features) in NATIVE_ADAPTERS {
+        run_native_adapter_clippy(manifest, features, "--all-targets");
+        run_native_adapter_clippy(manifest, features, "--lib");
+    }
     // The desktop test suite regenerates frame/src/ipc/bindings.ts, so the
     // frontend typecheck after it doubles as a Rust/TS drift check.
     run("cargo", &["test", "--workspace"]);
-    run(
-        "cargo",
-        &[
-            "test",
-            "--manifest-path",
-            "vendor/wry/Cargo.toml",
-            "--all-targets",
-            "--locked",
-        ],
-    );
+    for (manifest, features) in NATIVE_ADAPTERS {
+        run_native_adapter_tests(manifest, features);
+    }
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+fn run_native_adapter_clippy(manifest: &str, features: Option<&str>, target: &str) {
+    let mut args = vec!["clippy", "--manifest-path", manifest, target, "--locked"];
+    if let Some(features) = features {
+        args.extend(["--features", features]);
+    }
+    args.extend(["--", "-D", "warnings"]);
+    run("cargo", &args);
+}
+
+fn run_native_adapter_tests(manifest: &str, features: Option<&str>) {
+    let mut args = vec![
+        "test",
+        "--manifest-path",
+        manifest,
+        "--all-targets",
+        "--locked",
+    ];
+    if let Some(features) = features {
+        args.extend(["--features", features]);
+    }
+    run("cargo", &args);
 }
 
 fn run(cmd: &str, args: &[&str]) {
@@ -306,7 +518,7 @@ fn run(cmd: &str, args: &[&str]) {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_advisory_exceptions;
+    use super::{validate_advisory_exceptions, validate_native_adapter_lock};
 
     #[test]
     fn advisory_exceptions_require_owner_and_short_live_expiry() {
@@ -330,6 +542,35 @@ ignore = [{ id = "RUSTSEC-2026-0001", reason = "owner=security; expires=2026-01-
         )
         .unwrap_err()
         .contains("expired"));
+    }
+
+    #[test]
+    fn native_adapter_locks_require_exact_local_packages() {
+        let local = r#"
+version = 4
+
+[[package]]
+name = "tauri"
+version = "2.11.3"
+
+[[package]]
+name = "tauri-runtime-wry"
+version = "2.11.3"
+"#;
+        let required = &[("tauri", "2.11.3"), ("tauri-runtime-wry", "2.11.3")];
+        assert!(validate_native_adapter_lock(local, required).is_ok());
+
+        let registry = format!(
+            "{local}\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        );
+        assert!(validate_native_adapter_lock(&registry, required)
+            .unwrap_err()
+            .contains("registry/git sourced"));
+
+        let duplicate = format!("{local}\n[[package]]\nname = \"tauri\"\nversion = \"2.11.3\"\n");
+        assert!(validate_native_adapter_lock(&duplicate, required)
+            .unwrap_err()
+            .contains("exactly one"));
     }
 
     #[test]

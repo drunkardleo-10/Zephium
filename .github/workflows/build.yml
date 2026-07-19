@@ -651,12 +651,19 @@ jobs:
           test "${#executables[@]}" -eq 1
 
           scan_root="${RUNNER_TEMP}/zephium-linux-sbom-payload"
-          mkdir -p "${scan_root}/installed" "${scan_root}/build-manifests/wry" \
+          mkdir -p "${scan_root}/installed" \
+            "${scan_root}/build-manifests/tauri" \
+            "${scan_root}/build-manifests/tauri-runtime-wry" \
+            "${scan_root}/build-manifests/wry" \
             "${scan_root}/build-manifests/javascript/root" \
             "${scan_root}/build-manifests/javascript/desktop" \
             "${scan_root}/build-manifests/javascript/frame"
           cp -a "${RUNNER_TEMP}/zephium-rpm-payload/." "${scan_root}/installed/"
           cp Cargo.toml Cargo.lock "${scan_root}/build-manifests/"
+          cp vendor/tauri/Cargo.toml vendor/tauri/Cargo.lock \
+            "${scan_root}/build-manifests/tauri/"
+          cp vendor/tauri-runtime-wry/Cargo.toml vendor/tauri-runtime-wry/Cargo.lock \
+            "${scan_root}/build-manifests/tauri-runtime-wry/"
           cp vendor/wry/Cargo.toml vendor/wry/Cargo.lock \
             "${scan_root}/build-manifests/wry/"
           cp pnpm-lock.yaml package.json "${scan_root}/build-manifests/javascript/root/"
@@ -1137,11 +1144,15 @@ jobs:
           $javascriptRoot = Join-Path $manifestRoot "javascript"
           New-Item -ItemType Directory -Path `
             $manifestRoot, `
+            (Join-Path $manifestRoot "tauri"), `
+            (Join-Path $manifestRoot "tauri-runtime-wry"), `
             (Join-Path $manifestRoot "wry"), `
             (Join-Path $javascriptRoot "root"), `
             (Join-Path $javascriptRoot "desktop"), `
             (Join-Path $javascriptRoot "frame") | Out-Null
           Copy-Item Cargo.toml, Cargo.lock -Destination $manifestRoot
+          Copy-Item vendor/tauri/Cargo.toml, vendor/tauri/Cargo.lock -Destination (Join-Path $manifestRoot "tauri")
+          Copy-Item vendor/tauri-runtime-wry/Cargo.toml, vendor/tauri-runtime-wry/Cargo.lock -Destination (Join-Path $manifestRoot "tauri-runtime-wry")
           Copy-Item vendor/wry/Cargo.toml, vendor/wry/Cargo.lock -Destination (Join-Path $manifestRoot "wry")
           Copy-Item pnpm-lock.yaml, package.json -Destination (Join-Path $javascriptRoot "root")
           Copy-Item desktop/package.json -Destination (Join-Path $javascriptRoot "desktop")
@@ -1481,7 +1492,10 @@ jobs:
           cp "target/${TARGET}/release/bundle/zephium-apple-audit.txt" "${public}/Zephium-${RELEASE_VERSION}-macos-${ARCH}-audit.txt"
 
           scan_root="${RUNNER_TEMP}/zephium-macos-sbom-payload"
-          mkdir -p "${scan_root}/installed" "${scan_root}/build-manifests/wry" \
+          mkdir -p "${scan_root}/installed" \
+            "${scan_root}/build-manifests/tauri" \
+            "${scan_root}/build-manifests/tauri-runtime-wry" \
+            "${scan_root}/build-manifests/wry" \
             "${scan_root}/build-manifests/javascript/root" \
             "${scan_root}/build-manifests/javascript/desktop" \
             "${scan_root}/build-manifests/javascript/frame"
@@ -1501,6 +1515,10 @@ jobs:
           trap - EXIT
 
           cp Cargo.toml Cargo.lock "${scan_root}/build-manifests/"
+          cp vendor/tauri/Cargo.toml vendor/tauri/Cargo.lock \
+            "${scan_root}/build-manifests/tauri/"
+          cp vendor/tauri-runtime-wry/Cargo.toml vendor/tauri-runtime-wry/Cargo.lock \
+            "${scan_root}/build-manifests/tauri-runtime-wry/"
           cp vendor/wry/Cargo.toml vendor/wry/Cargo.lock \
             "${scan_root}/build-manifests/wry/"
           cp pnpm-lock.yaml package.json "${scan_root}/build-manifests/javascript/root/"

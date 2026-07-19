@@ -13,6 +13,16 @@ updates:
     directory: /vendor/wry
     schedule:
       interval: weekly
+  - package-ecosystem: cargo
+    # Tauri's policy fork is excluded and owns an independent validation graph.
+    directory: /vendor/tauri
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    # The runtime adapter is independently locked and validated on every OS.
+    directory: /vendor/tauri-runtime-wry
+    schedule:
+      interval: weekly
   - package-ecosystem: npm
     # pnpm-lock.yaml is owned by the repository-root workspace and covers
     # both frame/ and desktop/. Updating only /frame would miss the Tauri CLI
