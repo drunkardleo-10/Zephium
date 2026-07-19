@@ -2533,6 +2533,13 @@ pub fn run() {
             // the normal application without rebuilding the native views.
             panel_window.navigate(app_url.clone())?;
             window.navigate(app_url)?;
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if std::env::var("ZEPHIUM_NATIVE_STARTUP_PROBE").as_deref() == Ok("1") {
+                // CI accepts this marker only after both privileged WebViews
+                // exist, their deny-by-default GTK policy/composition has
+                // completed, and both trusted navigations were admitted.
+                eprintln!("startup-probe: Linux privileged WebViews are hardened and composed");
+            }
             Ok(())
             })();
 
@@ -2913,10 +2920,22 @@ mod tests {
         let panel_webview = setup
             .find("let panel_builder = tauri::WebviewWindowBuilder::new")
             .expect("panel privileged WebView construction");
+        let panel_navigation = setup
+            .find("panel_window.navigate(app_url.clone())?")
+            .expect("hardened panel navigation");
+        let main_navigation = setup
+            .find("window.navigate(app_url)?")
+            .expect("hardened main navigation");
+        let linux_startup_probe = setup
+            .find("startup-probe: Linux privileged WebViews are hardened and composed")
+            .expect("post-hardening Linux startup probe");
         assert!(engine_install < startup_engine_owner);
         assert!(startup_engine_owner < shell_owner);
         assert!(shell_owner < engine_transfer);
         assert!(shell_owner < panel_webview);
+        assert!(panel_webview < panel_navigation);
+        assert!(panel_navigation < main_navigation);
+        assert!(main_navigation < linux_startup_probe);
         assert!(!setup.contains("app.manage(shutdown.clone())"));
 
         let run_event = production
