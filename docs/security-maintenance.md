@@ -11,7 +11,7 @@ The release security owner reviews all three native-engine channels at least
 weekly and again immediately before freezing a release commit. A second
 maintainer reviews every floor change used for a signed artifact. The review
 must happen sooner when Apple, Microsoft, WebKitGTK, RustSec, npm, a supported
-distribution, or the Wry project publishes a security notice.
+distribution, or the Tauri or Wry projects publish a security notice.
 
 Current deadlines are encoded next to their evidence in:
 
@@ -99,12 +99,15 @@ Registry availability is different from a vulnerability result. A network or
 registry failure should be retried from the controlled release environment;
 it must not be converted into a passing audit.
 
-## Wry fork maintenance
+## Native-boundary fork maintenance
 
-The in-tree Wry fork is a native security adapter and therefore part of
-Zephium's trusted computing base. Monitor upstream security releases and the
-files touched by every upstream change. Follow `vendor/wry/REBASE.md` for every
-update; a version-only bump or blind merge is prohibited.
+The in-tree Tauri, Tauri Runtime Wry, and Wry forks are narrow native security
+adapters and therefore part of Zephium's trusted computing base. Monitor
+upstream security releases and the files touched by every upstream change.
+Follow the `REBASE.md` in each fork for every update; a version-only bump or
+blind merge is prohibited. Tauri and Tauri Runtime Wry share an upstream
+repository and commit, but their complete deltas, lockfiles, and validation
+results remain independently reviewable.
 
 Before a stable release, all native-platform checks must run on the immutable
 candidate commit. Passing macOS tests does not substitute for Windows or Linux,

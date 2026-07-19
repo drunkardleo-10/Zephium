@@ -13,10 +13,10 @@ installer host and retain the verification evidence. Signed update metadata is
 not an automatic updater; the client trust root and monotonic sequence store
 must land first.
 
-Engine-floor, dependency-advisory, and Wry-fork review procedures live in
-`docs/security-maintenance.md`. A release failure caused by an expired review
-or a new advisory is never resolved by weakening the gate or extending a date
-without repeating that review.
+Engine-floor, dependency-advisory, and native-boundary fork review procedures
+live in `docs/security-maintenance.md`. A release failure caused by an expired
+review or a new advisory is never resolved by weakening the gate or extending
+a date without repeating that review.
 
 ## Repository and environment policy
 

@@ -481,13 +481,18 @@ metadata, are distinct from browsing traffic. They require purpose-built bounded
 components with explicit source, redirect, proxy, integrity, retention, and shutdown
 policies; they must not restore a generic fetch capability for page-controlled URLs.
 
-**Dependency policy.** Wry is vendored from the immutable upstream revision recorded in
-`vendor/wry/UPSTREAM.md`. Relative to that revision, Zephium's source patch covers
-constructing WebKitGTK contexts with process swapping, enabling/asserting the sandbox
-before WebView creation, allowing an incognito view to use only an explicitly ephemeral
-supplied context (including related-view construction), and the documented Windows
-staged-construction/IPC/callback hardening. The direct Wry dependency is exact-versioned, and Cargo source
-policy rejects unknown registries/git sources and requires revision-pinned git
+**Dependency policy.** Tauri, Tauri Runtime Wry, and Wry are vendored from the immutable
+upstream revisions recorded in their respective `vendor/*/UPSTREAM.md` files. The Tauri
+patch preserves pathless ephemeral storage for implicit Linux incognito WebViews and
+rejects contradictory explicit persistent storage before touching the filesystem. The
+runtime patch acknowledges native construction before publishing a detached handle and
+propagates the exact failure instead of creating ghost runtime state. Relative to Wry's
+recorded revision, its patch covers constructing WebKitGTK contexts with process
+swapping, enabling/asserting the sandbox before WebView creation, allowing an incognito
+view to use only an explicitly ephemeral supplied context (including related-view
+construction), and the documented Windows staged-construction/IPC/callback hardening.
+The direct Tauri and Wry dependencies are exact-versioned, and Cargo source policy
+rejects unknown registries/git sources and requires revision-pinned git
 dependencies. CI treats frontend high-severity audits and Cargo
 license/advisory/source policy as gates. Every external GitHub Action is pinned to a
 40-character commit and weekly action updates are configured. This reduces supply-chain
