@@ -1,0 +1,24 @@
+schema = 1
+upstream_repository = "https://github.com/tauri-apps/tauri"
+upstream_commit = "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"
+reason = "the crates.io package excludes /test, but upstream lib unit tests compile-time include this normal application fixture"
+
+[[files]]
+path = "test/fixture/src-tauri/tauri.conf.json"
+git_blob = "f5b75e3eb0554e617a862d78194c02176c811fcd"
+
+[[files]]
+path = "test/fixture/dist/index.html"
+git_blob = "698a3577914d350e1ebcd9279fe325563553ba24"
+
+[[files]]
+path = "test/fixture/src-tauri/icons/icon.ico"
+git_blob = "b3636e4b22ba65db9061cd60a77b02c92022dfd6"
+
+[[files]]
+path = "test/fixture/src-tauri/icons/icon.ico~dev"
+git_blob = "db7fd98204424b6b9b02fa06ad18f05c089f93b5"
+
+[[files]]
+path = "test/fixture/src-tauri/icons/icon.png"
+git_blob = "a437dd51741e9e56e14b5d6024493cb2abfd5259"

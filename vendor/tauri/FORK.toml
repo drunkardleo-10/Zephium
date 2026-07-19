@@ -1,0 +1,51 @@
+schema = 1
+fork = "Zephium Tauri policy adapter"
+reviewed_on = "2026-07-19"
+production_status = "pre-production; native packaged tests remain required"
+
+[upstream]
+repository = "https://github.com/tauri-apps/tauri"
+version = "2.11.3"
+commit = "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"
+path = "crates/tauri"
+
+[reproducibility]
+standalone_manifest = "Cargo.toml"
+standalone_lockfile = "Cargo.lock"
+application_lockfile = "../../Cargo.lock"
+standalone_patches = ["../tauri-runtime-wry", "../wry"]
+
+[[patch_sets]]
+name = "Linux ephemeral-incognito data-directory policy"
+paths = ["src/error.rs", "src/manager/webview.rs", "src/webview/mod.rs", "src/webview/webview_window.rs"]
+invariant = "an implicit data directory is never attached to an incognito Linux WebView, and an explicit persistent directory is rejected before filesystem creation"
+
+[[patch_sets]]
+name = "standalone native-adapter composition"
+paths = ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".gitignore"]
+invariant = "standalone gates build the same reviewed Tauri Runtime Wry and Wry forks as the application, and restore upstream's self dev-dependency omitted from the published normalized manifest so upstream unit tests resolve their generated tauri alias"
+
+[[patch_sets]]
+name = "current Specta API compatibility"
+paths = ["Cargo.toml", "Cargo.lock", "src/lib.rs"]
+invariant = "optional Specta integration is exact-pinned to the application's reviewed rc.25 graph with its production-required std support explicit, uses the non-deprecated Types registry API, and remains warning-free under strict adapter linting"
+
+[[patch_sets]]
+name = "exact upstream unit-test fixture restoration"
+paths = ["TEST_FIXTURE.toml", "test/fixture", ".gitattributes"]
+invariant = "every restored fixture file has the Git blob identity recorded for the same immutable upstream commit"
+
+[release_gates]
+standalone_fmt = "cargo fmt --manifest-path vendor/tauri/Cargo.toml -- --check"
+standalone_check = "cargo check --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features macos-private-api,specta"
+standalone_test = "cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features macos-private-api,specta"
+standalone_clippy = "cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features macos-private-api,specta -- -D warnings"
+standalone_release = "cargo check --manifest-path vendor/tauri/Cargo.toml --locked --release --features macos-private-api,specta"
+workspace_check = "cargo check --workspace --locked --all-targets"
+workspace_clippy = "cargo clippy --workspace --locked --all-targets -- -D warnings"
+native_platforms = ["windows", "macos", "linux"]
+
+[maintenance]
+procedure = "REBASE.md"
+minimum_reviewers = 2
+update_policy = "complete upstream diff and explicit disposition of every patch set"
