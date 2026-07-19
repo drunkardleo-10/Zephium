@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "desktop", "xtask"]
-exclude = ["vendor/wry"]
+exclude = ["vendor/tauri", "vendor/tauri-runtime-wry", "vendor/wry"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,7 +17,7 @@ zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
 zephium-store = { path = "crates/zephium-store", version = "=0.1.0" }
 zephium-app = { path = "crates/zephium-app", version = "=0.1.0" }
 
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "=2.11.3", features = ["macos-private-api"] }
 tauri-build = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
@@ -39,11 +39,13 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 proptest = "1"
 tempfile = "3"
 
-# `vendor/wry` starts from the exact upstream revision documented alongside the
-# vendored source and is maintained as Zephium's auditable native-security
-# adapter. Keeping it in-tree makes callback, prompt, teardown, profile, and
-# Linux process-isolation policy reproducible without relying on a mutable fork.
+# These native-boundary crates start from the exact upstream revisions recorded
+# alongside their source. Keeping the surgical adapters in-tree makes Tauri
+# construction policy and Wry's callback, prompt, teardown, profile, and Linux
+# process-isolation policy reproducible without relying on mutable forks.
 [patch.crates-io]
+tauri = { path = "vendor/tauri" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 wry = { path = "vendor/wry" }
 
 [profile.release]
