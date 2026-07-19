@@ -1005,13 +1005,22 @@ impl Default for WebViewAttributes<'_> {
 impl WebViewAttributes<'_> {
   /// Whether native construction must begin behind the presentation barrier.
   ///
-  /// WebKitGTK cannot start an untrusted child unmapped without risking a
-  /// permanently missing compositing surface. Its adapter uses this fact to
-  /// keep the widget mapped but fully transparent before parenting, initial
-  /// navigation, or `show_all`. Other backends use their native hidden state.
+  /// WebKitGTK keeps a guarded child unmapped through construction, then lets
+  /// the embedder's presentation stage perform its first map at validated
+  /// offscreen geometry. Other backends use their native hidden state.
   #[cfg(any(gtk, test))]
   fn guards_initial_presentation(&self) -> bool {
     self.navigation_presentation_guard.is_some()
+  }
+
+  #[cfg(any(gtk, test))]
+  fn maps_during_initial_construction(&self) -> bool {
+    self.visible && !self.guards_initial_presentation()
+  }
+
+  #[cfg(any(gtk, test))]
+  fn focuses_during_initial_construction(&self) -> bool {
+    self.focused && !self.guards_initial_presentation()
   }
 }
 
@@ -1640,6 +1649,12 @@ impl<'a> WebViewBuilder<'a> {
   /// it should synchronously revoke the embedder's reveal permit without
   /// entering native UI code. The embedder must call [`WebView::set_visible`]
   /// only after it has acknowledged the matching trusted-chrome state.
+  ///
+  /// On Linux, this fork additionally revokes GTK mapping, opacity, and input.
+  /// A guarded view starts unmapped, and `set_visible(true)` alone deliberately
+  /// cannot restore every revoked surface. The embedder must own a native GTK
+  /// presentation stage that maps offscreen first, then restores paint and
+  /// input only after exact navigation attribution.
   pub fn with_navigation_presentation_guard(mut self, guard: impl Fn() + 'static) -> Self {
     self.attrs.navigation_presentation_guard = Some(Box::new(guard));
     self
@@ -3017,42 +3032,233 @@ mod tests {
 
   #[test]
   fn navigation_guard_requires_initial_presentation_concealment() {
-    let ordinary = WebViewBuilder::new();
+    let ordinary = WebViewBuilder::new().with_visible(true).with_focused(true);
     assert!(!ordinary.attrs.guards_initial_presentation());
+    assert!(ordinary.attrs.maps_during_initial_construction());
+    assert!(ordinary.attrs.focuses_during_initial_construction());
 
-    let guarded = WebViewBuilder::new().with_navigation_presentation_guard(|| {});
+    let hidden = WebViewBuilder::new()
+      .with_visible(false)
+      .with_focused(false);
+    assert!(!hidden.attrs.maps_during_initial_construction());
+    assert!(!hidden.attrs.focuses_during_initial_construction());
+
+    let guarded = WebViewBuilder::new()
+      .with_visible(true)
+      .with_focused(true)
+      .with_navigation_presentation_guard(|| {});
     assert!(guarded.attrs.guards_initial_presentation());
+    assert!(!guarded.attrs.maps_during_initial_construction());
+    assert!(!guarded.attrs.focuses_during_initial_construction());
   }
 
   #[test]
-  fn webkitgtk_conceals_guarded_construction_before_parenting_navigation_and_mapping() {
+  fn webkitgtk_keeps_guarded_construction_unmapped_until_embedder_stage() {
     let source = include_str!("webkitgtk/mod.rs");
     let constructor = source
       .split("pub fn new_gtk<W>(")
       .nth(1)
+      .and_then(|source| source.split("fn create_webview(").next())
       .expect("WebKitGTK constructor");
-    let conceal = constructor
-      .find("if attributes.guards_initial_presentation()")
+    let policy = constructor
+      .find("let guards_initial_presentation = attributes.guards_initial_presentation();")
+      .expect("retained construction presentation policy");
+    let mapping_policy = constructor
+      .find("let maps_during_initial_construction = attributes.maps_during_initial_construction();")
+      .expect("retained construction mapping policy");
+    let focus_policy = constructor
+      .find(
+        "let focuses_during_initial_construction = attributes.focuses_during_initial_construction();",
+      )
+      .expect("retained construction focus policy");
+    let conceal = constructor[mapping_policy..]
+      .find("if guards_initial_presentation {")
+      .map(|offset| mapping_policy + offset)
       .expect("construction presentation guard");
+    let sensitivity = constructor[conceal..]
+      .find("webview.set_sensitive(false)")
+      .map(|offset| conceal + offset)
+      .expect("construction-time input revocation");
+    let child_visibility = constructor[conceal..]
+      .find("webview.set_child_visible(false)")
+      .map(|offset| conceal + offset)
+      .expect("construction-time mapping barrier");
     let opacity = constructor[conceal..]
       .find("webview.set_opacity(0.0)")
       .map(|offset| conceal + offset)
-      .expect("construction-time transparent surface");
+      .expect("construction-time paint revocation");
+    let hide = constructor[conceal..]
+      .find("webview.hide()")
+      .map(|offset| conceal + offset)
+      .expect("construction-time ordinary visibility revocation");
     let parenting = constructor
       .find("Self::add_to_container(&webview")
       .expect("WebKitGTK parenting");
+    let post_parent = constructor[parenting..]
+      .find("if guards_initial_presentation {")
+      .map(|offset| parenting + offset)
+      .expect("post-parenting presentation guard");
+    let post_parent_barrier = constructor[post_parent..]
+      .find("webview.set_child_visible(false)")
+      .map(|offset| post_parent + offset)
+      .expect("post-parenting mapping barrier");
+    let post_parent_hide = constructor[post_parent..]
+      .find("webview.hide()")
+      .map(|offset| post_parent + offset)
+      .expect("post-parenting ordinary visibility revocation");
     let navigation = constructor
       .find("web_context.load_uri(w.webview.clone()")
       .expect("WebKitGTK initial navigation");
-    let mapping = constructor
+    let mapping_policy_gate = constructor
+      .find("if maps_during_initial_construction {")
+      .expect("non-guarded construction mapping gate");
+    let mapping = constructor[mapping_policy_gate..]
       .find("w.webview.show_all()")
+      .map(|offset| mapping_policy_gate + offset)
       .expect("WebKitGTK mapping");
+    let focus_policy_gate = constructor
+      .find("if focuses_during_initial_construction {")
+      .expect("non-guarded construction focus gate");
+    let focus = constructor[focus_policy_gate..]
+      .find("w.webview.grab_focus()")
+      .map(|offset| focus_policy_gate + offset)
+      .expect("WebKitGTK focus request");
 
-    assert!(conceal <= opacity);
-    assert!(opacity < parenting);
-    assert!(opacity < navigation);
-    assert!(opacity < mapping);
-    assert!(constructor.contains("if attributes.visible {\n      w.webview.show_all();"));
+    assert!(policy < mapping_policy);
+    assert!(mapping_policy < focus_policy);
+    assert!(focus_policy < conceal);
+    assert!(conceal < sensitivity);
+    assert!(sensitivity < child_visibility);
+    assert!(child_visibility < opacity);
+    assert!(opacity < hide);
+    assert!(hide < parenting);
+    assert!(parenting < post_parent_barrier);
+    assert!(post_parent_barrier < post_parent_hide);
+    assert!(post_parent_hide < navigation);
+    assert!(navigation < mapping_policy_gate);
+    assert!(mapping_policy_gate < mapping);
+    assert!(mapping < focus_policy_gate);
+    assert!(focus_policy_gate < focus);
+    assert_eq!(constructor.matches("w.webview.show_all()").count(), 1);
+    assert_eq!(constructor.matches("w.webview.grab_focus()").count(), 1);
+    assert!(!constructor.contains("if attributes.visible {\n      w.webview.show_all();"));
+    assert!(!constructor.contains("if attributes.focused {\n      w.webview.grab_focus();"));
+  }
+
+  #[test]
+  fn webkitgtk_x11_wrapper_does_not_map_a_guarded_constructor() {
+    let source = include_str!("webkitgtk/mod.rs");
+    let constructor = source
+      .split("fn new_x11<W: HasWindowHandle>(")
+      .nth(1)
+      .and_then(|source| source.split("fn create_container_x11_window(").next())
+      .expect("WebKitGTK X11 constructor");
+    let policy = constructor
+      .find("let guards_initial_presentation = attributes.guards_initial_presentation();")
+      .expect("X11 retained construction policy");
+    let build = constructor
+      .find("Self::new_gtk(&vbox, attributes, pl_attrs)")
+      .expect("inner GTK construction");
+    let mapping_gate = constructor
+      .find("if !guards_initial_presentation {")
+      .expect("guarded X11 mapping gate");
+    let mapping = constructor[mapping_gate..]
+      .find("gtk_window.show_all()")
+      .map(|offset| mapping_gate + offset)
+      .expect("X11 mapping");
+
+    assert!(policy < build);
+    assert!(build < mapping_gate);
+    assert!(mapping_gate < mapping);
+    assert_eq!(
+      constructor
+        .matches("\n        gtk_window.show_all();")
+        .count(),
+      1
+    );
+  }
+
+  #[test]
+  fn webkitgtk_x11_native_child_respects_the_initial_mapping_guard() {
+    let source = include_str!("webkitgtk/mod.rs");
+    let constructor = source
+      .split("fn create_container_x11_window(")
+      .nth(1)
+      .and_then(|source| source.split("pub fn create_gtk_window(").next())
+      .expect("WebKitGTK native X11 child constructor");
+    let mapping_gate = constructor
+      .find("if attributes.maps_during_initial_construction() {")
+      .expect("native X11 initial mapping gate");
+    let mapping = constructor[mapping_gate..]
+      .find("(xlib.XMapWindow)(display, window)")
+      .map(|offset| mapping_gate + offset)
+      .expect("native X11 child mapping");
+
+    assert!(mapping_gate < mapping);
+    assert!(!constructor.contains("if attributes.visible {"));
+  }
+
+  #[test]
+  fn webkitgtk_commit_revokes_permit_input_and_paint_before_embedder_dispatch() {
+    let source = include_str!("webkitgtk/mod.rs");
+    assert!(
+      !source.contains("set_sensitive(true)"),
+      "Wry may revoke GTK input, but only the embedder's attributed stage may restore it"
+    );
+    let callback = source
+      .split("webview.connect_load_changed(move |webview, load_event| {")
+      .nth(1)
+      .and_then(|source| source.split("let failed_handler").next())
+      .expect("bounded WebKitGTK load-changed callback");
+    let commit = callback
+      .find("let (transition, native_committed) = match load_event {")
+      .expect("raw native commit marker");
+    let guarded = &callback[commit..];
+    let native_commit_arm = guarded
+      .find("LoadEvent::Committed => (")
+      .expect("raw native committed arm");
+    let native_commit_arm_end = guarded[native_commit_arm..]
+      .find("LoadEvent::Finished => (")
+      .map(|offset| native_commit_arm + offset)
+      .expect("end of raw native committed arm");
+    let native_gate = guarded
+      .find("if native_committed {")
+      .expect("raw native commit concealment gate");
+    let permit = guarded.find("guard();").expect("permit revocation");
+    let sensitivity = guarded
+      .find("webview.set_sensitive(false)")
+      .expect("input revocation");
+    let child_visibility = guarded
+      .find("webview.set_child_visible(false)")
+      .expect("mapping revocation");
+    let opacity = guarded
+      .find("webview.set_opacity(0.0)")
+      .expect("paint concealment");
+    let hide = guarded.find("webview.hide()").expect("ordinary GTK hide");
+    let final_child_visibility = guarded[hide..]
+      .find("webview.set_child_visible(false)")
+      .map(|offset| hide + offset)
+      .expect("terminal mapping barrier");
+    let dispatch = guarded
+      .find("changed_handler(NavigationEvent")
+      .expect("embedder navigation dispatch");
+
+    assert!(native_commit_arm < native_gate);
+    assert!(guarded[native_commit_arm..native_commit_arm_end].contains("true,"));
+    assert!(native_gate < permit);
+    assert!(permit < sensitivity);
+    assert!(sensitivity < child_visibility);
+    assert!(child_visibility < opacity);
+    assert!(opacity < hide);
+    assert!(hide < final_child_visibility);
+    assert!(final_child_visibility < dispatch);
+    assert_eq!(
+      guarded[..dispatch]
+        .matches("webview.set_child_visible(false)")
+        .count(),
+      2
+    );
+    assert!(!guarded[..dispatch].contains("Some((_, NavigationEventPhase::Committed))"));
   }
 
   #[test]

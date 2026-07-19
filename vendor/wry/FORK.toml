@@ -54,13 +54,14 @@ name = "identity-bearing main-frame navigation lifecycle"
 paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_navigation_delegate.rs"]
 
 [[patch_sets]]
-name = "commit-time presentation guard and bounded native title snapshot"
-paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs"]
+name = "commit-time presentation and input guard plus bounded native title snapshot"
+paths = ["src/lib.rs", "src/web_context.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs"]
 
 [release_gates]
 standalone_fmt = "cargo fmt --manifest-path vendor/wry/Cargo.toml -- --check"
 standalone_check = "cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets"
 standalone_clippy = "cargo clippy --manifest-path vendor/wry/Cargo.toml --locked --all-targets -- -D warnings"
+linux_guarded_presentation = "xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked --lib web_context::tests::guarded_webkitgtk_construction_commit_and_first_map_are_native_and_fail_closed -- --ignored --exact"
 native_platforms = ["windows", "macos", "linux"]
 packaged_hostile_tests = "required on supported Windows, macOS, and Fedora release artifacts"
 external_native_boundary_audit = "required before stable"

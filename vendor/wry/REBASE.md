@@ -63,7 +63,7 @@ platforms:
 - raw-page IPC, custom protocols, script evaluation, host objects, and injected
   scripts;
 - navigation identities, redirects, popup/new-window handling, and the
-  commit-to-presentation barrier;
+  commit-to-presentation/input barrier;
 - permission, authentication, certificate, file, print, media, fullscreen,
   preview, dialog, download, and drag/drop surfaces;
 - per-profile persistent/ephemeral stores, cookies, caches, and process models;
@@ -115,6 +115,16 @@ cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 cargo clippy --manifest-path vendor/wry/Cargo.toml --locked --all-targets -- -D warnings
 cargo check --manifest-path vendor/wry/Cargo.toml --locked --release
+```
+
+On the supported Fedora image, also run the ignored native presentation gate
+under Xvfb:
+
+```sh
+xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked \
+  --lib \
+  web_context::tests::guarded_webkitgtk_construction_commit_and_first_map_are_native_and_fail_closed \
+  -- --ignored --exact
 ```
 
 Then run the locked workspace check/test/Clippy/release matrix. Add fault

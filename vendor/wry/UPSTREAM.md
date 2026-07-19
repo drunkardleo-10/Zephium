@@ -117,13 +117,21 @@ Its security-relevant deltas currently enforce these invariants:
   emitted together at `didCommit`. `WKWebView.URL` is never treated as a
   provisional-navigation URL. All retained identity state is bounded and
   native-policy admission remains fail-closed when the bound is exhausted.
-- The same identity callback owns a commit-time presentation guard. Before the
-  embedder sees `Committed`, WebView2 hides both controller and child HWND,
-  WebKitGTK keeps its mapped compositor surface transparent, and WKWebView
-  hides the native view. The embedder's synchronous callback can revoke its
-  own per-view permit before those native calls pump re-entrant layout. Wry
-  also exposes a bounded current-document title query so the embedder can
-  attribute title only after its exact navigation lifecycle is complete.
+- The same identity callback owns a commit-time presentation and input guard.
+  Before the embedder sees `Committed`, WebView2 hides both controller and
+  child HWND, WebKitGTK revokes mapping, paint, and input, and WKWebView hides
+  the native view. A guarded WebKitGTK child also remains unmapped throughout
+  construction; Zephium's stage performs its first map at validated offscreen
+  geometry and is the only code allowed to reveal it after exact attribution.
+  The embedder's synchronous callback can revoke its own per-view permit before
+  those native calls pump re-entrant layout. Wry also exposes a bounded
+  current-document title query so the embedder can attribute title only after
+  its exact navigation lifecycle is complete.
+- Linux CI constructs a guarded WebKitGTK view inside an already-mapped
+  `GtkFixed`, drives a real local document through commit while mapping, paint,
+  focus, and input remain revoked, then proves the Stage-compatible offscreen
+  first-map and attributed reveal produce a rendered native snapshot. Source
+  ordering tests supplement this native gate; they do not replace it.
 
 The standalone `Cargo.lock` is intentional. Fork CI invokes this manifest with
 `--locked` so it cannot silently resolve a graph different from the reviewed

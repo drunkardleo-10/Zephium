@@ -325,6 +325,13 @@ mod navigation_sequence_tests {
     sequence.next = 0;
     assert_eq!(sequence.started(), None);
   }
+
+  #[test]
+  fn commit_without_a_started_sequence_has_no_synthetic_identity() {
+    let mut sequence = GtkNavigationSequence::default();
+    assert_eq!(sequence.committed(), None);
+    assert_eq!(sequence.finished(), None);
+  }
 }
 
 mod drag_drop;
@@ -433,16 +440,18 @@ impl InnerWebView {
     let (gtk_window, vbox) = Self::create_gtk_window(raw, x11_window)?;
 
     let visible = attributes.visible;
+    let guards_initial_presentation = attributes.guards_initial_presentation();
 
     Self::new_gtk(&vbox, attributes, pl_attrs).map(|mut w| {
-      // for some reason, if the webview starts as hidden,
-      // we will need about 3 calls to `webview.set_visible`
-      // with alternating value.
-      // calling gtk_window.show_all() then hiding it again
-      // seems to fix the issue.
-      gtk_window.show_all();
-      if !visible {
-        let _ = w.set_visible(false);
+      // Ordinary initially-hidden X11 views need this show/hide cycle or
+      // later visibility changes can fail. A presentation-guarded view must
+      // instead stay genuinely unmapped until the embedder has parked it;
+      // applying the workaround here would expose its on-screen allocation.
+      if !guards_initial_presentation {
+        gtk_window.show_all();
+        if !visible {
+          let _ = w.set_visible(false);
+        }
       }
 
       w.x11.replace(X11Data {
@@ -486,7 +495,7 @@ impl InnerWebView {
       return Err(Error::X11WindowCreationFailed);
     }
 
-    if attributes.visible {
+    if attributes.maps_during_initial_construction() {
       unsafe { (xlib.XMapWindow)(display, window) };
     }
 
@@ -526,6 +535,13 @@ impl InnerWebView {
   where
     W: IsA<gtk::Container>,
   {
+    // `attach_handlers` moves the callback into the native signal closure.
+    // Retain the construction policy separately so no later visibility path
+    // can accidentally infer it from an already-consumed Option.
+    let guards_initial_presentation = attributes.guards_initial_presentation();
+    let maps_during_initial_construction = attributes.maps_during_initial_construction();
+    let focuses_during_initial_construction = attributes.focuses_during_initial_construction();
+
     // default_context allows us to create a scoped context on-demand
     let mut default_context;
     let web_context = if attributes.incognito {
@@ -587,14 +603,17 @@ impl InnerWebView {
 
     let webview = Self::create_webview(web_context, &attributes, &pl_attrs);
 
-    // A guarded untrusted view must remain mapped so WebKitGTK creates and
-    // maintains its compositing surface, but it must not paint the engine's
-    // construction-time blank document. Conceal immediately after allocation,
-    // before the widget is parented, initial navigation starts, or either GTK
-    // construction path calls `show_all`. The host's exact navigation permit
-    // is the only later authority that may restore opacity.
-    if attributes.guards_initial_presentation() {
+    // A transparent mapped WebKitGTK child can still publish a black accelerated
+    // layer and intercept input. A guarded untrusted view therefore starts
+    // insensitive, behind GTK's mapping barrier, transparent, and ordinarily
+    // hidden. Do this immediately after allocation; every GTK setter can pump
+    // callbacks. The embedder's exact attributed stage performs the first
+    // fully-offscreen map after construction.
+    if guards_initial_presentation {
+      webview.set_sensitive(false);
+      webview.set_child_visible(false);
       webview.set_opacity(0.0);
+      webview.hide();
     }
 
     // Transparent
@@ -632,6 +651,12 @@ impl InnerWebView {
     web_context.register_automation(webview.clone());
 
     let is_in_fixed_parent = Self::add_to_container(&webview, container, &attributes);
+    if guards_initial_presentation {
+      // Parenting or a re-entrant ancestor operation must not make a guarded
+      // child mappable at its construction-time (on-screen) bounds.
+      webview.set_child_visible(false);
+      webview.hide();
+    }
 
     #[cfg(any(debug_assertions, feature = "devtools"))]
     let is_inspector_open = Self::attach_inspector_handlers(&webview);
@@ -692,11 +717,11 @@ impl InnerWebView {
       w.webview.load_html(&html, None);
     }
 
-    if attributes.visible {
+    if maps_during_initial_construction {
       w.webview.show_all();
     }
 
-    if attributes.focused {
+    if focuses_during_initial_construction {
       w.webview.grab_focus();
     }
 
@@ -812,30 +837,48 @@ impl InnerWebView {
       let changed_handler = navigation_event_handler.clone();
       webview.connect_load_changed(move |webview, load_event| {
         let mut sequence = changed_sequence.get();
-        let transition = match load_event {
-          LoadEvent::Started => sequence
-            .started()
-            .map(|id| (id, NavigationEventPhase::Started)),
-          LoadEvent::Redirected => sequence
-            .redirected()
-            .map(|id| (id, NavigationEventPhase::Redirected)),
-          LoadEvent::Committed => sequence
-            .committed()
-            .map(|id| (id, NavigationEventPhase::Committed)),
-          LoadEvent::Finished => sequence
-            .finished()
-            .map(|id| (id, NavigationEventPhase::Finished)),
-          _ => None,
+        let (transition, native_committed) = match load_event {
+          LoadEvent::Started => (
+            sequence
+              .started()
+              .map(|id| (id, NavigationEventPhase::Started)),
+            false,
+          ),
+          LoadEvent::Redirected => (
+            sequence
+              .redirected()
+              .map(|id| (id, NavigationEventPhase::Redirected)),
+            false,
+          ),
+          LoadEvent::Committed => (
+            sequence
+              .committed()
+              .map(|id| (id, NavigationEventPhase::Committed)),
+            true,
+          ),
+          LoadEvent::Finished => (
+            sequence
+              .finished()
+              .map(|id| (id, NavigationEventPhase::Finished)),
+            false,
+          ),
+          _ => (None, false),
         };
         changed_sequence.set(sequence);
-        if let (Some(guard), Some((_, NavigationEventPhase::Committed))) =
-          (navigation_presentation_guard.as_ref(), transition)
-        {
-          // Keep the already-mapped WebKit compositing surface but make the
-          // newly committed document non-painting before embedder dispatch.
-          // Revoke the reveal permit first because set_opacity can pump GTK.
-          guard();
-          webview.set_opacity(0.0);
+        if native_committed {
+          if let Some(guard) = navigation_presentation_guard.as_ref() {
+            // Conceal every native commit even when the synthetic identity is
+            // missing or exhausted. The unattributed document has no legal
+            // reveal path. Revoke the permit before native calls, then remove
+            // input, mapping and paint before embedder dispatch. Every setter
+            // may pump GTK; the final barrier dominates nested stale layout.
+            guard();
+            webview.set_sensitive(false);
+            webview.set_child_visible(false);
+            webview.set_opacity(0.0);
+            webview.hide();
+            webview.set_child_visible(false);
+          }
         }
         if let (Some((id, phase)), Some(url)) = (transition, bounded_webview_uri(webview)) {
           changed_handler(NavigationEvent { id, phase, url });
