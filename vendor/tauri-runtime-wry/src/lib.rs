@@ -125,7 +125,7 @@ pub use tao::platform::macos::{
 use tauri_runtime::ActivationPolicy;
 
 use std::{
-  cell::RefCell,
+  cell::{Cell, RefCell},
   collections::{
     hash_map::Entry::{Occupied, Vacant},
     BTreeMap, HashMap, HashSet,
@@ -197,6 +197,10 @@ impl WindowIdStore {
     if ids.get(w).copied() == Some(expected) {
       ids.remove(w);
     }
+  }
+
+  fn clear(&self) {
+    self.0.lock().unwrap().clear();
   }
 }
 
@@ -516,8 +520,125 @@ pub enum ActiveTracingSpan {
   },
 }
 
-#[derive(Debug)]
-pub struct WindowsStore(pub RefCell<BTreeMap<WindowId, WindowWrapper>>);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ExitDrainState {
+  #[default]
+  Open,
+  Draining,
+  Drained,
+  Failed,
+}
+
+enum ExitDrainAdmission {
+  Started(BTreeMap<WindowId, WindowWrapper>),
+  InProgress,
+  Complete,
+  Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitDrainOutcome {
+  Complete,
+  InProgress,
+  Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoopDestroyedMode {
+  IterationBoundary,
+  Terminal,
+}
+
+#[derive(Debug, Default)]
+pub struct WindowsStore {
+  windows: RefCell<BTreeMap<WindowId, WindowWrapper>>,
+  exit_drain: Cell<ExitDrainState>,
+}
+
+impl WindowsStore {
+  fn accepts_creation(&self) -> bool {
+    self.exit_drain.get() == ExitDrainState::Open
+  }
+
+  fn begin_exit_drain(&self) -> ExitDrainAdmission {
+    match self.exit_drain.get() {
+      ExitDrainState::Open => {
+        self.exit_drain.set(ExitDrainState::Draining);
+        match self.windows.try_borrow_mut() {
+          Ok(mut windows) => ExitDrainAdmission::Started(std::mem::take(&mut *windows)),
+          Err(_) => {
+            self.exit_drain.set(ExitDrainState::Failed);
+            ExitDrainAdmission::Failed
+          }
+        }
+      }
+      ExitDrainState::Draining => ExitDrainAdmission::InProgress,
+      ExitDrainState::Drained => ExitDrainAdmission::Complete,
+      ExitDrainState::Failed => ExitDrainAdmission::Failed,
+    }
+  }
+
+  fn finish_exit_drain(&self) {
+    if self.exit_drain.get() == ExitDrainState::Draining {
+      self.exit_drain.set(ExitDrainState::Drained);
+    } else {
+      self.exit_drain.set(ExitDrainState::Failed);
+    }
+  }
+
+  fn insert_window(&self, id: WindowId, window: WindowWrapper) -> Result<()> {
+    if !self.accepts_creation() {
+      return Err(Error::EventLoopClosed);
+    }
+    let mut windows = self
+      .windows
+      .try_borrow_mut()
+      .map_err(|_| Error::FailedToSendMessage)?;
+    if !self.accepts_creation() {
+      return Err(Error::EventLoopClosed);
+    }
+    windows.insert(id, window);
+    Ok(())
+  }
+
+  fn insert_webview(&self, window_id: WindowId, webview: WebviewWrapper) -> Result<()> {
+    if !self.accepts_creation() {
+      return Err(Error::EventLoopClosed);
+    }
+    let mut windows = self
+      .windows
+      .try_borrow_mut()
+      .map_err(|_| Error::FailedToSendMessage)?;
+    if !self.accepts_creation() {
+      return Err(Error::EventLoopClosed);
+    }
+    let window = windows.get_mut(&window_id).ok_or(Error::WindowNotFound)?;
+    if window.inner.is_none() {
+      return Err(Error::WindowNotFound);
+    }
+    window.webviews.push(webview);
+    window.has_children.store(true, Ordering::Relaxed);
+    Ok(())
+  }
+}
+
+fn commit_window_to_registry(
+  windows: &WindowsStore,
+  window_id_map: &WindowIdStore,
+  window_id: WindowId,
+  window: WindowWrapper,
+) -> Result<()> {
+  let tao_id = window
+    .inner
+    .as_ref()
+    .map(|window| window.id())
+    .ok_or(Error::CreateWindow)?;
+  if let Err(error) = windows.insert_window(window_id, window) {
+    window_id_map.remove_if_matches(&tao_id, window_id);
+    return Err(error);
+  }
+  Ok(())
+}
 
 // SAFETY: we ensure this type is only used on the main thread.
 #[allow(clippy::non_send_fields_in_send_ty)]
@@ -2704,6 +2825,75 @@ impl WindowWrapper {
   pub fn label(&self) -> &str {
     &self.label
   }
+
+  fn teardown_for_exit(mut self) {
+    // Exit is terminal: release application callbacks first so their captured
+    // dispatchers cannot keep this now-detached wrapper graph alive. The
+    // registry has already been emptied, so native teardown reentry observes
+    // no logical window and cannot dispatch through one of these listeners.
+    self
+      .window_event_listeners
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .clear();
+    self
+      .focused_webview
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .take();
+
+    // WebView2/WKWebView/WebKitGTK children must release their controller and
+    // callback ownership while the native parent still exists. The default
+    // field-drop order releases `inner` first, which is unsuitable for an
+    // explicit whole-runtime exit transaction.
+    self.webviews.clear();
+    #[cfg(windows)]
+    self.surface.take();
+    self.inner.take();
+  }
+}
+
+fn drain_windows_for_exit(
+  windows: &WindowsStore,
+  window_id_map: &WindowIdStore,
+) -> ExitDrainOutcome {
+  match windows.begin_exit_drain() {
+    ExitDrainAdmission::Started(detached) => {
+      // Revoke event routing before any native destructor can pump callbacks.
+      // New construction is rejected by the sealed WindowsStore, and captured
+      // dispatcher cycles now retain only the already-empty registry.
+      window_id_map.clear();
+      for window in detached.into_values() {
+        window.teardown_for_exit();
+      }
+      windows.finish_exit_drain();
+      if windows.exit_drain.get() == ExitDrainState::Drained {
+        ExitDrainOutcome::Complete
+      } else {
+        ExitDrainOutcome::Failed
+      }
+    }
+    ExitDrainAdmission::Complete => ExitDrainOutcome::Complete,
+    // A nested exit request must not overtake the outer native drain. An
+    // unexpected RefCell conflict is sticky and fail-closed; the embedding
+    // watchdog remains responsible for bounded unsuccessful termination.
+    ExitDrainAdmission::InProgress => ExitDrainOutcome::InProgress,
+    ExitDrainAdmission::Failed => ExitDrainOutcome::Failed,
+  }
+}
+
+fn drain_outcome_allows_loop_exit(outcome: ExitDrainOutcome) -> bool {
+  // `InProgress` means a reentrant request is nested inside the exact drain
+  // that will authorize the outer exit. `Failed` cannot be repaired safely,
+  // but must still converge so an embedder can report/quarantine the failed
+  // native proof instead of hanging its process indefinitely.
+  outcome != ExitDrainOutcome::InProgress
+}
+
+fn prepare_event_loop_control_flow(control_flow: &mut ControlFlow) {
+  if !matches!(*control_flow, ControlFlow::ExitWithCode(_)) {
+    *control_flow = ControlFlow::Wait;
+  }
 }
 
 impl fmt::Debug for WindowWrapper {
@@ -3010,7 +3200,7 @@ impl<T: UserEvent> Wry<T> {
     let main_thread_id = current_thread().id();
     let web_context = WebContextStore::default();
 
-    let windows = Arc::new(WindowsStore(RefCell::new(BTreeMap::default())));
+    let windows = Arc::new(WindowsStore::default());
     let window_id_map = WindowIdStore::default();
 
     let context = Context {
@@ -3086,6 +3276,9 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
     pending: PendingWindow<T, Self>,
     after_window_creation: Option<F>,
   ) -> Result<DetachedWindow<T, Self>> {
+    if !self.context.main_thread.windows.accepts_creation() {
+      return Err(Error::EventLoopClosed);
+    }
     let label = pending.label.clone();
     let window_id = self.context.next_window_id();
     let (webview_id, use_https_scheme) = pending
@@ -3113,13 +3306,12 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
       context: self.context.clone(),
     };
 
-    self
-      .context
-      .main_thread
-      .windows
-      .0
-      .borrow_mut()
-      .insert(window_id, window);
+    commit_window_to_registry(
+      &self.context.main_thread.windows,
+      &self.context.window_id_map,
+      window_id,
+      window,
+    )?;
 
     let detached_webview = webview_id.map(|id| {
       let webview = DetachedWebview {
@@ -3149,16 +3341,22 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
     window_id: WindowId,
     pending: PendingWebview<T, Self>,
   ) -> Result<DetachedWebview<T, Self>> {
+    if !self.context.main_thread.windows.accepts_creation() {
+      return Err(Error::EventLoopClosed);
+    }
     let label = pending.label.clone();
 
-    let window = self
-      .context
-      .main_thread
-      .windows
-      .0
-      .borrow()
-      .get(&window_id)
-      .map(|w| (w.inner.clone(), w.focused_webview.clone()));
+    let windows = &self.context.main_thread.windows;
+    let window = windows
+      .accepts_creation()
+      .then(|| {
+        windows
+          .windows
+          .borrow()
+          .get(&window_id)
+          .map(|w| (w.inner.clone(), w.focused_webview.clone()))
+      })
+      .flatten();
     if let Some((Some(window), focused_webview)) = window {
       let window_id_wrapper = Arc::new(Mutex::new(window_id));
 
@@ -3174,17 +3372,7 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
         focused_webview,
       )?;
 
-      if let Some(w) = self
-        .context
-        .main_thread
-        .windows
-        .0
-        .borrow_mut()
-        .get_mut(&window_id)
-      {
-        w.webviews.push(webview);
-        w.has_children.store(true, Ordering::Relaxed);
-      }
+      windows.insert_webview(window_id, webview)?;
 
       let dispatcher = WryWebviewDispatcher {
         window_id: window_id_wrapper,
@@ -3314,6 +3502,9 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
           event,
           event_loop,
           control_flow,
+          // Tao reports `LoopDestroyed` whenever this bounded `run_return`
+          // call yields. That marks an iteration boundary, not app teardown.
+          LoopDestroyedMode::IterationBoundary,
           EventLoopIterationContext {
             callback: &mut callback,
             windows: windows.clone(),
@@ -3388,6 +3579,7 @@ where
       event,
       event_loop,
       control_flow,
+      LoopDestroyedMode::Terminal,
       EventLoopIterationContext {
         callback: &mut callback,
         window_id_map: window_id_map.clone(),
@@ -3455,7 +3647,7 @@ fn handle_user_message<T: UserEvent>(
       }
     },
     Message::Window(id, window_message) => {
-      let w = windows.0.borrow().get(&id).map(|w| {
+      let w = windows.windows.borrow().get(&id).map(|w| {
         (
           w.inner.clone(),
           w.webviews.clone(),
@@ -3784,16 +3976,20 @@ fn handle_user_message<T: UserEvent>(
         target_os = "openbsd"
       ))]
       if let WebviewMessage::Reparent(new_parent_window_id, tx) = webview_message {
-        let webview_handle = windows.0.borrow_mut().get_mut(&window_id).and_then(|w| {
-          w.webviews
-            .iter()
-            .position(|w| w.id == webview_id)
-            .map(|webview_index| w.webviews.remove(webview_index))
-        });
+        let webview_handle = windows
+          .windows
+          .borrow_mut()
+          .get_mut(&window_id)
+          .and_then(|w| {
+            w.webviews
+              .iter()
+              .position(|w| w.id == webview_id)
+              .map(|webview_index| w.webviews.remove(webview_index))
+          });
 
         if let Some(webview) = webview_handle {
           if let Some((Some(new_parent_window), new_parent_window_webviews)) = windows
-            .0
+            .windows
             .borrow_mut()
             .get_mut(&new_parent_window_id)
             .map(|w| (w.inner.clone(), &mut w.webviews))
@@ -3839,7 +4035,7 @@ fn handle_user_message<T: UserEvent>(
         return;
       }
 
-      let webview_handle = windows.0.borrow().get(&window_id).map(|w| {
+      let webview_handle = windows.windows.borrow().get(&window_id).map(|w| {
         (
           w.inner.clone(),
           w.webviews.iter().find(|w| w.id == webview_id).cloned(),
@@ -3911,12 +4107,16 @@ fn handle_user_message<T: UserEvent>(
           }
           WebviewMessage::Close => {
             #[allow(unknown_lints, clippy::manual_inspect)]
-            windows.0.borrow_mut().get_mut(&window_id).map(|window| {
-              if let Some(i) = window.webviews.iter().position(|w| w.id == webview.id) {
-                window.webviews.remove(i);
-              }
-              window
-            });
+            windows
+              .windows
+              .borrow_mut()
+              .get_mut(&window_id)
+              .map(|window| {
+                if let Some(i) = window.webviews.iter().position(|w| w.id == webview.id) {
+                  window.webviews.remove(i);
+                }
+                window
+              });
           }
           WebviewMessage::SetBounds(bounds) => {
             let bounds: RectWrapper = bounds.into();
@@ -4153,40 +4353,45 @@ fn handle_user_message<T: UserEvent>(
     }
     Message::CreateWebview(window_id, handler, sender) => {
       let window = windows
-        .0
-        .borrow()
-        .get(&window_id)
-        .map(|w| (w.inner.clone(), w.focused_webview.clone()));
-      let created = match window {
-        Some((Some(window), focused_webview)) => {
+        .accepts_creation()
+        .then(|| {
+          windows
+            .windows
+            .borrow()
+            .get(&window_id)
+            .map(|w| (w.inner.clone(), w.focused_webview.clone()))
+        })
+        .flatten();
+      let created = match (windows.accepts_creation(), window) {
+        (true, Some((Some(window), focused_webview))) => {
           handler(&window, CreateWebviewOptions { focused_webview })
         }
-        _ => Err(Error::WindowNotFound),
+        (true, _) => Err(Error::WindowNotFound),
+        (false, _) => Err(Error::EventLoopClosed),
       };
       complete_creation(
         created,
-        |webview| {
-          let mut windows = windows.0.borrow_mut();
-          let window = windows.get_mut(&window_id).ok_or(Error::WindowNotFound)?;
-          if window.inner.is_none() {
-            return Err(Error::WindowNotFound);
-          }
-          window.webviews.push(webview);
-          window.has_children.store(true, Ordering::Relaxed);
-          Ok(())
-        },
+        |webview| windows.insert_webview(window_id, webview),
         sender,
       );
     }
-    Message::CreateWindow(window_id, handler, sender) => complete_creation(
-      handler(event_loop),
-      |window| {
-        windows.0.borrow_mut().insert(window_id, window);
-        Ok(())
-      },
-      sender,
-    ),
+    Message::CreateWindow(window_id, handler, sender) => {
+      let created = if windows.accepts_creation() {
+        handler(event_loop)
+      } else {
+        Err(Error::EventLoopClosed)
+      };
+      complete_creation(
+        created,
+        |window| commit_window_to_registry(&windows, &window_id_map, window_id, window),
+        sender,
+      );
+    }
     Message::CreateRawWindow(window_id, handler, sender) => {
+      if !windows.accepts_creation() {
+        let _ = sender.send(Err(Error::EventLoopClosed));
+        return;
+      }
       let (label, builder) = handler();
 
       #[cfg(windows)]
@@ -4195,7 +4400,7 @@ fn handle_user_message<T: UserEvent>(
       let is_window_transparent = builder.window.transparent;
 
       if let Ok(window) = builder.build(event_loop) {
-        window_id_map.insert(window.id(), window_id);
+        let window_id_admission = WindowIdAdmission::new(&window_id_map, window.id(), window_id);
 
         let window = Arc::new(window);
 
@@ -4215,7 +4420,8 @@ fn handle_user_message<T: UserEvent>(
           None
         };
 
-        windows.0.borrow_mut().insert(
+        let weak = Arc::downgrade(&window);
+        let admitted = windows.insert_window(
           window_id,
           WindowWrapper {
             label,
@@ -4232,9 +4438,17 @@ fn handle_user_message<T: UserEvent>(
             focused_webview: Default::default(),
           },
         );
-        sender.send(Ok(Arc::downgrade(&window))).unwrap();
+        match admitted {
+          Ok(()) => {
+            window_id_admission.commit();
+            let _ = sender.send(Ok(weak));
+          }
+          Err(error) => {
+            let _ = sender.send(Err(error));
+          }
+        }
       } else {
-        sender.send(Err(Error::CreateWindow)).unwrap();
+        let _ = sender.send(Err(Error::CreateWindow));
       }
     }
 
@@ -4260,6 +4474,7 @@ fn handle_event_loop<T: UserEvent>(
   event: Event<'_, Message<T>>,
   event_loop: &EventLoopWindowTarget<Message<T>>,
   control_flow: &mut ControlFlow,
+  loop_destroyed_mode: LoopDestroyedMode,
   context: EventLoopIterationContext<'_, T>,
 ) {
   let EventLoopIterationContext {
@@ -4269,9 +4484,7 @@ fn handle_event_loop<T: UserEvent>(
     #[cfg(feature = "tracing")]
     active_tracing_spans,
   } = context;
-  if *control_flow != ControlFlow::Exit {
-    *control_flow = ControlFlow::Wait;
-  }
+  prepare_event_loop_control_flow(control_flow);
 
   match event {
     Event::NewEvents(StartCause::Init) => {
@@ -4287,13 +4500,20 @@ fn handle_event_loop<T: UserEvent>(
     }
 
     Event::LoopDestroyed => {
+      if loop_destroyed_mode == LoopDestroyedMode::Terminal
+        && drain_windows_for_exit(&windows, &window_id_map) == ExitDrainOutcome::Failed
+      {
+        log::error!(
+          "native window registry could not complete its terminal drain before event-loop destruction"
+        );
+      }
       callback(RunEvent::Exit);
     }
 
     #[cfg(windows)]
     Event::RedrawRequested(id) => {
       if let Some(window_id) = window_id_map.get(&id) {
-        let mut windows_ref = windows.0.borrow_mut();
+        let mut windows_ref = windows.windows.borrow_mut();
         if let Some(window) = windows_ref.get_mut(&window_id) {
           if window.is_window_transparent {
             let background_color = window.background_color;
@@ -4317,7 +4537,7 @@ fn handle_event_loop<T: UserEvent>(
       webview_id,
       WebviewMessage::WebviewEvent(event),
     )) => {
-      let windows_ref = windows.0.borrow();
+      let windows_ref = windows.windows.borrow();
       if let Some(window) = windows_ref.get(&window_id) {
         if let Some(webview) = window.webviews.iter().find(|w| w.id == webview_id) {
           let label = webview.label.clone();
@@ -4344,7 +4564,7 @@ fn handle_event_loop<T: UserEvent>(
       WebviewMessage::SynthesizedWindowEvent(event),
     )) => {
       if let Some(event) = WindowEventWrapper::from(event).0 {
-        let windows_ref = windows.0.borrow();
+        let windows_ref = windows.windows.borrow();
         let window = windows_ref.get(&window_id);
         if let Some(window) = window {
           let label = window.label.clone();
@@ -4371,7 +4591,7 @@ fn handle_event_loop<T: UserEvent>(
     } => {
       if let Some(window_id) = window_id_map.get(&window_id) {
         {
-          let windows_ref = windows.0.borrow();
+          let windows_ref = windows.windows.borrow();
           if let Some(window) = windows_ref.get(&window_id) {
             if let Some(event) = WindowEventWrapper::parse(window, &event).0 {
               let label = window.label.clone();
@@ -4395,7 +4615,7 @@ fn handle_event_loop<T: UserEvent>(
         match event {
           #[cfg(windows)]
           TaoWindowEvent::ThemeChanged(theme) => {
-            if let Some(window) = windows.0.borrow().get(&window_id) {
+            if let Some(window) = windows.windows.borrow().get(&window_id) {
               for webview in &window.webviews {
                 let theme = match theme {
                   TaoTheme::Dark => wry::Theme::Dark,
@@ -4412,9 +4632,9 @@ fn handle_event_loop<T: UserEvent>(
             on_close_requested(callback, window_id, windows);
           }
           TaoWindowEvent::Destroyed => {
-            let removed = windows.0.borrow_mut().remove(&window_id).is_some();
+            let removed = windows.windows.borrow_mut().remove(&window_id).is_some();
             if removed {
-              let is_empty = windows.0.borrow().is_empty();
+              let is_empty = windows.windows.borrow().is_empty();
               if is_empty {
                 let (tx, rx) = channel();
                 callback(RunEvent::ExitRequested { code: None, tx });
@@ -4423,14 +4643,25 @@ fn handle_event_loop<T: UserEvent>(
                 let should_prevent = matches!(recv, Ok(ExitRequestedEventAction::Prevent));
 
                 if !should_prevent {
-                  *control_flow = ControlFlow::Exit;
+                  let outcome = drain_windows_for_exit(&windows, &window_id_map);
+                  if outcome == ExitDrainOutcome::Failed {
+                    // The loop must still converge. Zephium's post-run exact
+                    // process proof turns this ambiguous native teardown into
+                    // a non-zero exit and retains the private-data quarantine.
+                    log::error!(
+                      "native window registry failed terminal drain after last-window destruction"
+                    );
+                  }
+                  if drain_outcome_allows_loop_exit(outcome) {
+                    *control_flow = ControlFlow::Exit;
+                  }
                 }
               }
             }
           }
           TaoWindowEvent::Resized(size) => {
             if let Some((Some(window), webviews)) = windows
-              .0
+              .windows
               .borrow()
               .get(&window_id)
               .map(|w| (w.inner.clone(), w.webviews.clone()))
@@ -4466,7 +4697,16 @@ fn handle_event_loop<T: UserEvent>(
         let should_prevent = matches!(recv, Ok(ExitRequestedEventAction::Prevent));
 
         if !should_prevent {
-          *control_flow = ControlFlow::Exit;
+          let outcome = drain_windows_for_exit(&windows, &window_id_map);
+          if outcome == ExitDrainOutcome::Failed {
+            // Do not turn an impossible-to-drain RefCell state into an
+            // unbounded event-loop hang. The embedder's exact native-process
+            // proof remains responsible for making this exit unsuccessful.
+            log::error!("native window registry failed an accepted terminal drain");
+          }
+          if drain_outcome_allows_loop_exit(outcome) {
+            *control_flow = ControlFlow::ExitWithCode(code);
+          }
         }
       }
       Message::Window(id, WindowMessage::Close) => {
@@ -4512,12 +4752,12 @@ fn handle_event_loop<T: UserEvent>(
 
       // Collect the per-window listener handles and release the `windows`
       // borrow before dispatching: handlers and the `RunEvent` callback may
-      // create or close windows (`windows.0.borrow_mut()`), which would panic
+      // create or close windows (`windows.windows.borrow_mut()`), which would panic
       // the `RefCell` if we held the borrow across them. The desktop
       // `WindowEvent` branches drop the borrow before dispatching for the same
       // reason; this mobile `Resumed`/`Suspended` branch was the exception.
       let targets = windows
-        .0
+        .windows
         .borrow()
         .values()
         .map(|w| (w.label.clone(), w.window_event_listeners.clone()))
@@ -4545,7 +4785,7 @@ fn on_close_requested<'a, T: UserEvent>(
   windows: Arc<WindowsStore>,
 ) {
   let (tx, rx) = channel();
-  let windows_ref = windows.0.borrow();
+  let windows_ref = windows.windows.borrow();
   if let Some(w) = windows_ref.get(&window_id) {
     let label = w.label.clone();
     let window_event_listeners = w.window_event_listeners.clone();
@@ -4571,7 +4811,7 @@ fn on_close_requested<'a, T: UserEvent>(
 }
 
 fn on_window_close(window_id: WindowId, windows: Arc<WindowsStore>) {
-  if let Some(window_wrapper) = windows.0.borrow_mut().get_mut(&window_id) {
+  if let Some(window_wrapper) = windows.windows.borrow_mut().get_mut(&window_id) {
     window_wrapper.inner = None;
     #[cfg(windows)]
     window_wrapper.surface.take();
@@ -5047,7 +5287,7 @@ You may have it installed on another user account, but it is not available for t
         tauri_runtime::webview::NewWindowResponse::Allow => wry::NewWindowResponse::Allow,
         #[cfg(desktop)]
         tauri_runtime::webview::NewWindowResponse::Create { window_id } => {
-          let windows = &context.main_thread.windows.0;
+          let windows = &context.main_thread.windows.windows;
           let webview = windows
             .borrow()
             .get(&window_id)
@@ -5242,7 +5482,7 @@ You may have it installed on another user account, but it is not available for t
       let context_ = context.clone();
       let window_id_ = window_id.clone();
       webview_builder = webview_builder.with_on_web_content_process_terminate_handler(move || {
-        if let Ok(windows) = &context_.main_thread.windows.0.try_borrow() {
+        if let Ok(windows) = &context_.main_thread.windows.windows.try_borrow() {
           if let Some(window) = windows.get(&*window_id_.lock().unwrap()) {
             if let Some(webview) = window.webviews.iter().find(|w| w.id == id) {
               match webview.reload() {
@@ -5561,7 +5801,7 @@ fn to_tao_theme(theme: Option<Theme>) -> Option<TaoTheme> {
 #[cfg(test)]
 mod construction_tests {
   use super::*;
-  use std::{cell::Cell, sync::mpsc::TryRecvError};
+  use std::sync::mpsc::TryRecvError;
 
   #[test]
   fn completion_is_sent_only_after_successful_registry_commit() {
@@ -5662,6 +5902,64 @@ mod construction_tests {
   }
 
   #[test]
+  fn terminal_window_drain_is_exactly_once_and_reentrancy_safe() {
+    let windows = WindowsStore::default();
+    let detached = match windows.begin_exit_drain() {
+      ExitDrainAdmission::Started(detached) => detached,
+      _ => panic!("an open registry must admit its first terminal drain"),
+    };
+    assert!(detached.is_empty());
+    assert_eq!(windows.exit_drain.get(), ExitDrainState::Draining);
+    assert!(matches!(
+      windows.begin_exit_drain(),
+      ExitDrainAdmission::InProgress
+    ));
+
+    windows.finish_exit_drain();
+    assert_eq!(windows.exit_drain.get(), ExitDrainState::Drained);
+    assert!(matches!(
+      windows.begin_exit_drain(),
+      ExitDrainAdmission::Complete
+    ));
+  }
+
+  #[test]
+  fn terminal_window_drain_fails_closed_on_an_unexpected_registry_borrow() {
+    let windows = WindowsStore::default();
+    let active_borrow = windows.windows.borrow();
+    assert!(matches!(
+      windows.begin_exit_drain(),
+      ExitDrainAdmission::Failed
+    ));
+    drop(active_borrow);
+    assert_eq!(windows.exit_drain.get(), ExitDrainState::Failed);
+    assert!(matches!(
+      windows.begin_exit_drain(),
+      ExitDrainAdmission::Failed
+    ));
+    assert!(drain_outcome_allows_loop_exit(ExitDrainOutcome::Failed));
+    assert!(drain_outcome_allows_loop_exit(ExitDrainOutcome::Complete));
+    assert!(!drain_outcome_allows_loop_exit(
+      ExitDrainOutcome::InProgress
+    ));
+  }
+
+  #[test]
+  fn event_loop_preparation_preserves_every_terminal_exit_code() {
+    let mut success = ControlFlow::Exit;
+    prepare_event_loop_control_flow(&mut success);
+    assert_eq!(success, ControlFlow::ExitWithCode(0));
+
+    let mut failure = ControlFlow::ExitWithCode(73);
+    prepare_event_loop_control_flow(&mut failure);
+    assert_eq!(failure, ControlFlow::ExitWithCode(73));
+
+    let mut active = ControlFlow::Poll;
+    prepare_event_loop_control_flow(&mut active);
+    assert_eq!(active, ControlFlow::Wait);
+  }
+
+  #[test]
   fn context_creation_waits_for_native_commit_before_detaching_handles() {
     let source = include_str!("lib.rs");
     let context_impl_start = source
@@ -5744,6 +6042,121 @@ mod construction_tests {
     assert!(
       !create_webview.contains("_registered_custom_protocols.remove"),
       "fallible construction must retain potentially irreversible protocol markers"
+    );
+  }
+
+  #[test]
+  fn accepted_exit_seals_and_drains_native_windows_before_loop_exit() {
+    let source = include_str!("lib.rs");
+    let request_exit = source
+      .split_once("Message::RequestExit(code) => {")
+      .expect("event-loop exit request handler")
+      .1
+      .split_once("Message::Window(id, WindowMessage::Close)")
+      .expect("bounded event-loop exit request handler")
+      .0;
+    assert_before(
+      request_exit,
+      "callback(RunEvent::ExitRequested",
+      "drain_windows_for_exit(&windows, &window_id_map)",
+    );
+    assert_before(
+      request_exit,
+      "drain_windows_for_exit(&windows, &window_id_map)",
+      "*control_flow = ControlFlow::ExitWithCode(code)",
+    );
+    assert!(request_exit.contains("*control_flow = ControlFlow::ExitWithCode(code);"));
+    assert!(!request_exit.contains("*control_flow = ControlFlow::Exit;"));
+
+    let drain = source
+      .split_once("fn drain_windows_for_exit(")
+      .expect("terminal native-window drain")
+      .1
+      .split_once("\n#[derive(Debug, Clone)]")
+      .expect("bounded terminal native-window drain")
+      .0;
+    assert_before(drain, "begin_exit_drain()", "window_id_map.clear()");
+    assert_before(drain, "window_id_map.clear()", "window.teardown_for_exit()");
+    assert_before(
+      drain,
+      "window.teardown_for_exit()",
+      "windows.finish_exit_drain()",
+    );
+
+    let teardown = source
+      .split_once("fn teardown_for_exit(mut self)")
+      .expect("ordered WindowWrapper teardown")
+      .1
+      .split_once("\n}\n\nfn drain_windows_for_exit")
+      .expect("bounded WindowWrapper teardown")
+      .0;
+    assert_before(teardown, "window_event_listeners", "self.webviews.clear()");
+    #[cfg(windows)]
+    assert_before(teardown, "self.webviews.clear()", "self.surface.take()");
+    assert_before(teardown, "self.webviews.clear()", "self.inner.take()");
+
+    let create_window_message = source
+      .split_once("Message::CreateWindow(window_id, handler, sender) => {")
+      .expect("event-loop window construction handler")
+      .1
+      .split_once("Message::CreateRawWindow")
+      .expect("bounded event-loop window construction handler")
+      .0;
+    assert_before(
+      create_window_message,
+      "windows.accepts_creation()",
+      "handler(event_loop)",
+    );
+
+    let create_raw_window_message = source
+      .split_once("Message::CreateRawWindow(window_id, handler, sender) => {")
+      .expect("event-loop raw-window construction handler")
+      .1
+      .split_once("Message::UserEvent(_) => ()")
+      .expect("bounded event-loop raw-window construction handler")
+      .0;
+    assert_before(
+      create_raw_window_message,
+      "!windows.accepts_creation()",
+      "builder.build(event_loop)",
+    );
+  }
+
+  #[test]
+  fn run_iteration_loop_boundary_never_drains_the_native_registry() {
+    let source = include_str!("lib.rs");
+    let run_iteration = source
+      .split_once("fn run_iteration<F: FnMut(RunEvent<T>) + 'static>")
+      .expect("run_iteration implementation")
+      .1
+      .split_once("\n  fn run<F: FnMut(RunEvent<T>) + 'static>")
+      .expect("bounded run_iteration implementation")
+      .0;
+    assert!(run_iteration.contains("LoopDestroyedMode::IterationBoundary"));
+    assert!(!run_iteration.contains("LoopDestroyedMode::Terminal"));
+    assert!(!run_iteration.contains("drain_windows_for_exit"));
+
+    let make_event_handler = source
+      .split_once("fn make_event_handler<T, F>(")
+      .expect("terminal event-handler factory")
+      .1
+      .split_once("\npub struct EventLoopIterationContext")
+      .expect("bounded terminal event-handler factory")
+      .0;
+    assert!(make_event_handler.contains("LoopDestroyedMode::Terminal"));
+    assert!(!make_event_handler.contains("LoopDestroyedMode::IterationBoundary"));
+
+    let loop_destroyed = source
+      .split_once("Event::LoopDestroyed => {")
+      .expect("LoopDestroyed handler")
+      .1
+      .split_once("\n    #[cfg(windows)]")
+      .expect("bounded LoopDestroyed handler")
+      .0;
+    assert_before(
+      loop_destroyed,
+      "loop_destroyed_mode == LoopDestroyedMode::Terminal",
+      "drain_windows_for_exit(&windows, &window_id_map)",
     );
   }
 

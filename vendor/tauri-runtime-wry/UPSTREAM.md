@@ -18,6 +18,11 @@ local invariants are:
 - retained Web contexts and Linux custom-protocol registration markers are not
   described as rolled back: those native/context effects may outlive a failed
   builder stage and remain available for explicit teardown or retry; and
+- an accepted whole-application exit seals and atomically detaches the native
+  window registry before leaving the event loop, drops child WebViews before
+  their Tao parent windows, preserves the exact requested exit code, and cannot
+  be overtaken by reentrant construction or a second exit request, while the
+  synthetic `run_iteration` loop boundary never drains live windows; and
 - GTK composition lookup is fallible and a dropped getter receiver cannot
   abort the browser process.
 

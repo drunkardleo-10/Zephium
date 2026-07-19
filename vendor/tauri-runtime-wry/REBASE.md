@@ -17,14 +17,22 @@
    back only entries whose reversal is proven safe. In particular, do not
    erase retained Web contexts or Linux protocol-registration markers merely
    because later WebView construction failed.
-6. Keep the standalone Wry path patch. Regenerate this lockfile from this
+6. Preserve terminal registry draining. An accepted exit must seal admission,
+   detach the complete registry before native destruction can pump callbacks,
+   revoke Tao ID routing, drop child WebViews before their parent windows, and
+   enter `ControlFlow::ExitWithCode(code)` only after the exact-once drain
+   completes. A nested exit or unexpected registry borrow must remain
+   fail-closed. Tao also emits `LoopDestroyed` when the deprecated
+   `run_iteration` returns; that synthetic boundary must never drain live
+   windows.
+7. Keep the standalone Wry path patch. Regenerate this lockfile from this
    manifest and the workspace lockfile from the repository root; review both
    complete diffs and all changed sources and licenses.
-7. Run standalone format, locked tests, strict Clippy, and release checks on
+8. Run standalone format, locked tests, strict Clippy, and release checks on
    Windows, macOS, and supported Fedora, followed by the full workspace matrix.
    Exercise native success, injected construction failures, missing/reentrant
    parent removal, dropped callers, startup, shutdown, and renderer crashes.
-8. Update `FORK.toml` and `UPSTREAM.md` only after two maintainers have reviewed
+9. Update `FORK.toml` and `UPSTREAM.md` only after two maintainers have reviewed
    the full delta. Stable release still requires packaged cross-platform tests
    and external native-boundary review.
 

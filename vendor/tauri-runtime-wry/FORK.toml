@@ -28,6 +28,10 @@ name = "fail-closed GTK composition getters"
 paths = ["src/lib.rs"]
 
 [[patch_sets]]
+name = "transactional whole-runtime native window teardown"
+paths = ["src/lib.rs"]
+
+[[patch_sets]]
 name = "current objc2 AppKit API compatibility"
 paths = ["src/window/macos.rs"]
 
