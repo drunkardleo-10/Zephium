@@ -1,4 +1,5 @@
 mod dispatch;
+mod permits;
 mod scripts;
 
 #[cfg(test)]
@@ -21,8 +22,11 @@ use dispatch::{
     with_profile_exit, with_suspend_result,
 };
 use dispatch::{
-    with_discard_observation, with_navigation_commit, with_navigation_settlement,
-    with_renderer_exit, with_source_observation, with_title_observation,
+    with_discard_observation, with_renderer_exit, with_source_observation, with_title_observation,
+};
+use permits::{
+    navigation_callback_matches, queue_navigation_commit, queue_navigation_completion,
+    queue_navigation_failure, EventPermit, Sink,
 };
 
 use std::cell::Cell;
@@ -34,7 +38,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
@@ -180,199 +184,6 @@ fn discard_probe_identity_matches(
 
 fn bounded_title(title: &str) -> String {
     zephium_core::item::sanitize_page_title(title)
-}
-
-#[derive(Clone)]
-struct Sink(crate::EngineEventIngressSink);
-
-impl Sink {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn emit(&self, ev: EngineEvent) {
-        (self.0)(crate::EngineEventIngress::global(ev));
-    }
-
-    fn emit_for(&self, token: Arc<AtomicBool>, ev: EngineEvent) {
-        (self.0)(crate::EngineEventIngress::for_item(ev, token));
-    }
-}
-
-/// Every native WebView owns one permit identity. A normal view is bound at
-/// construction; a warm spare may be bound exactly once when it is adopted.
-/// Revocation is terminal, so a callback retained by a dropped same-id view
-/// can never acquire the token of a replacement view.
-#[derive(Clone)]
-struct EventPermit {
-    state: Arc<Mutex<EventPermitState>>,
-}
-
-enum EventPermitState {
-    #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
-    Inactive,
-    Bound(Weak<AtomicBool>),
-    Revoked,
-}
-
-impl EventPermit {
-    #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
-    fn inactive() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(EventPermitState::Inactive)),
-        }
-    }
-
-    fn bound(token: &Arc<AtomicBool>) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(EventPermitState::Bound(Arc::downgrade(token)))),
-        }
-    }
-
-    #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
-    fn bind_once(&self, token: &Arc<AtomicBool>) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match *state {
-            #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
-            EventPermitState::Inactive => {
-                *state = EventPermitState::Bound(Arc::downgrade(token));
-                true
-            }
-            EventPermitState::Bound(_) | EventPermitState::Revoked => false,
-        }
-    }
-
-    fn revoke(&self) {
-        *self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = EventPermitState::Revoked;
-    }
-
-    fn active_token(&self) -> Option<Arc<AtomicBool>> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &*state {
-            EventPermitState::Bound(token) => token
-                .upgrade()
-                .filter(|token| token.load(Ordering::Acquire)),
-            #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
-            EventPermitState::Inactive => None,
-            EventPermitState::Revoked => None,
-        }
-    }
-
-    fn same_generation(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.state, &other.state)
-    }
-
-    fn matches_token(&self, token: &Arc<AtomicBool>) -> bool {
-        self.active_token()
-            .is_some_and(|bound| Arc::ptr_eq(&bound, token))
-    }
-
-    fn allows_navigation(&self, target: &str) -> bool {
-        if !navigation::is_allowed_str(target) {
-            return false;
-        }
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &*state {
-            #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
-            EventPermitState::Inactive => target == "about:blank",
-            EventPermitState::Bound(token) => token
-                .upgrade()
-                .is_some_and(|token| token.load(Ordering::Acquire)),
-            EventPermitState::Revoked => false,
-        }
-    }
-
-    fn emit(&self, sink: &Sink, event: EngineEvent) {
-        if let Some(token) = self.active_token() {
-            sink.emit_for(token, event);
-        }
-    }
-}
-
-fn navigation_callback_matches(
-    view_permit: &EventPermit,
-    view_navigation: &NavigationEpochTracker,
-    source_permit: &EventPermit,
-    source_navigation: &NavigationEpochTracker,
-    epoch: NavigationEpoch,
-) -> bool {
-    view_permit.same_generation(source_permit)
-        && view_navigation.same_generation(source_navigation)
-        && view_navigation.is_current(epoch)
-}
-
-fn queue_navigation_commit(
-    id: ItemId,
-    permit: &EventPermit,
-    navigation: &NavigationEpochTracker,
-    epoch: NavigationEpoch,
-) {
-    if permit.active_token().is_none() {
-        return;
-    }
-    let queued_permit = permit.clone();
-    let queued_navigation = navigation.clone();
-    let admitted = with_navigation_commit(id, move |host| {
-        if host.rearm_navigation_presentation(id, &queued_permit, &queued_navigation, epoch) {
-            host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
-        }
-    });
-    if !admitted {
-        // Wry has already hidden the committed native surface before invoking
-        // this callback. Reserved globally-coalesced capacity proves ordinary
-        // overload cannot reach this branch; shutdown/sealed-host rejection
-        // terminally revokes the orphaned callback generation.
-        permit.revoke();
-        navigation.revoke();
-        eprintln!("security: committed-document presentation gate was not admitted");
-    }
-}
-
-fn queue_navigation_completion(
-    id: ItemId,
-    permit: &EventPermit,
-    navigation: &NavigationEpochTracker,
-    epoch: NavigationEpoch,
-) {
-    if permit.active_token().is_none() {
-        return;
-    }
-    let queued_permit = permit.clone();
-    let queued_navigation = navigation.clone();
-    with_navigation_settlement(id, move |host| {
-        if host.rearm_navigation_presentation(id, &queued_permit, &queued_navigation, epoch)
-            && host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch)
-        {
-            host.complete_title_attribution(id, &queued_permit, &queued_navigation, epoch);
-            host.emit_navigation_ready(id, &queued_permit, &queued_navigation, epoch);
-        }
-    });
-}
-
-fn queue_navigation_failure(
-    id: ItemId,
-    permit: &EventPermit,
-    navigation: &NavigationEpochTracker,
-    failed: NavigationEpoch,
-    restored: Option<NavigationEpoch>,
-) {
-    if permit.active_token().is_none() {
-        return;
-    }
-    let queued_permit = permit.clone();
-    let queued_navigation = navigation.clone();
-    with_navigation_settlement(id, move |host| {
-        host.settle_navigation_failure(id, &queued_permit, &queued_navigation, failed, restored);
-    });
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

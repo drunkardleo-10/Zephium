@@ -53,102 +53,6 @@ fn native_construction_reservation_is_bounded_and_released_exactly() {
 }
 
 #[test]
-fn native_event_permit_is_one_shot_and_generation_exact() {
-    let first = Arc::new(AtomicBool::new(true));
-    let replacement = Arc::new(AtomicBool::new(true));
-    let permit = EventPermit::inactive();
-    let callback_copy = permit.clone();
-
-    assert!(permit.bind_once(&first));
-    assert!(permit.matches_token(&first));
-    assert!(callback_copy.same_generation(&permit));
-    assert!(!callback_copy.bind_once(&replacement));
-    assert!(!permit.matches_token(&replacement));
-
-    permit.revoke();
-    assert!(callback_copy.active_token().is_none());
-    assert!(!permit.bind_once(&replacement));
-
-    let replacement_permit = EventPermit::bound(&replacement);
-    assert!(!replacement_permit.same_generation(&permit));
-    assert!(replacement_permit.matches_token(&replacement));
-}
-
-#[test]
-fn revoking_an_inactive_spare_is_terminal() {
-    let token = Arc::new(AtomicBool::new(true));
-    let permit = EventPermit::inactive();
-    let callback_copy = permit.clone();
-
-    assert!(permit.allows_navigation("about:blank"));
-    permit.revoke();
-
-    assert!(!callback_copy.allows_navigation("about:blank"));
-    assert!(!callback_copy.bind_once(&token));
-    assert!(permit.active_token().is_none());
-}
-
-#[test]
-fn navigation_callbacks_require_generation_tracker_and_epoch_identity() {
-    let token = Arc::new(AtomicBool::new(true));
-    let permit = EventPermit::bound(&token);
-    let callback_permit = permit.clone();
-    let navigation = NavigationEpochTracker::new();
-    let callback_navigation = navigation.clone();
-    let first = navigation
-        .begin("https://example.com/first")
-        .expect("first navigation epoch");
-
-    assert!(navigation_callback_matches(
-        &permit,
-        &navigation,
-        &callback_permit,
-        &callback_navigation,
-        first,
-    ));
-
-    let second = navigation
-        .begin("https://example.com/second")
-        .expect("second navigation epoch");
-    assert!(!navigation_callback_matches(
-        &permit,
-        &navigation,
-        &callback_permit,
-        &callback_navigation,
-        first,
-    ));
-    assert!(navigation_callback_matches(
-        &permit,
-        &navigation,
-        &callback_permit,
-        &callback_navigation,
-        second,
-    ));
-
-    // The same outer token does not make a replacement native generation
-    // or a distinct epoch tracker equivalent to the callback owner.
-    let replacement_permit = EventPermit::bound(&token);
-    assert!(!navigation_callback_matches(
-        &replacement_permit,
-        &navigation,
-        &callback_permit,
-        &callback_navigation,
-        second,
-    ));
-    let replacement_navigation = NavigationEpochTracker::new();
-    let coincident = replacement_navigation
-        .begin("https://example.com/second")
-        .expect("replacement navigation epoch");
-    assert!(!navigation_callback_matches(
-        &permit,
-        &replacement_navigation,
-        &callback_permit,
-        &callback_navigation,
-        coincident,
-    ));
-}
-
-#[test]
 fn profile_id_never_crosses_durable_and_ephemeral_storage_classes() {
     let durable_first = ProfileId::from(31);
     let ephemeral_first = ProfileId::from(32);
@@ -1103,8 +1007,9 @@ fn raw_native_views_never_request_focus_during_construction() {
 
 #[test]
 fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let completion = source
+    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
+    let completion = permits
         .split("fn queue_navigation_completion(")
         .nth(1)
         .expect("navigation completion queue")
@@ -1115,7 +1020,7 @@ fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
     assert!(completion.contains("emit_navigation_ready"));
     assert!(!completion.contains("present_navigation_epoch"));
 
-    let ready = source
+    let ready = host
         .split("fn emit_navigation_ready(")
         .nth(1)
         .expect("navigation-ready emitter")
@@ -1127,8 +1032,9 @@ fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
 
 #[test]
 fn every_identity_bearing_commit_rearms_presentation_but_history_observation_does_not() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let native_handler = source
+    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
+    let native_handler = host
         .split("builder = builder.with_navigation_event_handler")
         .nth(1)
         .expect("raw navigation identity handler")
@@ -1144,7 +1050,7 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
         .expect("bounded identity-bearing commit branch");
     assert!(committed.contains("queue_navigation_commit"));
 
-    let commit_queue = source
+    let commit_queue = permits
         .split("fn queue_navigation_commit(")
         .nth(1)
         .expect("commit presentation queue")
@@ -1154,7 +1060,7 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
     assert!(commit_queue.contains("rearm_navigation_presentation"));
     assert!(commit_queue.contains("emit_navigation_observation"));
 
-    let source_observer = source
+    let source_observer = host
         .split("let observer = match crate::platform::imp::install_navigation_observer")
         .nth(1)
         .expect("same-document source observer")
@@ -1167,7 +1073,7 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
     // Reload, history traversal, explicit navigation and page-driven
     // navigation all converge on the same native Committed transition.
     // The Wry guard hides before callback admission on all desktop ports.
-    let raw_policy = source
+    let raw_policy = host
         .split("let mut builder = builder")
         .nth(1)
         .expect("raw view policy builder")
@@ -1347,8 +1253,9 @@ fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
 
 #[test]
 fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let title_callback = source
+    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
+    let title_callback = host
         .split(".with_document_title_changed_handler")
         .nth(1)
         .expect("raw title callback")
@@ -1358,7 +1265,7 @@ fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
     assert!(title_callback.contains("with_title_observation"));
     assert!(!title_callback.contains("title_permit.emit"));
 
-    let completion = source
+    let completion = permits
         .split("fn queue_navigation_completion(")
         .nth(1)
         .expect("navigation completion queue")
@@ -1373,7 +1280,7 @@ fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
         .expect("presentation-ready event");
     assert!(title < ready);
 
-    let observed = source
+    let observed = host
         .split("fn emit_title_observation(")
         .nth(1)
         .expect("title observation gate")

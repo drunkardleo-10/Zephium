@@ -10,9 +10,10 @@ use std::sync::Arc;
 use raw_window_handle::RawWindowHandle;
 use zephium_core::ids::{ItemId, ProfileId};
 
+use super::permits::Sink;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::ParentHandle;
-use super::{EngineHost, NativeViewReservations, Sink, MAX_NATIVE_VIEW_RESOURCES};
+use super::{EngineHost, NativeViewReservations, MAX_NATIVE_VIEW_RESOURCES};
 
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
@@ -186,7 +187,7 @@ pub(crate) fn install(
             windows_cleanup_invariant_failed: false,
             erasure_tombstones: HashSet::new(),
             erasure_attempts: HashMap::new(),
-            sink: Sink(sink),
+            sink: Sink::new(sink),
         });
         Ok(())
     })
