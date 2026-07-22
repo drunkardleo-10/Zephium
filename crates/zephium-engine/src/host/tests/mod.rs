@@ -1,36 +1,9 @@
-use super::*;
-
-#[test]
-fn native_resource_ceiling_counts_spare_and_every_cleanup_debt() {
-    assert_eq!(owned_native_view_resources(32, false, 0), Some(32));
-    assert_eq!(owned_native_view_resources(32, true, 0), Some(33));
-    assert_eq!(owned_native_view_resources(32, true, 8), Some(41));
-    assert_eq!(owned_native_view_resources(usize::MAX, true, 0), None);
-}
-
-#[test]
-fn native_construction_reservation_is_bounded_and_released_exactly() {
-    let mut reservations = NativeViewReservations::default();
-    assert_eq!(
-        reservations.try_reserve(MAX_NATIVE_VIEW_RESOURCES - 1),
-        Ok(true)
-    );
-    assert_eq!(reservations.in_construction(), 1);
-    // Re-entry/retry observes the first construction reservation and may
-    // not allocate the forty-ninth native resource.
-    assert_eq!(
-        reservations.try_reserve(MAX_NATIVE_VIEW_RESOURCES - 1),
-        Ok(false)
-    );
-    assert_eq!(reservations.in_construction(), 1);
-    assert_eq!(reservations.release(), Ok(()));
-    assert_eq!(reservations.in_construction(), 0);
-    assert_eq!(reservations.release(), Err(()));
-}
-
 #[test]
 fn raw_page_print_guard_is_installed_for_subframes_before_user_scripts() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let all_frames_call = [
         "builder.with_initialization_script_for_main_only(",
         "crate::PAGE_PRINT_DENY_SCRIPT, false)",
@@ -44,7 +17,10 @@ fn raw_page_print_guard_is_installed_for_subframes_before_user_scripts() {
 
 #[test]
 fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let raw_policy = source
         .split("let mut builder = builder")
         .nth(1)
@@ -58,10 +34,11 @@ fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
 
 #[test]
 fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
-    // View construction still lives in the facade for this commit. The
-    // construction extraction must re-anchor only this source path while
-    // preserving the cross-module handoff assertions below.
-    let construction = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    // Keep the construction-to-stage handoff explicit across module boundaries.
+    let construction = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
     let create_view = construction
         .split("pub(crate) fn create_view(")
@@ -404,7 +381,10 @@ fn linux_stage_exhaustion_retains_one_coalesced_idle_redrive() {
 
 #[test]
 fn raw_native_views_never_request_focus_during_construction() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let raw_policy = source
         .split("let mut builder = builder")
         .nth(1)
@@ -445,7 +425,10 @@ fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
 
 #[test]
 fn every_identity_bearing_commit_rearms_presentation_but_history_observation_does_not() {
-    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let host = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
     let native_handler = host
         .split("builder = builder.with_navigation_event_handler")
@@ -667,7 +650,10 @@ fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
 
 #[test]
 fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
-    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let host = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let navigation = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/navigation.rs"
@@ -743,7 +729,10 @@ fn user_native_action_results_are_never_silently_discarded() {
 
 #[test]
 fn raw_native_media_surfaces_are_denied_per_view() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let raw_policy = source
         .split("let mut builder = builder")
         .nth(1)
@@ -757,7 +746,10 @@ fn raw_native_media_surfaces_are_denied_per_view() {
 
 #[test]
 fn warm_spare_cannot_outlive_its_profiles_last_real_view() {
-    let construction = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let construction = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
     let lifecycle = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/lifecycle.rs"

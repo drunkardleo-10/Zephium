@@ -10,10 +10,11 @@ use zephium_core::ids::ItemId;
 #[cfg(target_os = "windows")]
 use zephium_core::ids::ProfileId;
 
+use super::construction::{NativeViewReservations, MAX_NATIVE_VIEW_RESOURCES};
 use super::permits::Sink;
+use super::EngineHost;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::ParentHandle;
-use super::{EngineHost, NativeViewReservations, MAX_NATIVE_VIEW_RESOURCES};
 
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
