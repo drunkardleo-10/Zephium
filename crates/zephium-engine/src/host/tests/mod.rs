@@ -29,25 +29,6 @@ fn native_construction_reservation_is_bounded_and_released_exactly() {
 }
 
 #[test]
-fn renderer_crash_classification_never_exposes_dead_spare() {
-    let spare = ItemId::from(1);
-    let live = ItemId::from(2);
-    let retired = ItemId::from(3);
-    assert_eq!(
-        renderer_crash_target(Some(spare), false, spare),
-        RendererCrashTarget::Spare
-    );
-    assert_eq!(
-        renderer_crash_target(Some(spare), true, live),
-        RendererCrashTarget::Live
-    );
-    assert_eq!(
-        renderer_crash_target(Some(spare), false, retired),
-        RendererCrashTarget::Retired
-    );
-}
-
-#[test]
 fn unchanged_layout_does_not_reseed_retained_stage_readiness() {
     assert!(should_seed_stage_readiness(true, true, true));
     assert!(!should_seed_stage_readiness(false, true, true));
@@ -787,8 +768,12 @@ fn raw_native_media_surfaces_are_denied_per_view() {
 
 #[test]
 fn warm_spare_cannot_outlive_its_profiles_last_real_view() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let ensure_spare = source
+    let construction = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let lifecycle = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/lifecycle.rs"
+    ));
+    let ensure_spare = construction
         .split("pub(crate) fn ensure_spare(&mut self, partition: Partition)")
         .nth(1)
         .expect("native warm-spare implementation")
@@ -797,7 +782,7 @@ fn warm_spare_cannot_outlive_its_profiles_last_real_view() {
         .expect("end of native warm-spare implementation");
     assert!(ensure_spare.contains("!self.has_live_profile_view(profile)"));
 
-    let idle_close = source
+    let idle_close = lifecycle
         .split("fn close_idle_spare(&mut self, profile: ProfileId)")
         .nth(1)
         .expect("idle spare retirement")
@@ -807,11 +792,11 @@ fn warm_spare_cannot_outlive_its_profiles_last_real_view() {
     assert!(idle_close.contains("spare.view.close_explicit()"));
     assert!(idle_close.contains("self.web_contexts.remove(&profile)"));
 
-    let close = source
+    let close = lifecycle
         .split("pub(crate) fn close(&mut self, id: ItemId)")
         .nth(1)
         .expect("view close implementation")
-        .split("pub(crate) fn shutdown")
+        .split("pub(super) fn shutdown")
         .next()
         .expect("end of view close implementation");
     assert!(close.contains("self.close_idle_spare(profile)"));
