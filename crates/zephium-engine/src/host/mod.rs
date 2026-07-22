@@ -6750,7 +6750,7 @@ mod tests {
         assert!(!should_seed_stage_readiness(true, false, true));
         assert!(!should_seed_stage_readiness(true, true, false));
 
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         assert!(
             source
                 .matches("should_seed_stage_readiness(\n                inserted,")
@@ -6842,7 +6842,7 @@ mod tests {
 
     #[test]
     fn raw_page_print_guard_is_installed_for_subframes_before_user_scripts() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let all_frames_call = [
             "builder.with_initialization_script_for_main_only(",
             "crate::PAGE_PRINT_DENY_SCRIPT, false)",
@@ -6856,7 +6856,7 @@ mod tests {
 
     #[test]
     fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let raw_policy = source
             .split("let mut builder = builder")
             .nth(1)
@@ -6870,7 +6870,7 @@ mod tests {
 
     #[test]
     fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let create_view = source
             .split("pub(crate) fn create_view(")
             .nth(1)
@@ -6894,7 +6894,10 @@ mod tests {
 
     #[test]
     fn windows_superseded_native_placement_requeues_without_spending_failure_budget() {
-        let source = include_str!("platform/windows/stage.rs");
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/stage.rs"
+        ));
         let application = source
             .split("fn apply_native_placement(")
             .nth(1)
@@ -6971,7 +6974,10 @@ mod tests {
 
     #[test]
     fn windows_reentrant_hide_preserves_newer_cache_and_forces_an_exact_redrive() {
-        let source = include_str!("platform/windows/stage.rs");
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/stage.rs"
+        ));
         let hide = source
             .split("fn hide_views(")
             .nth(1)
@@ -7009,7 +7015,10 @@ mod tests {
         // The shared pure helper has collapse/grow unit coverage. These
         // platform-boundary assertions ensure every stage uses that decision
         // before its native geometry/reveal primitive.
-        let windows = include_str!("platform/windows/stage.rs");
+        let windows = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/stage.rs"
+        ));
         let windows_layout = windows
             .split("let pane_rects = tree")
             .nth(1)
@@ -7021,7 +7030,10 @@ mod tests {
         assert!(windows_layout.contains("rounded_native_size"));
         assert!(!windows_layout.contains(".max(0)"));
 
-        let linux = include_str!("platform/linux/stage.rs");
+        let linux = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/linux/stage.rs"
+        ));
         let linux_placement = linux
             .split("let placements = views")
             .nth(1)
@@ -7042,7 +7054,10 @@ mod tests {
         assert!(linux_geometry.contains("fixed.move_(&view.view, parked_x, 0)"));
         assert!(linux_geometry.contains("view.view.set_size_request"));
 
-        let mac = include_str!("platform/macos/stage.rs");
+        let mac = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/macos/stage.rs"
+        ));
         let resize = mac
             .split("fn resize_subviews")
             .nth(1)
@@ -7064,7 +7079,7 @@ mod tests {
 
     #[test]
     fn terminal_native_stage_failures_have_exact_retirement_and_mandatory_fatal_handoff() {
-        let host = include_str!("host.rs");
+        let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let mac_failure = host
             .split("fn on_macos_stage_failure(")
             .nth(1)
@@ -7079,7 +7094,10 @@ mod tests {
         );
         assert!(mac_failure.contains("self.native_terminal_failure"));
 
-        let mac_stage = include_str!("platform/macos/stage.rs");
+        let mac_stage = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/macos/stage.rs"
+        ));
         assert!(mac_stage.contains("pub fn attached_items(&self) -> Option<Vec<ItemId>>"));
         let container = mac_stage
             .split("fn sync_container_visibility(&self)")
@@ -7104,7 +7122,10 @@ mod tests {
 
     #[test]
     fn macos_divider_capture_survives_geometry_only_relayout_but_not_topology_change() {
-        let source = include_str!("platform/macos/stage.rs");
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/macos/stage.rs"
+        ));
         let set_tree = source
             .split("pub fn set_tree(&self, tree: Option<Pane>)")
             .nth(1)
@@ -7148,7 +7169,10 @@ mod tests {
 
     #[test]
     fn linux_stage_exhaustion_retains_one_coalesced_idle_redrive() {
-        let source = include_str!("platform/linux/stage.rs");
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/linux/stage.rs"
+        ));
         let sync = source
             .split("fn sync(")
             .nth(1)
@@ -7190,7 +7214,7 @@ mod tests {
 
     #[test]
     fn raw_native_views_never_request_focus_during_construction() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let raw_policy = source
             .split("let mut builder = builder")
             .nth(1)
@@ -7203,7 +7227,7 @@ mod tests {
 
     #[test]
     fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let completion = source
             .split("fn queue_navigation_completion(")
             .nth(1)
@@ -7227,7 +7251,7 @@ mod tests {
 
     #[test]
     fn every_identity_bearing_commit_rearms_presentation_but_history_observation_does_not() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let native_handler = source
             .split("builder = builder.with_navigation_event_handler")
             .nth(1)
@@ -7276,7 +7300,10 @@ mod tests {
             .expect("pre-script raw view policy");
         assert!(raw_policy.contains("with_navigation_presentation_guard(move ||"));
         assert!(raw_policy.contains("guard_presentation_permit.store(false, Ordering::Release)"));
-        let webview2 = include_str!("../../../vendor/wry/src/webview2/mod.rs");
+        let webview2 = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../vendor/wry/src/webview2/mod.rs"
+        ));
         assert!(webview2.contains("navigation_presentation_guard"));
         assert!(webview2.contains("ShowWindow(hwnd, SW_HIDE)"));
         assert!(webview2.contains("committed_controller.SetIsVisible(false)"));
@@ -7289,7 +7316,10 @@ mod tests {
                 < guarded_webview2.find("ShowWindow(hwnd, SW_HIDE)").unwrap()
         );
 
-        let webkitgtk = include_str!("../../../vendor/wry/src/webkitgtk/mod.rs");
+        let webkitgtk = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../vendor/wry/src/webkitgtk/mod.rs"
+        ));
         let guarded_gtk = webkitgtk
             .split("if native_committed {")
             .nth(1)
@@ -7301,7 +7331,10 @@ mod tests {
         assert!(gtk_guard < gtk_input);
         assert!(gtk_input < gtk_paint);
 
-        let wkwebview = include_str!("../../../vendor/wry/src/wkwebview/navigation.rs");
+        let wkwebview = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../vendor/wry/src/wkwebview/navigation.rs"
+        ));
         let guarded_wk = wkwebview
             .split("if let Some(guard) = &this.ivars().navigation_presentation_guard")
             .nth(1)
@@ -7314,7 +7347,10 @@ mod tests {
 
     #[test]
     fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
-        let mac = include_str!("platform/macos/stage.rs");
+        let mac = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/macos/stage.rs"
+        ));
         let mac_sync = mac
             .split("fn sync_visibility(&self)")
             .nth(1)
@@ -7332,7 +7368,10 @@ mod tests {
             .find("presentation_permit.load(Ordering::Acquire)")
             .is_some());
 
-        let linux = include_str!("platform/linux/stage.rs");
+        let linux = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/linux/stage.rs"
+        ));
         let linux_sync = linux
             .split("fn sync(")
             .nth(1)
@@ -7360,7 +7399,10 @@ mod tests {
             .find("view_may_reveal(state, revision, *id, view)")
             .is_some());
 
-        let windows = include_str!("platform/windows/stage.rs");
+        let windows = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/stage.rs"
+        ));
         let windows_reveal = windows
             .split("fn apply_native_placement(")
             .nth(1)
@@ -7404,7 +7446,7 @@ mod tests {
             .find("content_update_epoch.get() != epoch")
             .is_some());
 
-        let mac_host_layout = include_str!("host.rs")
+        let mac_host_layout = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"))
             .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_content(")
             .nth(1)
             .expect("macOS host layout")
@@ -7419,7 +7461,7 @@ mod tests {
         assert!(mac_host_layout.contains("finish_content_update"));
         assert!(!mac_host_layout.contains("stage.setHidden(false)"));
 
-        let host = include_str!("host.rs");
+        let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         assert!(
             host.matches("view.presentation_permit.load(Ordering::Acquire)")
                 .count()
@@ -7430,7 +7472,7 @@ mod tests {
 
     #[test]
     fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let title_callback = source
             .split(".with_document_title_changed_handler")
             .nth(1)
@@ -7475,7 +7517,7 @@ mod tests {
 
     #[test]
     fn user_native_action_results_are_never_silently_discarded() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let actions = source
             .split("fn invoke_navigation_action(")
             .nth(1)
@@ -7503,7 +7545,7 @@ mod tests {
 
     #[test]
     fn raw_native_media_surfaces_are_denied_per_view() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let raw_policy = source
             .split("let mut builder = builder")
             .nth(1)
@@ -7517,7 +7559,7 @@ mod tests {
 
     #[test]
     fn warm_spare_cannot_outlive_its_profiles_last_real_view() {
-        let source = include_str!("host.rs");
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
         let ensure_spare = source
             .split("pub(crate) fn ensure_spare(&mut self, partition: Partition)")
             .nth(1)
@@ -7549,7 +7591,10 @@ mod tests {
 
     #[test]
     fn windows_raw_autofill_surfaces_are_mandatory_verified_postconditions() {
-        let source = include_str!("platform/windows/mod.rs");
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/mod.rs"
+        ));
         let configure = source
             .split("pub fn configure(")
             .nth(1)
