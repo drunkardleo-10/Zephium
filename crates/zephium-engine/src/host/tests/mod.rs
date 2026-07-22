@@ -406,191 +406,6 @@ fn successful_windows_profile_erasure_restores_the_shutdown_map_invariant() {
 }
 
 #[test]
-fn native_navigation_observations_are_bounded_deduplicated_and_filtered() {
-    let id = ItemId::from(7);
-    let mut previous = NavigationSnapshot::default();
-
-    let initial = navigation_observation_events(
-        id,
-        &mut previous,
-        Some("https://example.com/"),
-        Some((false, false)),
-    );
-    assert_eq!(initial.len(), 2);
-    assert!(matches!(
-        &initial[0],
-        EngineEvent::UrlChanged { id: observed, url }
-            if *observed == id && url == "https://example.com/"
-    ));
-    assert!(matches!(
-        initial[1],
-        EngineEvent::NavState {
-            id: observed,
-            can_go_back: false,
-            can_go_forward: false,
-        } if observed == id
-    ));
-
-    assert!(navigation_observation_events(
-        id,
-        &mut previous,
-        Some("https://example.com/"),
-        Some((false, false)),
-    )
-    .is_empty());
-
-    let same_document = navigation_observation_events(
-        id,
-        &mut previous,
-        Some("https://example.com/#state"),
-        Some((true, false)),
-    );
-    assert_eq!(same_document.len(), 2);
-
-    let forbidden = navigation_observation_events(
-        id,
-        &mut previous,
-        Some("file:///etc/passwd"),
-        Some((true, true)),
-    );
-    assert_eq!(forbidden.len(), 1);
-    assert!(matches!(
-        forbidden[0],
-        EngineEvent::NavState {
-            can_go_back: true,
-            can_go_forward: true,
-            ..
-        }
-    ));
-    assert_eq!(previous.url.as_deref(), Some("https://example.com/#state"));
-}
-
-#[test]
-fn native_url_policy_distinguishes_unavailable_from_forbidden_sources() {
-    assert_eq!(classify_observed_url(None), ObservedUrl::Unavailable);
-    assert_eq!(
-        classify_observed_url(Some(String::new())),
-        ObservedUrl::Unavailable
-    );
-    assert_eq!(
-        classify_observed_url(Some("https://example.com/#state".to_owned())),
-        ObservedUrl::Allowed("https://example.com/#state".to_owned())
-    );
-    assert_eq!(
-        classify_observed_url(Some("file:///etc/passwd".to_owned())),
-        ObservedUrl::Forbidden
-    );
-}
-
-fn commit_test_navigation(
-    tracker: &NavigationEpochTracker,
-    native_id: u64,
-    target: &str,
-) -> NavigationEpoch {
-    let epoch = tracker.begin(target).expect("allowed test URL");
-    for phase in [
-        wry::NavigationEventPhase::Started,
-        wry::NavigationEventPhase::Committed,
-    ] {
-        assert!(tracker
-            .observe_navigation(&wry::NavigationEvent {
-                id: wry::NavigationId::from_raw(native_id),
-                phase,
-                url: target.to_owned(),
-            })
-            .is_some());
-    }
-    epoch
-}
-
-#[test]
-fn unavailable_native_url_uses_only_the_exact_committed_snapshot() {
-    let tracker = NavigationEpochTracker::new();
-    let epoch = commit_test_navigation(&tracker, 71, "https://committed.example/path");
-    assert_eq!(
-        resolve_committed_observed_url(&tracker, epoch, None),
-        ObservedUrl::Allowed("https://committed.example/path".to_owned())
-    );
-
-    let pending = tracker.begin("https://pending.example/").unwrap();
-    assert_eq!(
-        resolve_committed_observed_url(&tracker, pending, None),
-        ObservedUrl::Unavailable
-    );
-    assert_eq!(
-        resolve_committed_observed_url(&tracker, epoch, None),
-        ObservedUrl::Unavailable
-    );
-}
-
-#[test]
-fn provisional_failure_can_restore_real_hidden_commit_but_not_spare_bootstrap() {
-    let tracker = NavigationEpochTracker::new();
-    let bootstrap = tracker.begin("about:blank").unwrap();
-    let real = tracker.begin("https://real.example/").unwrap();
-
-    assert!(!restored_navigation_can_present(
-        false,
-        Some(bootstrap),
-        bootstrap
-    ));
-    assert!(restored_navigation_can_present(
-        false,
-        Some(bootstrap),
-        real
-    ));
-    assert!(restored_navigation_can_present(
-        true,
-        Some(bootstrap),
-        bootstrap
-    ));
-}
-
-#[test]
-fn failed_navigation_cannot_reveal_its_stale_epoch() {
-    let tracker = NavigationEpochTracker::new();
-    let visible = commit_test_navigation(&tracker, 81, "https://visible.example/");
-    let failed = tracker.begin("https://failed.example/").unwrap();
-    assert!(tracker
-        .observe_navigation(&wry::NavigationEvent {
-            id: wry::NavigationId::from_raw(82),
-            phase: wry::NavigationEventPhase::Started,
-            url: "https://failed.example/".to_owned(),
-        })
-        .is_some());
-    assert!(tracker
-        .observe_navigation(&wry::NavigationEvent {
-            id: wry::NavigationId::from_raw(82),
-            phase: wry::NavigationEventPhase::Failed,
-            url: "https://failed.example/".to_owned(),
-        })
-        .is_some());
-
-    assert_eq!(
-        resolve_committed_observed_url(&tracker, failed, None),
-        ObservedUrl::Unavailable
-    );
-    assert_eq!(
-        resolve_committed_observed_url(&tracker, visible, None),
-        ObservedUrl::Allowed("https://visible.example/".to_owned())
-    );
-}
-
-#[test]
-fn forbidden_native_url_never_falls_back_to_trusted_chrome() {
-    let tracker = NavigationEpochTracker::new();
-    let epoch = commit_test_navigation(&tracker, 91, "https://trusted.example/");
-    assert_eq!(
-        resolve_committed_observed_url(&tracker, epoch, Some("file:///etc/passwd".to_owned())),
-        ObservedUrl::Forbidden
-    );
-    assert_eq!(
-        tracker.committed_snapshot(),
-        Some((epoch, "https://trusted.example/".to_owned()))
-    );
-}
-
-#[test]
 fn discard_report_accepts_only_the_exact_safe_primitive_mask() {
     assert!(renderer_report_allows_discard("1"));
     for protected in [
@@ -1007,7 +822,10 @@ fn raw_native_views_never_request_focus_during_construction() {
 
 #[test]
 fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
-    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let navigation = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/navigation.rs"
+    ));
     let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
     let completion = permits
         .split("fn queue_navigation_completion(")
@@ -1020,7 +838,7 @@ fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
     assert!(completion.contains("emit_navigation_ready"));
     assert!(!completion.contains("present_navigation_epoch"));
 
-    let ready = host
+    let ready = navigation
         .split("fn emit_navigation_ready(")
         .nth(1)
         .expect("navigation-ready emitter")
@@ -1254,6 +1072,10 @@ fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
 #[test]
 fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
     let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let navigation = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/navigation.rs"
+    ));
     let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
     let title_callback = host
         .split(".with_document_title_changed_handler")
@@ -1280,7 +1102,7 @@ fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
         .expect("presentation-ready event");
     assert!(title < ready);
 
-    let observed = host
+    let observed = navigation
         .split("fn emit_title_observation(")
         .nth(1)
         .expect("title observation gate")
@@ -1299,12 +1121,16 @@ fn zoom_settlement_keeps_the_last_proven_native_scale_on_failure() {
 
 #[test]
 fn user_native_action_results_are_never_silently_discarded() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let actions = source
+    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let navigation = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/navigation.rs"
+    ));
+    let actions = navigation
         .split("fn invoke_navigation_action(")
         .nth(1)
         .expect("native navigation-action adapter")
-        .split("pub(crate) fn zoom(")
+        .split("\n}\n\n#[cfg(test)]")
         .next()
         .expect("bounded native navigation-action adapter");
     assert!(actions.contains("EngineEvent::NativeActionFailed"));
@@ -1313,7 +1139,7 @@ fn user_native_action_results_are_never_silently_discarded() {
     assert!(!actions.contains("let _ = view.go_back()"));
     assert!(!actions.contains("let _ = view.go_forward()"));
 
-    let zoom = source
+    let zoom = host
         .split("pub(crate) fn zoom(")
         .nth(1)
         .expect("native zoom adapter")
