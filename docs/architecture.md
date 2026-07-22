@@ -183,7 +183,10 @@ order: native menu > overlay panel > DOM.
   portal activation token before presenting the window. The worker watches
   the portal owner before Registry admission, pins subsequent calls to that
   exact unique D-Bus owner, and retries a bounded three times on restart or a
-  bounded non-interactive call timeout. A user-interactive Bind response is
+  bounded non-interactive call timeout. An explicit Registry policy or
+  identity rejection is terminal for that worker run: replaying the same
+  identity against the same owner cannot repair missing desktop metadata and
+  would only delay the focused fallback. A user-interactive Bind response is
   never timed out. `ShortcutsChanged` is subscribed before the authoritative
   List/Bind exchange; removal or malformed state revokes the global-capability
   bit before parsing so the focused fallback resumes immediately. If the

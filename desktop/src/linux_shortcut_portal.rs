@@ -320,7 +320,30 @@ async fn register_host_connection(connection: &zbus::Connection) -> Result<(), P
     // attribute a raw development launch to its terminal (or another scope),
     // persisting consent under the wrong application. Keep the focused GTK
     // shortcut active unless the portal accepted this exact identity.
-    result.map_err(|error| PortalError::transport("register exact host portal identity", error))
+    result.map_err(classify_host_registry_error)
+}
+
+fn classify_host_registry_error(error: zbus::Error) -> PortalError {
+    let rendered = error.to_string();
+    match error {
+        // Registry has processed the exact identity and returned a portal
+        // policy/application error. Repeating the same call against the same
+        // owner cannot establish missing desktop metadata or reverse a policy
+        // decision, and produces misleading reconnect noise in raw dev runs.
+        // Bus transport/owner failures deliberately remain retryable below.
+        zbus::Error::MethodError(name, _, _)
+            if terminal_host_registry_error_name(name.as_str()) =>
+        {
+            PortalError::HostIdentityRejected(format!(
+                "register exact host portal identity: {rendered}"
+            ))
+        }
+        _ => PortalError::Transport(format!("register exact host portal identity: {rendered}")),
+    }
+}
+
+fn terminal_host_registry_error_name(name: &str) -> bool {
+    name.starts_with("org.freedesktop.portal.Error.")
 }
 
 async fn run_session(
@@ -1048,6 +1071,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Debug)]
 pub(crate) enum PortalError {
     Transport(String),
+    HostIdentityRejected(String),
     TimedOut(&'static str),
     UnsupportedVersion(u32),
     EntropyUnavailable,
@@ -1077,6 +1101,7 @@ impl fmt::Display for PortalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport(error) => formatter.write_str(error),
+            Self::HostIdentityRejected(error) => formatter.write_str(error),
             Self::TimedOut(operation) => write!(formatter, "{operation} timed out"),
             Self::UnsupportedVersion(version) => {
                 write!(
@@ -1192,12 +1217,31 @@ mod tests {
     fn denial_and_malformed_data_are_never_retried() {
         assert!(!PortalError::Denied.retryable());
         assert!(!PortalError::Rejected(2).retryable());
+        assert!(
+            !PortalError::HostIdentityRejected("missing desktop metadata".to_owned()).retryable()
+        );
         assert!(!PortalError::EntropyUnavailable.retryable());
         assert!(!PortalError::Malformed("bad data").retryable());
         assert!(!PortalError::SessionClosed.retryable());
         assert!(PortalError::Transport("restart".to_owned()).retryable());
         assert!(PortalError::TimedOut("test operation").retryable());
         assert_eq!(MAX_PORTAL_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn host_registry_rejection_is_terminal_but_owner_failures_remain_retryable() {
+        assert!(terminal_host_registry_error_name(
+            "org.freedesktop.portal.Error.Failed"
+        ));
+        assert!(terminal_host_registry_error_name(
+            "org.freedesktop.portal.Error.NotAllowed"
+        ));
+        assert!(!terminal_host_registry_error_name(
+            "org.freedesktop.DBus.Error.NameHasNoOwner"
+        ));
+        assert!(!terminal_host_registry_error_name(
+            "org.freedesktop.DBus.Error.NoReply"
+        ));
     }
 
     #[test]

@@ -123,6 +123,16 @@ and no activation after browser shutdown begins. Run this against the packaged
 artifact whose installed entry is exactly `app.zephium.desktop`; raw `cargo`
 or `tauri dev` execution does not prove portal application identity.
 
+A teardown-only GLib-GIO warning from a sandbox child saying that release of an
+`app.zephium.Sandboxed.WebProcess-*` bus name failed because its connection was
+already closed is a WebKit child-process cleanup diagnostic. Do not hide it
+with a GLib log handler or by weakening the WebKit sandbox. It is acceptable
+only when Zephium exits cleanly and it is not accompanied by an
+`engine: web process terminated` event, a core dump, a hang, or a surviving
+auxiliary process. Any of those accompanying symptoms turns it into a native
+runtime failure: retain the journal and core, record the exact WebKitGTK/GLib
+versions, and keep the candidate blocked pending engine-level investigation.
+
 ## Release evidence
 
 For every candidate, retain:
