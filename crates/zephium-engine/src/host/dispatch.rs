@@ -1,14 +1,14 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-#[cfg(any(unix, test))]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::ItemId;
+#[cfg(target_os = "windows")]
+use zephium_core::ids::ProfileId;
 
 use super::permits::Sink;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -219,54 +219,6 @@ pub(crate) fn make_unavailable_for_test() {
     HOST_SEALED.with(|sealed| sealed.set(false));
     HOST.with(|host| *host.borrow_mut() = None);
     PENDING.with(|pending| pending.borrow_mut().clear());
-}
-
-/// Release main-thread-bound WebsiteDataManager proof handles only after the
-/// exact erasure attempt that used them verified disk absence. Failure to
-/// enqueue this housekeeping closure is safe: it retains proof instead of
-/// forgetting it.
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn release_linux_erasure_obligations(profile: ProfileId, attempt: Arc<AtomicBool>) {
-    let _ = try_with(move |host| {
-        let exact_settled_attempt =
-            linux_erasure_release_matches(host.erasure_attempts.get(&profile), &attempt);
-        if exact_settled_attempt {
-            host.linux_data_managers.remove(&profile);
-        }
-    });
-}
-
-/// Release a private profile's last host-owned WKWebsiteDataStore handle only
-/// after the exact native erasure attempt has positively settled. A failed,
-/// timed-out, or superseded callback must retain the handle so a retry cannot
-/// mistake forgotten in-memory state for verified deletion.
-#[cfg(target_os = "macos")]
-pub(crate) fn release_macos_erasure_obligation(profile: ProfileId, attempt: Arc<AtomicBool>) {
-    let _ = try_with(move |host| {
-        if macos_erasure_release_matches(host.erasure_attempts.get(&profile), &attempt) {
-            host.macos_ephemeral_data_stores.remove(&profile);
-        }
-    });
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn macos_erasure_release_matches(
-    current: Option<&Arc<AtomicBool>>,
-    completed: &Arc<AtomicBool>,
-) -> bool {
-    current.is_some_and(|current| {
-        Arc::ptr_eq(current, completed) && !completed.load(Ordering::Acquire)
-    })
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_erasure_release_matches(
-    current: Option<&Arc<AtomicBool>>,
-    completed: &Arc<AtomicBool>,
-) -> bool {
-    current.is_some_and(|current| {
-        Arc::ptr_eq(current, completed) && !completed.load(Ordering::Acquire)
-    })
 }
 
 #[cfg(target_os = "windows")]
@@ -742,7 +694,7 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "windows")]
-    use super::super::{
+    use super::super::profiles::{
         transferred_erasure_exit_settlement, windows_profile_provenance_presence_is_consistent,
         TransferredErasureExitSettlement,
     };
@@ -1160,37 +1112,6 @@ mod tests {
             pending.back().map(|task| task.priority),
             Some(HostTaskPriority::ProfileErasure)
         );
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn linux_manager_release_is_exact_attempt_and_terminal_only() {
-        let completed = Arc::new(AtomicBool::new(true));
-        let replacement = Arc::new(AtomicBool::new(false));
-
-        assert!(!linux_erasure_release_matches(Some(&completed), &completed));
-        completed.store(false, Ordering::Release);
-        assert!(linux_erasure_release_matches(Some(&completed), &completed));
-        assert!(!linux_erasure_release_matches(
-            Some(&replacement),
-            &completed
-        ));
-        assert!(!linux_erasure_release_matches(None, &completed));
-    }
-
-    #[test]
-    fn macos_store_release_is_exact_attempt_and_terminal_only() {
-        let completed = Arc::new(AtomicBool::new(true));
-        let replacement = Arc::new(AtomicBool::new(false));
-
-        assert!(!macos_erasure_release_matches(Some(&completed), &completed));
-        completed.store(false, Ordering::Release);
-        assert!(macos_erasure_release_matches(Some(&completed), &completed));
-        assert!(!macos_erasure_release_matches(
-            Some(&replacement),
-            &completed
-        ));
-        assert!(!macos_erasure_release_matches(None, &completed));
     }
 
     #[cfg(target_os = "windows")]
