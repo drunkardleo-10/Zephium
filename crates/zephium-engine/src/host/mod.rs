@@ -1,11 +1,39 @@
+mod dispatch;
 mod scripts;
 
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
+pub(crate) use dispatch::make_unavailable_for_test;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) use dispatch::release_linux_erasure_obligations;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::release_macos_erasure_obligation;
+pub(crate) use dispatch::{
+    best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
+};
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use dispatch::seal_ingress;
+#[cfg(target_os = "macos")]
+use dispatch::try_with_stage_failure;
+#[cfg(target_os = "windows")]
+use dispatch::{
+    drain_windows_cleanup_debts, queue_windows_cleanup_debt, windows_cleanup_invariant_failed,
+    with_profile_exit, with_suspend_result,
+};
+use dispatch::{
+    with_discard_observation, with_navigation_commit, with_navigation_settlement,
+    with_renderer_exit, with_source_observation, with_title_observation,
+};
+
+use std::cell::Cell;
+#[cfg(target_os = "windows")]
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -40,70 +68,7 @@ use {
     windows::Win32::Foundation::HWND,
 };
 
-thread_local! {
-    static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
-    static PENDING: RefCell<VecDeque<QueuedHostTask>> = const { RefCell::new(VecDeque::new()) };
-    static HOST_SEALED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "windows")]
-    static PENDING_WINDOWS_CLEANUP_DEBTS: RefCell<Vec<(ProfileId, wry::WebView2CleanupDebt)>> =
-        const { RefCell::new(Vec::new()) };
-    #[cfg(target_os = "windows")]
-    static WINDOWS_CLEANUP_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
-}
-
-type HostTask = Box<dyn FnOnce(&mut EngineHost)>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum HostTaskPriority {
-    Normal,
-    #[cfg(target_os = "windows")]
-    Maintenance,
-    Observation,
-    Lifecycle,
-    Close,
-    ProfileErasure,
-    Shutdown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HostTaskKey {
-    // A renderer death supersedes a pending source observation for the same
-    // view; an explicit close supersedes both. Priority prevents a later
-    // lower-level callback from replacing the stronger transition.
-    View(ItemId),
-    // Replaceable source/history facts must never overwrite an adjacent
-    // terminal navigation settlement or discard-safety phase for the same
-    // view merely because they share an ItemId.
-    Source(ItemId),
-    Title(ItemId),
-    NavigationCommit(ItemId),
-    NavigationSettlement(ItemId),
-    Discard(ItemId),
-    #[cfg(target_os = "windows")]
-    Profile(ProfileId, crate::platform::imp::BrowserProcessGeneration),
-    #[cfg(target_os = "windows")]
-    Suspend(ItemId),
-}
-
-struct QueuedHostTask {
-    priority: HostTaskPriority,
-    key: Option<HostTaskKey>,
-    task: HostTask,
-}
-
 const GAP: f64 = 8.0;
-const NORMAL_PENDING_HOST_TASK_CAPACITY: usize = 960;
-// Normal UI work cannot consume this lifecycle band. One keyed native fact
-// per maximum view/profile plus the bounded suspend batch stays below this
-// ceiling, even during a nested native message-loop pump. One additional slot
-// per maximum live profile is reserved for non-coalescible erasure tasks, and
-// the final physical slot is reserved exclusively for shutdown.
-const PENDING_HOST_TASK_CAPACITY: usize = 4096;
-const NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY: usize = PENDING_HOST_TASK_CAPACITY - 1;
-const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
-    zephium_core::session::MAX_SESSION_PROFILES;
-const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY - PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
 #[cfg(all(unix, not(target_os = "macos")))]
 const MAX_LINUX_RETAINED_DATA_MANAGERS: usize = zephium_core::session::MAX_SESSION_PROFILES * 2;
 #[cfg(target_os = "windows")]
@@ -119,13 +84,6 @@ const MAX_WINDOWS_CLEANUP_DEBTS: usize =
 // therefore never create around any failed teardown obligation.
 const MAX_NATIVE_VIEW_RESOURCES: usize = 48;
 const _: () = assert!(MAX_NATIVE_VIEW_RESOURCES >= 32 + 1 + 8);
-// One globally coalesced commit gate per native view remains admissible even
-// if ordinary observations/lifecycle work fill their band. The native view
-// resource ceiling proves no more distinct live commit keys can exist while
-// the host is re-entrantly borrowed.
-const NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize = MAX_NATIVE_VIEW_RESOURCES;
-const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 // A distinct WebView2 environment/UDF owns its own browser/network process
 // group. This is separate from the 64-profile persistence format limit and
 // from the per-view ceiling above: retaining zero-view environments for every
@@ -136,7 +94,6 @@ const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
 // bounded asynchronous overlap rather than briefly creating a ninth group.
 #[cfg(any(target_os = "windows", test))]
 const MAX_NATIVE_PROFILE_PROCESS_GROUPS: usize = 8;
-static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 
 #[derive(Default)]
 struct NativeViewReservations {
@@ -223,606 +180,6 @@ fn discard_probe_identity_matches(
 
 fn bounded_title(title: &str) -> String {
     zephium_core::item::sanitize_page_title(title)
-}
-
-pub(crate) fn install(
-    #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
-    data_root: PathBuf,
-    sink: crate::EngineEventIngressSink,
-    native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
-) -> Result<(), String> {
-    HOST_SEALED.with(|sealed| sealed.set(false));
-    PENDING.with(|pending| {
-        pending
-            .try_borrow_mut()
-            .map_err(|_| "engine host pending queue is re-entrantly borrowed".to_owned())?
-            .clear();
-        Ok::<(), String>(())
-    })?;
-    // WebView2 needs a user-data folder even for InPrivate controllers. It
-    // must never be the privileged Tauri chrome's folder, and stale runtime
-    // metadata must not accumulate across browser sessions.
-    #[cfg(not(target_os = "macos"))]
-    let profiles_root = crate::erasure::canonical_owned_root(&data_root.join("profiles"))
-        .map_err(|error| format!("cannot secure engine profile root: {error}"))?;
-    #[cfg(target_os = "windows")]
-    let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
-        &data_root.join("private-runtime"),
-        zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
-    )
-    .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
-    #[cfg(target_os = "macos")]
-    let _ = &data_root;
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let _ = &native_terminal_failure;
-    HOST.with(|cell| {
-        let mut host = cell
-            .try_borrow_mut()
-            .map_err(|_| "engine host is re-entrantly borrowed during install".to_owned())?;
-        if host.is_some() {
-            return Err("engine host is already installed on this thread".to_owned());
-        }
-        *host = Some(EngineHost {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            parent: ParentHandle(parent),
-            #[cfg(not(target_os = "macos"))]
-            profiles_root,
-            #[cfg(target_os = "windows")]
-            private_runtime,
-            views: HashMap::new(),
-            native_view_reservations: NativeViewReservations::default(),
-            native_resource_accounting_failed: false,
-            navigation_snapshots: HashMap::new(),
-            partitions: HashMap::new(),
-            profile_persistence_classes: HashMap::new(),
-            spare: None,
-            user_content: HashMap::new(),
-            shortcuts: Vec::new(),
-            stages: HashMap::new(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            native_terminal_failure,
-            #[cfg(target_os = "macos")]
-            macos_ephemeral_data_stores: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            hidden: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
-            dormant: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
-            desired_dormant: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
-            suspending: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
-            suspend_failed: std::collections::HashSet::new(),
-            #[cfg(not(target_os = "macos"))]
-            web_contexts: HashMap::new(),
-            #[cfg(all(unix, not(target_os = "macos")))]
-            linux_data_managers: HashMap::new(),
-            #[cfg(all(unix, not(target_os = "macos")))]
-            linux_unverifiable_data_managers: HashSet::new(),
-            #[cfg(target_os = "windows")]
-            browser_version_observers: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            environments: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            browser_processes: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            browser_process_exit_observers: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            pending_profile_recovery: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            exiting_browser_processes: HashSet::new(),
-            #[cfg(target_os = "windows")]
-            unverifiable_browser_processes: HashSet::new(),
-            #[cfg(target_os = "windows")]
-            construction_unproven: HashSet::new(),
-            #[cfg(target_os = "windows")]
-            unproven_browser_processes: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            unproven_environments: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            windows_cleanup_debts: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            windows_cleanup_invariant_failed: false,
-            erasure_tombstones: HashSet::new(),
-            erasure_attempts: HashMap::new(),
-            sink: Sink(sink),
-        });
-        Ok(())
-    })
-}
-
-// WebView2 construction pumps the Windows message loop. A nested main-thread
-// dispatch must not re-enter the host, but dropping it can lose a close,
-// navigation or security transition. Queue it and drain after the outer
-// operation releases the mutable borrow.
-/// Admit work whose loss is explicitly fail-safe and observed by a later
-/// retry/timeout. Authoritative mutations must use `try_with` (or a stronger
-/// priority-specific variant) and handle `false`.
-pub(crate) fn best_effort_with<F>(f: F)
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(HostTaskPriority::Normal, None, f);
-}
-
-pub(crate) fn try_with<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(HostTaskPriority::Normal, None, f)
-}
-
-#[cfg(test)]
-pub(crate) fn make_unavailable_for_test() {
-    HOST_SEALED.with(|sealed| sealed.set(false));
-    HOST.with(|host| *host.borrow_mut() = None);
-    PENDING.with(|pending| pending.borrow_mut().clear());
-}
-
-/// Release main-thread-bound WebsiteDataManager proof handles only after the
-/// exact erasure attempt that used them verified disk absence. Failure to
-/// enqueue this housekeeping closure is safe: it retains proof instead of
-/// forgetting it.
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn release_linux_erasure_obligations(profile: ProfileId, attempt: Arc<AtomicBool>) {
-    let _ = try_with(move |host| {
-        let exact_settled_attempt =
-            linux_erasure_release_matches(host.erasure_attempts.get(&profile), &attempt);
-        if exact_settled_attempt {
-            host.linux_data_managers.remove(&profile);
-        }
-    });
-}
-
-/// Release a private profile's last host-owned WKWebsiteDataStore handle only
-/// after the exact native erasure attempt has positively settled. A failed,
-/// timed-out, or superseded callback must retain the handle so a retry cannot
-/// mistake forgotten in-memory state for verified deletion.
-#[cfg(target_os = "macos")]
-pub(crate) fn release_macos_erasure_obligation(profile: ProfileId, attempt: Arc<AtomicBool>) {
-    let _ = try_with(move |host| {
-        if macos_erasure_release_matches(host.erasure_attempts.get(&profile), &attempt) {
-            host.macos_ephemeral_data_stores.remove(&profile);
-        }
-    });
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn macos_erasure_release_matches(
-    current: Option<&Arc<AtomicBool>>,
-    completed: &Arc<AtomicBool>,
-) -> bool {
-    current.is_some_and(|current| {
-        Arc::ptr_eq(current, completed) && !completed.load(Ordering::Acquire)
-    })
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_erasure_release_matches(
-    current: Option<&Arc<AtomicBool>>,
-    completed: &Arc<AtomicBool>,
-) -> bool {
-    current.is_some_and(|current| {
-        Arc::ptr_eq(current, completed) && !completed.load(Ordering::Acquire)
-    })
-}
-
-/// Profile retirement owns a dedicated bounded band above every ordinary and
-/// native-lifecycle task. It intentionally has no coalescing key: replacing a
-/// duplicate would drop that request's exactly-once completion obligation.
-pub(crate) fn try_with_profile_erasure<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(HostTaskPriority::ProfileErasure, None, f)
-}
-
-pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(HostTaskPriority::Close, Some(HostTaskKey::View(id)), f)
-}
-
-fn with_source_observation<F>(id: ItemId, f: F)
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(
-        HostTaskPriority::Observation,
-        Some(HostTaskKey::Source(id)),
-        f,
-    );
-}
-
-fn with_title_observation<F>(id: ItemId, f: F)
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(
-        HostTaskPriority::Observation,
-        Some(HostTaskKey::Title(id)),
-        f,
-    );
-}
-
-fn with_navigation_commit<F>(id: ItemId, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(
-        HostTaskPriority::Lifecycle,
-        Some(HostTaskKey::NavigationCommit(id)),
-        f,
-    )
-}
-
-fn with_navigation_settlement<F>(id: ItemId, f: F)
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(
-        HostTaskPriority::Lifecycle,
-        Some(HostTaskKey::NavigationSettlement(id)),
-        f,
-    );
-}
-
-fn with_discard_observation<F>(id: ItemId, f: F)
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(
-        HostTaskPriority::Observation,
-        Some(HostTaskKey::Discard(id)),
-        f,
-    );
-}
-
-fn with_renderer_exit<F>(id: ItemId, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(HostTaskPriority::Lifecycle, Some(HostTaskKey::View(id)), f)
-}
-
-#[cfg(target_os = "windows")]
-fn with_profile_exit<F>(
-    profile: ProfileId,
-    generation: crate::platform::imp::BrowserProcessGeneration,
-    f: F,
-) where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(
-        HostTaskPriority::Lifecycle,
-        Some(HostTaskKey::Profile(profile, generation)),
-        f,
-    );
-}
-
-#[cfg(target_os = "windows")]
-fn with_suspend_result<F>(id: ItemId, f: F)
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let _ = with_priority(
-        HostTaskPriority::Maintenance,
-        Some(HostTaskKey::Suspend(id)),
-        f,
-    );
-}
-
-fn with_priority<F>(priority: HostTaskPriority, key: Option<HostTaskKey>, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    enum Access {
-        Executed,
-        Reentrant,
-        Unavailable,
-    }
-
-    if HOST_SEALED.with(Cell::get) {
-        return false;
-    }
-
-    let mut task: Option<HostTask> = Some(Box::new(f));
-    let access = HOST.with(|cell| match cell.try_borrow_mut() {
-        Ok(mut slot) => {
-            let Some(host) = slot.as_mut() else {
-                return Access::Unavailable;
-            };
-            if priority == HostTaskPriority::Shutdown {
-                // The host exists and the barrier is about to execute. Seal
-                // before native teardown so a callback pumped by teardown
-                // cannot recreate a controller behind it.
-                HOST_SEALED.with(|sealed| sealed.set(true));
-            }
-            if let Some(task) = task.take() {
-                task(host);
-            }
-            #[cfg(target_os = "windows")]
-            host.retry_windows_cleanup_debts(1);
-            Access::Executed
-        }
-        Err(_) => Access::Reentrant,
-    });
-    match access {
-        Access::Unavailable => return false,
-        Access::Reentrant => {
-            return PENDING.with(|pending| {
-                let Ok(mut pending) = pending.try_borrow_mut() else {
-                    // Queue mutation can run destructors for replaced work.
-                    // If one reenters here, reject this admission explicitly;
-                    // a RefCell panic would abort production builds.
-                    eprintln!("engine: rejected recursively borrowed host queue admission");
-                    return false;
-                };
-                let Some(task) = task.take() else {
-                    HOST_SEALED.with(|sealed| sealed.set(true));
-                    return false;
-                };
-                let queued = QueuedHostTask {
-                    priority,
-                    key,
-                    task,
-                };
-                let accepted = enqueue_pending(&mut pending, queued);
-                if accepted && priority == HostTaskPriority::Shutdown {
-                    // Non-shutdown admission stops one slot early, so a first
-                    // shutdown is guaranteed a physical queue slot. Seal only
-                    // after that barrier has actually been admitted.
-                    HOST_SEALED.with(|sealed| sealed.set(true));
-                }
-                if !accepted
-                    && PENDING_OVERFLOW_LOGS_REMAINING
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                            value.checked_sub(1)
-                        })
-                        .is_ok()
-                {
-                    // Reentrant WebView2 construction pumps the native loop. A
-                    // hostile renderer must not turn that into an unbounded queue;
-                    // blocking here would deadlock the same main-thread borrow.
-                    eprintln!("engine: dropping reentrant native task at bounded capacity");
-                }
-                accepted
-            });
-        }
-        Access::Executed => {}
-    }
-
-    loop {
-        let queued = PENDING.with(|pending| {
-            pending
-                .try_borrow_mut()
-                .map(|mut pending| pending.pop_front())
-        });
-        let queued = match queued {
-            Ok(Some(queued)) => queued,
-            Ok(None) => break,
-            Err(_) => {
-                // An authoritative drain cannot be resumed in an unknown
-                // ordering state. Seal ingress rather than aborting or
-                // executing accepted work out of order.
-                HOST_SEALED.with(|sealed| sealed.set(true));
-                return false;
-            }
-        };
-        let mut queued = Some(queued);
-        let accessed = HOST.with(|cell| {
-            let Ok(mut slot) = cell.try_borrow_mut() else {
-                return false;
-            };
-            if let Some(host) = slot.as_mut() {
-                if let Some(queued) = queued.take() {
-                    (queued.task)(host);
-                    #[cfg(target_os = "windows")]
-                    host.retry_windows_cleanup_debts(1);
-                }
-                true
-            } else {
-                false
-            }
-        });
-        if !accessed {
-            // Preserve the already-admitted task if the host was unexpectedly
-            // still borrowed, but seal all new ingress because its ordering
-            // relative to the active callback can no longer be proved.
-            if let Some(queued) = queued.take() {
-                let _ = PENDING.with(|pending| {
-                    pending
-                        .try_borrow_mut()
-                        .map(|mut pending| pending.push_front(queued))
-                });
-            }
-            HOST_SEALED.with(|sealed| sealed.set(true));
-            return false;
-        }
-    }
-    true
-}
-
-fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTask) -> bool {
-    let contains_shutdown = pending
-        .iter()
-        .any(|task| task.priority == HostTaskPriority::Shutdown);
-    if contains_shutdown {
-        // Nothing may be admitted behind the teardown barrier. `HOST_SEALED`
-        // enforces this at the public ingress; keep the queue primitive safe
-        // when exercised directly as well.
-        return false;
-    }
-    if let Some(key) = queued.key {
-        if matches!(key, HostTaskKey::NavigationCommit(_)) {
-            // A newer exact commit makes an older still-queued commit task a
-            // stale no-op. Coalesce globally (not merely adjacently), keeping
-            // at most one reserved security gate per bounded native view.
-            if let Some(index) = pending.iter().rposition(|task| task.key == Some(key)) {
-                pending.remove(index);
-                pending.push_back(queued);
-                return true;
-            }
-        }
-        if let Some(back) = pending.back().filter(|task| task.key == Some(key)) {
-            // Coalesce only an adjacent callback. Crossing an intervening host
-            // task can invert native facts around a create/navigation (most
-            // critically, a profile-process exit around a profile rebuild).
-            if queued.priority < back.priority {
-                return true;
-            }
-            pending.pop_back();
-            pending.push_back(queued);
-            return true;
-        }
-    }
-    if queued.priority == HostTaskPriority::Normal
-        && pending.len() >= NORMAL_PENDING_HOST_TASK_CAPACITY
-    {
-        return false;
-    }
-    let capacity = match queued.priority {
-        HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
-        HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
-        _ if matches!(queued.key, Some(HostTaskKey::NavigationCommit(_))) => {
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
-        }
-        _ => NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY,
-    };
-    if pending.len() < capacity {
-        pending.push_back(queued);
-        return true;
-    }
-
-    // At this priority class's bounded ceiling only, retain the newest fact
-    // for the same native object even across intervening work. This overload
-    // escape hatch prevents one object from crowding itself out; ordinary
-    // operation above preserves every ordering barrier.
-    if let Some(key) = queued.key {
-        if let Some(index) = pending.iter().rposition(|task| task.key == Some(key)) {
-            if queued.priority < pending[index].priority {
-                return true;
-            }
-            pending.remove(index);
-            pending.push_back(queued);
-            return true;
-        }
-    }
-
-    let replace = match queued.priority {
-        HostTaskPriority::Normal => None,
-        #[cfg(target_os = "windows")]
-        HostTaskPriority::Maintenance => pending
-            .iter()
-            .position(|task| task.priority < queued.priority),
-        HostTaskPriority::Observation | HostTaskPriority::Lifecycle | HostTaskPriority::Close => {
-            pending
-                .iter()
-                .position(|task| task.priority < queued.priority)
-        }
-        // Its dedicated band guarantees the bounded first cohort. Past that
-        // point rejecting this attempt is safer than dropping an already
-        // admitted close/lifecycle obligation; the public retirement gate has
-        // already made the requested profile inaccessible.
-        HostTaskPriority::ProfileErasure => None,
-        // The non-shutdown ceiling guarantees this arm cannot be reached for
-        // the first shutdown barrier.
-        HostTaskPriority::Shutdown => None,
-    };
-    if let Some(index) = replace {
-        pending.remove(index);
-        pending.push_back(queued);
-        return true;
-    }
-
-    false
-}
-
-pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
-    // Keep completion in the host task itself: `with` may queue during a
-    // reentrant WebView2 construction pump, and acknowledging before that
-    // queued task runs would let the process exit with live controllers.
-    let completion = Arc::new(std::sync::Mutex::new(Some(done)));
-    let queued_completion = completion.clone();
-    let admitted = with_priority(HostTaskPriority::Shutdown, None, move |host| {
-        let Some(done) = queued_completion
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        else {
-            return;
-        };
-        #[cfg(target_os = "windows")]
-        {
-            let (browser_processes, process_provenance_valid) = host.shutdown();
-            let private_runtime_cleanup = host.private_runtime.cleanup_ticket();
-            let worker_completion = Arc::new(std::sync::Mutex::new(Some(done)));
-            let spawn_failure = worker_completion.clone();
-            // Environment5, not the main process HANDLE alone, proves every
-            // child process and UDF resource has been released. Keep the app
-            // shutdown barrier open for one globally bounded proof wait.
-            let spawned = std::thread::Builder::new()
-                .name("zephium-webview2-shutdown".into())
-                .spawn(move || {
-                    let finish = |clean| {
-                        if let Some(done) = worker_completion
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .take()
-                        {
-                            done(clean);
-                        }
-                    };
-                    if !process_provenance_valid
-                        || !crate::platform::imp::wait_for_browser_process_shutdown(
-                            browser_processes,
-                            std::time::Duration::from_secs(5),
-                        )
-                    {
-                        eprintln!(
-                            "privacy: WebView2 full process-group shutdown could not be proven"
-                        );
-                        finish(false);
-                        return;
-                    }
-                    let cleaned = match private_runtime_cleanup.cleanup_after_proven_exit() {
-                        Ok(()) => true,
-                        Err(error) => {
-                            eprintln!(
-                                "privacy: could not remove private WebView2 runtime data at {}: {error}",
-                                private_runtime_cleanup.root().display()
-                            );
-                            false
-                        }
-                    };
-                    finish(cleaned);
-                });
-            if let Err(error) = spawned {
-                eprintln!("shutdown: could not start WebView2 cleanup worker: {error}");
-                if let Some(done) = spawn_failure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take()
-                {
-                    done(false);
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            done(host.shutdown());
-        }
-    });
-    if !admitted {
-        if let Some(done) = completion
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            done(false);
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -1098,23 +455,6 @@ impl Drop for ObservedView {
             }
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-fn queue_windows_cleanup_debt(profile: ProfileId, debt: wry::WebView2CleanupDebt) {
-    PENDING_WINDOWS_CLEANUP_DEBTS.with(|pending| {
-        let Ok(mut pending) = pending.try_borrow_mut() else {
-            WINDOWS_CLEANUP_INVARIANT_FAILED.with(|failed| failed.set(true));
-            std::mem::forget(debt);
-            return;
-        };
-        if pending.len() >= MAX_WINDOWS_CLEANUP_DEBTS {
-            WINDOWS_CLEANUP_INVARIANT_FAILED.with(|failed| failed.set(true));
-            std::mem::forget(debt);
-            return;
-        }
-        pending.push((profile, debt));
-    });
 }
 
 impl ObservedView {
@@ -3818,22 +3158,12 @@ impl EngineHost {
 
     #[cfg(target_os = "windows")]
     fn collect_pending_windows_cleanup_debts(&mut self) {
-        let pending = PENDING_WINDOWS_CLEANUP_DEBTS.with(|pending| {
-            let Ok(mut pending) = pending.try_borrow_mut() else {
-                // Existing debts remain owned by the TLS queue. We cannot
-                // prove which profile obligations were observed, so make the
-                // global construction/erasure barrier sticky instead of
-                // panicking from RefCell's dynamic borrow check.
-                WINDOWS_CLEANUP_INVARIANT_FAILED.with(|failed| failed.set(true));
-                return Vec::new();
-            };
-            std::mem::take(&mut *pending)
-        });
+        let pending = drain_windows_cleanup_debts();
         for (profile, debt) in pending {
             self.retain_windows_cleanup_debt(profile, debt);
         }
         let invariant_failed =
-            WINDOWS_CLEANUP_INVARIANT_FAILED.with(Cell::get) || wry::webview2_cleanup_overflowed();
+            windows_cleanup_invariant_failed() || wry::webview2_cleanup_overflowed();
         if invariant_failed {
             self.fail_windows_cleanup_invariant();
         }
@@ -4860,7 +4190,7 @@ impl EngineHost {
                 host.on_stage_placement_failure(id, &generation)
             });
             if !admitted {
-                HOST_SEALED.with(|sealed| sealed.set(true));
+                seal_ingress();
                 native_terminal_failure(
                     "terminal Windows stage failure was not admitted by the engine host",
                 );
@@ -4893,7 +4223,7 @@ impl EngineHost {
         // mapped. A temporary RefCell conflict must never be canonicalized to
         // an empty set and then retire native ownership without its views.
         let Some(ids) = stage.attached_items() else {
-            HOST_SEALED.with(|sealed| sealed.set(true));
+            seal_ingress();
             (self.native_terminal_failure)(
                 "terminal macOS stage could not prove its attached native views",
             );
@@ -4906,7 +4236,7 @@ impl EngineHost {
             // No native call occurs between identity proof and removal, but
             // keep this invariant fail-closed if that ever changes.
             self.stages.insert(window, stage);
-            HOST_SEALED.with(|sealed| sealed.set(true));
+            seal_ingress();
             (self.native_terminal_failure)(
                 "terminal macOS stage identity changed during retirement",
             );
@@ -4938,11 +4268,11 @@ impl EngineHost {
             mtm,
             GAP,
             Box::new(move |failed_identity| {
-                let admitted = with_priority(HostTaskPriority::Close, None, move |host| {
+                let admitted = try_with_stage_failure(move |host| {
                     host.on_macos_stage_failure(window, failed_identity)
                 });
                 if !admitted {
-                    HOST_SEALED.with(|sealed| sealed.set(true));
+                    seal_ingress();
                     native_terminal_failure(
                         "terminal macOS stage failure was not admitted by the engine host",
                     );
