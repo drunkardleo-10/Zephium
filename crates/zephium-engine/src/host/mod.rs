@@ -1,3 +1,4 @@
+mod discard;
 mod dispatch;
 mod navigation;
 mod page_ops;
@@ -21,11 +22,9 @@ use dispatch::try_with_stage_failure;
 #[cfg(target_os = "windows")]
 use dispatch::{
     drain_windows_cleanup_debts, queue_windows_cleanup_debt, windows_cleanup_invariant_failed,
-    with_profile_exit, with_suspend_result,
+    with_profile_exit,
 };
-use dispatch::{
-    with_discard_observation, with_renderer_exit, with_source_observation, with_title_observation,
-};
+use dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
 use navigation::bounded_title;
 use permits::{
     queue_navigation_commit, queue_navigation_completion, queue_navigation_failure, EventPermit,
@@ -49,12 +48,12 @@ use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{DownloadPolicy, WebView, WebViewBuilder};
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker, NavigationTransition};
-use scripts::{DISCARD_SAFETY_BOOTSTRAP_JS, DISCARD_SAFETY_QUERY_JS, EXTRACT_HTML_BOOTSTRAP_JS};
+use scripts::{DISCARD_SAFETY_BOOTSTRAP_JS, EXTRACT_HTML_BOOTSTRAP_JS};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::navigation as navigation_policy;
 use zephium_core::ports::engine::{
-    ContentScope, DiscardProbeId, EngineEvent, Partition, Shortcut, UserContent, World,
+    ContentScope, EngineEvent, Partition, Shortcut, UserContent, World,
 };
 use zephium_core::split::Pane;
 
@@ -74,8 +73,6 @@ use {
 const GAP: f64 = 8.0;
 #[cfg(all(unix, not(target_os = "macos")))]
 const MAX_LINUX_RETAINED_DATA_MANAGERS: usize = zephium_core::session::MAX_SESSION_PROFILES * 2;
-#[cfg(target_os = "windows")]
-const MAX_CONCURRENT_SUSPENDS: usize = 8;
 #[cfg(target_os = "windows")]
 const MAX_WINDOWS_CLEANUP_DEBTS: usize =
     zephium_core::session::MAX_SESSION_ITEMS + zephium_core::session::MAX_SESSION_PROFILES;
@@ -151,12 +148,6 @@ fn profile_process_group_capacity_allows(
     distinct.len() < MAX_NATIVE_PROFILE_PROCESS_GROUPS
 }
 
-fn renderer_report_allows_discard(result: &str) -> bool {
-    // Safe means the primitive mask contains only the ready bit. Reject every
-    // alternate number/string/object representation without parsing.
-    result == "1"
-}
-
 fn should_seed_stage_readiness(
     inserted: bool,
     presentable: bool,
@@ -167,18 +158,6 @@ fn should_seed_stage_readiness(
     // once per visible split leaf during every resize. A newly attached child
     // alone needs to inherit an already-presentable document's retained fact.
     inserted && presentable && presentation_permitted
-}
-
-fn discard_probe_identity_matches(
-    current_permit: &EventPermit,
-    current_navigation: &NavigationEpochTracker,
-    requested_permit: &EventPermit,
-    requested_navigation: &NavigationEpochTracker,
-    requested_epoch: NavigationEpoch,
-) -> bool {
-    current_permit.same_generation(requested_permit)
-        && current_navigation.same_generation(requested_navigation)
-        && requested_navigation.is_current(requested_epoch)
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2038,139 +2017,6 @@ impl EngineHost {
         })
     }
 
-    pub(crate) fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) {
-        let Some(view) = self.views.get(&id) else {
-            return;
-        };
-        let Some(epoch) = view.navigation.current_committed() else {
-            return;
-        };
-        let permit = view.event_permit.clone();
-        let navigation = view.navigation.clone();
-        let queued_permit = permit.clone();
-        let queued_navigation = navigation.clone();
-        let _ = view.evaluate_script_with_callback(DISCARD_SAFETY_QUERY_JS, move |result| {
-            // Callback completion can race focus-driven navigation or close.
-            // Do not reinterpret a report from the old document under a new
-            // same-id view/navigation; the shell timeout is fail-closed.
-            if !queued_navigation.is_current(epoch) {
-                return;
-            }
-            let renderer_safe = renderer_report_allows_discard(&result);
-            let completion_permit = queued_permit.clone();
-            let completion_navigation = queued_navigation.clone();
-            with_discard_observation(id, move |host| {
-                host.complete_discard_probe(
-                    id,
-                    probe,
-                    &completion_permit,
-                    &completion_navigation,
-                    epoch,
-                    renderer_safe,
-                )
-            });
-        });
-    }
-
-    fn complete_discard_probe(
-        &self,
-        id: ItemId,
-        probe: DiscardProbeId,
-        permit: &EventPermit,
-        navigation: &NavigationEpochTracker,
-        epoch: NavigationEpoch,
-        renderer_safe: bool,
-    ) {
-        let Some(view) = self.views.get(&id) else {
-            return;
-        };
-        if !discard_probe_identity_matches(
-            &view.event_permit,
-            &view.navigation,
-            permit,
-            navigation,
-            epoch,
-        ) {
-            return;
-        }
-
-        if !renderer_safe {
-            permit.emit(
-                &self.sink,
-                EngineEvent::DiscardSafety {
-                    id,
-                    probe,
-                    can_discard: false,
-                },
-            );
-            return;
-        }
-
-        // WebView2 and WebKitGTK expose native audio activity; WKWebView has
-        // public asynchronous playback plus synchronous camera/microphone
-        // capture state. Page JavaScript cannot spoof these cross-checks.
-        let activity_permit = permit.clone();
-        let activity_navigation = navigation.clone();
-        let started = crate::platform::imp::query_document_activity(view, move |native_allows| {
-            with_discard_observation(id, move |host| {
-                host.finish_discard_probe(
-                    id,
-                    probe,
-                    &activity_permit,
-                    &activity_navigation,
-                    epoch,
-                    native_allows,
-                )
-            });
-        });
-        if !started {
-            // Missing native API/admission is uncertainty, never silence.
-            permit.emit(
-                &self.sink,
-                EngineEvent::DiscardSafety {
-                    id,
-                    probe,
-                    can_discard: false,
-                },
-            );
-        }
-    }
-
-    fn finish_discard_probe(
-        &self,
-        id: ItemId,
-        probe: DiscardProbeId,
-        permit: &EventPermit,
-        navigation: &NavigationEpochTracker,
-        epoch: NavigationEpoch,
-        native_allows: bool,
-    ) {
-        let Some(view) = self.views.get(&id) else {
-            return;
-        };
-        if !discard_probe_identity_matches(
-            &view.event_permit,
-            &view.navigation,
-            permit,
-            navigation,
-            epoch,
-        ) {
-            return;
-        }
-        // Raw-content downloads are denied at construction (and per-context
-        // before load on GTK), so there is no admitted active download state
-        // to query here. That remains a mandatory invariant until a broker
-        // supplies an explicit download lease.
-        permit.emit(
-            &self.sink,
-            EngineEvent::DiscardSafety {
-                id,
-                probe,
-                can_discard: native_allows,
-            },
-        );
-    }
-
     #[cfg(target_os = "windows")]
     fn collect_pending_windows_cleanup_debts(&mut self) {
         let pending = drain_windows_cleanup_debts();
@@ -2925,84 +2771,6 @@ impl EngineHost {
         self.browser_process_exit_observers.remove(&profile);
         self.exiting_browser_processes.remove(&profile);
         true
-    }
-
-    /// Suspends the given hidden views (shell idle policy). Only Windows has
-    /// an explicit primitive; WebKit suspends hidden/unmapped processes on
-    /// its own. Resume is implicit: WebView2 wakes a view on SetIsVisible.
-    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>) {
-        #[cfg(target_os = "windows")]
-        {
-            let next: std::collections::HashSet<ItemId> = ids
-                .into_iter()
-                .filter(|id| self.hidden.contains(id))
-                .collect();
-            let wake: Vec<ItemId> = self.dormant.difference(&next).copied().collect();
-            for id in wake {
-                if let Some(view) = self.views.get(&id) {
-                    crate::platform::imp::resume(view);
-                }
-                self.dormant.remove(&id);
-            }
-            self.suspend_failed.retain(|id| next.contains(id));
-            self.desired_dormant = next;
-            self.pump_suspends();
-        }
-        #[cfg(not(target_os = "windows"))]
-        let _ = ids;
-    }
-
-    #[cfg(target_os = "windows")]
-    fn on_suspend_result(&mut self, id: ItemId, suspended: bool) {
-        self.suspending.remove(&id);
-        if suspended && self.desired_dormant.contains(&id) && self.hidden.contains(&id) {
-            self.dormant.insert(id);
-        } else if suspended {
-            // The desired state changed while the async request was in flight.
-            if let Some(view) = self.views.get(&id) {
-                crate::platform::imp::resume(view);
-            }
-        } else if self.desired_dormant.contains(&id) {
-            // Do not spin on runtimes that cannot suspend. Becoming visible
-            // clears this marker, so a later hide cycle can retry.
-            self.suspend_failed.insert(id);
-        }
-        self.pump_suspends();
-    }
-
-    #[cfg(target_os = "windows")]
-    fn pump_suspends(&mut self) {
-        while self.suspending.len() < MAX_CONCURRENT_SUSPENDS {
-            let mut candidates: Vec<ItemId> = self
-                .desired_dormant
-                .iter()
-                .filter(|id| {
-                    !self.dormant.contains(id)
-                        && !self.suspending.contains(id)
-                        && !self.suspend_failed.contains(id)
-                })
-                .copied()
-                .collect();
-            candidates.sort();
-            let Some(id) = candidates.first().copied() else {
-                break;
-            };
-            self.suspending.insert(id);
-            let started = self.views.get(&id).is_some_and(|view| {
-                crate::platform::imp::try_suspend(view, move |suspended| {
-                    with_suspend_result(id, move |host| host.on_suspend_result(id, suspended));
-                })
-            });
-            if !started {
-                // Keep synchronous admission failure iterative. Recursively
-                // pumping a runtime that rejects every request would consume
-                // one stack frame per dormant tab.
-                self.suspending.remove(&id);
-                if self.desired_dormant.contains(&id) {
-                    self.suspend_failed.insert(id);
-                }
-            }
-        }
     }
 
     #[cfg(target_os = "macos")]

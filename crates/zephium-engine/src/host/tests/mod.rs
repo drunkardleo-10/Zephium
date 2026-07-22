@@ -406,22 +406,6 @@ fn successful_windows_profile_erasure_restores_the_shutdown_map_invariant() {
 }
 
 #[test]
-fn discard_report_accepts_only_the_exact_safe_primitive_mask() {
-    assert!(renderer_report_allows_discard("1"));
-    for protected in [
-        "0", "2", "3", "255", "256", "511", "null", "\"1\"", "{}", " 1",
-    ] {
-        assert!(
-            !renderer_report_allows_discard(protected),
-            "alternate renderer value must veto discard: {protected:?}"
-        );
-    }
-    assert!(DISCARD_SAFETY_BOOTSTRAP_JS.contains("localUncertain ? 256 : 0"));
-    assert!(DISCARD_SAFETY_QUERY_JS.contains("return 256"));
-    assert!(!DISCARD_SAFETY_QUERY_JS.contains("return {"));
-}
-
-#[test]
 fn unchanged_layout_does_not_reseed_retained_stage_readiness() {
     assert!(should_seed_stage_readiness(true, true, true));
     assert!(!should_seed_stage_readiness(false, true, true));
@@ -1218,66 +1202,4 @@ fn windows_raw_autofill_surfaces_are_mandatory_verified_postconditions() {
             "raw WebView2 autofill postcondition lost invariant: {required}"
         );
     }
-}
-
-#[test]
-fn discard_probe_requires_exact_generation_and_current_navigation_epoch() {
-    let first_token = Arc::new(AtomicBool::new(true));
-    let first_permit = EventPermit::bound(&first_token);
-    let first_navigation = NavigationEpochTracker::new();
-    let first_epoch = first_navigation.begin("https://first.example/").unwrap();
-    assert_eq!(
-        first_navigation.observe_navigation(&wry::NavigationEvent {
-            id: wry::NavigationId::from_raw(1),
-            phase: wry::NavigationEventPhase::Started,
-            url: "https://first.example/".into(),
-        }),
-        Some(NavigationTransition::Started(first_epoch))
-    );
-    assert_eq!(
-        first_navigation.observe_navigation(&wry::NavigationEvent {
-            id: wry::NavigationId::from_raw(1),
-            phase: wry::NavigationEventPhase::Committed,
-            url: "https://first.example/".into(),
-        }),
-        Some(NavigationTransition::Committed(first_epoch))
-    );
-    assert!(discard_probe_identity_matches(
-        &first_permit,
-        &first_navigation,
-        &first_permit,
-        &first_navigation,
-        first_epoch,
-    ));
-
-    let second_epoch = first_navigation.begin("https://second.example/").unwrap();
-    assert_ne!(first_epoch, second_epoch);
-    assert!(!discard_probe_identity_matches(
-        &first_permit,
-        &first_navigation,
-        &first_permit,
-        &first_navigation,
-        first_epoch,
-    ));
-
-    let replacement_token = Arc::new(AtomicBool::new(true));
-    let replacement_permit = EventPermit::bound(&replacement_token);
-    let replacement_navigation = NavigationEpochTracker::new();
-    let replacement_epoch = replacement_navigation
-        .begin("https://second.example/")
-        .unwrap();
-    assert!(!discard_probe_identity_matches(
-        &replacement_permit,
-        &replacement_navigation,
-        &first_permit,
-        &first_navigation,
-        second_epoch,
-    ));
-    assert!(!discard_probe_identity_matches(
-        &first_permit,
-        &first_navigation,
-        &replacement_permit,
-        &replacement_navigation,
-        replacement_epoch,
-    ));
 }
