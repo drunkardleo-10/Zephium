@@ -1,5 +1,6 @@
 mod dispatch;
 mod navigation;
+mod page_ops;
 mod permits;
 mod scripts;
 
@@ -48,16 +49,12 @@ use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{DownloadPolicy, WebView, WebViewBuilder};
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker, NavigationTransition};
-use scripts::{
-    decode_favicon_eval_result, DISCARD_SAFETY_BOOTSTRAP_JS, DISCARD_SAFETY_QUERY_JS,
-    EXTRACT_HTML_BOOTSTRAP_JS, EXTRACT_HTML_JS, FAVICON_JS, MAX_HTML_CHARS, MAX_HTML_RESULT_BYTES,
-};
+use scripts::{DISCARD_SAFETY_BOOTSTRAP_JS, DISCARD_SAFETY_QUERY_JS, EXTRACT_HTML_BOOTSTRAP_JS};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::navigation as navigation_policy;
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, EngineEvent, Partition, Shortcut, UserContent, World,
-    ZoomRequestId,
 };
 use zephium_core::split::Pane;
 
@@ -295,14 +292,6 @@ enum RendererCrashTarget {
     Spare,
     Live,
     Retired,
-}
-
-fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
-    if succeeded {
-        requested
-    } else {
-        previous
-    }
 }
 
 fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> RendererCrashTarget {
@@ -2049,104 +2038,6 @@ impl EngineHost {
         })
     }
 
-    pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
-        let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
-            let succeeded = view.zoom(scale).is_ok();
-            view.applied_zoom = settled_zoom_scale(view.applied_zoom, scale, succeeded);
-            (view.event_permit.clone(), view.applied_zoom, succeeded)
-        }) else {
-            return;
-        };
-        if !succeeded {
-            eprintln!("engine: native zoom invocation failed");
-        }
-        permit.emit(
-            &self.sink,
-            EngineEvent::ZoomSettled {
-                id,
-                request,
-                applied_scale,
-                succeeded,
-            },
-        );
-    }
-
-    pub(crate) fn extract_html(&self, id: ItemId) {
-        if let Some(view) = self.views.get(&id) {
-            let Some(epoch) = view.navigation.current_committed() else {
-                return;
-            };
-            let sink = self.sink.clone();
-            let permit = view.event_permit.clone();
-            let navigation = view.navigation.clone();
-            let script = EXTRACT_HTML_JS.replace("__MAX__", &MAX_HTML_CHARS.to_string());
-            let _ = view.evaluate_script_with_callback(&script, move |result| {
-                if !navigation.is_current(epoch) {
-                    return;
-                }
-                if result.len() > MAX_HTML_RESULT_BYTES {
-                    return;
-                }
-                let Ok(value) = serde_json::from_str::<String>(&result) else {
-                    return;
-                };
-                let (truncated, html) = if let Some(html) = value.strip_prefix('0') {
-                    (false, html)
-                } else if let Some(html) = value.strip_prefix('1') {
-                    (true, html)
-                } else {
-                    return;
-                };
-                if html.encode_utf16().count() > MAX_HTML_CHARS {
-                    return;
-                }
-                permit.emit(
-                    &sink,
-                    EngineEvent::HtmlExtracted {
-                        id,
-                        html: html.to_owned(),
-                        truncated,
-                    },
-                );
-            });
-        }
-    }
-
-    pub(crate) fn discover_favicon(&self, id: ItemId) {
-        if let Some(view) = self.views.get(&id) {
-            let Some((epoch, page_url)) = view.navigation.committed_snapshot() else {
-                return;
-            };
-            if !navigation_policy::is_allowed_str(&page_url) {
-                return;
-            }
-            let sink = self.sink.clone();
-            let permit = view.event_permit.clone();
-            let navigation = view.navigation.clone();
-            let _ = view.evaluate_script_with_callback(FAVICON_JS, move |result| {
-                if !navigation.matches_committed_snapshot(epoch, &page_url) {
-                    return;
-                }
-                // Native engines JSON-serialize the primitive callback value.
-                // The bounded decoder accepts both ordinary JSON and
-                // Foundation's escaped-solidus spelling, then requires one
-                // canonical 5464-byte base64 value and exact 32x32 RGBA
-                // output. No page object/toJSON hook is traversed.
-                let Some(rgba) = decode_favicon_eval_result(&result) else {
-                    return;
-                };
-                permit.emit(
-                    &sink,
-                    EngineEvent::FaviconPixels {
-                        id,
-                        page_url: page_url.clone(),
-                        rgba,
-                    },
-                );
-            });
-        }
-    }
-
     pub(crate) fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) {
         let Some(view) = self.views.get(&id) else {
             return;
@@ -2278,12 +2169,6 @@ impl EngineHost {
                 can_discard: native_allows,
             },
         );
-    }
-
-    pub(crate) fn print(&self, id: ItemId) {
-        if let Some(view) = self.views.get(&id) {
-            let _ = view.print();
-        }
     }
 
     #[cfg(target_os = "windows")]

@@ -1114,18 +1114,12 @@ fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
 }
 
 #[test]
-fn zoom_settlement_keeps_the_last_proven_native_scale_on_failure() {
-    assert_eq!(settled_zoom_scale(1.0, 1.25, true), 1.25);
-    assert_eq!(settled_zoom_scale(1.25, 1.5, false), 1.25);
-}
-
-#[test]
 fn user_native_action_results_are_never_silently_discarded() {
-    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
     let navigation = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/navigation.rs"
     ));
+    let page_ops = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/page_ops.rs"));
     let actions = navigation
         .split("fn invoke_navigation_action(")
         .nth(1)
@@ -1139,7 +1133,7 @@ fn user_native_action_results_are_never_silently_discarded() {
     assert!(!actions.contains("let _ = view.go_back()"));
     assert!(!actions.contains("let _ = view.go_forward()"));
 
-    let zoom = host
+    let zoom = page_ops
         .split("pub(crate) fn zoom(")
         .nth(1)
         .expect("native zoom adapter")
