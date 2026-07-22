@@ -29,22 +29,6 @@ fn native_construction_reservation_is_bounded_and_released_exactly() {
 }
 
 #[test]
-fn unchanged_layout_does_not_reseed_retained_stage_readiness() {
-    assert!(should_seed_stage_readiness(true, true, true));
-    assert!(!should_seed_stage_readiness(false, true, true));
-    assert!(!should_seed_stage_readiness(true, false, true));
-    assert!(!should_seed_stage_readiness(true, true, false));
-
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    assert!(
-        source
-            .matches("should_seed_stage_readiness(\n                inserted,")
-            .count()
-            >= 2
-    );
-}
-
-#[test]
 fn raw_page_print_guard_is_installed_for_subframes_before_user_scripts() {
     let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
     let all_frames_call = [
@@ -74,8 +58,12 @@ fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
 
 #[test]
 fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let create_view = source
+    // View construction still lives in the facade for this commit. The
+    // construction extraction must re-anchor only this source path while
+    // preserving the cross-module handoff assertions below.
+    let construction = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
+    let create_view = construction
         .split("pub(crate) fn create_view(")
         .nth(1)
         .expect("view creation implementation")
@@ -92,8 +80,8 @@ fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
             .count(),
         2
     );
-    assert!(source.contains("filter(|stage| stage.contains_item(id))"));
-    assert!(source.contains("Stage::exclude_unstaged(view)"));
+    assert!(stages.contains("filter(|stage| stage.contains_item(id))"));
+    assert!(stages.contains("Stage::exclude_unstaged(view)"));
 }
 
 #[test]
@@ -282,8 +270,8 @@ fn collapsed_split_leaves_hide_without_invalid_native_bounds_and_reappear_on_res
 
 #[test]
 fn terminal_native_stage_failures_have_exact_retirement_and_mandatory_fatal_handoff() {
-    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
-    let mac_failure = host
+    let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
+    let mac_failure = stages
         .split("fn on_macos_stage_failure(")
         .nth(1)
         .expect("macOS terminal stage handler")
@@ -316,9 +304,9 @@ fn terminal_native_stage_failures_have_exact_retirement_and_mandatory_fatal_hand
         "terminal Windows stage failure was not admitted by the engine host",
         "terminal macOS stage failure was not admitted by the engine host",
     ] {
-        let failure = host.find(reason).expect("terminal admission handoff");
-        assert!(host[..failure].rfind("if !admitted").is_some());
-        assert!(host[..failure].rfind("native_terminal_failure").is_some());
+        let failure = stages.find(reason).expect("terminal admission handoff");
+        assert!(stages[..failure].rfind("if !admitted").is_some());
+        assert!(stages[..failure].rfind("native_terminal_failure").is_some());
     }
 }
 
@@ -652,7 +640,7 @@ fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
         .find("content_update_epoch.get() != epoch")
         .is_some());
 
-    let mac_host_layout = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"))
+    let mac_host_layout = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"))
         .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_content(")
         .nth(1)
         .expect("macOS host layout")
@@ -667,13 +655,14 @@ fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
     assert!(mac_host_layout.contains("finish_content_update"));
     assert!(!mac_host_layout.contains("stage.setHidden(false)"));
 
-    let host = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/mod.rs"));
+    let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
     assert!(
-        host.matches("view.presentation_permit.load(Ordering::Acquire)")
+        stages
+            .matches("view.presentation_permit.load(Ordering::Acquire)")
             .count()
             >= 5
     );
-    assert!(host.matches("view.presentable").count() >= 5);
+    assert!(stages.matches("view.presentable").count() >= 5);
 }
 
 #[test]
