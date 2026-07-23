@@ -1,0 +1,185 @@
+schema = 1
+fork = "Zephium adblock-rust network-policy adapter"
+reviewed_on = "2026-07-23"
+production_status = "backend foundation only; disabled by default and supplied an empty catalog"
+
+[upstream]
+repository = "https://github.com/brave/adblock-rust"
+tag = "v0.13.2"
+version = "0.13.2"
+commit = "00b19a06508ddd4f3453779f8618983421ddf32b"
+tree = "17f03b25091db8ce9ef88408e4be9d11f3e6f755"
+license = "MPL-2.0"
+
+[import]
+source_manifest = "Cargo.toml.orig"
+fork_manifest = "Cargo.toml"
+fork_lockfile = "Cargo.lock"
+application_lockfile = "../../Cargo.lock"
+upstream_file_inventory = "UPSTREAM_FILES.toml"
+code_paths = ["src", "benches", "tests"]
+support_paths = [".gitattributes", "LICENSE", "README.md", "rustfmt.toml"]
+excluded_upstream_components = [
+  ".github",
+  ".gitignore",
+  ".npmignore",
+  "CHANGELOG.md",
+  "SECURITY.md",
+  "examples",
+  "fuzz",
+  "js",
+  "npm package metadata",
+  "rust-toolchain.toml",
+  "all upstream data fixtures",
+]
+
+[[patch_sets]]
+name = "bounded prepared runtime matcher"
+paths = ["src/blocker.rs", "src/engine.rs", "src/regex_manager.rs"]
+invariants = [
+  "all regex-backed rules are compiled transactionally on a worker before publication",
+  "regex count, aggregate bytes, and per-regex pattern budgets are enforced",
+  "exact and source-independent prepared matching share the configured per-request filter-check ceiling across every scanned list",
+  "prepared match failures distinguish unprepared state, transient unavailability, and candidate-budget exhaustion without allocating",
+  "published matching never compiles, evicts, performs I/O, or waits for a contended lock",
+]
+
+[[patch_sets]]
+name = "source-independent request construction"
+paths = ["src/request.rs", "src/url_parser/mod.rs"]
+invariants = [
+  "unknown initiating-document attribution is represented explicitly",
+  "the requested URL is parsed and tokenized once without fabricated source-host hashes or a public-suffix lookup",
+]
+
+[[patch_sets]]
+name = "conservative unknown-attribution matching"
+paths = [
+  "src/blocker.rs",
+  "src/network_filter_list.rs",
+  "src/filters/fb_network.rs",
+  "src/filters/fb_network_builder.rs",
+  "src/filters/network.rs",
+  "src/filters/network_matchers.rs",
+]
+invariants = [
+  "source-sensitive rules never become broader blocks when the initiating frame is unknown",
+  "a potentially applicable source-sensitive exception makes a normal generic block fail open",
+  "source-independent important rules retain their documented priority",
+  "source-sensitive exceptions remain discoverable by requested-URL tokens or the zero bucket",
+]
+
+[[patch_sets]]
+name = "serialized matcher compatibility boundary"
+paths = [
+  "src/data_format/mod.rs",
+  "src/filters/fb_network_builder.rs",
+  "tests/unit/engine.rs",
+]
+invariants = [
+  "the fork data version is 6",
+  "artifacts from the previous bucket layout are rejected rather than reinterpreted",
+  "stable serialization hashes are updated only with an explicit format review",
+]
+
+[[patch_sets]]
+name = "empty removeparam fast path"
+paths = ["src/blocker.rs"]
+invariants = [
+  "a policy with no removeparam rules does not parse or allocate per-query-parameter state",
+]
+
+[[patch_sets]]
+name = "fallible WebKit content-rule conversion"
+paths = ["src/content_blocking.rs", "tests/unit/content_blocking.rs"]
+invariants = [
+  "network domain options use the parser's final option boundary",
+  "domains are normalized to bounded lowercase ASCII IDNA and invalid domains fail conversion",
+  "ABP separators use WebKit-supported explicit byte classes and final separators split into bounded separator-byte and end-of-URL rules",
+  "unsupported or lossy native conversion never widens a blocking rule",
+]
+
+[[patch_sets]]
+name = "strict request test compatibility"
+paths = [
+  "Cargo.toml",
+  "src/url_parser/mod.rs",
+  "tests/ublock-coverage.rs",
+  "tests/unit/engine.rs",
+  "tests/unit/filters/network_matchers.rs",
+]
+invariants = [
+  "upstream-derived tests provide valid initiating URLs after strict source validation",
+  "no-resolver production feature tests use an addr-backed resolver only under cfg(test)",
+  "production builds without the embedded resolver still require explicit resolver installation for exact-attribution requests",
+]
+
+[[patch_sets]]
+name = "fork regression tests"
+paths = [
+  "src/data_format/mod.rs",
+  "tests/unit/content_blocking.rs",
+  "tests/unit/engine.rs",
+  "tests/unit/filters/network_matchers.rs",
+  "tests/unit/request.rs",
+]
+invariants = [
+  "source-independent construction, bounded matching, WebKit conversion, and serialized-format rejection remain tested",
+]
+
+[[patch_sets]]
+name = "fixture-free test surface"
+paths = [
+  "tests/test_utils.rs",
+  "tests/unit/blocker.rs",
+  "tests/unit/resources/resource_assembler.rs",
+]
+invariants = [
+  "ordinary fork validation contains no third-party filter-list or replacement-resource payload",
+  "parser, serialization, resource-assembly, and scale coverage use deterministic Zephium-authored invalid-domain vectors",
+]
+
+[production_graphs]
+windows_runtime = "full-regex-handling"
+webkit_native = "full-regex-handling,content-blocking"
+optional_exact_attribution = "full-regex-handling,embedded-domain-resolver"
+default_features = "not used by Zephium production builds"
+test_threading = "upstream single-thread feature is disabled in every production-graph gate"
+verification = "cargo xtask check-security-fork-locks resolves exact desktop graphs for Windows, both macOS architectures, and Linux"
+
+[lock_alignment]
+policy = "every registry package reachable from the union of Zephium production graphs must have the same version, source, and checksum in the standalone and application lockfiles"
+standalone_dev_graph = "may contain additional independently pinned test-only packages"
+
+[release_gates]
+fork_provenance = "cargo xtask check-security-fork-locks"
+fork_fmt = "cargo fmt --manifest-path vendor/adblock/Cargo.toml -- --check"
+fork_windows_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling"
+fork_windows_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling -- -D warnings"
+fork_windows_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling"
+fork_webkit_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,content-blocking"
+fork_webkit_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,content-blocking -- -D warnings"
+fork_webkit_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,content-blocking"
+fork_optional_exact_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,embedded-domain-resolver"
+fork_optional_exact_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,embedded-domain-resolver -- -D warnings"
+fork_optional_exact_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,embedded-domain-resolver"
+fork_upstream_compatibility_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract"
+fork_dependency_policy = "cargo deny --manifest-path vendor/adblock/Cargo.toml --config deny.toml --locked check -A advisory-not-detected"
+workspace_fmt = "cargo fmt --all -- --check"
+workspace_check = "cargo check --workspace --locked --all-targets"
+workspace_clippy = "cargo clippy --workspace --locked --all-targets -- -D warnings"
+adapter_tests = "check, test, and Clippy each runtime-only, runtime-exact, WebKit-only, runtime+WebKit, and runtime-exact+WebKit zephium-blocker graph"
+feature_matrix = "runtime; runtime-exact; webkit; runtime,webkit; runtime-exact,webkit"
+differential_tests = "the explicit fork_contract target runs self-authored exact-attribution, unknown-attribution, bounded-matcher, and serialization vectors under every reviewed graph"
+
+[enablement_gates]
+source_package = "authenticated, licensed, monotonic, rollback-resistant, and bounded"
+native_tests = "packaged enforcement tests on supported Windows, macOS, and Fedora hosts"
+resource_tests = "recorded compile/match/startup/RSS/CPU/battery/endurance budgets"
+native_cache_gc = "bounded namespace-owned persistent WebKit content-rule cache"
+privileged_status_ui = "expose existing typed status/retry without a raw-page capability"
+
+[maintenance]
+procedure = "REBASE.md"
+minimum_reviewers = 2
+update_policy = "complete upstream-range review and explicit disposition of every patch set"
