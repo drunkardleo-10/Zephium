@@ -1,6 +1,9 @@
 node_modules
 dist
 /target
+/vendor/adblock/target/
+/crates/zephium-blocker/fuzz/artifacts/
+/crates/zephium-blocker/fuzz/target/
 gen/schemas
 .DS_Store
 *.log

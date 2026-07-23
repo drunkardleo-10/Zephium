@@ -9,6 +9,16 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: cargo
+    # The adblock security fork is excluded and owns its reviewed lock graph.
+    directory: /vendor/adblock
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    # The sanitizer harness is an independent, explicitly pinned test graph.
+    directory: /crates/zephium-blocker/fuzz
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
     # Wry is excluded from the root workspace and owns an independent lockfile.
     directory: /vendor/wry
     schedule:
