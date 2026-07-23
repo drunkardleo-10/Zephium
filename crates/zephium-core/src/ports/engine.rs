@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::geometry::Rect;
 use crate::ids::{ItemId, ProfileId, WindowId};
 use crate::split::Pane;
@@ -208,9 +211,20 @@ pub trait Engine {
     /// suspends where it has a primitive (WebView2) and resumes implicitly
     /// when a view becomes visible again.
     fn set_dormant(&self, _ids: Vec<ItemId>) {}
-    /// Compiled rule payload; format is engine-specific (WebKit JSON,
-    /// WebView2 filter set).
-    fn set_content_rules(&self, profile: ProfileId, compiled: String);
+    /// Installs one exact, immutable profile-scoped content policy.
+    ///
+    /// Queue admission is not native application. The terminal result arrives
+    /// as [`EngineEvent::ContentRulesSettled`]. A profile has no implicit
+    /// allow-all state: callers must install an explicit `AllowAll` generation
+    /// before its first view can be created.
+    fn install_content_rules(
+        &self,
+        _profile: ProfileId,
+        _generation: ContentPolicyGeneration,
+        _rules: Arc<ContentRules>,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Sticky process-local signal that the native browser runtime reported a
     /// newer version. `true` never means the running environments adopted the
     /// update: the composition root must use its ordinary ordered shutdown
@@ -282,6 +296,25 @@ pub enum NativeAction {
     GoForward,
 }
 
+/// Terminal native state for one requested content-policy generation.
+///
+/// The shape deliberately cannot express contradictory states such as a
+/// successful application with a failure, or a failed replacement without
+/// saying whether a prior generation remains active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentRuleSettlement {
+    Applied {
+        generation: ContentPolicyGeneration,
+    },
+    Retained {
+        generation: ContentPolicyGeneration,
+        failure: ContentRuleApplyFailure,
+    },
+    Unavailable {
+        failure: ContentRuleApplyFailure,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionKind {
     Geolocation,
@@ -298,6 +331,20 @@ pub enum EngineEvent {
     /// content profile alone cannot update privileged chrome and must not be
     /// presented as successful adoption.
     RuntimeRestartRequired,
+    /// One exact native content-policy installation attempt settled.
+    ///
+    /// Replacement failure reports `Retained` with the prior known-good
+    /// generation. `Unavailable` means no explicit policy is active, so the
+    /// engine continues to reject view creation for this profile.
+    ///
+    /// On WebKit, native rule-list changes govern future resource loads and
+    /// navigations; settlement is not a claim that resources already loaded
+    /// by the current document were retroactively filtered.
+    ContentRulesSettled {
+        profile: ProfileId,
+        requested: ContentPolicyGeneration,
+        settlement: ContentRuleSettlement,
+    },
     TitleChanged {
         id: ItemId,
         title: String,

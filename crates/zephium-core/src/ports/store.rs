@@ -1,3 +1,4 @@
+use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use crate::ids::ProfileId;
 use crate::session::SessionState;
 use std::time::Instant;
@@ -74,7 +75,13 @@ pub enum ProfileDeletionFinalizeOutcome {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionLoad {
     Absent,
-    Loaded(SessionState),
+    Loaded {
+        state: SessionState,
+        /// Exact blocker configuration cohort for every profile registered in
+        /// `state`. Missing or extra rows are storage corruption, never an
+        /// invitation for the application to invent a default.
+        blocker_configs: Vec<ProfileBlockerConfig>,
+    },
     /// The authoritative session is exact and fully usable, but one or more
     /// registered per-profile ancillary databases could not be safely opened
     /// at their shipped schema. Their original files are preserved and every
@@ -83,6 +90,7 @@ pub enum SessionLoad {
     LoadedWithDegradedProfiles {
         state: SessionState,
         profiles: Vec<ProfileId>,
+        blocker_configs: Vec<ProfileBlockerConfig>,
     },
     /// The authoritative bytes were preserved, but they do not describe an
     /// exact canonical session. The store is read-only until an explicit
@@ -90,6 +98,35 @@ pub enum SessionLoad {
     RecoveryRequired {
         reason: String,
     },
+    Failed,
+}
+
+/// Durable result of a compare-and-swap profile blocker preference update.
+///
+/// An admitted callback runs exactly once. `OutcomeUnknown` means the caller's
+/// observation deadline elapsed after the command entered the storage actor;
+/// it must reconcile through the next authoritative load instead of guessing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockerConfigUpdateOutcome {
+    Updated(ProfileBlockerConfig),
+    Conflict(ProfileBlockerConfig),
+    NotRegistered,
+    NotAdmitted,
+    OutcomeUnknown,
+    Failed,
+}
+
+/// Result of one actor-owned, asynchronous read of an exact durable blocker
+/// preference.
+///
+/// This narrow reconciliation path exists for indeterminate CAS outcomes.
+/// It must not be implemented by calling the synchronous whole-session load
+/// from the application actor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockerConfigLoadOutcome {
+    Loaded(ProfileBlockerConfig),
+    NotRegistered,
+    NotAdmitted,
     Failed,
 }
 
@@ -131,6 +168,32 @@ pub trait Store {
         }
     }
     fn load_session(&self) -> SessionLoad;
+    /// Durably replaces a profile's blocker preference only when `expected`
+    /// is still authoritative. The storage adapter allocates the next checked
+    /// revision and invokes `done` after transaction settlement.
+    ///
+    /// `false` proves the bounded adapter did not admit the command and the
+    /// callback will not run. This rare control-plane mutation is never
+    /// coalesced with browsing-history or session-snapshot traffic.
+    fn update_profile_blocker_config(
+        &self,
+        _profile: ProfileId,
+        _expected: BlockerConfigRevision,
+        _next: BlockerConfig,
+        _done: Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Reads one profile's current authoritative blocker preference without
+    /// blocking the application actor. `true` transfers exactly-once callback
+    /// ownership; `false` proves the request was not admitted.
+    fn load_profile_blocker_config(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
     /// History is per-profile; the adapter must ignore profiles it does not
     /// persist (incognito never reaches disk).
     fn record_visit(&self, profile: ProfileId, url: String, title: String);

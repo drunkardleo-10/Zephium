@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod blocker;
 pub mod commands;
 pub mod geometry;
 pub mod icon;
