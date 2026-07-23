@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::{params, Connection};
+use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::ids::{ItemId, SpaceId};
 use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::profiles::ProfileKind;
@@ -144,8 +145,29 @@ fn two_profile_sample() -> SessionState {
 
 fn loaded(store: &impl Store) -> SessionState {
     match store.load_session() {
-        SessionLoad::Loaded(state) => state,
+        SessionLoad::Loaded { state, .. } => state,
         other => panic!("expected loaded session, got {other:?}"),
+    }
+}
+
+fn default_blocker_configs(state: &SessionState) -> Vec<ProfileBlockerConfig> {
+    let mut configs: Vec<_> = state
+        .profiles
+        .iter()
+        .map(|profile| ProfileBlockerConfig {
+            profile: profile.id,
+            revision: BlockerConfigRevision::INITIAL,
+            config: BlockerConfig { enabled: false },
+        })
+        .collect();
+    configs.sort_unstable_by_key(|config| config.profile.to_string());
+    configs
+}
+
+fn loaded_session(state: SessionState) -> SessionLoad {
+    SessionLoad::Loaded {
+        blocker_configs: default_blocker_configs(&state),
+        state,
     }
 }
 
@@ -159,6 +181,258 @@ fn roundtrip_tree_folders_focus_and_splits() {
 }
 
 #[test]
+fn blocker_preferences_load_with_the_authoritative_session_and_default_disabled() {
+    let store = SqliteStore::in_memory().unwrap();
+    let session = two_profile_sample();
+    store.save_session(session.clone());
+
+    assert_eq!(store.load_session(), loaded_session(session));
+}
+
+#[test]
+fn blocker_preference_update_is_durable_monotonic_compare_and_swap() {
+    let store = SqliteStore::in_memory().unwrap();
+    let session = sample();
+    let profile = session.profiles[0].id;
+    store.save_session(session.clone());
+    assert!(store.flush());
+
+    let (updated_tx, updated_rx) = mpsc::channel();
+    assert!(store.update_profile_blocker_config(
+        profile,
+        BlockerConfigRevision::INITIAL,
+        BlockerConfig { enabled: true },
+        Box::new(move |outcome| {
+            updated_tx.send(outcome).unwrap();
+        }),
+    ));
+    let revision = BlockerConfigRevision::INITIAL.next().unwrap();
+    let updated = ProfileBlockerConfig {
+        profile,
+        revision,
+        config: BlockerConfig { enabled: true },
+    };
+    assert_eq!(
+        updated_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        BlockerConfigUpdateOutcome::Updated(updated)
+    );
+    assert!(
+        updated_rx.try_recv().is_err(),
+        "one admitted update completed more than once"
+    );
+    assert_eq!(
+        store.load_session(),
+        SessionLoad::Loaded {
+            state: session,
+            blocker_configs: vec![updated],
+        }
+    );
+
+    let (conflict_tx, conflict_rx) = mpsc::channel();
+    assert!(store.update_profile_blocker_config(
+        profile,
+        BlockerConfigRevision::INITIAL,
+        BlockerConfig { enabled: false },
+        Box::new(move |outcome| {
+            conflict_tx.send(outcome).unwrap();
+        }),
+    ));
+    assert_eq!(
+        conflict_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        BlockerConfigUpdateOutcome::Conflict(updated)
+    );
+}
+
+#[test]
+fn blocker_preference_update_survives_a_clean_process_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = sample();
+    let profile = session.profiles[0].id;
+    let revision = BlockerConfigRevision::INITIAL.next().unwrap();
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(session.clone());
+        assert!(store.flush());
+        let (done, completed) = mpsc::channel();
+        assert!(store.update_profile_blocker_config(
+            profile,
+            BlockerConfigRevision::INITIAL,
+            BlockerConfig { enabled: true },
+            Box::new(move |outcome| {
+                done.send(outcome).unwrap();
+            }),
+        ));
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_secs(1)).unwrap(),
+            BlockerConfigUpdateOutcome::Updated(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.load_session(),
+        SessionLoad::Loaded {
+            state: session,
+            blocker_configs: vec![ProfileBlockerConfig {
+                profile,
+                revision,
+                config: BlockerConfig { enabled: true },
+            }],
+        }
+    );
+}
+
+#[test]
+fn blocker_preference_update_rejects_unknown_profiles_and_terminal_admission() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.save_session(sample());
+    assert!(store.flush());
+
+    let (unknown_tx, unknown_rx) = mpsc::channel();
+    assert!(store.update_profile_blocker_config(
+        ProfileId::from(999),
+        BlockerConfigRevision::INITIAL,
+        BlockerConfig { enabled: true },
+        Box::new(move |outcome| {
+            unknown_tx.send(outcome).unwrap();
+        }),
+    ));
+    assert_eq!(
+        unknown_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        BlockerConfigUpdateOutcome::NotRegistered
+    );
+
+    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_completions = completions.clone();
+    assert!(!store.update_profile_blocker_config(
+        ProfileId::from(1),
+        BlockerConfigRevision::INITIAL,
+        BlockerConfig { enabled: true },
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    thread::sleep(Duration::from_millis(10));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+    store.lifecycle.lock().unwrap().terminal_admitted = false;
+}
+
+#[test]
+fn blocker_preference_reconciliation_reads_one_exact_authoritative_row() {
+    let store = SqliteStore::in_memory().unwrap();
+    let session = sample();
+    let profile = session.profiles[0].id;
+    store.save_session(session);
+    assert!(store.flush());
+
+    let (loaded_tx, loaded_rx) = mpsc::channel();
+    assert!(store.load_profile_blocker_config(
+        profile,
+        Box::new(move |outcome| loaded_tx.send(outcome).unwrap()),
+    ));
+    assert_eq!(
+        loaded_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        BlockerConfigLoadOutcome::Loaded(ProfileBlockerConfig {
+            profile,
+            revision: BlockerConfigRevision::INITIAL,
+            config: BlockerConfig::default(),
+        })
+    );
+    assert!(loaded_rx.try_recv().is_err());
+
+    let (unknown_tx, unknown_rx) = mpsc::channel();
+    assert!(store.load_profile_blocker_config(
+        ProfileId::from(999),
+        Box::new(move |outcome| unknown_tx.send(outcome).unwrap()),
+    ));
+    assert_eq!(
+        unknown_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        BlockerConfigLoadOutcome::NotRegistered
+    );
+}
+
+#[test]
+fn blocker_preference_reconciliation_rejects_terminal_and_full_queue_admission() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_completions = completions.clone();
+    assert!(!store.load_profile_blocker_config(
+        ProfileId::from(1),
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let full_store = std::mem::ManuallyDrop::new(test_store_with_sender(tx));
+    let callback_completions = completions.clone();
+    assert!(!full_store.load_profile_blocker_config(
+        ProfileId::from(1),
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn blocker_preference_update_reports_queue_non_admission_without_a_callback() {
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let store = std::mem::ManuallyDrop::new(test_store_with_sender(tx));
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_completions = completions.clone();
+
+    assert!(!store.update_profile_blocker_config(
+        ProfileId::from(1),
+        BlockerConfigRevision::INITIAL,
+        BlockerConfig { enabled: true },
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn session_commit_preserves_survivors_and_defaults_only_new_profiles() {
+    let mut hub = Hub::in_memory().unwrap();
+    let first = sample();
+    let first_profile = first.profiles[0].id;
+    hub.save(&first).unwrap();
+    let updated = hub
+        .update_profile_blocker_config(
+            first_profile,
+            BlockerConfigRevision::INITIAL,
+            BlockerConfig { enabled: true },
+        )
+        .unwrap();
+    let BlockerConfigUpdateOutcome::Updated(updated) = updated else {
+        panic!("blocker preference update did not settle")
+    };
+
+    let second = two_profile_sample();
+    hub.save(&second).unwrap();
+    assert_eq!(
+        hub.profile_blocker_configs().unwrap(),
+        vec![
+            updated,
+            ProfileBlockerConfig {
+                profile: ProfileId::from(3),
+                revision: BlockerConfigRevision::INITIAL,
+                config: BlockerConfig { enabled: false },
+            },
+        ]
+    );
+}
+
+#[test]
 fn empty_tab_session_still_persists_profile_identity() {
     let store = SqliteStore::in_memory().unwrap();
     let mut session = sample();
@@ -167,7 +441,7 @@ fn empty_tab_session_still_persists_profile_identity() {
     session.splits = None;
 
     store.save_session(session.clone());
-    assert_eq!(store.load_session(), SessionLoad::Loaded(session));
+    assert_eq!(store.load_session(), loaded_session(session));
 }
 
 #[test]
@@ -185,7 +459,7 @@ fn actor_boundary_retains_last_good_session_after_oversized_or_private_input() {
     let store = SqliteStore::in_memory().unwrap();
     let good = sample();
     store.save_session(good.clone());
-    assert_eq!(store.load_session(), SessionLoad::Loaded(good.clone()));
+    assert_eq!(store.load_session(), loaded_session(good.clone()));
 
     let mut private = good.clone();
     private.profiles[0].kind = ProfileKind::Incognito;
@@ -197,7 +471,7 @@ fn actor_boundary_retains_last_good_session_after_oversized_or_private_input() {
     *title = "x".repeat(zephium_core::item::MAX_PAGE_TITLE_CHARS * 4 + 1);
     store.save_session(oversized);
 
-    assert_eq!(store.load_session(), SessionLoad::Loaded(good));
+    assert_eq!(store.load_session(), loaded_session(good));
 }
 
 #[test]
@@ -205,7 +479,7 @@ fn actor_boundary_rejects_recursive_or_nonfinite_programmatic_state() {
     let store = SqliteStore::in_memory().unwrap();
     let good = sample();
     store.save_session(good.clone());
-    assert_eq!(store.load_session(), SessionLoad::Loaded(good.clone()));
+    assert_eq!(store.load_session(), loaded_session(good.clone()));
 
     let mut too_deep = good.clone();
     let mut split = Pane::Leaf(ItemId::from(10));
@@ -227,7 +501,7 @@ fn actor_boundary_rejects_recursive_or_nonfinite_programmatic_state() {
     *zoom = f64::NAN;
     store.save_session(nonfinite);
 
-    assert_eq!(store.load_session(), SessionLoad::Loaded(good));
+    assert_eq!(store.load_session(), loaded_session(good));
 }
 
 #[test]
@@ -1175,6 +1449,7 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
         SessionLoad::LoadedWithDegradedProfiles {
             state: state.clone(),
             profiles: vec![degraded],
+            blocker_configs: default_blocker_configs(&state),
         }
     );
 
@@ -1255,11 +1530,13 @@ fn registered_schema_corruption_is_preserved_without_blocking_the_session() {
     let preserved = artifact_bytes(&path);
 
     let store = SqliteStore::open(dir.path()).unwrap();
+    let blocker_configs = default_blocker_configs(&state);
     assert_eq!(
         store.load_session(),
         SessionLoad::LoadedWithDegradedProfiles {
             state,
             profiles: vec![degraded],
+            blocker_configs,
         }
     );
     assert_eq!(artifact_bytes(&path), preserved);
@@ -1346,6 +1623,94 @@ fn authoritative_snapshot_must_exactly_match_validated_registry_before_purge() {
 }
 
 #[test]
+fn authoritative_blocker_cohort_corruption_enters_read_only_recovery() {
+    for corruption in ["missing", "extra", "malformed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let original = sample();
+        {
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            hub.save(&original).unwrap();
+        }
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        let original_snapshot: String = meta
+            .query_row(
+                "SELECT data FROM session_snapshot WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        match corruption {
+            "missing" => {
+                meta.execute(
+                    "DELETE FROM profile_blocker_settings WHERE profile_id = ?1",
+                    [ProfileId::from(1).to_string()],
+                )
+                .unwrap();
+            }
+            "extra" => {
+                meta.execute(
+                    "INSERT INTO profile_blocker_settings(profile_id, revision, enabled)
+                     VALUES (?1, 1, 0)",
+                    [ProfileId::from(999).to_string()],
+                )
+                .unwrap();
+            }
+            "malformed" => {
+                meta.execute(
+                    "UPDATE profile_blocker_settings
+                     SET profile_id = 'ZZZZZZZZZZZZZZZZZZZZZZZZZZ'",
+                    [],
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(meta);
+
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let SessionLoad::RecoveryRequired { reason } = store.load_session() else {
+            panic!("{corruption} blocker cohort was accepted")
+        };
+        assert!(reason.contains("blocker"), "{reason}");
+        drop(store);
+
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        let retained_snapshot: String = meta
+            .query_row(
+                "SELECT data FROM session_snapshot WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            retained_snapshot, original_snapshot,
+            "{corruption} blocker corruption rewrote the authoritative session"
+        );
+    }
+}
+
+#[test]
+fn session_commit_never_silently_repairs_a_diverged_blocker_cohort() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = sample();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    hub.save(&original).unwrap();
+    let external = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    external
+        .execute(
+            "DELETE FROM profile_blocker_settings WHERE profile_id = ?1",
+            [ProfileId::from(1).to_string()],
+        )
+        .unwrap();
+    drop(external);
+
+    let mut updated = original.clone();
+    updated.active_item = Some(ItemId::from(10));
+    assert!(hub.save(&updated).is_err());
+    assert_eq!(hub.load().unwrap(), Some(original));
+}
+
+#[test]
 fn maximum_valid_session_fits_snapshot_budget() {
     let profile = ProfileId::from(1);
     let space = SpaceId::from(2);
@@ -1414,6 +1779,10 @@ fn deletion_authorization_atomically_publishes_filtered_session_and_journal() {
         ProfileDeletionAuthorizeOutcome::Authorized
     );
     assert_eq!(hub.load().unwrap(), Some(SessionState::default()));
+    assert!(
+        hub.profile_blocker_configs().unwrap().is_empty(),
+        "deletion authorization retained a profile preference"
+    );
     assert_eq!(
         hub.pending_profile_deletions().unwrap(),
         vec![zephium_core::ports::store::PendingProfileDeletion {

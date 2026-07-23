@@ -399,7 +399,7 @@ mod tests {
             let version: i64 = reopened
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 9);
+            assert_eq!(version, migrations::META.last().unwrap().version);
             drop(reopened);
 
             let second_metadata = std::fs::symlink_metadata(&path).unwrap();

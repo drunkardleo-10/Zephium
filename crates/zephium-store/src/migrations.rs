@@ -434,6 +434,27 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 10,
+        up: |tx| {
+            tx.execute_batch(
+                // Profile blocker preferences are independent authoritative
+                // state, not part of the serialized session payload. Existing
+                // profiles start disabled: migration must never manufacture
+                // an enabled preference before a real bundled policy exists.
+                "CREATE TABLE profile_blocker_settings (
+                     profile_id TEXT PRIMARY KEY
+                         CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     enabled INTEGER NOT NULL
+                         CHECK (enabled IN (0, 1))
+                 ) STRICT;
+                 INSERT INTO profile_blocker_settings(profile_id, revision, enabled)
+                 SELECT id, 1, 0 FROM profiles;",
+            )
+        },
+    },
 ];
 
 pub static PROFILE: &[Migration] = &[
@@ -670,7 +691,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, META.last().unwrap().version);
     }
 
     #[test]
@@ -712,6 +733,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retained, (0, 1));
+    }
+
+    #[test]
+    fn meta_v10_creates_an_exact_disabled_profile_blocker_cohort() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..9]).unwrap();
+        for (position, profile) in [
+            (0_i64, "01J00000000000000000000000"),
+            (1_i64, "01J00000000000000000000001"),
+        ] {
+            conn.execute(
+                "INSERT INTO profiles(id, name, kind, position)
+                 VALUES (?1, 'Profile', 'default', ?2)",
+                rusqlite::params![profile, position],
+            )
+            .unwrap();
+        }
+
+        apply(&mut conn, META).unwrap();
+
+        let rows: Vec<(String, i64, i64)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT profile_id, revision, enabled
+                     FROM profile_blocker_settings ORDER BY profile_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                ("01J00000000000000000000000".into(), 1, 0),
+                ("01J00000000000000000000001".into(), 1, 0),
+            ]
+        );
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+    }
+
+    #[test]
+    fn meta_v10_blocker_schema_rejects_invalid_durable_values() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+
+        for (profile, revision, enabled) in [
+            ("short", 1_i64, 0_i64),
+            ("01J00000000000000000000000", 0, 0),
+            ("01J00000000000000000000001", 1, 2),
+        ] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO profile_blocker_settings(
+                         profile_id, revision, enabled
+                     ) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![profile, revision, enabled],
+                )
+                .is_err(),
+                "accepted invalid blocker setting ({profile}, {revision}, {enabled})"
+            );
+        }
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM profile_blocker_settings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

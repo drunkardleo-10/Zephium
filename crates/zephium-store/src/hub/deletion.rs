@@ -288,7 +288,7 @@ impl Hub {
                 [],
                 |row| row.get::<_, bool>(0),
             )?;
-            if !authoritative || self.load()?.is_none() {
+            if !authoritative || self.load_authoritative()?.is_none() {
                 return Err(invalid_data(
                     "profile deletion journal has no valid authoritative session",
                 ));

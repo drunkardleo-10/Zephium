@@ -254,6 +254,7 @@ impl Hub {
             registry,
         } = prepared;
         let tx = self.meta.transaction()?;
+        Self::validate_blocker_cohort_before_session_commit(&tx, &self.registry)?;
         tx.execute("DELETE FROM profiles", [])?;
         {
             let mut ins = tx.prepare_cached(
@@ -270,6 +271,7 @@ impl Hub {
                 ])?;
             }
         }
+        Self::reconcile_blocker_cohort_for_session_commit(&tx, &registry)?;
         let last = state
             .active_space
             .and_then(|sp| state.spaces.iter().find(|x| x.id == sp))
@@ -531,6 +533,33 @@ impl Hub {
 
     pub(crate) fn recovery_reason(&self) -> Option<&str> {
         self.recovery_required.as_deref()
+    }
+
+    pub(super) fn has_authoritative_snapshot(&self) -> rusqlite::Result<bool> {
+        self.meta.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_snapshot WHERE id = 1)",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    pub(super) fn quarantine_current_authoritative(
+        &mut self,
+        reason: &str,
+    ) -> rusqlite::Result<()> {
+        let (schema_version, data) = self
+            .meta
+            .query_row(
+                "SELECT schema_version,
+                        CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data END
+                 FROM session_snapshot WHERE id = 1",
+                [MAX_SESSION_SNAPSHOT_BYTES as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| invalid_data("authoritative session snapshot is absent"))?;
+        let data = data.ok_or_else(|| invalid_data("authoritative session exceeds limit"))?;
+        self.quarantine_authoritative(reason, schema_version, Some(data.as_bytes()))
     }
 
     fn quarantine_authoritative(

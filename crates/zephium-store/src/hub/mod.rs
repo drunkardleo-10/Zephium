@@ -4,6 +4,7 @@
 //! file-level isolation boundary. The hub owns every connection; a single
 //! actor thread (`actor.rs`) serializes all access.
 
+mod blocker;
 mod compatibility;
 mod deletion;
 mod favicons;
@@ -18,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use zephium_core::blocker::ProfileBlockerConfig;
 use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::navigation;
@@ -73,6 +75,11 @@ pub struct Hub {
     fail_profile_deletion_after_local_purge_once: bool,
 }
 
+pub(crate) struct AuthoritativeLoad {
+    pub(crate) state: SessionState,
+    pub(crate) blocker_configs: Vec<ProfileBlockerConfig>,
+}
+
 impl Hub {
     pub fn open(dir: PathBuf) -> rusqlite::Result<Self> {
         Self::open_with_deletion_process_generation(dir, deletion_process_generation())
@@ -122,7 +129,7 @@ impl Hub {
         // migrated, purged, or reconciled. A corrupt authoritative row must
         // fail startup without destroying the only recoverable profile data.
         if authoritative && hub.recovery_required.is_none() {
-            match hub.load() {
+            match hub.load_authoritative() {
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(invalid_data("authoritative session snapshot is absent")),
                 // `load` records semantic/corruption failures before

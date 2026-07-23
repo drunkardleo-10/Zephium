@@ -13,12 +13,14 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::ids::ProfileId;
 use zephium_core::item::sanitize_page_title;
 use zephium_core::navigation;
 use zephium_core::ports::store::{
-    HistoryHit, ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome,
-    ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome, MAX_FAVICON_BATCH_ORIGINS,
+    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, HistoryHit,
+    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
+    SessionLoad, Store, StoreShutdownOutcome, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -44,6 +46,8 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(8);
 const STORE_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
 type PendingVisits = HashMap<(ProfileId, String), String>;
+type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
+type BlockerConfigLoadDone = Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>;
 
 #[derive(Default)]
 struct PendingSettings {
@@ -137,6 +141,13 @@ enum Cmd {
     VisitWake,
     SettingWake,
     Load(Sender<SessionLoad>),
+    UpdateProfileBlockerConfig(
+        ProfileId,
+        BlockerConfigRevision,
+        BlockerConfig,
+        BlockerConfigUpdateDone,
+    ),
+    LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -178,7 +189,7 @@ impl SqliteStore {
         // Fail before the shell/UI starts if even a compatibility snapshot
         // cannot be read. Startup must never turn storage failure into a new,
         // empty authoritative session.
-        if let Err(error) = hub.load() {
+        if let Err(error) = hub.load_authoritative() {
             if hub.recovery_reason().is_none() {
                 return Err(error);
             }
@@ -388,6 +399,43 @@ impl Store for SqliteStore {
         }
         rx.recv_timeout(STORE_RPC_TIMEOUT)
             .unwrap_or(SessionLoad::Failed)
+    }
+
+    fn update_profile_blocker_config(
+        &self,
+        profile: ProfileId,
+        expected: BlockerConfigRevision,
+        next: BlockerConfig,
+        done: BlockerConfigUpdateDone,
+    ) -> bool {
+        // Terminal admission transfers ownership of the actor and can make a
+        // later queued callback unreachable. Serialize this command with that
+        // transition so `true` always guarantees exactly one completion.
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::UpdateProfileBlockerConfig(
+                profile, expected, next, done,
+            ))
+            .is_ok()
+    }
+
+    fn load_profile_blocker_config(&self, profile: ProfileId, done: BlockerConfigLoadDone) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadProfileBlockerConfig(profile, done))
+            .is_ok()
     }
 
     fn record_visit(&self, profile: ProfileId, url: String, title: String) {
@@ -778,13 +826,20 @@ fn actor(
                         false,
                     );
                 }
-                let loaded = match hub.load() {
-                    Ok(Some(state)) => {
+                let loaded = match hub.load_authoritative() {
+                    Ok(Some(authoritative)) => {
                         let profiles = hub.degraded_profile_ids();
                         if profiles.is_empty() {
-                            SessionLoad::Loaded(state)
+                            SessionLoad::Loaded {
+                                state: authoritative.state,
+                                blocker_configs: authoritative.blocker_configs,
+                            }
                         } else {
-                            SessionLoad::LoadedWithDegradedProfiles { state, profiles }
+                            SessionLoad::LoadedWithDegradedProfiles {
+                                state: authoritative.state,
+                                profiles,
+                                blocker_configs: authoritative.blocker_configs,
+                            }
                         }
                     }
                     Ok(None) => SessionLoad::Absent,
@@ -800,6 +855,30 @@ fn actor(
                     }
                 };
                 let _ = reply.send(loaded);
+            }
+            Some(Cmd::UpdateProfileBlockerConfig(profile, expected, next, done)) => {
+                let outcome = match hub.update_profile_blocker_config(profile, expected, next) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} blocker preference update failed: {error}"
+                        );
+                        BlockerConfigUpdateOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadProfileBlockerConfig(profile, done)) => {
+                let outcome = match hub.profile_blocker_config(profile) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} blocker preference reconciliation failed: {error}"
+                        );
+                        BlockerConfigLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
             }
             Some(Cmd::GetSetting(key, reply)) => {
                 let _ = reply.send(hub.app_setting(&key));
