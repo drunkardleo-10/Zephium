@@ -670,6 +670,7 @@ jobs:
 
           scan_root="${RUNNER_TEMP}/zephium-linux-sbom-payload"
           mkdir -p "${scan_root}/installed" \
+            "${scan_root}/build-manifests/adblock" \
             "${scan_root}/build-manifests/tauri" \
             "${scan_root}/build-manifests/tauri-runtime-wry" \
             "${scan_root}/build-manifests/wry" \
@@ -696,6 +697,13 @@ jobs:
             --source-version "${RELEASE_VERSION}" \
             --source-supplier Zephium \
             --output "cyclonedx-json=${output}"
+          # The workspace lock is the authoritative product graph. Stage the
+          # standalone fork evidence only after Syft so its development graph
+          # cannot duplicate or pollute the release dependency inventory.
+          cp vendor/adblock/Cargo.toml vendor/adblock/Cargo.lock \
+            vendor/adblock/Cargo.toml.orig vendor/adblock/FORK.toml \
+            vendor/adblock/UPSTREAM_FILES.toml vendor/adblock/LICENSE \
+            "${scan_root}/build-manifests/adblock/"
           packaged_executable="${scan_root}/installed/usr/bin/$(basename "${executables[0]}")"
           python3 scripts/release/finalize_sbom.py \
             --sbom "${output}" \
@@ -706,7 +714,10 @@ jobs:
             --platform linux \
             --subject "${rpms[0]}" \
             --executable "${packaged_executable}" \
-            --reference-executable target/release/zephium-desktop
+            --reference-executable target/release/zephium-desktop \
+            --adblock-fork-manifest "${scan_root}/build-manifests/adblock/FORK.toml" \
+            --adblock-upstream-inventory "${scan_root}/build-manifests/adblock/UPSTREAM_FILES.toml" \
+            --adblock-source-manifest "${scan_root}/build-manifests/adblock/Cargo.toml.orig"
           python3 -m json.tool "${output}" >/dev/null
 
       - name: Attest Linux release outputs at their producing runner
@@ -1159,9 +1170,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $payloadRoot = Join-Path $env:RUNNER_TEMP "zephium-windows-payload"
           $manifestRoot = Join-Path $payloadRoot "build-manifests"
+          $adblockManifestRoot = Join-Path $manifestRoot "adblock"
           $javascriptRoot = Join-Path $manifestRoot "javascript"
           New-Item -ItemType Directory -Path `
             $manifestRoot, `
+            $adblockManifestRoot, `
             (Join-Path $manifestRoot "tauri"), `
             (Join-Path $manifestRoot "tauri-runtime-wry"), `
             (Join-Path $manifestRoot "wry"), `
@@ -1206,6 +1219,17 @@ jobs:
             --source-supplier Zephium `
             --output "cyclonedx-json=$output"
           if ($LASTEXITCODE -ne 0) { throw "Syft failed" }
+          # Keep the standalone fork's development graph out of the product
+          # dependency scan; the finalizer inventories and binds this exact
+          # evidence after independently validating the workspace graph.
+          Copy-Item -LiteralPath @(
+            "vendor/adblock/Cargo.toml",
+            "vendor/adblock/Cargo.lock",
+            "vendor/adblock/Cargo.toml.orig",
+            "vendor/adblock/FORK.toml",
+            "vendor/adblock/UPSTREAM_FILES.toml",
+            "vendor/adblock/LICENSE"
+          ) -Destination $adblockManifestRoot
           $arguments = @(
             "scripts/release/finalize_sbom.py",
             "--sbom", $output,
@@ -1216,7 +1240,10 @@ jobs:
             "--platform", "windows",
             "--subject", $msis[0].FullName,
             "--subject", $installers[0].FullName,
-            "--reference-executable", $reference.FullName
+            "--reference-executable", $reference.FullName,
+            "--adblock-fork-manifest", (Join-Path $adblockManifestRoot "FORK.toml"),
+            "--adblock-upstream-inventory", (Join-Path $adblockManifestRoot "UPSTREAM_FILES.toml"),
+            "--adblock-source-manifest", (Join-Path $adblockManifestRoot "Cargo.toml.orig")
           )
           foreach ($executable in $executables) {
             $arguments += @("--executable", $executable.FullName)
@@ -1511,6 +1538,7 @@ jobs:
 
           scan_root="${RUNNER_TEMP}/zephium-macos-sbom-payload"
           mkdir -p "${scan_root}/installed" \
+            "${scan_root}/build-manifests/adblock" \
             "${scan_root}/build-manifests/tauri" \
             "${scan_root}/build-manifests/tauri-runtime-wry" \
             "${scan_root}/build-manifests/wry" \
@@ -1551,6 +1579,13 @@ jobs:
             --source-version "${RELEASE_VERSION}" \
             --source-supplier Zephium \
             --output "cyclonedx-json=${sbom}"
+          # Preserve one authoritative workspace dependency graph in Syft,
+          # then add the separately reviewed fork evidence to the bound
+          # payload inventory.
+          cp vendor/adblock/Cargo.toml vendor/adblock/Cargo.lock \
+            vendor/adblock/Cargo.toml.orig vendor/adblock/FORK.toml \
+            vendor/adblock/UPSTREAM_FILES.toml vendor/adblock/LICENSE \
+            "${scan_root}/build-manifests/adblock/"
           python3 scripts/release/finalize_sbom.py \
             --sbom "${sbom}" \
             --scan-root "${scan_root}" \
@@ -1560,7 +1595,10 @@ jobs:
             --platform macos \
             --subject "${public_dmg}" \
             --executable "${staged_app}/Contents/MacOS/zephium-desktop" \
-            --reference-executable "${apps[0]}/Contents/MacOS/zephium-desktop"
+            --reference-executable "${apps[0]}/Contents/MacOS/zephium-desktop" \
+            --adblock-fork-manifest "${scan_root}/build-manifests/adblock/FORK.toml" \
+            --adblock-upstream-inventory "${scan_root}/build-manifests/adblock/UPSTREAM_FILES.toml" \
+            --adblock-source-manifest "${scan_root}/build-manifests/adblock/Cargo.toml.orig"
           python3 -m json.tool "${sbom}" >/dev/null
 
       - name: Attest macOS release outputs at their producing runner
