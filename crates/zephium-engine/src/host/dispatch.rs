@@ -19,7 +19,11 @@ use super::ParentHandle;
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
     static PENDING: RefCell<VecDeque<QueuedHostTask>> = const { RefCell::new(VecDeque::new()) };
+    #[cfg(not(target_os = "windows"))]
+    static PENDING_CONTENT_POLICY_TERMINALS: Cell<ContentPolicyTerminalSlots> =
+        const { Cell::new(ContentPolicyTerminalSlots::EMPTY) };
     static HOST_SEALED: Cell<bool> = const { Cell::new(false) };
+    static HOST_INSTALLING: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "windows")]
     static PENDING_WINDOWS_CLEANUP_DEBTS: RefCell<Vec<(ProfileId, wry::WebView2CleanupDebt)>> =
         const { RefCell::new(Vec::new()) };
@@ -28,6 +32,72 @@ thread_local! {
 }
 
 type HostTask = Box<dyn FnOnce(&mut EngineHost)>;
+
+struct HostInstallClaim(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl HostInstallClaim {
+    fn acquire() -> Result<Self, String> {
+        let claimed = HOST_INSTALLING.with(|installing| !installing.replace(true));
+        if !claimed {
+            return Err("engine host installation is already active on this thread".to_owned());
+        }
+        let claim = Self(std::marker::PhantomData);
+        HOST.with(|cell| {
+            let host = cell
+                .try_borrow()
+                .map_err(|_| "engine host is re-entrantly borrowed during install".to_owned())?;
+            if host.is_some() {
+                return Err("engine host is already installed on this thread".to_owned());
+            }
+            Ok(())
+        })?;
+        Ok(claim)
+    }
+}
+
+impl Drop for HostInstallClaim {
+    fn drop(&mut self) {
+        HOST_INSTALLING.with(|installing| installing.set(false));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Default)]
+struct ContentPolicyTerminalSlots {
+    first: Option<HostTask>,
+    second: Option<HostTask>,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl ContentPolicyTerminalSlots {
+    const EMPTY: Self = Self {
+        first: None,
+        second: None,
+    };
+
+    fn push_back(&mut self, task: HostTask) -> Result<(), HostTask> {
+        if self.first.is_none() {
+            self.first = Some(task);
+            Ok(())
+        } else if self.second.is_none() {
+            self.second = Some(task);
+            Ok(())
+        } else {
+            Err(task)
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<HostTask> {
+        let first = self.first.take();
+        self.first = self.second.take();
+        first
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + usize::from(self.second.is_some())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum HostTaskPriority {
@@ -70,9 +140,11 @@ struct QueuedHostTask {
 const NORMAL_PENDING_HOST_TASK_CAPACITY: usize = 960;
 // Normal UI work cannot consume this lifecycle band. One keyed native fact
 // per maximum view/profile plus the bounded suspend batch stays below this
-// ceiling, even during a nested native message-loop pump. One additional slot
-// per maximum live profile is reserved for non-coalescible erasure tasks, and
-// the final physical slot is reserved exclusively for shutdown.
+// ceiling, even during a nested native message-loop pump. One slot per
+// maximum live profile is reserved for noncoalescible erasure tasks, and the
+// final physical slot is reserved exclusively for shutdown. The single
+// WebKit compiler/cache-maintenance slot's two exact physical callbacks have
+// their own fixed FIFO.
 const PENDING_HOST_TASK_CAPACITY: usize = 4096;
 const NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY: usize = PENDING_HOST_TASK_CAPACITY - 1;
 const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
@@ -94,6 +166,22 @@ pub(crate) fn install(
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
+    let _install_claim = HostInstallClaim::acquire()?;
+    // WebView2 needs a user-data folder even for InPrivate controllers. It
+    // must never be the privileged Tauri chrome's folder, and stale runtime
+    // metadata must not accumulate across browser sessions.
+    #[cfg(not(target_os = "macos"))]
+    let profiles_root = crate::erasure::canonical_owned_root(&data_root.join("profiles"))
+        .map_err(|error| format!("cannot secure engine profile root: {error}"))?;
+    #[cfg(not(target_os = "windows"))]
+    let content_rule_cache = crate::erasure::canonical_owned_root(&data_root.join("content-rules"))
+        .map_err(|error| format!("cannot secure content-rule cache: {error}"))?;
+    #[cfg(target_os = "windows")]
+    let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
+        &data_root.join("private-runtime"),
+        zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
+    )
+    .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
     HOST_SEALED.with(|sealed| sealed.set(false));
     PENDING.with(|pending| {
         pending
@@ -102,34 +190,22 @@ pub(crate) fn install(
             .clear();
         Ok::<(), String>(())
     })?;
-    // WebView2 needs a user-data folder even for InPrivate controllers. It
-    // must never be the privileged Tauri chrome's folder, and stale runtime
-    // metadata must not accumulate across browser sessions.
-    #[cfg(not(target_os = "macos"))]
-    let profiles_root = crate::erasure::canonical_owned_root(&data_root.join("profiles"))
-        .map_err(|error| format!("cannot secure engine profile root: {error}"))?;
-    #[cfg(target_os = "windows")]
-    let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
-        &data_root.join("private-runtime"),
-        zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
-    )
-    .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
-    #[cfg(target_os = "macos")]
-    let _ = &data_root;
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let _ = &native_terminal_failure;
+    #[cfg(not(target_os = "windows"))]
+    PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+        drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
+    });
     HOST.with(|cell| {
         let mut host = cell
             .try_borrow_mut()
             .map_err(|_| "engine host is re-entrantly borrowed during install".to_owned())?;
-        if host.is_some() {
-            return Err("engine host is already installed on this thread".to_owned());
-        }
+        debug_assert!(host.is_none(), "the install claim proves host vacancy");
         *host = Some(EngineHost {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             parent: ParentHandle(parent),
             #[cfg(not(target_os = "macos"))]
             profiles_root,
+            #[cfg(not(target_os = "windows"))]
+            content_rule_cache,
             #[cfg(target_os = "windows")]
             private_runtime,
             views: HashMap::new(),
@@ -138,12 +214,33 @@ pub(crate) fn install(
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),
             profile_persistence_classes: HashMap::new(),
+            content_policies: HashMap::new(),
+            declarative_content_policy_cache: HashMap::new(),
+            declarative_content_policy_compilations: HashMap::new(),
+            #[cfg(not(target_os = "windows"))]
+            declarative_content_policy_queue: VecDeque::new(),
+            #[cfg(not(target_os = "windows"))]
+            active_declarative_content_policy_maintenance: None,
+            #[cfg(not(target_os = "windows"))]
+            declarative_content_policy_bytes: 0,
+            #[cfg(not(target_os = "windows"))]
+            next_declarative_content_policy_maintenance_attempt: 1,
+            #[cfg(not(target_os = "windows"))]
+            // Persistent native-cache maintenance is requested by an actual
+            // policy settlement. Process startup alone does not yet know the
+            // initial profile cohort's protected digests.
+            content_rule_cache_gc_pending: false,
+            #[cfg(not(target_os = "windows"))]
+            content_rule_cache_gc_cursor: 0,
+            #[cfg(not(target_os = "windows"))]
+            content_rule_cache_gc_removed_in_cycle: false,
             spare: None,
             user_content: HashMap::new(),
             shortcuts: Vec::new(),
             stages: HashMap::new(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             native_terminal_failure,
+            #[cfg(not(target_os = "windows"))]
+            shutdown_completion: None,
             #[cfg(target_os = "macos")]
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(target_os = "windows")]
@@ -218,8 +315,13 @@ where
 #[cfg(test)]
 pub(crate) fn make_unavailable_for_test() {
     HOST_SEALED.with(|sealed| sealed.set(false));
+    HOST_INSTALLING.with(|installing| installing.set(false));
     HOST.with(|host| *host.borrow_mut() = None);
     PENDING.with(|pending| pending.borrow_mut().clear());
+    #[cfg(not(target_os = "windows"))]
+    PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+        drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
+    });
 }
 
 #[cfg(target_os = "windows")]
@@ -307,6 +409,81 @@ where
         Some(HostTaskKey::NavigationCommit(id)),
         f,
     )
+}
+
+/// Native declarative compilation/cache maintenance is asynchronous and may
+/// complete while WebKit has re-entered the host. The one physical slot owns
+/// a dedicated two-entry FIFO for its timeout and terminal callback. Neither
+/// ordinary queue saturation nor shutdown sealing may discard these debts.
+#[cfg(not(target_os = "windows"))]
+pub(super) fn with_content_policy_settlement<F>(_digest: [u8; 32], f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    admit_content_policy_terminal_debt(Box::new(f))
+}
+
+/// The one physical WebKit maintenance watchdog must not coalesce with its
+/// completion. If both arrive during native re-entry, FIFO order decides
+/// whether the completion or deadline wins, and the exact attempt token makes
+/// the losing task a no-op.
+#[cfg(not(target_os = "windows"))]
+pub(super) fn with_content_policy_timeout<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    admit_content_policy_terminal_debt(Box::new(f))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn admit_content_policy_terminal_debt(task: HostTask) -> bool {
+    let queued = PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+        let mut slots = pending.take();
+        let queued = slots.push_back(task);
+        pending.set(slots);
+        queued.is_ok()
+    });
+    if !queued {
+        return false;
+    }
+    drain_content_policy_terminal_debts()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn drain_content_policy_terminal_debts() -> bool {
+    enum Drain {
+        Executed,
+        Empty,
+        Deferred,
+        Unavailable,
+    }
+
+    loop {
+        let drained = HOST.with(|cell| {
+            let Ok(mut slot) = cell.try_borrow_mut() else {
+                return Drain::Deferred;
+            };
+            let Some(host) = slot.as_mut() else {
+                return Drain::Unavailable;
+            };
+            let task = PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+                let mut slots = pending.take();
+                let task = slots.pop_front();
+                pending.set(slots);
+                task
+            });
+            let Some(task) = task else {
+                return Drain::Empty;
+            };
+            task(host);
+            Drain::Executed
+        });
+        match drained {
+            Drain::Executed => {}
+            Drain::Empty | Drain::Deferred => return true,
+            Drain::Unavailable => return false,
+        }
+    }
 }
 
 pub(super) fn with_navigation_settlement<F>(id: ItemId, f: F)
@@ -458,6 +635,16 @@ where
         Access::Executed => {}
     }
 
+    #[cfg(not(target_os = "windows"))]
+    if !drain_content_policy_terminal_debts() {
+        // An exact native compiler terminal is a lifecycle debt, not a
+        // replaceable observation. If its dedicated queue cannot be drained,
+        // ordinary ingress must stop and the callback owner will invoke the
+        // mandatory terminal-failure path.
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        return false;
+    }
+
     loop {
         let queued = PENDING.with(|pending| {
             pending
@@ -502,6 +689,11 @@ where
                         .map(|mut pending| pending.push_front(queued))
                 });
             }
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            return false;
+        }
+        #[cfg(not(target_os = "windows"))]
+        if !drain_content_policy_terminal_debts() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }
@@ -676,7 +868,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            done(host.shutdown());
+            host.shutdown(done);
         }
     });
     if !admitted {
@@ -717,6 +909,78 @@ mod tests {
     }
 
     #[test]
+    fn install_claim_is_reentrant_safe_and_never_resets_live_ingress() {
+        make_unavailable_for_test();
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        PENDING.with(|pending| {
+            pending
+                .borrow_mut()
+                .push_back(queued(HostTaskPriority::Lifecycle));
+        });
+        #[cfg(not(target_os = "windows"))]
+        PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            assert!(slots.push_back(Box::new(|_| {})).is_ok());
+            pending.set(slots);
+        });
+
+        let claim = HostInstallClaim::acquire().expect("first install must claim vacancy");
+        let Err(error) = HostInstallClaim::acquire() else {
+            panic!("a nested install must not acquire the live claim");
+        };
+        assert!(error.contains("already active"));
+        assert!(HOST_SEALED.with(Cell::get));
+        assert_eq!(PENDING.with(|pending| pending.borrow().len()), 1);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+                let slots = pending.take();
+                let len = slots.len();
+                pending.set(slots);
+                len
+            }),
+            1
+        );
+        drop(claim);
+
+        HOST.with(|host| {
+            let _reentrant_host_borrow = host.borrow_mut();
+            let Err(error) = HostInstallClaim::acquire() else {
+                panic!("a reentrant host borrow must reject installation");
+            };
+            assert!(error.contains("re-entrantly borrowed"));
+        });
+        assert!(!HOST_INSTALLING.with(Cell::get));
+        assert!(HOST_SEALED.with(Cell::get));
+        assert_eq!(PENDING.with(|pending| pending.borrow().len()), 1);
+
+        make_unavailable_for_test();
+    }
+
+    #[test]
+    fn host_vacancy_is_claimed_before_install_resets_ingress() {
+        let source = include_str!("dispatch.rs");
+        let install = source
+            .split_once("pub(crate) fn install(")
+            .expect("install exists")
+            .1
+            .split_once("\n}\n\n// WebView2 construction")
+            .expect("install body has an audit boundary")
+            .0;
+        let claim = install
+            .find("HostInstallClaim::acquire()")
+            .expect("install claims exclusive vacancy");
+        let seal_reset = install
+            .find("HOST_SEALED.with")
+            .expect("install resets ingress after claiming");
+        let pending_reset = install
+            .find("PENDING.with")
+            .expect("install clears pending work after claiming");
+        assert!(claim < seal_reset);
+        assert!(claim < pending_reset);
+    }
+
+    #[test]
     fn tasks_are_rejected_when_the_host_is_unavailable() {
         HOST_SEALED.with(|sealed| sealed.set(false));
         HOST.with(|host| *host.borrow_mut() = None);
@@ -753,6 +1017,90 @@ mod tests {
         assert_eq!(PENDING.with(|pending| pending.borrow().len()), 1);
         PENDING.with(|pending| pending.borrow_mut().clear());
         HOST_SEALED.with(|sealed| sealed.set(false));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn content_policy_terminals_survive_recursive_queue_borrow_and_shutdown_seal() {
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        HOST.with(|host| *host.borrow_mut() = None);
+        PENDING.with(|pending| pending.borrow_mut().clear());
+        PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+            drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
+        });
+
+        HOST.with(|host| {
+            let _active_host_borrow = host.borrow_mut();
+            PENDING.with(|pending| {
+                let _recursive_pending_borrow = pending.borrow_mut();
+                assert!(admit_content_policy_terminal_debt(Box::new(|_| {
+                    panic!("a reentrant terminal debt must not execute early")
+                })));
+                assert!(admit_content_policy_terminal_debt(Box::new(|_| {
+                    panic!("a reentrant terminal debt must not execute early")
+                })));
+                assert!(
+                    !admit_content_policy_terminal_debt(Box::new(|_| {})),
+                    "one timeout plus one native terminal is the exact physical bound"
+                );
+            });
+        });
+        assert_eq!(
+            PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+                let slots = pending.take();
+                let len = slots.len();
+                pending.set(slots);
+                len
+            }),
+            2
+        );
+        assert!(
+            PENDING.with(|pending| pending.borrow().is_empty()),
+            "native compiler terminals must not depend on the ordinary queue"
+        );
+        PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
+            drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
+        });
+        HOST_SEALED.with(|sealed| sealed.set(false));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn content_policy_terminal_slots_are_fifo() {
+        struct DropMarker {
+            value: usize,
+            order: Arc<std::sync::Mutex<Vec<usize>>>,
+        }
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.order
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(self.value);
+            }
+        }
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first = DropMarker {
+            value: 1,
+            order: order.clone(),
+        };
+        let second = DropMarker {
+            value: 2,
+            order: order.clone(),
+        };
+        let mut slots = ContentPolicyTerminalSlots::default();
+        assert!(slots.push_back(Box::new(move |_| drop(first))).is_ok());
+        assert!(slots.push_back(Box::new(move |_| drop(second))).is_ok());
+        drop(slots.pop_front());
+        drop(slots.pop_front());
+        assert_eq!(
+            *order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![1, 2]
+        );
     }
 
     #[test]
