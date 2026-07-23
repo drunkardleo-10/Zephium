@@ -2,8 +2,13 @@
 //! positioning, SetWindowRgn rounding, divider drags and the drop indicator
 //! all mirror the macOS ContentStage.
 
+mod content_filter;
 mod stage;
 
+pub(crate) use content_filter::{
+    install_on_view as install_content_policy_on_view, prepare as prepare_content_policy,
+    same_policy as same_content_policy, ContentPolicyRegistration, NativeContentPolicy,
+};
 pub use stage::Stage;
 
 use std::cell::{Cell, RefCell};
@@ -71,8 +76,19 @@ fn take_pwstr_bounded(
             // SAFETY: the scan established this initialized prefix and the
             // CoTaskMem owner remains live through conversion.
             let units = unsafe { std::slice::from_raw_parts(pointer, length) };
-            let value = String::from_utf16_lossy(units);
-            return (value.len() <= max_utf8_bytes).then_some(value);
+            let mut utf8_bytes = 0usize;
+            for character in char::decode_utf16(units.iter().copied()) {
+                let character = character.unwrap_or(char::REPLACEMENT_CHARACTER);
+                utf8_bytes = utf8_bytes.checked_add(character.len_utf8())?;
+                if utf8_bytes > max_utf8_bytes {
+                    return None;
+                }
+            }
+            let mut value = String::with_capacity(utf8_bytes);
+            for character in char::decode_utf16(units.iter().copied()) {
+                value.push(character.unwrap_or(char::REPLACEMENT_CHARACTER));
+            }
+            return Some(value);
         }
         length += 1;
     }
