@@ -1,8 +1,16 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
 //! composition root; the stage positions them and draws the drop indicator.
 
+mod content_filter;
 mod stage;
 
+pub(crate) use content_filter::{
+    compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
+    install_on_view as install_content_policy_on_view, remove_content_policy_cache_identifier,
+    same_policy as same_content_policy, ContentPolicyCacheMaintenanceCancellation,
+    ContentPolicyCachePage, ContentPolicyCompilationCancellation, ContentPolicyRegistration,
+    NativeContentPolicy,
+};
 pub use stage::Stage;
 
 use std::cell::RefCell;
@@ -11,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use gtk::glib::prelude::{ObjectExt, ObjectType};
 use gtk::glib::signal::{connect_raw, SignalHandlerId};
@@ -21,6 +30,45 @@ use zephium_core::ports::engine::Partition;
 
 thread_local! {
     static CONTAINER: RefCell<Option<gtk::Fixed>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct ContentPolicyTimeout {
+    task: gtk::glib::JoinHandle<()>,
+    fired: Rc<std::cell::Cell<bool>>,
+}
+
+impl ContentPolicyTimeout {
+    pub(crate) fn cancel(self) {
+        drop(self);
+    }
+}
+
+impl Drop for ContentPolicyTimeout {
+    fn drop(&mut self) {
+        if !self.fired.get() {
+            self.task.abort();
+        }
+    }
+}
+
+pub(crate) fn schedule_content_policy_timeout(
+    duration: Duration,
+    callback: impl FnOnce() + 'static,
+) -> Option<ContentPolicyTimeout> {
+    let context = gtk::glib::MainContext::ref_thread_default();
+    if !context.is_owner() {
+        return None;
+    }
+    let fired = Rc::new(std::cell::Cell::new(false));
+    let callback_fired = fired.clone();
+    let task = context.spawn_local(async move {
+        gtk::glib::timeout_future(duration).await;
+        // Mark first: timeout settlement takes and drops this exact watchdog
+        // while its local task is still executing.
+        callback_fired.set(true);
+        callback();
+    });
+    Some(ContentPolicyTimeout { task, fired })
 }
 
 pub fn install_container(fixed: gtk::Fixed) -> Result<(), String> {
@@ -550,14 +598,76 @@ fn remove_linux_profile_directories_async(
 #[cfg(test)]
 mod tests {
     use gtk::prelude::{ContainerExt, WidgetExt};
+    use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use webkit2gtk::{WebContextExt, WebViewExt};
     use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
     use zephium_core::ids::ProfileId;
+
+    #[test]
+    fn content_policy_watchdog_is_owner_context_local_and_cancelable() {
+        let context = gtk::glib::MainContext::new();
+        let owner_thread = std::thread::current().id();
+        let fired_on = Rc::new(Cell::new(None));
+        let callback_fired_on = fired_on.clone();
+        context
+            .with_thread_default(|| {
+                let timeout =
+                    schedule_content_policy_timeout(Duration::from_millis(1), move || {
+                        callback_fired_on.set(Some(std::thread::current().id()))
+                    })
+                    .expect("owned thread-default context must admit its watchdog");
+                while fired_on.get().is_none() {
+                    assert!(context.iteration(true));
+                }
+                drop(timeout);
+            })
+            .expect("test must own its isolated GLib context");
+        assert_eq!(fired_on.get(), Some(owner_thread));
+
+        let canceled = Rc::new(Cell::new(false));
+        let callback_canceled = canceled.clone();
+        context
+            .with_thread_default(|| {
+                let timeout =
+                    schedule_content_policy_timeout(Duration::from_millis(1), move || {
+                        callback_canceled.set(true)
+                    })
+                    .expect("owned thread-default context must admit its watchdog");
+                drop(timeout);
+                std::thread::sleep(Duration::from_millis(5));
+                while context.pending() {
+                    assert!(context.iteration(false));
+                }
+            })
+            .expect("test must reacquire its isolated GLib context");
+        assert!(!canceled.get());
+    }
+
+    #[test]
+    fn content_policy_watchdog_never_falls_back_to_the_process_default_context() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/linux/mod.rs"
+        ));
+        let schedule = source
+            .split_once("pub(crate) fn schedule_content_policy_timeout")
+            .expect("watchdog scheduler disappeared")
+            .1
+            .split_once("pub fn install_container")
+            .expect("watchdog scheduler boundary disappeared")
+            .0;
+        assert!(schedule.contains("MainContext::ref_thread_default()"));
+        assert!(schedule.contains("if !context.is_owner()"));
+        assert!(schedule.contains("context.spawn_local("));
+        assert!(schedule.contains("timeout_future(duration)"));
+        assert!(!schedule.contains("timeout_add_local_once"));
+    }
 
     fn proc_parent_map() -> HashMap<u32, u32> {
         let mut parents = HashMap::new();
