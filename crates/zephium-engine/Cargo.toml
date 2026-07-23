@@ -34,11 +34,22 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
-dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-core-graphics = "0.3"
 objc2-foundation = "0.3"
-objc2-web-kit = "0.3"
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "block2",
+    "WKContentWorld",
+    "WKContentRuleList",
+    "WKContentRuleListStore",
+    "WKError",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataRecord",
+    "WKWebsiteDataStore",
+] }
 objc2-quartz-core = "0.3"
 raw-window-handle.workspace = true

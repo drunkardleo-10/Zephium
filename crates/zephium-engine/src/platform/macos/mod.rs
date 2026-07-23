@@ -1,9 +1,20 @@
+mod content_filter;
 mod native;
 mod navigation;
 mod stage;
 
+pub(crate) use content_filter::{
+    compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
+    install_on_view as install_content_policy_on_view, remove_content_policy_cache_identifier,
+    same_policy as same_content_policy, ContentPolicyCacheMaintenanceCancellation,
+    ContentPolicyCachePage, ContentPolicyCompilationCancellation, ContentPolicyRegistration,
+    NativeContentPolicy,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+use dispatch2::DispatchObject as _;
 
 pub use native::{add_user_script, configure, query_document_activity, stop_loading};
 pub use navigation::NavigationObserver;
@@ -11,6 +22,56 @@ use objc2::rc::Retained;
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
 pub use stage::ContentStage;
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
+
+pub(crate) struct ContentPolicyTimeout {
+    source: dispatch2::DispatchRetained<dispatch2::DispatchSource>,
+}
+
+impl ContentPolicyTimeout {
+    pub(crate) fn cancel(self) {
+        drop(self);
+    }
+}
+
+impl Drop for ContentPolicyTimeout {
+    fn drop(&mut self) {
+        self.source.cancel();
+    }
+}
+
+pub(crate) fn schedule_content_policy_timeout(
+    duration: Duration,
+    callback: impl FnOnce() + Send + 'static,
+) -> Option<ContentPolicyTimeout> {
+    let Ok(deadline) = dispatch2::DispatchTime::try_from(duration) else {
+        return None;
+    };
+    let timer_type = std::ptr::addr_of!(dispatch2::_dispatch_source_type_timer).cast_mut();
+    // SAFETY: the process-global timer source type is the exact libdispatch
+    // constant required for a handle-less one-shot timer.
+    let source = unsafe {
+        dispatch2::DispatchSource::new(timer_type, 0, 0, Some(dispatch2::DispatchQueue::main()))
+    };
+    let callback = Arc::new(std::sync::Mutex::new(Some(callback)));
+    let callback_for_handler = callback.clone();
+    let handler: block2::RcBlock<dyn Fn()> = block2::RcBlock::new(move || {
+        if let Some(callback) = callback_for_handler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        }
+    });
+    // SAFETY: libdispatch copies the heap block and retains it until this
+    // activated source fires or is canceled.
+    unsafe {
+        source.set_event_handler_with_block(block2::RcBlock::as_ptr(&handler));
+    }
+    source.set_timer(deadline, u64::MAX, 100_000_000);
+    source.activate();
+    Some(ContentPolicyTimeout { source })
+}
 
 const PAGE_URL_UTF16_LIMIT: usize = 8 * 1_024;
 const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
