@@ -1,4 +1,5 @@
 mod construction;
+mod content_rules;
 mod discard;
 mod dispatch;
 mod lifecycle;
@@ -28,7 +29,6 @@ use profiles::ProfilePersistenceClass;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
-#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -39,6 +39,7 @@ use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHan
 use wry::WebView;
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
+use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{ContentScope, Partition, Shortcut, UserContent};
 #[cfg(target_os = "macos")]
@@ -109,9 +110,17 @@ struct ObservedView {
     _accelerator_registration: Option<crate::platform::imp::AcceleratorRegistration>,
     #[cfg(target_os = "windows")]
     _security_policy: crate::platform::imp::SecurityPolicy,
+    // `AllowAll` also has an explicit no-op registration. An absent field is
+    // never used to authorize browsing. `Option` exists solely so teardown
+    // can retire it before closing the native controller.
+    content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
     _observer: crate::platform::imp::InstalledNavigationObserver,
     #[cfg(target_os = "windows")]
     cleanup_profile: ProfileId,
+    #[cfg(target_os = "windows")]
+    native_close_attempted: bool,
+    #[cfg(target_os = "windows")]
+    native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     view: WebView,
 }
 
@@ -122,23 +131,44 @@ impl Drop for ObservedView {
         // rejected even if the shell reuses the same logical ItemId.
         self.event_permit.revoke();
         self.navigation.revoke();
+        let policy_cleanup_failed = self
+            .content_policy_registration
+            .take()
+            .is_some_and(|registration| registration.retire().is_err());
         #[cfg(target_os = "windows")]
         {
-            use wry::WebViewExtWindows;
-            if let Err(debt) = self.view.close() {
-                queue_windows_cleanup_debt(self.cleanup_profile, debt);
+            if policy_cleanup_failed {
+                (self.native_terminal_failure)(
+                    "content-policy registration could not be retired before controller close",
+                );
             }
+            use wry::WebViewExtWindows;
+            if !self.native_close_attempted {
+                self.native_close_attempted = true;
+                if let Err(debt) = self.view.close() {
+                    queue_windows_cleanup_debt(self.cleanup_profile, debt);
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        if policy_cleanup_failed {
+            eprintln!("content blocker: native registration retirement failed during view drop");
         }
     }
 }
 
 impl ObservedView {
     #[cfg(target_os = "windows")]
-    fn close_explicit(mut self) -> Option<wry::WebView2CleanupDebt> {
+    fn close_explicit(mut self) -> (Option<wry::WebView2CleanupDebt>, bool) {
         use wry::WebViewExtWindows;
         self.event_permit.revoke();
         self.navigation.revoke();
-        self.view.close().err()
+        let policy_cleanup_failed = self
+            .content_policy_registration
+            .take()
+            .is_some_and(|registration| registration.retire().is_err());
+        self.native_close_attempted = true;
+        (self.view.close().err(), policy_cleanup_failed)
     }
 }
 
@@ -156,6 +186,75 @@ struct NavigationSnapshot {
     history: Option<(bool, bool)>,
 }
 
+struct AppliedContentPolicy {
+    generation: ContentPolicyGeneration,
+    native: Rc<crate::platform::imp::NativeContentPolicy>,
+    #[cfg(not(target_os = "windows"))]
+    digest: Option<[u8; 32]>,
+}
+
+struct CompilingContentPolicy {
+    generation: ContentPolicyGeneration,
+    superseded: bool,
+}
+
+struct QueuedContentPolicy {
+    generation: ContentPolicyGeneration,
+    rules: Arc<zephium_core::blocker::ContentRules>,
+}
+
+#[cfg(not(target_os = "windows"))]
+struct DeclarativeContentPolicyJob {
+    digest: [u8; 32],
+    rules: Arc<zephium_core::blocker::ContentRules>,
+    encoded_bytes: usize,
+}
+
+#[cfg(not(target_os = "windows"))]
+struct DeclarativeContentPolicyAttempt {
+    id: u64,
+    digest: [u8; 32],
+    encoded_bytes: usize,
+    timed_out: bool,
+    watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
+    cancellation: Option<crate::platform::imp::ContentPolicyCompilationCancellation>,
+}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ContentRuleCacheGcPhase {
+    Enumerating,
+    Removing { operation: u16, digest: [u8; 32] },
+}
+
+#[cfg(not(target_os = "windows"))]
+struct ContentRuleCacheGcAttempt {
+    id: u64,
+    phase: ContentRuleCacheGcPhase,
+    candidates: std::collections::VecDeque<[u8; 32]>,
+    next_cursor: usize,
+    scan_complete: bool,
+    removed_any: bool,
+    timed_out: bool,
+    watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
+    cancellation: Option<crate::platform::imp::ContentPolicyCacheMaintenanceCancellation>,
+}
+
+#[cfg(not(target_os = "windows"))]
+enum DeclarativeContentPolicyMaintenance {
+    Compilation(DeclarativeContentPolicyAttempt),
+    CacheGc(ContentRuleCacheGcAttempt),
+}
+
+#[derive(Default)]
+struct ProfileContentPolicy {
+    applied: Option<AppliedContentPolicy>,
+    compiling: Option<CompilingContentPolicy>,
+    queued: Option<QueuedContentPolicy>,
+    #[cfg(not(target_os = "windows"))]
+    previous_known_good_digest: Option<[u8; 32]>,
+}
+
 pub(crate) struct EngineHost {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     parent: ParentHandle,
@@ -163,6 +262,8 @@ pub(crate) struct EngineHost {
     // privileged Tauri chrome. A context is further partitioned per profile.
     #[cfg(not(target_os = "macos"))]
     profiles_root: PathBuf,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_cache: PathBuf,
     #[cfg(target_os = "windows")]
     private_runtime: zephium_core::webview2::RuntimeGeneration,
     views: HashMap<ItemId, ObservedView>,
@@ -174,6 +275,32 @@ pub(crate) struct EngineHost {
     // storage in one process. Closing, crashing, or erasing a profile does not
     // relax this binding and therefore cannot resurrect a UDF in private mode.
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
+    content_policies: HashMap<ProfileId, ProfileContentPolicy>,
+    // Declarative native objects are content-addressed by the SHA-256 of the
+    // exact encoded JSON. Weak entries let identical policy generations and
+    // profiles share one compiled 10–30 MiB object without pinning stale
+    // artifacts after the last profile replaces them.
+    declarative_content_policy_cache:
+        HashMap<[u8; 32], std::rc::Weak<crate::platform::imp::NativeContentPolicy>>,
+    // At most one native WebKit operation exists process-wide. Compilation
+    // and namespace-owned cache maintenance share this typed slot, so an
+    // asynchronous cleanup can never overlap a lookup/save/compile.
+    declarative_content_policy_compilations:
+        HashMap<[u8; 32], Vec<(ProfileId, ContentPolicyGeneration)>>,
+    #[cfg(not(target_os = "windows"))]
+    declarative_content_policy_queue: std::collections::VecDeque<DeclarativeContentPolicyJob>,
+    #[cfg(not(target_os = "windows"))]
+    active_declarative_content_policy_maintenance: Option<DeclarativeContentPolicyMaintenance>,
+    #[cfg(not(target_os = "windows"))]
+    declarative_content_policy_bytes: usize,
+    #[cfg(not(target_os = "windows"))]
+    next_declarative_content_policy_maintenance_attempt: u64,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_cache_gc_pending: bool,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_cache_gc_cursor: usize,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_cache_gc_removed_in_cycle: bool,
     spare: Option<Spare>,
     user_content: HashMap<ContentScope, UserContent>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -182,11 +309,17 @@ pub(crate) struct EngineHost {
     stages: HashMap<WindowId, Retained<ContentStage>>,
     #[cfg(not(target_os = "macos"))]
     stages: HashMap<WindowId, crate::platform::imp::Stage>,
-    // Exhausted native stage retries are no longer recoverable inside Wry's
-    // UI-thread adapter. Admission failure or an unverifiable teardown must
-    // seal outer lifecycle/event authority before the mandatory fatal path.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    // Native callback admission failure, exhausted stage retries, or
+    // unverifiable teardown must seal outer lifecycle/event authority before
+    // the mandatory fatal path.
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
+    // WebKit rule-list compilation/cache maintenance has no synchronous,
+    // proven cancellation barrier. Non-Windows shutdown therefore retains
+    // its one completion until the exact physical callback releases the
+    // final native attempt, while the application-owned end-to-end deadline
+    // remains the outer bound.
+    #[cfg(not(target_os = "windows"))]
+    shutdown_completion: Option<Box<dyn FnOnce(bool) + Send>>,
     // A private profile owns exactly one non-persistent WKWebsiteDataStore for
     // its entire host lifetime. Each tab gets a fresh configuration pointing
     // at this retained store; distinct profile ids can never share one.
