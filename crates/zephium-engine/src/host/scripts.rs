@@ -1,4 +1,3 @@
-use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::{
     ContentScope, Partition, Shortcut, UserContent, UserScript, World,
 };
@@ -556,11 +555,6 @@ impl EngineHost {
     pub(crate) fn set_shortcuts(&mut self, shortcuts: Vec<Shortcut>) {
         self.shortcuts = shortcuts;
         self.spare = None;
-    }
-
-    pub(crate) fn set_content_rules(&mut self, _profile: ProfileId, _compiled: String) {
-        // Lands with the blocker: WKContentRuleListStore on macOS,
-        // WebResourceRequested on Windows, UserContentFilter on GTK.
     }
 }
 

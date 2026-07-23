@@ -1,8 +1,5 @@
-#[cfg(any(not(target_os = "macos"), test))]
 use std::fs;
-#[cfg(any(not(target_os = "macos"), test))]
 use std::io;
-#[cfg(any(not(target_os = "macos"), test))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -20,7 +17,6 @@ const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 type ErasureDone = Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>;
 
-#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn metadata_is_direct_directory(metadata: &fs::Metadata) -> bool {
     #[cfg(target_os = "windows")]
     let is_reparse_point = {
@@ -35,7 +31,6 @@ pub(crate) fn metadata_is_direct_directory(metadata: &fs::Metadata) -> bool {
     metadata.is_dir() && !metadata.file_type().is_symlink() && !is_reparse_point
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
 fn direct_directory_identity(path: &Path) -> io::Result<PathBuf> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata_is_direct_directory(&metadata) {
@@ -262,7 +257,6 @@ impl Completion {
     }
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn canonical_owned_root(path: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(path)?;
     let canonical = direct_directory_identity(path)?;

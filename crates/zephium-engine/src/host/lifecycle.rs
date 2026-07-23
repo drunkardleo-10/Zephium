@@ -54,7 +54,11 @@ impl EngineHost {
             // that event independently proves the process group released its
             // UDF; only the path-only Wry context can be retired immediately.
             self.web_contexts.remove(&profile);
-            if let Some(debt) = spare.view.close_explicit() {
+            let (debt, policy_cleanup_failed) = spare.view.close_explicit();
+            if policy_cleanup_failed {
+                self.fail_content_policy_retirement();
+            }
+            if let Some(debt) = debt {
                 self.retain_windows_cleanup_debt(profile, debt);
             }
         }
@@ -83,7 +87,11 @@ impl EngineHost {
         }
         #[cfg(target_os = "windows")]
         if let (Some(profile), Some(view)) = (profile, removed) {
-            if let Some(debt) = view.close_explicit() {
+            let (debt, policy_cleanup_failed) = view.close_explicit();
+            if policy_cleanup_failed {
+                self.fail_content_policy_retirement();
+            }
+            if let Some(debt) = debt {
                 self.retain_windows_cleanup_debt(profile, debt);
             }
         }
@@ -95,9 +103,14 @@ impl EngineHost {
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub(super) fn shutdown(&mut self) -> bool {
+    pub(super) fn shutdown(&mut self, done: Box<dyn FnOnce(bool) + Send>) {
+        if self.shutdown_completion.is_some() {
+            done(false);
+            return;
+        }
+        self.shutdown_completion = Some(done);
         self.shutdown_common();
-        !self.native_resource_accounting_failed
+        self.finish_content_policy_shutdown_if_quiescent();
     }
 
     #[cfg(target_os = "windows")]
@@ -167,6 +180,7 @@ impl EngineHost {
             self.close(id);
         }
         self.spare = None;
+        self.begin_content_policy_shutdown();
         self.navigation_snapshots.clear();
         self.partitions.clear();
         // Release native composition roots as part of the shutdown barrier.

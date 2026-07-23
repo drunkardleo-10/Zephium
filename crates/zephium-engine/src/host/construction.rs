@@ -104,6 +104,12 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
+        if !self.has_applied_content_policy(partition.profile()) {
+            eprintln!("content blocker: rejected view creation before explicit policy application");
+            self.sink
+                .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
+            return;
+        }
         if !bind_profile_persistence_class(&mut self.profile_persistence_classes, partition) {
             eprintln!("privacy: rejected profile persistence-class mismatch or capacity");
             self.sink
@@ -214,6 +220,9 @@ impl EngineHost {
             return;
         }
         if matches!(partition, Partition::Ephemeral(_)) || self.spare.is_some() {
+            return;
+        }
+        if self.applied_content_policy(profile).is_none() {
             return;
         }
         let cell = Rc::new(Cell::new(ItemId::generate()));
@@ -354,6 +363,12 @@ impl EngineHost {
             }
             return None;
         }
+        let Some(content_policy) = self.applied_content_policy(partition.profile()) else {
+            if report_failure {
+                event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+            }
+            return None;
+        };
         #[cfg(all(unix, not(target_os = "macos")))]
         if self
             .linux_unverifiable_data_managers
@@ -1054,6 +1069,22 @@ impl EngineHost {
             }
             return None;
         }
+        // Native hardening and profile-storage attestation must precede
+        // content-policy registration, while registration must precede every
+        // observer and the first network-producing load. This ordering is the
+        // first-navigation protection boundary.
+        let content_policy_registration =
+            match crate::platform::imp::install_content_policy_on_view(&view, &content_policy) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    eprintln!("content blocker: native view policy installation failed: {error:?}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
+            };
         #[cfg(target_os = "windows")]
         let process_failure_permit = crash_permit.clone();
         #[cfg(target_os = "windows")]
@@ -1206,9 +1237,14 @@ impl EngineHost {
             _accelerator_registration: accelerator_registration,
             #[cfg(target_os = "windows")]
             _security_policy: security_policy,
+            content_policy_registration: Some(content_policy_registration),
             _observer: observer,
             #[cfg(target_os = "windows")]
             cleanup_profile: partition.profile(),
+            #[cfg(target_os = "windows")]
+            native_close_attempted: false,
+            #[cfg(target_os = "windows")]
+            native_terminal_failure: self.native_terminal_failure.clone(),
             view,
         })
     }

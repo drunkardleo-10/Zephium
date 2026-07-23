@@ -573,6 +573,10 @@ impl EngineHost {
         // Tombstone before touching any native reference. Reentrant creation
         // or navigation callbacks during teardown must observe the deny state,
         // and no failure path below removes it.
+        // Removing the host policy state also generation-cancels any delayed
+        // WebKit compilation callback. Per-view exact registrations remain
+        // owned until the controllers are closed below.
+        self.retire_content_policy(profile);
 
         #[cfg(target_os = "macos")]
         let ephemeral_stores = self

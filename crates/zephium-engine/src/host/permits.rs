@@ -17,7 +17,6 @@ impl Sink {
         Self(inner)
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) fn emit(&self, ev: EngineEvent) {
         (self.0)(crate::EngineEventIngress::global(ev));
     }

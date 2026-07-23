@@ -19,6 +19,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
+use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
@@ -476,6 +477,9 @@ impl RetirementGate {
                     self.runtime_restart_required = true;
                     Some(EngineEvent::RuntimeRestartRequired)
                 }
+            }
+            event @ EngineEvent::ContentRulesSettled { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
             }
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
@@ -1289,9 +1293,14 @@ impl Engine for WebviewEngine {
         }
     }
 
-    fn set_content_rules(&self, profile: ProfileId, compiled: String) {
+    fn install_content_rules(
+        &self,
+        profile: ProfileId,
+        generation: ContentPolicyGeneration,
+        rules: Arc<ContentRules>,
+    ) -> NativeDispatch {
         if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
-            return;
+            return NativeDispatch::Rejected;
         }
         let queued_retirement = self.retirement.clone();
         let queued_delivery = self.event_delivery.clone();
@@ -1299,9 +1308,11 @@ impl Engine for WebviewEngine {
         let dispatched_retirement = queued_retirement.clone();
         let dispatched_delivery = queued_delivery.clone();
         let dispatched_fatal = queued_fatal.clone();
-        if !self.run(move || {
+        let dispatched = self.run(move || {
             if lock_retirement_gate(&queued_retirement).profile_is_active(profile)
-                && !host::try_with(move |h| h.set_content_rules(profile, compiled))
+                && !host::try_with(move |host| {
+                    host.install_content_rules(profile, generation, rules)
+                })
                 && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
             {
                 fail_native_host_admission(
@@ -1311,7 +1322,8 @@ impl Engine for WebviewEngine {
                     "content-rule policy was not admitted by the engine host",
                 );
             }
-        }) {
+        });
+        if !dispatched {
             fail_native_host_admission(
                 &dispatched_delivery,
                 &dispatched_retirement,
@@ -1319,6 +1331,7 @@ impl Engine for WebviewEngine {
                 "content-rule policy was not admitted by the main event loop",
             );
         }
+        NativeDispatch::from_scheduled(dispatched)
     }
 
     fn erase_profile_data(
@@ -1741,7 +1754,17 @@ mod tests {
         );
         engine.set_dormant(vec![id]);
         engine.set_user_content(ContentScope::Profile(profile), UserContent::default());
-        engine.set_content_rules(profile, "[]".into());
+        let rules = zephium_core::blocker::ContentRules::allow_all(
+            zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
+        );
+        assert_eq!(
+            engine.install_content_rules(
+                profile,
+                zephium_core::blocker::ContentPolicyGeneration::new(1).unwrap(),
+                rules,
+            ),
+            NativeDispatch::Rejected
+        );
         assert_eq!(attempts.load(Ordering::Relaxed), 3);
 
         // Close is never denied by retirement; it remains available for
@@ -1909,6 +1932,49 @@ mod tests {
         assert!(!gate.allows_item(exited));
         assert!(!gate.allows_item(crashed));
         assert!(gate.allows_item(foreign));
+    }
+
+    #[test]
+    fn content_policy_settlement_is_profile_scoped_and_retirement_filtered() {
+        let active = ProfileId::from(201);
+        let retired = ProfileId::from(202);
+        let retirement = Arc::new(Mutex::new(RetirementGate::default()));
+        lock_retirement_gate(&retirement).retire(retired);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let caller_sink: Arc<dyn Fn(EngineEvent) + Send + Sync> = {
+            let events = events.clone();
+            Arc::new(move |event| {
+                events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
+            })
+        };
+        let sink = retirement_filtering_sink(
+            retirement,
+            Arc::new(EventDeliveryGate::default()),
+            caller_sink,
+        );
+        let generation = ContentPolicyGeneration::new(1).unwrap();
+        for profile in [active, retired] {
+            sink(EngineEventIngress::global(
+                EngineEvent::ContentRulesSettled {
+                    profile,
+                    requested: generation,
+                    settlement: zephium_core::ports::engine::ContentRuleSettlement::Applied {
+                        generation,
+                    },
+                },
+            ));
+        }
+        let events = events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            EngineEvent::ContentRulesSettled { profile, .. } if profile == active
+        ));
     }
 
     #[test]

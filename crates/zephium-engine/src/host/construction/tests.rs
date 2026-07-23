@@ -27,3 +27,42 @@ fn native_construction_reservation_is_bounded_and_released_exactly() {
     assert_eq!(reservations.in_construction(), 0);
     assert_eq!(reservations.release(), Err(()));
 }
+
+#[test]
+fn explicit_content_policy_brackets_every_first_native_navigation() {
+    let file = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
+    let source = file
+        .split_once("fn build_view_inner(")
+        .expect("construction lost build_view_inner")
+        .1
+        .split_once("\nfn to_wry(")
+        .expect("construction lost build_view_inner's end")
+        .0;
+    let policy_gate = source
+        .find("let Some(content_policy) = self.applied_content_policy")
+        .expect("construction lost the explicit profile-policy gate");
+    let builder = source
+        .find("WebViewBuilder::new")
+        .expect("construction lost its native builder");
+    assert!(
+        policy_gate < builder,
+        "policy absence must reject before allocating a native view"
+    );
+
+    let last_native_hardening = source
+        .rfind("crate::platform::imp::configure(")
+        .expect("construction lost platform hardening");
+    let policy_install = source
+        .find("install_content_policy_on_view(&view, &content_policy)")
+        .expect("construction lost native content-policy installation");
+    let first_load = source
+        .find("view.load_url(url)")
+        .expect("construction lost its explicit first navigation");
+    assert!(
+        last_native_hardening < policy_install && policy_install < first_load,
+        "native policy must install after hardening and before first navigation"
+    );
+}
