@@ -1,0 +1,33 @@
+[package]
+name = "zephium-blocker-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "=0.1.89"
+futures-util = { version = "=0.3.32", default-features = false, features = ["std"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "=0.10.9"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "time"] }
+tough.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+aws-lc-rs = "=1.17.3"
+jiff = "0.2"
+tempfile.workspace = true
+zephium-core.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+zephium-blocker = { workspace = true, features = ["runtime"] }
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+zephium-blocker = { workspace = true, features = ["webkit"] }

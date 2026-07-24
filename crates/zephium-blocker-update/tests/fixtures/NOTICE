@@ -1,0 +1,7 @@
+The root metadata and private key in this directory are test-only snake-oil
+fixtures copied from tough 0.24.0.
+
+Copyright 2019 Amazon.com, Inc. or its affiliates.
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+They are not production trust material and must never be used by a release.
