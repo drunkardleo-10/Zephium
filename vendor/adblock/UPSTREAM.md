@@ -151,10 +151,16 @@ and current enablement gates.
 
 ## Current product status
 
-The backend compilation, lifecycle, and native enforcement foundation exists,
-but the desktop composition root supplies `StaticPolicyCatalog::empty()` and
-new profile preferences default to disabled. Therefore the current product
-does not ship an active maintained blocker and makes no protection claim.
-Source authenticity/licensing, packaged native enforcement tests, resource
-and endurance measurements, and bounded persistent native-cache garbage
-collection remain enablement gates.
+The desktop composition root starts from the immutable, release-authenticated
+EasyList + EasyPrivacy seed documented in `assets/blocker-seed/v1`. It
+validates the exact compressed and raw bytes, approved CC-BY-SA-3.0 metadata,
+and upstream provenance before the bounded compiler can consume them. New
+profile preferences default to disabled; an explicit enable installs the
+exact platform artifact before raw navigation is admitted.
+
+No production TUF trust root, repository identity, or fixed origins are
+provisioned yet. Bundled mode is therefore network-inert and identifies its
+authority as `ReleaseBundle`; only a new signed application release can
+replace the lists. Production TUF provisioning, packaged native enforcement
+tests, redistribution approval, resource/endurance evidence, sustained
+fuzzing, and external review remain stable enablement gates.
