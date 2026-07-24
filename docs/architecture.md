@@ -237,6 +237,12 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   │                            (stage_macos / stage_windows / stage_linux,
 │   │                            same inherent surface, cfg-selected).
 │   │                            unsafe allowlisted here.
+│   ├── zephium-blocker          bounded adblock-rust compiler worker and
+│   │                            immutable platform artifacts.
+│   ├── zephium-blocker-update   fixed-origin TUF authentication, private
+│   │                            package storage, rollback/clock authority.
+│   ├── zephium-blocker-service  candidate preparation, durable commit, and
+│   │                            exact compiler activation coordinator.
 │   ├── zephium-store            SQLite actor, migrations, FTS5, fakes.
 │   └── zephium-app              the actor shell: owns composed core state,
 │                                drives ports, builds projections.
@@ -359,7 +365,8 @@ favorites and folders into one aggregate; there is no separate bookmarks system.
 - **Commands** - registry with stable string ids (`tab.close`, `space.next`,
   `page.copy-markdown`). One registry powers native menus, accelerators, the
   palette, the launcher and the user-configurable keymap (Vivaldi-grade).
-- **ContentRules** - compiled adblock/user-filter state per profile (§9).
+- **ContentRules** - compiled native network-policy generation per profile
+  (§9).
 - **SearchIndex** - FTS5 across items, history, documents and commands; feeds
   the launcher and palette (§8).
 
@@ -418,9 +425,10 @@ The full surface is declared now; implementations land incrementally. Grouped:
   two-way messaging channel**, because the same pipeline serves the built-in
   scrollbar CSS, Boosts (per-origin page customization), userscripts/
   userstyles, adblock cosmetics, and a future extensions layer (§10).
-- **rules**: `set_content_rules(profile, compiled)`; plus an **optional
-  request-level hook** where the engine supports it (WebView2). On engines
-  without it, rules stay declarative; the port models both.
+- **rules**: `install_content_rules(profile, generation, compiled)` with an
+  exact settlement event. Windows installs a synchronous request matcher;
+  macOS/Linux install declarative native rules. Core models both as immutable
+  policy payloads and never performs per-request matching.
 - **events**: Title/Url/Loading (built), SplitChanged (built), Favicon,
   NavState{can_back, can_forward}, NewWindowRequested{url, disposition},
   PermissionRequested, DownloadRequested, Crashed.
@@ -445,25 +453,70 @@ reintroduced for page-controlled URLs.
 
 ---
 
-## 9. Blocker (planned next track, adblock-rust)
+## 9. Blocker (bundled network policy implemented; TUF next)
 
-The foundation keeps a policy port for a future built-in blocker based on
-Brave's `adblock-rust`; the current `set_content_rules` adapter is a no-op and
-no blocking claim is made. The intended implementation uses two architectures
-behind one policy port, never per-request logic in core:
+The native network blocker is implemented behind the core policy ports. The
+desktop embeds an immutable, release-authenticated EasyList + EasyPrivacy seed
+with exact license/provenance and compiler-quality manifests. Raw list bodies
+are inflated only after a compiled-cache miss, and every new profile still
+defaults to disabled. Enabling requires the exact authenticated catalog and
+holds first navigation until a non-empty native artifact is installed; it
+cannot present an empty policy as protection.
 
-| Platform | Network blocking | adblock-rust role | Cosmetic |
-|---|---|---|---|
-| WebView2 (Win) | runtime intercept (`WebResourceRequested`) -> cancel/redirect | full runtime matcher (`$redirect`, scriptlets); Chromium is adblock-rust's home turf | inject CSS/JS at document start |
-| WKWebView (mac) | declarative `WKContentRuleList` | list parsing + `content_blocking` conversion to WebKit JSON + cosmetics | `WKUserScript` via injection pipeline |
-| WebKitGTK (Linux) | declarative `WebKitUserContentFilter` (same JSON format) | same as macOS | injected stylesheet/script |
+The production TUF trust domain is intentionally not provisioned yet.
+Bundled mode is network-inert, exposes `release_bundle` provenance, and has no
+manual source-refresh action. TUF will be a distinct, independently
+authenticated authority rather than an environment-variable or writable
+configuration override.
 
-Expected, documented gap: no runtime `$redirect`/scriptlets on WebKit;
-declarative rule-count caps (split large lists). Cosmetic injection runs before
-render to avoid ad flash. List pipeline: purpose-built allowlisted downloader ->
-parse/validate (fuzz later) -> compile -> cache per profile -> hot reload. A
-local-root-CA MITM proxy is rejected: unacceptable trust liability in a privacy
-browser.
+One bounded compiler worker parses already-authenticated ABP/uBlock-style or
+hosts-format sources with the vendored `adblock-rust` fork. It publishes only
+one native artifact for the current platform. The shell assigns an exact,
+non-wrapping policy generation, holds first view creation/navigation until an
+explicit allow-all or blocking policy is installed, and generation-checks
+every worker and native settlement. A replacement is installed across the
+profile's live-view cohort before the previous registration is retired;
+ambiguous cleanup is terminal native-accounting failure.
+
+| Platform | Implemented network mechanism | Deliberate v1 boundary |
+|---|---|---|
+| WebView2 (Windows) | frozen in-process matcher from synchronous `WebResourceRequested`; a block receives an empty, no-store 403 response | only document-sourced native stylesheet, image, media, font, script, XHR, fetch, and ping contexts; no document/subdocument/WebSocket/object/other interception and no service/shared-worker request interception; missing initiating-frame attribution uses conservative source-independent matching |
+| WKWebView (macOS) | canonical WebKit JSON compiled/cached as `WKContentRuleList` and installed per raw view | conversion losses are counted; `$important`, method predicates, full regexes, and other non-equivalent rules are omitted rather than approximated silently |
+| WebKitGTK (Linux) | the same canonical JSON compiled/cached as `WebKitUserContentFilter` and installed per raw view | the same declarative coverage boundary as macOS |
+
+v1 is network-only on every platform. Cosmetic filtering, scriptlets,
+redirect resources, CSP mutation, URL-parameter rewriting, generic-hide
+controls, and tag-driven policy are rejected before artifact publication.
+There is no second Rust proxy or local-root-CA MITM path.
+
+Published blocking artifacts carry a checked coverage report and an explicit,
+nonzero post-control native blocking-entry count. This is a structural
+admission invariant, not a claim that exceptions leave every entry reachable;
+exceptions and platform-omitted rules are not counted as blocking entries.
+Approximation is also typed by resource reachability, native request-source
+kind, and initiating-document attribution, with a deduplicated aggregate.
+
+The purpose-built updater and coordinator are implemented. Release mode
+validates deterministic embedded gzip, canonical manifests, exact raw
+length/digest/header provenance, and the approved license before compilation.
+TUF mode authenticates a fixed-origin, licensed package into a private
+content-addressed store with a durable clock/revision high-water, then keeps a
+candidate distinct from current while the compiler prepares its exact
+artifact. Only that exact prepared candidate may be durably committed and
+activated; current/previous known-good state and candidate recovery survive
+crashes. Compiled artifacts and native WebKit content-rule namespaces have
+bounded, identity-safe caches and garbage collection.
+
+Privileged main chrome receives only a revisioned focused-profile status and
+bounded refresh, preference, and exact-generation retry commands. It exposes
+public package revision/digest and aggregate coverage diagnostics, not profile
+IDs, URLs, per-request decisions, list text, or native/parser strings. Raw
+content views have no blocker command surface. TUF trust material, packaged
+native enforcement tests, legal approval, external review, and
+resource/endurance evidence remain stable-release gates. Exact limits,
+release-seed measurements, failure semantics, native coverage, and release
+gates are documented in
+[`adblock.md`](adblock.md).
 
 ---
 
@@ -633,8 +686,9 @@ chrome positioning) carries over as-is.
 - **Phase 4 - table stakes:** downloads + MOTW, find-in-page, permissions
   prompts, history UI, full session restore incl. splits.
 - **Phase 5 - differentiators:** Boosts + userscripts/userstyles, notes/
-  tasks/easel, site-as-app windows, adblock wiring per §9, Tier 1 extensions
-  (Windows), data viz internal pages, html->md and clipboard commands.
+  tasks/easel, site-as-app windows, blocker source packaging/enablement per §9,
+  Tier 1 extensions (Windows), data viz internal pages, html->md and clipboard
+  commands.
 - **Later, own track:** Tier 2 extensions compat, sync (change-log at the
   reducer chokepoint), SQLCipher/SecretStore.
 

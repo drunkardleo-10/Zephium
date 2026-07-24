@@ -26,6 +26,7 @@ Engineering references:
 - [Security model](docs/security-model.md)
 - [Security maintenance](docs/security-maintenance.md)
 - [Frontend/native boundary](docs/frontend.md)
+- [Native network blocker](docs/adblock.md)
 - [Release engineering](.github/RELEASE.md)
 
 ## Development
@@ -70,6 +71,10 @@ cargo clippy --manifest-path vendor/wry/Cargo.toml --locked --all-targets -- -D 
 ## License
 
 Zephium is licensed under MPL-2.0. Vendored dependencies retain their upstream
-licenses and provenance; see the [Tauri](vendor/tauri/UPSTREAM.md),
+licenses and provenance. The bundled EasyList/EasyPrivacy snapshots retain
+their separately documented CC BY-SA 3.0 terms and attribution in
+[assets/blocker-seed/v1](assets/blocker-seed/v1). See also the
+[adblock-rust](vendor/adblock/UPSTREAM.md),
+[Tauri](vendor/tauri/UPSTREAM.md),
 [Tauri Runtime Wry](vendor/tauri-runtime-wry/UPSTREAM.md), and
 [Wry](vendor/wry/UPSTREAM.md) fork records.

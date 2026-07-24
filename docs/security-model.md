@@ -85,12 +85,16 @@ Any change that breaks one of these invariants must fail review and release:
    precede the final session snapshot and SQLite flush. A flush failure occurs before
    native shutdown is invoked and leaves the reusable shell component available for a
    host-controlled retry. The desktop close path is still terminal: the same eight-second
-   deadline covers storage admission, durability, native teardown, acknowledgment, and
-   UI exit, so an unproven flush exits non-zero instead of leaving an unclosable window.
+   deadline covers storage admission, durability, native teardown, blocker
+   compiler/updater/service termination, acknowledgment, and UI exit, so an unproven
+   flush exits non-zero instead of leaving an unclosable window. The blocker service
+   passes that unchanged absolute deadline through its layers and gives each worker only
+   the remaining duration; it does not restart the timeout per layer.
    Once native shutdown is invoked, a negative native result, rejected main-thread
-   dispatch, or missing acknowledgment is likewise terminal. On Windows that outer
-   deadline contains the separate five-second WebView2 process-group proof plus bounded
-   private-UDF removal. An unproven outcome is never reported as clean teardown.
+   dispatch, unproved blocker-worker exit/join, or missing acknowledgment is likewise
+   terminal. On Windows that outer deadline contains the separate five-second WebView2
+   process-group proof plus bounded private-UDF removal. An unproven outcome is never
+   reported as clean teardown.
 9. Page-derived values remain untrusted and bounded before crossing into application
    state. Titles are stripped of control characters and limited to 512 characters, and
    HTML extraction has character and serialized-result limits. The Wry adapter accepts
@@ -128,6 +132,13 @@ Any change that breaks one of these invariants must fail review and release:
     and the framework actually supplying `WKWebView` must have the expected identifiers
     and exactly matching build versions. Malformed, stale, mismatched, and unreviewed
     future OS/Safari release lines fail closed.
+13. The content-policy lifecycle never treats absence as allow-all. Every profile must
+    install an exact process-local generation—an explicit allow-all artifact while
+    disabled, or a validated blocking artifact—before its first raw view/navigation is
+    admitted. Compile and native callbacks are generation-checked; a replacement becomes
+    authoritative only after native cohort installation succeeds. A clean failure may
+    retain the exact previous generation, while an initial failure leaves raw navigation
+    held. Unsupported or all-omitted rule sets cannot be published as enabled protection.
 
 ## Implemented controls
 
@@ -481,16 +492,75 @@ metadata, are distinct from browsing traffic. They require purpose-built bounded
 components with explicit source, redirect, proxy, integrity, retention, and shutdown
 policies; they must not restore a generic fetch capability for page-controlled URLs.
 
-**Dependency policy.** Tauri, Tauri Runtime Wry, and Wry are vendored from the immutable
-upstream revisions recorded in their respective `vendor/*/UPSTREAM.md` files. The Tauri
-patch preserves pathless ephemeral storage for implicit Linux incognito WebViews and
-rejects contradictory explicit persistent storage before touching the filesystem. The
-runtime patch acknowledges native construction before publishing a detached handle and
-propagates the exact failure instead of creating ghost runtime state. Relative to Wry's
-recorded revision, its patch covers constructing WebKitGTK contexts with process
-swapping, enabling/asserting the sandbox before WebView creation, allowing an incognito
-view to use only an explicitly ephemeral supplied context (including related-view
-construction), and the documented Windows staged-construction/IPC/callback hardening.
+**Native network blocker (release seed active; TUF unprovisioned).** The tree contains a
+bounded authenticated source updater, network-rule compiler, persistent caches,
+coordinator, and native enforcement adapters. The desktop embeds exact immutable EasyList
+and EasyPrivacy snapshots whose compressed/raw bytes, upstream revisions, approved
+CC-BY-SA-3.0 metadata, and compiler reports are authenticated by the signed application
+release. It deliberately embeds no production TUF root or repository origins/identity, so
+bundled mode performs no source-network request and exposes distinct `release_bundle`
+provenance. Profile preferences remain disabled by default. Disabled profiles install an
+explicit allow-all generation; enabling requires the exact authenticated and installed
+non-empty catalog and does not let an initial profile browse under a fictitious enabled
+state.
+
+The compiler worker accepts only pre-authenticated immutable source material, applies
+source/rule/line/artifact budgets, rejects mutation and cosmetic capabilities outside the
+audited network-only scope, and records platform omissions. Core admits a blocking artifact
+only when its coverage equations hold and its explicit post-control native blocking-rule
+entry count is nonzero; this structural count does not claim every entry remains reachable
+after exceptions, and exceptions/platform omissions are not counted. Partial coverage is
+typed separately for resource contexts, native request-source kinds, and document
+attribution, while the aggregate counts each affected source rule once. Windows publishes a
+precompiled frozen matcher to document-sourced WebView2 request contexts. Service- and
+shared-worker requests remain unsupported until one profile/environment owner can avoid
+WebView2's per-view callback fanout. The synchronous callback
+performs no I/O or actor dispatch and fails open on malformed/oversized native data, lock
+contention, matcher failure, or the per-request filter-evaluation ceiling. Because WebView2
+does not supply the exact initiating frame URL, only source-independent blocks are applied;
+a potentially applicable source-sensitive exception makes a normal generic block fail
+open. macOS and Linux install digest-exact
+native WebKit declarative filters and validate native cache identities. The application
+holds first raw navigation until native installation settles, retains a proved previous
+generation on replacement failure, and exposes only a trusted in-process typed status and
+bounded exact-generation retry seam. Declarative compiler timeouts fail logical waiters and
+queued jobs. Linux also cancels its retained `GCancellable`, but releases the one physical
+slot only at the exact GLib callback; macOS has no native cancellation handle and keeps that
+slot quarantined until its exact callback.
+
+The release-seed loader verifies deterministic gzip identity and performs bounded lazy
+inflation plus exact raw length/digest/header validation after a compiled-cache miss. It
+drops inflated source strings after compilation and reports expiry as stale/degraded
+without inventing an online refresh. Bundles install the exact attribution notice and
+license legal text.
+
+The optional updater admits only a fixed-origin licensed TUF package, persists a monotonic
+rollback/clock high-water and content-addressed current/previous/candidate state, and keeps
+the durable candidate distinct from current until its exact compiler artifact is prepared.
+The coordinator then durably commits that candidate before activating only the already
+prepared artifact; interrupted transitions remain explicit and recoverable. Compiled/source
+caches and native WebKit namespaces have bounded identity-safe garbage collection.
+
+Only privileged main chrome receives the revisioned focused-profile diagnostics and bounded
+enable/disable and exact-generation retry controls; refresh is exposed only for TUF
+provenance. The DTO contains aggregate coverage and bounded public package
+revision/SHA-256 identities, never profile IDs, URLs, request decisions, filter text, or
+native/parser strings. Raw pages have no blocker command surface. Before stable product
+claims, Zephium still needs production TUF trust material, packaged hostile enforcement
+tests on every supported OS, legal approval, external review, and recorded
+resource/endurance budgets. Full capability and failure details are in `docs/adblock.md`.
+
+**Dependency policy.** Tauri, Tauri Runtime Wry, Wry, and adblock-rust are vendored from
+the immutable upstream revisions recorded in their respective
+`vendor/*/UPSTREAM.md` files. The Tauri patch preserves pathless ephemeral storage for
+implicit Linux incognito WebViews and rejects contradictory explicit persistent storage
+before touching the filesystem. The runtime patch acknowledges native construction
+before publishing a detached handle and propagates the exact failure instead of creating
+ghost runtime state. Relative to Wry's recorded revision, its patch covers constructing
+WebKitGTK contexts with process swapping, enabling/asserting the sandbox before WebView
+creation, allowing an incognito view to use only an explicitly ephemeral supplied
+context (including related-view construction), and the documented Windows staged-
+construction/IPC/callback hardening.
 The direct Tauri and Wry dependencies are exact-versioned, and Cargo source policy
 rejects unknown registries/git sources and requires revision-pinned git
 dependencies. CI treats frontend high-severity audits and Cargo
@@ -596,20 +666,21 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version and meet the reviewed Microsoft Stable security floor. The current
-  floor is `150.0.4078.65`, published July 9, 2026. Preview-channel and malformed strings
+  floor is `150.0.4078.96`, published July 23, 2026. Preview-channel and malformed strings
   fail closed. The process also rejects documented WebView2 environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI, startup, and per-environment
-  attestation expire this review after July 23; a clock before the reviewed release or
+  attestation expire this review after July 30; a clock before the reviewed release or
   after the deadline fails closed. This forces the version, source date, and next
   deadline to be reviewed together. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
-  were not yet available in Edge/WebView2 Stable. Startup continues to admit
-  the newest actually available Stable runtime above, but the production
-  workflow fails `check-release-engine-security` until Microsoft publishes the
-  fixed Stable build and the floor is reviewed again. Runtime availability is
-  not allowed to turn a known vendor patch gap into release evidence.
+  were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
+  incorporated the update on July 16, and the reviewed floor now names the
+  later July 23 security release above. The release gate preserves the
+  historical notice and requires both a cleared blocker and a floor published
+  after it, so changing a boolean cannot turn a known vendor patch gap into
+  release evidence.
 - Every retained raw WebView2 environment owns one deduplicated RAII
   `NewBrowserVersionAvailable` registration. The first callback sets a sticky,
   queryable backend `restart_required` state, emits one typed engine event, and is
@@ -784,7 +855,9 @@ The following are roadmap items or disabled backends, not current security guara
   scanning;
 - extension installation, extension API mediation, or Chrome/Firefox extension
   compatibility;
-- native content blocking/ad blocking (`set_content_rules` is currently a no-op);
+- continuously maintained online blocker sources or full EasyList semantics: the usable
+  network-only release seed is bundled, but production TUF trust is unprovisioned and
+  packaged enforcement/endurance proof is still a release gate;
 - a custom certificate-error interstitial or anti-phishing service;
 - an automatic updater client that embeds the update trust root and durably enforces
   the highest accepted signed release sequence;
@@ -820,8 +893,11 @@ risk. The recurring engine-floor, advisory, and fork-review procedure is defined
    local storage, WebSQL where present, HTTP authentication state, and engine caches for
    persistent and incognito profiles. Inject crashes and ambiguous storage outcomes at
    every authorization, native-proof, filesystem, and journal-finalization boundary.
-4. Keep downloads, permission grants, extensions, and content blocking disabled until
-   their brokers are complete and adversarially tested.
+4. Keep downloads, permission grants, extensions, and product-level content blocking
+   disabled until their brokers are complete and adversarially tested. Blocker enablement
+   additionally requires provisioning and exercising the production trust domain and exact
+   licensed list package, plus the packaged cross-platform enforcement, external-review,
+   and endurance gates in `docs/adblock.md`.
 5. Rehearse the production workflow with protected publisher credentials and verify
    its signed/notarized artifacts, SBOM attestations, encrypted symbols, and signed
    rollback-resistant metadata on real installer hosts. Before auto-update is offered,
@@ -865,8 +941,9 @@ updates mitigate some of these risks but do not remove them.
 - [ ] Incognito changes prove that session/history/favicon persistence is rejected and
       that privileged UI storage is non-persistent; tests account for engine-created
       temporary files and abnormal termination.
-- [ ] Permission, download, popup, extension, content-blocking, and favicon code remains
-      fail-closed unless its complete policy and native tests land together.
+- [ ] Permission, download, popup, extension, content-blocking, and favicon code preserves
+      its documented boundary behavior unless its complete policy and native tests land
+      together; do not call a fail-open per-request blocker decision “fail-closed.”
 - [ ] Release devtools remain disabled; privileged navigation lock, CSP, response
       headers, incognito construction, retained fail-closed native delegates/handlers,
       mandatory hardening installation, and label-scoped projection delivery remain
