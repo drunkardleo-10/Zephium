@@ -287,13 +287,6 @@ pub enum CbRuleEquivalent {
     /// blocking rules: the first has all original resource types except `Document`, and the second
     /// only specifies `Document` with a third-party load type.
     SplitDocument(CbRule, CbRule),
-    /// A final ABP separator accepts either one separator byte or end-of-URL.
-    ///
-    /// WebKit's URL-filter subset rejects alternation, so these cases require
-    /// one rule for each branch.
-    SplitSeparator(CbRule, CbRule),
-    /// Both the document-resource and final-separator transformations apply.
-    SplitDocumentAndSeparator(CbRule, CbRule, CbRule, CbRule),
 }
 
 impl IntoIterator for CbRuleEquivalent {
@@ -303,19 +296,11 @@ impl IntoIterator for CbRuleEquivalent {
     fn into_iter(self) -> Self::IntoIter {
         match self {
             Self::SingleRule(r) => CbRuleEquivalentIterator {
-                rules: [Some(r), None, None, None],
+                rules: [Some(r), None],
                 index: 0,
             },
             Self::SplitDocument(r1, r2) => CbRuleEquivalentIterator {
-                rules: [Some(r1), Some(r2), None, None],
-                index: 0,
-            },
-            Self::SplitSeparator(r1, r2) => CbRuleEquivalentIterator {
-                rules: [Some(r1), Some(r2), None, None],
-                index: 0,
-            },
-            Self::SplitDocumentAndSeparator(r1, r2, r3, r4) => CbRuleEquivalentIterator {
-                rules: [Some(r1), Some(r2), Some(r3), Some(r4)],
+                rules: [Some(r1), Some(r2)],
                 index: 0,
             },
         }
@@ -324,7 +309,7 @@ impl IntoIterator for CbRuleEquivalent {
 
 /// Returned by [`CbRuleEquivalent`]'s `IntoIterator` implementation.
 pub struct CbRuleEquivalentIterator {
-    rules: [Option<CbRule>; 4],
+    rules: [Option<CbRule>; 2],
     index: usize,
 }
 
@@ -343,7 +328,7 @@ impl Iterator for CbRuleEquivalentIterator {
 
 const ABP_SEPARATOR_CLASS: &str = "[^A-Za-z0-9_.%-]";
 
-fn convert_network_pattern(pattern: &str) -> (String, Option<String>) {
+fn convert_network_pattern(pattern: &str) -> (String, bool) {
     let (pattern, has_trailing_separator) = pattern
         .strip_suffix('^')
         .map_or((pattern, false), |pattern| (pattern, true));
@@ -359,22 +344,41 @@ fn convert_network_pattern(pattern: &str) -> (String, Option<String>) {
             _ => converted.push(character),
         }
     }
+    (converted, has_trailing_separator)
+}
+
+fn finish_network_pattern(
+    converted: &mut String,
+    has_trailing_separator: bool,
+    is_right_anchor: bool,
+) {
     if has_trailing_separator {
-        let mut separator_variant = converted.clone();
-        separator_variant.push_str(ABP_SEPARATOR_CLASS);
+        // ABP's final `^` is a separator byte or end-of-URL. WebKit rejects
+        // alternation, but explicitly supports groups and `?`/`*`
+        // quantifiers. Anchoring an optional suffix therefore represents both
+        // branches in one native rule. An ABP right anchor permits at most the
+        // separator itself; otherwise the suffix consumes the rest of the URL.
+        converted.push('(');
+        converted.push_str(ABP_SEPARATOR_CLASS);
+        if !is_right_anchor {
+            converted.push_str(".*");
+        }
+        converted.push_str(")?$");
+    } else if is_right_anchor {
         converted.push('$');
-        (separator_variant, Some(converted))
-    } else {
-        (converted, None)
     }
 }
 
-fn raw_pattern_ends_with_separator(raw_line: &str) -> bool {
+fn raw_pattern_and_anchors(raw_line: &str) -> &str {
     let pattern_and_anchors = find_char_reverse(b'$', raw_line.as_bytes())
         .map_or(raw_line, |options_index| &raw_line[..options_index]);
-    let pattern_and_anchors = pattern_and_anchors
+    pattern_and_anchors
         .strip_prefix("@@")
-        .unwrap_or(pattern_and_anchors);
+        .unwrap_or(pattern_and_anchors)
+}
+
+fn raw_pattern_ends_with_separator(raw_line: &str) -> bool {
+    let pattern_and_anchors = raw_pattern_and_anchors(raw_line);
     pattern_and_anchors
         .strip_suffix('|')
         .unwrap_or(pattern_and_anchors)
@@ -456,12 +460,18 @@ impl TryFrom<NetworkFilter<'_>> for CbRuleEquivalent {
                 vec![]
             };
 
-            let (url_filter, exact_end_url_filter) = match (v.filter, v.hostname) {
+            // The parser's hostname-right-anchor bit also represents ABP's
+            // hostname separator boundary. Only a literal final `|` has the
+            // stronger end-of-URL semantics needed by the compact suffix.
+            let is_right_anchor = raw_pattern_and_anchors(raw_line).ends_with('|');
+            let url_filter = match (v.filter, v.hostname) {
                 (crate::filters::network::FilterPart::AnyOf(_), _) => {
                     return Err(CbRuleCreationFailure::OptimizedRulesUnsupported);
                 }
                 (crate::filters::network::FilterPart::Simple(part), Some(hostname)) => {
-                    let (converted_pattern, exact_end_pattern) = convert_network_pattern(&part);
+                    let (converted_pattern, converted_trailing_separator) =
+                        convert_network_pattern(&part);
+                    debug_assert_eq!(converted_trailing_separator, has_trailing_separator);
                     let mut prefix = format!(
                         "^[^:]+:(//)?([^/]+\\.)?{}",
                         SPECIAL_CHARS.replace_all(&hostname, r##"\$1"##)
@@ -472,16 +482,17 @@ impl TryFrom<NetworkFilter<'_>> for CbRuleEquivalent {
                     }
 
                     let mut url_filter = format!("{prefix}{converted_pattern}");
-                    if v.mask.contains(NetworkFilterMask::IS_RIGHT_ANCHOR) {
-                        url_filter += "$";
-                    }
-                    (
-                        url_filter,
-                        exact_end_pattern.map(|pattern| format!("{prefix}{pattern}")),
-                    )
+                    finish_network_pattern(
+                        &mut url_filter,
+                        converted_trailing_separator,
+                        is_right_anchor,
+                    );
+                    url_filter
                 }
                 (crate::filters::network::FilterPart::Simple(part), None) => {
-                    let (converted_pattern, exact_end_pattern) = convert_network_pattern(&part);
+                    let (converted_pattern, converted_trailing_separator) =
+                        convert_network_pattern(&part);
+                    debug_assert_eq!(converted_trailing_separator, has_trailing_separator);
                     let prefix = if v.mask.contains(NetworkFilterMask::IS_LEFT_ANCHOR) {
                         "^"
                     } else {
@@ -500,28 +511,25 @@ impl TryFrom<NetworkFilter<'_>> for CbRuleEquivalent {
                         }
                     };
                     let mut url_filter = format!("{prefix}{converted_pattern}");
-                    if v.mask.contains(NetworkFilterMask::IS_RIGHT_ANCHOR) {
-                        url_filter += "$";
-                    }
-                    (
-                        url_filter,
-                        exact_end_pattern.map(|pattern| format!("{prefix}{pattern}")),
-                    )
+                    finish_network_pattern(
+                        &mut url_filter,
+                        converted_trailing_separator,
+                        is_right_anchor,
+                    );
+                    url_filter
                 }
                 (crate::filters::network::FilterPart::Empty, Some(hostname)) => {
                     let escaped_special_chars = SPECIAL_CHARS.replace_all(&hostname, r##"\$1"##);
-                    let prefix = format!("^[^:]+:(//)?([^/]+\\.)?{escaped_special_chars}");
-                    if has_trailing_separator {
-                        (
-                            format!("{prefix}{ABP_SEPARATOR_CLASS}"),
-                            Some(format!("{prefix}$")),
-                        )
-                    } else {
-                        (prefix, None)
-                    }
+                    let mut url_filter = format!("^[^:]+:(//)?([^/]+\\.)?{escaped_special_chars}");
+                    finish_network_pattern(
+                        &mut url_filter,
+                        has_trailing_separator,
+                        is_right_anchor,
+                    );
+                    url_filter
                 }
                 (crate::filters::network::FilterPart::Empty, None) => {
-                    let prefix = if v
+                    let mut url_filter = if v
                         .mask
                         .contains(NetworkFilterMask::FROM_HTTP | NetworkFilterMask::FROM_HTTPS)
                     {
@@ -536,14 +544,12 @@ impl TryFrom<NetworkFilter<'_>> for CbRuleEquivalent {
                         unreachable!("Invalid scheme information");
                     }
                     .to_string();
-                    if has_trailing_separator {
-                        (
-                            format!("{prefix}{ABP_SEPARATOR_CLASS}"),
-                            Some(format!("{prefix}$")),
-                        )
-                    } else {
-                        (prefix, None)
-                    }
+                    finish_network_pattern(
+                        &mut url_filter,
+                        has_trailing_separator,
+                        is_right_anchor,
+                    );
+                    url_filter
                 }
             };
 
@@ -654,32 +660,14 @@ impl TryFrom<NetworkFilter<'_>> for CbRuleEquivalent {
                     ..Default::default()
                 },
             };
-            let exact_end_rule = exact_end_url_filter.map(|url_filter| {
-                let mut rule = single_rule.clone();
-                rule.trigger.url_filter = url_filter;
-                rule
-            });
-            if !single_rule.is_ascii()
-                || exact_end_rule.as_ref().is_some_and(|rule| !rule.is_ascii())
-            {
+            if !single_rule.is_ascii() {
                 return Err(CbRuleCreationFailure::RuleContainsNonASCII);
             }
 
-            let (separator, separator_document) = split_document_rule(single_rule);
-            let exact_end = exact_end_rule.map(split_document_rule);
-            match (separator_document, exact_end) {
-                (None, None) => Ok(Self::SingleRule(separator)),
-                (Some(document), None) => Ok(Self::SplitDocument(separator, document)),
-                (None, Some((exact_end, None))) => Ok(Self::SplitSeparator(separator, exact_end)),
-                (Some(separator_document), Some((exact_non_document, Some(exact_document)))) => {
-                    Ok(Self::SplitDocumentAndSeparator(
-                        separator,
-                        separator_document,
-                        exact_non_document,
-                        exact_document,
-                    ))
-                }
-                _ => unreachable!("separator variants must share resource semantics"),
+            let (non_document, document) = split_document_rule(single_rule);
+            match document {
+                Some(document) => Ok(Self::SplitDocument(non_document, document)),
+                None => Ok(Self::SingleRule(non_document)),
             }
         } else {
             Err(CbRuleCreationFailure::NeedsDebugMode)

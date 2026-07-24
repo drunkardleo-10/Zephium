@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod ab2cb_tests {
     use super::super::*;
+    use std::collections::HashSet;
 
     fn test_from_abp(abp_rule: &str, cb: &str) {
         let filter = crate::lists::parse_filter(abp_rule, true, Default::default())
@@ -18,14 +19,14 @@ mod ab2cb_tests {
         let mut expected = serde_json::from_str::<Vec<CbRule>>(cb)
             .expect("content blocking rule under test could not be deserialized");
         if has_trailing_separator {
-            let mut exact_end = expected.clone();
+            let is_right_anchor = pattern_and_anchors.ends_with("^|");
             for rule in &mut expected {
-                rule.trigger.url_filter.push_str("[^A-Za-z0-9_.%-]");
+                rule.trigger.url_filter.push_str("([^A-Za-z0-9_.%-]");
+                if !is_right_anchor {
+                    rule.trigger.url_filter.push_str(".*");
+                }
+                rule.trigger.url_filter.push_str(")?$");
             }
-            for rule in &mut exact_end {
-                rule.trigger.url_filter.push('$');
-            }
-            expected.extend(exact_end);
         }
         assert_eq!(
             CbRuleEquivalent::try_from(filter)
@@ -699,7 +700,7 @@ mod ab2cb_tests {
     }
 
     #[test]
-    fn separators_use_webkit_supported_split_rules() {
+    fn separators_use_one_webkit_supported_rule() {
         let convert = |rule| {
             let parsed = crate::lists::parse_filter(rule, true, Default::default()).unwrap();
             CbRuleEquivalent::try_from(parsed)
@@ -711,36 +712,125 @@ mod ab2cb_tests {
 
         assert_eq!(
             convert("||example.com^"),
-            [
-                "^[^:]+:(//)?([^/]+\\.)?example\\.com[^A-Za-z0-9_.%-]",
-                "^[^:]+:(//)?([^/]+\\.)?example\\.com$",
-            ]
+            ["^[^:]+:(//)?([^/]+\\.)?example\\.com([^A-Za-z0-9_.%-].*)?$"]
         );
         assert_eq!(
             convert("||example.com/path^segment"),
             ["^[^:]+:(//)?([^/]+\\.)?example\\.com/path[^A-Za-z0-9_.%-]segment"]
         );
 
-        let domain_filters = convert("||example.com^");
-        let domain_filters = domain_filters
-            .iter()
-            .map(|filter| regex::Regex::new(filter).unwrap())
+        assert_eq!(
+            convert("||example.com^|"),
+            ["^[^:]+:(//)?([^/]+\\.)?example\\.com([^A-Za-z0-9_.%-])?$"]
+        );
+        assert_eq!(
+            convert("|https://example.com/path^"),
+            ["^https://example\\.com/path([^A-Za-z0-9_.%-].*)?$"]
+        );
+        assert_eq!(
+            convert("|https://example.com/path^|"),
+            ["^https://example\\.com/path([^A-Za-z0-9_.%-])?$"]
+        );
+
+        let domain_filter =
+            regex::Regex::new(&convert("||example.com^").into_iter().next().unwrap()).unwrap();
+        assert!(domain_filter.is_match("https://example.com"));
+        assert!(domain_filter.is_match("https://example.com/ad.js"));
+        assert!(!domain_filter.is_match("https://example.com.evil/ad.js"));
+    }
+
+    #[test]
+    fn separator_compaction_preserves_document_split() {
+        let parsed = crate::lists::parse_filter(
+            "||example.com^$script,subdocument",
+            true,
+            Default::default(),
+        )
+        .unwrap();
+        let rules = CbRuleEquivalent::try_from(parsed)
+            .unwrap()
+            .into_iter()
             .collect::<Vec<_>>();
-        assert!(
-            domain_filters
-                .iter()
-                .any(|filter| filter.is_match("https://example.com"))
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            rules[0].trigger.url_filter,
+            "^[^:]+:(//)?([^/]+\\.)?example\\.com([^A-Za-z0-9_.%-].*)?$"
         );
-        assert!(
-            domain_filters
-                .iter()
-                .any(|filter| filter.is_match("https://example.com/ad.js"))
+        assert_eq!(rules[1].trigger.url_filter, rules[0].trigger.url_filter);
+        assert_eq!(rules[0].trigger.load_type, []);
+        assert_eq!(rules[1].trigger.load_type, [CbLoadType::ThirdParty]);
+        assert_eq!(
+            rules[0].trigger.resource_type,
+            Some(HashSet::from([CbResourceType::Script]))
         );
-        assert!(
-            domain_filters
-                .iter()
-                .all(|filter| !filter.is_match("https://example.com.evil/ad.js"))
+        assert_eq!(
+            rules[1].trigger.resource_type,
+            Some(HashSet::from([CbResourceType::Document]))
         );
+    }
+
+    #[test]
+    fn separator_compaction_matches_the_split_reference_language() {
+        fn enumerate_suffixes(
+            alphabet: &[char],
+            maximum_length: usize,
+            suffix: &mut String,
+            output: &mut Vec<String>,
+        ) {
+            output.push(suffix.clone());
+            if suffix.len() == maximum_length {
+                return;
+            }
+            for character in alphabet {
+                suffix.push(*character);
+                enumerate_suffixes(alphabet, maximum_length, suffix, output);
+                suffix.pop();
+            }
+        }
+
+        let mut suffixes = Vec::new();
+        enumerate_suffixes(
+            &['a', '9', '_', '.', '-', '%', '/', '?', ':'],
+            5,
+            &mut String::new(),
+            &mut suffixes,
+        );
+        let cases = [
+            (
+                "^[^:]+:(//)?([^/]+\\.)?example\\.com",
+                ["https://example.com", "https://www.example.com"],
+            ),
+            ("tracker", ["tracker", "https://cdn.invalid/tracker"]),
+            ("foo.*bar", ["foobar", "https://invalid/foo/value/bar"]),
+        ];
+
+        for (base, prefixes) in cases {
+            for is_right_anchor in [false, true] {
+                let separator_reference = regex::Regex::new(&format!(
+                    "{base}{ABP_SEPARATOR_CLASS}{}",
+                    if is_right_anchor { "$" } else { "" }
+                ))
+                .unwrap();
+                let end_reference = regex::Regex::new(&format!("{base}$")).unwrap();
+                let compact = regex::Regex::new(&format!(
+                    "{base}({ABP_SEPARATOR_CLASS}{})?$",
+                    if is_right_anchor { "" } else { ".*" }
+                ))
+                .unwrap();
+
+                for prefix in prefixes {
+                    for suffix in &suffixes {
+                        let url = format!("{prefix}{suffix}");
+                        assert_eq!(
+                            compact.is_match(&url),
+                            separator_reference.is_match(&url) || end_reference.is_match(&url),
+                            "base={base:?}, right_anchor={is_right_anchor}, url={url:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -759,15 +849,7 @@ mod ab2cb_tests {
                 "type": "block"
             },
             "trigger": {
-                "url-filter": "^[^:]+:(//)?([^/]+\\.)?example\\.com[^A-Za-z0-9_.%-]",
-                "load-type": ["third-party"]
-            }
-        }, {
-            "action": {
-                "type": "block"
-            },
-            "trigger": {
-                "url-filter": "^[^:]+:(//)?([^/]+\\.)?example\\.com$",
+                "url-filter": "^[^:]+:(//)?([^/]+\\.)?example\\.com([^A-Za-z0-9_.%-].*)?$",
                 "load-type": ["third-party"]
             }
         }, {
@@ -806,9 +888,9 @@ mod filterset_tests {
         let (cb_rules, used_rules) = set.into_content_blocking()?;
         assert_eq!(used_rules, FILTER_LIST);
 
-        // Three network rules split into six native entries, three cosmetic
-        // entries, plus `ignore_previous_fp_documents()`.
-        assert_eq!(cb_rules.len(), 10);
+        // Three network entries, three cosmetic entries, plus
+        // `ignore_previous_fp_documents()`.
+        assert_eq!(cb_rules.len(), 7);
 
         Ok(())
     }
@@ -826,9 +908,8 @@ mod filterset_tests {
         let (cb_rules, used_rules) = set.into_content_blocking()?;
         assert_eq!(used_rules, &FILTER_LIST[0..3]);
 
-        // Three network rules split into six native entries, plus
-        // `ignore_previous_fp_documents()`.
-        assert_eq!(cb_rules.len(), 7);
+        // Three network entries plus `ignore_previous_fp_documents()`.
+        assert_eq!(cb_rules.len(), 4);
 
         Ok(())
     }
@@ -873,9 +954,9 @@ mod filterset_tests {
         let (cb_rules, used_rules) = set.into_content_blocking()?;
         assert_eq!(used_rules, FILTER_LIST);
 
-        // Three network rules split into six native entries, three cosmetic
-        // entries, plus `ignore_previous_fp_documents()`.
-        assert_eq!(cb_rules.len(), 10);
+        // Three network entries, three cosmetic entries, plus
+        // `ignore_previous_fp_documents()`.
+        assert_eq!(cb_rules.len(), 7);
 
         Ok(())
     }

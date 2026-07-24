@@ -143,7 +143,7 @@ pub struct DeclarativeArtifactDigest([u8; 32]);
 impl DeclarativeArtifactDigest {
     fn for_encoded(format: DeclarativeRuleFormat, encoded: &str) -> Self {
         let format_version = match format {
-            DeclarativeRuleFormat::WebKitContentBlockerV1 => 2_u32,
+            DeclarativeRuleFormat::WebKitContentBlockerV1 => 3_u32,
         };
         let mut digest = Sha256::new();
         digest.update(b"zephium-webkit-content-rules");
@@ -205,17 +205,12 @@ impl ContentRuleCoverage {
         let Some(represented) = self.accepted_rules.checked_sub(self.platform_omitted_rules) else {
             return false;
         };
-        let Some(maximum_blocking_entries) = represented.checked_mul(2) else {
-            return false;
-        };
         parsed == self.source_rules
             && self.platform_approximated_rules <= represented
             && self.platform_resource_approximated_rules <= self.platform_approximated_rules
             && self.platform_source_kind_approximated_rules <= self.platform_approximated_rules
             && self.platform_attribution_approximated_rules <= self.platform_approximated_rules
-            // WebKit format v2 may emit a separator-byte and exact-end entry
-            // for one ABP rule because its regex subset has no alternation.
-            && self.blocking_rule_entries <= maximum_blocking_entries
+            && self.blocking_rule_entries <= represented
     }
 
     pub const fn has_blocking_entries(self) -> bool {
@@ -738,7 +733,7 @@ mod tests {
             platform_resource_approximated_rules: 0,
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
-            blocking_rule_entries: 2,
+            blocking_rule_entries: 1,
         }
         .is_consistent());
         assert!(!ContentRuleCoverage {
@@ -750,7 +745,7 @@ mod tests {
             platform_resource_approximated_rules: 0,
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
-            blocking_rule_entries: 3,
+            blocking_rule_entries: 2,
         }
         .is_consistent());
         assert!(!ContentRuleCoverage {
