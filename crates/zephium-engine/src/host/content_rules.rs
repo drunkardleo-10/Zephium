@@ -26,7 +26,11 @@ const MAX_DECLARATIVE_CONTENT_POLICY_JOBS: usize = 2;
 const MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES: usize =
     zephium_core::blocker::MAX_DECLARATIVE_RULE_BYTES * 2;
 #[cfg(not(target_os = "windows"))]
-const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// The exact 2026-07-24 EasyList + EasyPrivacy artifact cold-compiles through
+// WKContentRuleListStore in roughly 39-50 seconds on supported macOS hardware.
+// Keep a measured, finite 2.4x envelope for slower supported machines. Native
+// work remains asynchronous, single-flight, byte-bounded, and cache-backed.
+const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(not(target_os = "windows"))]
 const CONTENT_RULE_CACHE_GC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 #[cfg(not(target_os = "windows"))]
@@ -1604,6 +1608,10 @@ mod tests {
     #[test]
     fn native_declarative_compilation_is_serialized_bounded_and_attempt_exact() {
         assert_eq!(MAX_DECLARATIVE_CONTENT_POLICY_JOBS, 2);
+        assert_eq!(
+            DECLARATIVE_CONTENT_POLICY_TIMEOUT,
+            std::time::Duration::from_secs(120)
+        );
         assert_eq!(
             MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES,
             zephium_core::blocker::MAX_DECLARATIVE_RULE_BYTES * 2
