@@ -1,0 +1,40 @@
+[package]
+name = "zephium-blocker-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+zephium-blocker = { path = "..", version = "=0.1.0", default-features = false, features = ["runtime", "runtime-exact", "webkit"] }
+
+[workspace]
+members = ["."]
+
+[patch.crates-io]
+adblock = { path = "../../../vendor/adblock" }
+
+[[bin]]
+name = "source_admission"
+path = "fuzz_targets/source_admission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request_match"
+path = "fuzz_targets/request_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webkit_canonical"
+path = "fuzz_targets/webkit_canonical.rs"
+test = false
+doc = false
+bench = false
