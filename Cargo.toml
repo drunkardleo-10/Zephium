@@ -1,7 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "desktop", "xtask"]
-exclude = ["vendor/tauri", "vendor/tauri-runtime-wry", "vendor/wry"]
+exclude = [
+    "vendor/adblock",
+    "vendor/tauri",
+    "vendor/tauri-runtime-wry",
+    "vendor/wry",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +16,9 @@ authors = ["crynta"]
 repository = "https://github.com/zephium/zephium"
 
 [workspace.dependencies]
+zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default-features = false }
+zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0" }
+zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0" }
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
@@ -38,12 +46,14 @@ specta-typescript = "0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 proptest = "1"
 tempfile = "3"
+tough = { version = "=0.24.0", default-features = false }
 
 # These native-boundary crates start from the exact upstream revisions recorded
 # alongside their source. Keeping the surgical adapters in-tree makes Tauri
 # construction policy and Wry's callback, prompt, teardown, profile, and Linux
 # process-isolation policy reproducible without relying on mutable forks.
 [patch.crates-io]
+adblock = { path = "vendor/adblock" }
 tauri = { path = "vendor/tauri" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 wry = { path = "vendor/wry" }
