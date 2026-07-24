@@ -89,9 +89,26 @@ class FinalizeSbomTests(unittest.TestCase):
     def arguments(self, root: Path) -> argparse.Namespace:
         payload = root / "payload"
         payload.mkdir()
-        (payload / "bin").mkdir()
-        executable = payload / "bin" / "zephium"
+        (payload / "installed/usr/bin").mkdir(parents=True)
+        executable = payload / "installed/usr/bin/zephium"
         executable.write_bytes(b"signed executable")
+        legal_resources = (
+            payload / "installed/usr/lib/app.zephium/licenses/blocker"
+        )
+        legal_resources.mkdir(parents=True)
+        shutil.copyfile(
+            REPOSITORY_ROOT / "LICENSE",
+            legal_resources.parent / finalize_sbom.ZEPHIUM_INSTALLED_LICENSE,
+        )
+        shutil.copyfile(
+            REPOSITORY_ROOT
+            / "assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt",
+            legal_resources / "CC-BY-SA-3.0.txt",
+        )
+        shutil.copyfile(
+            REPOSITORY_ROOT / "assets/blocker-seed/v1/NOTICE",
+            legal_resources / "EasyList-EasyPrivacy-NOTICE.txt",
+        )
         (payload / "asset.txt").write_text("asset", encoding="utf-8")
         (payload / "asset-link").symlink_to("asset.txt")
         adblock = payload / finalize_sbom.ADBLOCK_MANIFEST_ROOT
@@ -107,6 +124,13 @@ class FinalizeSbomTests(unittest.TestCase):
             shutil.copyfile(
                 REPOSITORY_ROOT / "vendor" / "adblock" / name,
                 adblock / name,
+            )
+        blocker_seed = payload / finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+        blocker_seed.mkdir(parents=True)
+        for name in finalize_sbom.BLOCKER_SEED_FILES:
+            shutil.copyfile(
+                REPOSITORY_ROOT / "assets" / "blocker-seed" / "v1" / name,
+                blocker_seed / name,
             )
         subject = root / "Zephium-1.2.3-linux-x86_64.rpm"
         subject.write_bytes(b"signed installer")
@@ -160,7 +184,7 @@ class FinalizeSbomTests(unittest.TestCase):
             )
             self.assertEqual(
                 properties["zephium:release:executable:0:path"],
-                "bin/zephium",
+                "installed/usr/bin/zephium",
             )
             payload_files = {
                 component["name"]: component
@@ -210,6 +234,40 @@ class FinalizeSbomTests(unittest.TestCase):
                     component_properties["zephium:blocker:component-role"],
                     role,
                 )
+            self.assertEqual(
+                properties["zephium:blocker-seed:license"],
+                finalize_sbom.EXPECTED_BLOCKER_SEED_LICENSE,
+            )
+            seed_components = [
+                component
+                for component in value["components"]
+                if component.get("type") == "data"
+                and str(component.get("bom-ref", "")).startswith(
+                    "urn:zephium:blocker-seed:"
+                )
+            ]
+            self.assertEqual(
+                {component["name"] for component in seed_components},
+                {"EasyList", "EasyPrivacy"},
+            )
+            for component in seed_components:
+                self.assertEqual(
+                    component["licenses"],
+                    [
+                        {
+                            "license": {
+                                "id": finalize_sbom.EXPECTED_BLOCKER_SEED_LICENSE
+                            }
+                        }
+                    ],
+                )
+                self.assertRegex(component["hashes"][0]["content"], r"^[0-9a-f]{64}$")
+                seed_properties = {
+                    item["name"]: item["value"]
+                    for item in component["properties"]
+                }
+                self.assertIn("zephium:blocker-seed:upstream-commit", seed_properties)
+                self.assertIn("zephium:blocker-seed:compressed-sha256", seed_properties)
             source_manifest = args.adblock_source_manifest
             source_digest = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
             self.assertEqual(
@@ -520,6 +578,56 @@ fi
 class AdditionalFinalizeSbomTests(unittest.TestCase):
     arguments = FinalizeSbomTests.arguments
 
+    def configure_platform_payload(
+        self, args: argparse.Namespace, platform: str
+    ) -> None:
+        if platform == "linux":
+            return
+        original_executable = args.executable[0]
+        if platform == "macos":
+            executable_names = [
+                "installed/Zephium.app/Contents/MacOS/zephium-desktop"
+            ]
+            resource_names = [
+                "installed/Zephium.app/Contents/Resources/licenses/blocker"
+            ]
+        elif platform == "windows":
+            executable_names = [
+                "msi-installed/Zephium/zephium-desktop.exe",
+                "nsis-installed/Zephium/zephium-desktop.exe",
+            ]
+            resource_names = [
+                "msi-installed/Zephium/licenses/blocker",
+                "nsis-installed/Zephium/licenses/blocker",
+            ]
+        else:
+            raise AssertionError(f"unsupported test platform: {platform}")
+
+        executables = []
+        for executable_name in executable_names:
+            executable = args.scan_root / executable_name
+            executable.parent.mkdir(parents=True)
+            shutil.copyfile(original_executable, executable)
+            executables.append(executable)
+        for resource_name in resource_names:
+            resource_root = args.scan_root / resource_name
+            resource_root.mkdir(parents=True)
+            shutil.copyfile(
+                REPOSITORY_ROOT / "LICENSE",
+                resource_root.parent / finalize_sbom.ZEPHIUM_INSTALLED_LICENSE,
+            )
+            for installed_name, source_name in (
+                finalize_sbom.BLOCKER_INSTALLED_LEGAL_FILES
+            ):
+                shutil.copyfile(
+                    args.scan_root
+                    / finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+                    / source_name,
+                    resource_root / installed_name,
+                )
+        args.executable = executables
+        args.reference_executable = executables[0]
+
     def test_rejects_missing_duplicate_or_inexact_adblock_component(self) -> None:
         mutations = {
             "missing": lambda components: components.pop(0),
@@ -583,6 +691,179 @@ class AdditionalFinalizeSbomTests(unittest.TestCase):
                 args.sbom.write_text(json.dumps(value), encoding="utf-8")
                 with self.assertRaises(finalize_sbom.SbomError):
                     finalize_sbom.finalize(args)
+
+    def test_rejects_missing_or_mutated_blocker_seed_provenance(self) -> None:
+        def seed_path(args: argparse.Namespace, name: str) -> Path:
+            return (
+                args.scan_root
+                / finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+                / name
+            )
+
+        mutations = {
+            "missing": lambda args: seed_path(args, "NOTICE").unlink(),
+            "compressed": lambda args: seed_path(
+                args, "easylist.txt.gz"
+            ).write_bytes(b"not the reviewed seed"),
+            "catalog": lambda args: seed_path(args, "catalog.json").write_bytes(
+                seed_path(args, "catalog.json").read_bytes() + b"\n"
+            ),
+            "license": lambda args: seed_path(
+                args, "LICENSE-CC-BY-SA-3.0.txt"
+            ).write_bytes(b"not the reviewed license"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                args = self.arguments(Path(temporary))
+                mutate(args)
+                with self.assertRaises(finalize_sbom.SbomError):
+                    finalize_sbom.finalize(args)
+
+    def test_rejects_self_consistent_but_unreviewed_compiler_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.arguments(Path(temporary))
+            report = (
+                args.scan_root
+                / finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+                / "compile-report.json"
+            )
+            value = json.loads(report.read_text(encoding="utf-8"))
+            value["compilers"][0]["candidate_rules"] = 1
+            value["compilers"][0]["limits"] = "not-real-compiler-limits"
+            report.write_text(
+                json.dumps(value, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                finalize_sbom.SbomError,
+                "independently reviewed release anchors",
+            ):
+                finalize_sbom.finalize(args)
+
+    def test_rejects_missing_mutated_or_linked_installed_blocker_legal_files(
+        self,
+    ) -> None:
+        def legal_path(args: argparse.Namespace, name: str) -> Path:
+            return (
+                args.scan_root
+                / "installed/usr/lib/app.zephium/licenses/blocker"
+                / name
+            )
+
+        mutations = {
+            "missing": lambda args: legal_path(
+                args, "EasyList-EasyPrivacy-NOTICE.txt"
+            ).unlink(),
+            "mutated": lambda args: legal_path(
+                args, "CC-BY-SA-3.0.txt"
+            ).write_bytes(b"not the reviewed license"),
+            "linked": lambda args: (
+                legal_path(args, "CC-BY-SA-3.0.txt").unlink(),
+                legal_path(args, "CC-BY-SA-3.0.txt").symlink_to(
+                    args.scan_root
+                    / finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+                    / "LICENSE-CC-BY-SA-3.0.txt"
+                ),
+            ),
+            "missing-application-license": lambda args: (
+                legal_path(args, "CC-BY-SA-3.0.txt").parent.parent
+                / finalize_sbom.ZEPHIUM_INSTALLED_LICENSE
+            ).unlink(),
+            "mutated-application-license": lambda args: (
+                legal_path(args, "CC-BY-SA-3.0.txt").parent.parent
+                / finalize_sbom.ZEPHIUM_INSTALLED_LICENSE
+            ).write_bytes(b"not the reviewed application license"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                args = self.arguments(Path(temporary))
+                mutate(args)
+                with self.assertRaises(finalize_sbom.SbomError):
+                    finalize_sbom.finalize(args)
+
+    def test_installed_blocker_legal_paths_are_platform_exact(self) -> None:
+        layouts = {
+            "macos": (
+                ["installed/Zephium.app/Contents/MacOS/zephium-desktop"],
+                ["installed/Zephium.app/Contents/Resources/licenses/blocker"],
+            ),
+            "windows": (
+                [
+                    "msi-installed/Zephium/zephium-desktop.exe",
+                    "nsis-installed/Zephium/zephium-desktop.exe",
+                ],
+                [
+                    "msi-installed/Zephium/licenses/blocker",
+                    "nsis-installed/Zephium/licenses/blocker",
+                ],
+            ),
+        }
+        for platform, (executable_names, resource_roots) in layouts.items():
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                manifest_root = (
+                    root / finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+                )
+                manifest_root.mkdir(parents=True)
+                provenance: dict[str, tuple[str, int]] = {}
+                for _, source_name in finalize_sbom.BLOCKER_INSTALLED_LEGAL_FILES:
+                    source = (
+                        REPOSITORY_ROOT / "assets/blocker-seed/v1" / source_name
+                    )
+                    destination = manifest_root / source_name
+                    shutil.copyfile(source, destination)
+                    encoded = destination.read_bytes()
+                    provenance[
+                        (
+                            finalize_sbom.BLOCKER_SEED_MANIFEST_ROOT
+                            / source_name
+                        ).as_posix()
+                    ] = (hashlib.sha256(encoded).hexdigest(), len(encoded))
+                executables = []
+                for executable_name in executable_names:
+                    executable = root / executable_name
+                    executable.parent.mkdir(parents=True)
+                    executable.write_bytes(b"signed executable")
+                    executables.append(executable)
+                for resource_name in resource_roots:
+                    resource_root = root / resource_name
+                    resource_root.mkdir(parents=True)
+                    shutil.copyfile(
+                        REPOSITORY_ROOT / "LICENSE",
+                        resource_root.parent
+                        / finalize_sbom.ZEPHIUM_INSTALLED_LICENSE,
+                    )
+                    for installed_name, source_name in (
+                        finalize_sbom.BLOCKER_INSTALLED_LEGAL_FILES
+                    ):
+                        shutil.copyfile(
+                            manifest_root / source_name,
+                            resource_root / installed_name,
+                        )
+
+                installed = finalize_sbom.installed_blocker_legal_resources(
+                    root,
+                    platform,
+                    executables,
+                    provenance,
+                )
+                self.assertEqual(
+                    set(installed),
+                    {
+                        (Path(resource_root) / installed_name).as_posix()
+                        for resource_root in resource_roots
+                        for installed_name, _ in (
+                            finalize_sbom.BLOCKER_INSTALLED_LEGAL_FILES
+                        )
+                    }
+                    | {
+                        (
+                            Path(resource_root).parent
+                            / finalize_sbom.ZEPHIUM_INSTALLED_LICENSE
+                        ).as_posix()
+                        for resource_root in resource_roots
+                    },
+                )
 
     def test_rejects_reserved_properties_anywhere_in_syft_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -684,7 +965,7 @@ class AdditionalFinalizeSbomTests(unittest.TestCase):
             ):
                 finalize_sbom.finalize(args)
 
-    def test_release_workflow_stages_and_binds_adblock_provenance_everywhere(
+    def test_release_workflow_stages_and_binds_blocker_provenance_everywhere(
         self,
     ) -> None:
         workflow = (
@@ -708,6 +989,7 @@ class AdditionalFinalizeSbomTests(unittest.TestCase):
         )
         for source in sources:
             self.assertEqual(workflow.count(source), 3)
+        self.assertEqual(workflow.count("assets/blocker-seed/v1/"), 3)
         for source, argument in bindings:
             self.assertEqual(workflow.count(argument), 3)
         for step_name in (
@@ -727,6 +1009,41 @@ class AdditionalFinalizeSbomTests(unittest.TestCase):
                 )
             for _, argument in bindings:
                 self.assertEqual(section.count(argument), 1, step_name)
+            self.assertEqual(
+                section.count("assets/blocker-seed/v1/"),
+                1,
+                step_name,
+            )
+            self.assertGreater(
+                section.index("assets/blocker-seed/v1/"),
+                section.index("syft scan"),
+                "blocker seed evidence must be staged after the authoritative graph scan",
+            )
+            self.assertEqual(section.count("git diff --quiet"), 1, step_name)
+            self.assertEqual(
+                section.count("git status --porcelain=v1 --untracked-files=all"),
+                1,
+                step_name,
+            )
+            self.assertLess(
+                section.index("git diff --quiet"),
+                section.index("assets/blocker-seed/v1/"),
+                "release inputs must be reverified before blocker seed staging",
+            )
+        for step_name in (
+            "Prove Linux release seed inputs match the release commit before build",
+            "Prove Windows release seed inputs match the release commit before build",
+            "Prove macOS release seed inputs match the release commit before build",
+        ):
+            self.assertEqual(workflow.count(f"      - name: {step_name}"), 1)
+        self.assertIn(
+            "rpm -qp --qf '%{LICENSE}'",
+            workflow,
+        )
+        self.assertIn(
+            '"MPL-2.0 AND CC-BY-SA-3.0"',
+            workflow,
+        )
         ordinary_ci = (
             REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
@@ -743,6 +1060,19 @@ class AdditionalFinalizeSbomTests(unittest.TestCase):
             args.sbom.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaises(finalize_sbom.SbomError):
                 finalize_sbom.finalize(args)
+
+    def test_rejects_unreviewed_cyclonedx_schema_version(self) -> None:
+        for version in ("1.4", "1.5", "1.7", "1.9"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
+                args = self.arguments(Path(temp))
+                value = json.loads(args.sbom.read_text(encoding="utf-8"))
+                value["specVersion"] = version
+                args.sbom.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    finalize_sbom.SbomError,
+                    "CycloneDX 1.6",
+                ):
+                    finalize_sbom.finalize(args)
 
     def test_rejects_real_syft_duplicate_from_standalone_fork_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -772,6 +1102,7 @@ class AdditionalFinalizeSbomTests(unittest.TestCase):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temporary:
                 args = self.arguments(Path(temporary))
                 args.platform = platform
+                self.configure_platform_payload(args, platform)
                 value = json.loads(args.sbom.read_text(encoding="utf-8"))
                 cargo_components = [
                     component

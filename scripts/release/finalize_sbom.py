@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import tomllib
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,43 @@ EXPECTED_BLOCKER_COMPONENTS = (
     ("platform-verifier", "rustls-platform-verifier", "0.7.0"),
     ("crypto-provider", "aws-lc-rs", "1.17.3"),
 )
+EXPECTED_BLOCKER_SEED_LICENSE = "CC-BY-SA-3.0"
+EXPECTED_BLOCKER_SEED_LICENSE_SHA256 = (
+    "3f941b3b89cf7b8370ceb83cc76d2120d471b58735d8ca60238a751a48d7f72f"
+)
+EXPECTED_BLOCKER_SEED_REVISION = 202607241759
+EXPECTED_BLOCKER_SEED_FILE_SHA256 = {
+    "catalog.json": "535fe97cdfd129a9084296491efa3721b43da22e469c42062a20cca4ec94b4dc",
+    "release-seed.json": "93c8ecad97a6a6f678362643995df97a5c77e8e6403019ddb69d282432192f82",
+    "compile-report.json": "551027e69cb14e3ac4cc6af6d14e280f4b5728dee9bc93c8c001b22fe9f8d13f",
+    "easylist.txt.gz": "5e2df212962c1afe1acb315c28af8d72976dae176e7305b8d530948702ea7972",
+    "easyprivacy.txt.gz": "4d20d41b7246b302cc07a40d066fe7f1091a0675f798021a8389f2cb2d14355f",
+    "LICENSE-CC-BY-SA-3.0.txt": EXPECTED_BLOCKER_SEED_LICENSE_SHA256,
+    "NOTICE": "6652e8725b3884ee0aafa241084caf9aac6735e68cb121dc2a5802c7d9a3fed7",
+}
+EXPECTED_ZEPHIUM_LICENSE_SHA256 = (
+    "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+)
+EXPECTED_ZEPHIUM_LICENSE_SIZE = 16_726
+ZEPHIUM_INSTALLED_LICENSE = "Zephium-MPL-2.0.txt"
+EXPECTED_BLOCKER_POLICY_FORMAT = 4
+EXPECTED_BLOCKER_WEBKIT_ARTIFACT_FORMAT = 3
+EXPECTED_BLOCKER_SEED_SOURCES = (
+    (
+        "easylist",
+        "EasyList",
+        "easylist.txt",
+        "easylist.txt.gz",
+        "https://easylist.to/easylist/easylist.txt",
+    ),
+    (
+        "easyprivacy",
+        "EasyPrivacy",
+        "easyprivacy.txt",
+        "easyprivacy.txt.gz",
+        "https://easylist.to/easylist/easyprivacy.txt",
+    ),
+)
 ADBLOCK_MANIFEST_ROOT = Path("build-manifests/adblock")
 ADBLOCK_FORK_MANIFEST = ADBLOCK_MANIFEST_ROOT / "FORK.toml"
 ADBLOCK_UPSTREAM_INVENTORY = ADBLOCK_MANIFEST_ROOT / "UPSTREAM_FILES.toml"
@@ -78,7 +116,28 @@ ADBLOCK_SOURCE_MANIFEST = ADBLOCK_MANIFEST_ROOT / "Cargo.toml.orig"
 ADBLOCK_ACTIVE_MANIFEST = ADBLOCK_MANIFEST_ROOT / "Cargo.toml"
 ADBLOCK_STANDALONE_LOCK = ADBLOCK_MANIFEST_ROOT / "Cargo.lock"
 ADBLOCK_LICENSE_FILE = ADBLOCK_MANIFEST_ROOT / "LICENSE"
+BLOCKER_SEED_MANIFEST_ROOT = Path("build-manifests/blocker-seed")
+BLOCKER_SEED_FILES = (
+    "catalog.json",
+    "release-seed.json",
+    "compile-report.json",
+    "easylist.txt.gz",
+    "easyprivacy.txt.gz",
+    "LICENSE-CC-BY-SA-3.0.txt",
+    "NOTICE",
+)
+BLOCKER_INSTALLED_LEGAL_FILES = (
+    (
+        "CC-BY-SA-3.0.txt",
+        "LICENSE-CC-BY-SA-3.0.txt",
+    ),
+    (
+        "EasyList-EasyPrivacy-NOTICE.txt",
+        "NOTICE",
+    ),
+)
 ADBLOCK_PROVENANCE_MAX_BYTES = 1024 * 1024
+BLOCKER_SEED_MAX_FILE_BYTES = 40 * 1024 * 1024
 MAX_SBOM_BYTES = 16 * 1024 * 1024
 MAX_PAYLOAD_FILES = 50_000
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -86,6 +145,7 @@ SAFE_SUBJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
 RESERVED_PROPERTY_PREFIXES = (
     "zephium:adblock:",
     "zephium:blocker:",
+    "zephium:blocker-seed:",
     "zephium:payload:",
     "zephium:release:",
 )
@@ -319,9 +379,8 @@ def validate_syft_document(
 ) -> tuple[dict[str, Any], list[Any]]:
     if value.get("bomFormat") != "CycloneDX":
         raise SbomError("SBOM is not a CycloneDX document")
-    spec = value.get("specVersion")
-    if not isinstance(spec, str) or not re.fullmatch(r"1\.[4-9]", spec):
-        raise SbomError("SBOM uses an unsupported CycloneDX specification version")
+    if value.get("specVersion") != "1.6":
+        raise SbomError("SBOM must use the reviewed CycloneDX 1.6 specification")
     versions = syft_versions(value)
     if versions != {EXPECTED_SYFT_VERSION}:
         raise SbomError(
@@ -596,6 +655,531 @@ def blocker_component_properties(platform: str) -> list[dict[str, str]]:
     return properties
 
 
+def _canonical_json_object(encoded: bytes, description: str) -> dict[str, Any]:
+    value = strict_json_loads(encoded)
+    if not isinstance(value, dict):
+        raise SbomError(f"{description} root must be an object")
+    try:
+        canonical = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as error:
+        raise SbomError(f"{description} cannot be canonically serialized") from error
+    if canonical != encoded:
+        raise SbomError(f"{description} is not exact canonical JSON")
+    return value
+
+
+def _exact_object_keys(
+    value: dict[str, Any], expected: set[str], description: str
+) -> None:
+    if set(value) != expected:
+        raise SbomError(f"{description} has an unexpected field set")
+
+
+def _lower_sha256(value: Any, description: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise SbomError(f"{description} is not a lowercase SHA-256")
+    return value
+
+
+def _positive_integer(value: Any, description: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise SbomError(f"{description} must be a positive integer")
+    return value
+
+
+def _bounded_gzip(
+    compressed: bytes, expected_length: int, description: str
+) -> bytes:
+    if (
+        expected_length <= 0
+        or expected_length > 16 * 1024 * 1024
+        or compressed[:10] != b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff"
+    ):
+        raise SbomError(f"{description} has an invalid canonical gzip header or length")
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    output = bytearray()
+    try:
+        for offset in range(0, len(compressed), 64 * 1024):
+            if inflater.eof:
+                raise SbomError(f"{description} has trailing or concatenated data")
+            pending = compressed[offset : offset + 64 * 1024]
+            while pending:
+                remaining = expected_length + 1 - len(output)
+                if remaining <= 0:
+                    raise SbomError(f"{description} expands beyond its declared length")
+                output_before = len(output)
+                output.extend(inflater.decompress(pending, remaining))
+                if len(output) > expected_length:
+                    raise SbomError(f"{description} expands beyond its declared length")
+                if inflater.unused_data:
+                    raise SbomError(f"{description} has trailing or concatenated data")
+                next_pending = inflater.unconsumed_tail
+                if next_pending == pending and len(output) == output_before:
+                    raise SbomError(f"{description} decompressor made no progress")
+                pending = next_pending
+        output.extend(inflater.flush())
+    except zlib.error as error:
+        raise SbomError(f"{description} is not a valid gzip stream") from error
+    if (
+        len(output) != expected_length
+        or not inflater.eof
+        or inflater.unused_data
+        or inflater.unconsumed_tail
+    ):
+        raise SbomError(
+            f"{description} is truncated, oversized, concatenated, or has trailing bytes"
+        )
+    return bytes(output)
+
+
+def _validate_seed_source_header(
+    raw: bytes,
+    expected_title: str,
+    expected_version: str,
+    expected_commit: str,
+    description: str,
+) -> None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise SbomError(f"{description} is not UTF-8") from error
+    lines = text.splitlines()[:32]
+    if (
+        not lines
+        or not lines[0].startswith("[Adblock Plus ")
+        or not lines[0].endswith("]")
+    ):
+        raise SbomError(f"{description} has no accepted ABP header")
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        for key in ("Title", "Version", "Commit"):
+            prefix = f"! {key}: "
+            if line.startswith(prefix) and key not in fields:
+                fields[key] = line[len(prefix) :]
+    if fields != {
+        "Title": expected_title,
+        "Version": expected_version,
+        "Commit": expected_commit,
+    }:
+        raise SbomError(f"{description} header provenance does not match its manifest")
+
+
+def _blocker_seed_notice(
+    sources: list[tuple[str, str, str, str, str]]
+) -> bytes:
+    notice = (
+        "Zephium bundled blocker seed v1\n\n"
+        "This directory contains unmodified EasyList and EasyPrivacy subscription text.\n"
+        "Zephium changes only the storage representation by applying deterministic gzip\n"
+        "compression; the decompressed source bytes are unchanged.\n\n"
+        "Attribution: The EasyList authors (https://easylist.to/)\n"
+        "Selected license: CC BY-SA 3.0 Unported (CC-BY-SA-3.0)\n"
+        "License text: LICENSE-CC-BY-SA-3.0.txt\n"
+        "Upstream terms: https://easylist.to/pages/licence.html\n\n"
+    )
+    for title, source_url, version, commit, raw_sha256 in sources:
+        notice += (
+            f"{title}\n"
+            f"Source: {source_url}\n"
+            f"Version: {version}\n"
+            f"Commit: {commit}\n"
+            f"Raw SHA-256: {raw_sha256}\n\n"
+        )
+    notice += (
+        "The upstream authors do not endorse Zephium. Release engineering must regenerate\n"
+        "and verify this record with `cargo xtask update-blocker-seed` whenever either\n"
+        "subscription changes.\n"
+    )
+    return notice.encode("utf-8")
+
+
+def blocker_seed_provenance(
+    root: Path,
+) -> tuple[
+    list[dict[str, str]],
+    list[dict[str, Any]],
+    dict[str, tuple[str, int]],
+]:
+    resolved_root = root.resolve(strict=True)
+    directory = root / BLOCKER_SEED_MANIFEST_ROOT
+    try:
+        directory_mode = directory.lstat().st_mode
+    except OSError as error:
+        raise SbomError("blocker seed provenance directory is unavailable") from error
+    if stat.S_ISLNK(directory_mode) or not stat.S_ISDIR(directory_mode):
+        raise SbomError("blocker seed provenance path must be a non-symbolic directory")
+    try:
+        actual_files = {entry.name for entry in directory.iterdir()}
+    except OSError as error:
+        raise SbomError("cannot enumerate blocker seed provenance files") from error
+    if actual_files != set(BLOCKER_SEED_FILES):
+        raise SbomError("blocker seed provenance file inventory is not closed")
+
+    paths = {
+        name: _fixed_staged_file(
+            root,
+            directory / name,
+            BLOCKER_SEED_MANIFEST_ROOT / name,
+            f"blocker seed {name}",
+        )
+        for name in BLOCKER_SEED_FILES
+    }
+    encoded = {
+        name: regular_file_bytes(
+            path,
+            f"blocker seed {name}",
+            BLOCKER_SEED_MAX_FILE_BYTES,
+            resolved_root,
+        )
+        for name, path in paths.items()
+    }
+    digests = {
+        name: hashlib.sha256(contents).hexdigest()
+        for name, contents in encoded.items()
+    }
+    if digests != EXPECTED_BLOCKER_SEED_FILE_SHA256:
+        raise SbomError(
+            "blocker seed bytes do not match the independently reviewed release anchors"
+        )
+    if (
+        digests["LICENSE-CC-BY-SA-3.0.txt"]
+        != EXPECTED_BLOCKER_SEED_LICENSE_SHA256
+    ):
+        raise SbomError("blocker seed license does not match the reviewed legal text")
+
+    catalog = _canonical_json_object(encoded["catalog.json"], "blocker seed catalog")
+    _exact_object_keys(
+        catalog,
+        {"schema_version", "revision", "created_unix", "expires_unix", "sources"},
+        "blocker seed catalog",
+    )
+    if catalog.get("schema_version") != 1:
+        raise SbomError("blocker seed catalog schema is unsupported")
+    revision = _positive_integer(catalog.get("revision"), "blocker seed revision")
+    if revision != EXPECTED_BLOCKER_SEED_REVISION:
+        raise SbomError("blocker seed revision is not the reviewed release revision")
+    created = _positive_integer(catalog.get("created_unix"), "blocker seed creation time")
+    expires = _positive_integer(catalog.get("expires_unix"), "blocker seed expiry time")
+    if expires <= created:
+        raise SbomError("blocker seed expiry does not follow creation")
+    sources = catalog.get("sources")
+    if not isinstance(sources, list) or len(sources) != len(EXPECTED_BLOCKER_SEED_SOURCES):
+        raise SbomError("blocker seed catalog does not contain the exact source set")
+
+    envelope = _canonical_json_object(
+        encoded["release-seed.json"], "blocker seed release envelope"
+    )
+    _exact_object_keys(
+        envelope,
+        {"schema_version", "catalog_manifest_sha256", "assets"},
+        "blocker seed release envelope",
+    )
+    if (
+        envelope.get("schema_version") != 1
+        or envelope.get("catalog_manifest_sha256") != digests["catalog.json"]
+    ):
+        raise SbomError("blocker seed envelope does not bind the catalog")
+    assets = envelope.get("assets")
+    if not isinstance(assets, list) or len(assets) != len(sources):
+        raise SbomError("blocker seed envelope does not contain the exact asset set")
+
+    notice_sources: list[tuple[str, str, str, str, str]] = []
+    data_components: list[dict[str, Any]] = []
+    total_source_bytes = 0
+    for expected, source, asset in zip(
+        EXPECTED_BLOCKER_SEED_SOURCES, sources, assets, strict=True
+    ):
+        source_id, title, target, compressed_name, source_url = expected
+        if not isinstance(source, dict) or not isinstance(asset, dict):
+            raise SbomError("blocker seed source descriptors must be objects")
+        _exact_object_keys(
+            source,
+            {"id", "format", "target", "length", "sha256", "license"},
+            f"blocker seed source {source_id}",
+        )
+        _exact_object_keys(
+            asset,
+            {
+                "target",
+                "compression",
+                "compressed_length",
+                "compressed_sha256",
+                "upstream_title",
+                "upstream_version",
+                "upstream_commit",
+            },
+            f"blocker seed asset {source_id}",
+        )
+        length = _positive_integer(
+            source.get("length"), f"blocker seed {source_id} length"
+        )
+        raw_sha256 = _lower_sha256(
+            source.get("sha256"), f"blocker seed {source_id} raw digest"
+        )
+        license_value = source.get("license")
+        if (
+            source.get("id") != source_id
+            or source.get("format") != "standard"
+            or source.get("target") != target
+            or not isinstance(license_value, dict)
+            or license_value
+            != {
+                "license_expression": EXPECTED_BLOCKER_SEED_LICENSE,
+                "attribution": "The EasyList authors (https://easylist.to/)",
+                "redistribution": (
+                    "Unmodified upstream subscription; deterministic gzip packaging only"
+                ),
+                "source_url": source_url,
+            }
+        ):
+            raise SbomError(f"blocker seed {source_id} source policy is not exact")
+        version = asset.get("upstream_version")
+        commit = asset.get("upstream_commit")
+        if (
+            asset.get("target") != target
+            or asset.get("compression") != "gzip"
+            or asset.get("upstream_title") != title
+            or not isinstance(version, str)
+            or not re.fullmatch(r"[0-9]{12}", version)
+            or not isinstance(commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)
+        ):
+            raise SbomError(f"blocker seed {source_id} upstream provenance is invalid")
+        compressed = encoded[compressed_name]
+        if (
+            asset.get("compressed_length") != len(compressed)
+            or asset.get("compressed_sha256") != digests[compressed_name]
+        ):
+            raise SbomError(f"blocker seed {source_id} compressed identity is invalid")
+        raw = _bounded_gzip(compressed, length, f"blocker seed {source_id}")
+        if hashlib.sha256(raw).hexdigest() != raw_sha256:
+            raise SbomError(f"blocker seed {source_id} raw digest does not match")
+        _validate_seed_source_header(raw, title, version, commit, source_id)
+        total_source_bytes += length
+        notice_sources.append((title, source_url, version, commit, raw_sha256))
+        component_properties = [
+            {
+                "name": "zephium:blocker-seed:catalog-manifest-sha256",
+                "value": digests["catalog.json"],
+            },
+            {
+                "name": "zephium:blocker-seed:compressed-sha256",
+                "value": digests[compressed_name],
+            },
+            {
+                "name": "zephium:blocker-seed:compressed-size",
+                "value": str(len(compressed)),
+            },
+            {
+                "name": "zephium:blocker-seed:package-revision",
+                "value": str(revision),
+            },
+            {"name": "zephium:blocker-seed:source-id", "value": source_id},
+            {"name": "zephium:blocker-seed:target", "value": target},
+            {"name": "zephium:blocker-seed:upstream-commit", "value": commit},
+        ]
+        component_properties.sort(key=lambda item: (item["name"], item["value"]))
+        data_components.append(
+            {
+                "type": "data",
+                "name": title,
+                "version": version,
+                "purl": f"pkg:generic/{source_id}@{version}",
+                "bom-ref": f"urn:zephium:blocker-seed:{source_id}:{raw_sha256}",
+                "hashes": [{"alg": "SHA-256", "content": raw_sha256}],
+                "licenses": [
+                    {"license": {"id": EXPECTED_BLOCKER_SEED_LICENSE}}
+                ],
+                "externalReferences": [
+                    {"type": "distribution", "url": source_url}
+                ],
+                "properties": component_properties,
+            }
+        )
+
+    if encoded["NOTICE"] != _blocker_seed_notice(notice_sources):
+        raise SbomError("blocker seed NOTICE does not match the exact source provenance")
+
+    quality = _canonical_json_object(
+        encoded["compile-report.json"], "blocker seed compiler report"
+    )
+    _exact_object_keys(
+        quality,
+        {
+            "schema_version",
+            "package_revision",
+            "catalog_manifest_sha256",
+            "release_seed_manifest_sha256",
+            "license_file",
+            "license_sha256",
+            "compilers",
+        },
+        "blocker seed compiler report",
+    )
+    compilers = quality.get("compilers")
+    if (
+        quality.get("schema_version") != 1
+        or quality.get("package_revision") != revision
+        or quality.get("catalog_manifest_sha256") != digests["catalog.json"]
+        or quality.get("release_seed_manifest_sha256")
+        != digests["release-seed.json"]
+        or quality.get("license_file") != "LICENSE-CC-BY-SA-3.0.txt"
+        or quality.get("license_sha256")
+        != EXPECTED_BLOCKER_SEED_LICENSE_SHA256
+        or not isinstance(compilers, list)
+        or len(compilers) != 2
+    ):
+        raise SbomError("blocker seed compiler report does not bind the package")
+    policy_digest: str | None = None
+    for compiler, target in zip(compilers, ("runtime", "webkit"), strict=True):
+        if not isinstance(compiler, dict):
+            raise SbomError("blocker seed compiler entries must be objects")
+        _exact_object_keys(
+            compiler,
+            {
+                "target",
+                "feature_graph",
+                "policy_format_version",
+                "webkit_artifact_format_version",
+                "adblock_engine_version",
+                "limits",
+                "policy_sha256",
+                "native_artifact_sha256",
+                "total_source_bytes",
+                "candidate_rules",
+                "accepted_rules",
+                "rejected_rules",
+                "native_blocking_rule_entries",
+                "attribution_sensitive_rules",
+                "runtime_omitted_rules",
+                "runtime_approximated_rules",
+                "runtime_resource_approximated_rules",
+                "runtime_source_kind_approximated_rules",
+                "sources",
+                "runtime",
+                "webkit",
+            },
+            f"blocker seed {target} compiler report",
+        )
+        digest = _lower_sha256(
+            compiler.get("policy_sha256"), f"blocker seed {target} policy digest"
+        )
+        if policy_digest is None:
+            policy_digest = digest
+        if (
+            compiler.get("target") != target
+            or compiler.get("feature_graph") != target
+            or compiler.get("policy_format_version")
+            != EXPECTED_BLOCKER_POLICY_FORMAT
+            or compiler.get("webkit_artifact_format_version")
+            != EXPECTED_BLOCKER_WEBKIT_ARTIFACT_FORMAT
+            or compiler.get("adblock_engine_version") != EXPECTED_ADBLOCK_VERSION
+            or compiler.get("total_source_bytes") != total_source_bytes
+            or digest != policy_digest
+            or not isinstance(compiler.get("sources"), list)
+            or [item.get("id") for item in compiler["sources"] if isinstance(item, dict)]
+            != [item[0] for item in EXPECTED_BLOCKER_SEED_SOURCES]
+        ):
+            raise SbomError(f"blocker seed {target} compiler identity is invalid")
+        if target == "runtime":
+            if (
+                compiler.get("native_artifact_sha256") is not None
+                or not isinstance(compiler.get("runtime"), dict)
+                or compiler.get("webkit") is not None
+            ):
+                raise SbomError("blocker seed runtime report has contradictory artifacts")
+        else:
+            _lower_sha256(
+                compiler.get("native_artifact_sha256"),
+                "blocker seed WebKit artifact digest",
+            )
+            if compiler.get("runtime") is not None or not isinstance(
+                compiler.get("webkit"), dict
+            ):
+                raise SbomError(
+                    "blocker seed WebKit report has contradictory artifacts"
+                )
+
+    properties = [
+        {
+            "name": "zephium:blocker-seed:catalog-manifest-sha256",
+            "value": digests["catalog.json"],
+        },
+        {
+            "name": "zephium:blocker-seed:license",
+            "value": EXPECTED_BLOCKER_SEED_LICENSE,
+        },
+        {
+            "name": "zephium:blocker-seed:package-revision",
+            "value": str(revision),
+        },
+        {
+            "name": "zephium:blocker-seed:policy-sha256",
+            "value": policy_digest or "",
+        },
+        {
+            "name": "zephium:blocker-seed:release-envelope-sha256",
+            "value": digests["release-seed.json"],
+        },
+        {
+            "name": "zephium:blocker-seed:source-count",
+            "value": str(len(sources)),
+        },
+        {
+            "name": "zephium:blocker-seed:source-bytes",
+            "value": str(total_source_bytes),
+        },
+    ]
+    payload_files: dict[str, tuple[str, int]] = {}
+    for name, path in paths.items():
+        relative = path.resolve(strict=True).relative_to(resolved_root).as_posix()
+        digest = digests[name]
+        size = len(encoded[name])
+        properties.extend(
+            [
+                {
+                    "name": f"zephium:blocker-seed:file:{name}:path",
+                    "value": relative,
+                },
+                {
+                    "name": f"zephium:blocker-seed:file:{name}:sha256",
+                    "value": digest,
+                },
+                {
+                    "name": f"zephium:blocker-seed:file:{name}:size",
+                    "value": str(size),
+                },
+            ]
+        )
+        payload_files[relative] = (digest, size)
+    properties.sort(key=lambda item: (item["name"], item["value"]))
+    return properties, data_components, payload_files
+
+
+def validate_blocker_seed_components(
+    components: list[Any], expected: list[dict[str, Any]]
+) -> None:
+    for wanted in expected:
+        matches = [
+            component
+            for component in components
+            if isinstance(component, dict)
+            and (
+                component.get("bom-ref") == wanted["bom-ref"]
+                or component.get("purl") == wanted["purl"]
+            )
+        ]
+        if matches != [wanted]:
+            raise SbomError(
+                f"SBOM does not contain one exact {wanted['name']} blocker-seed component"
+            )
+
+
 def _strict_toml(encoded: bytes, description: str) -> dict[str, Any]:
     try:
         value = tomllib.loads(encoded.decode("utf-8"))
@@ -647,7 +1231,10 @@ def _fixed_staged_file(
                 f"{description} parent must be a non-symbolic directory: {current}"
             )
     resolved_root = absolute_root.resolve(strict=True)
-    resolved = absolute_supplied.resolve(strict=True)
+    try:
+        resolved = absolute_supplied.resolve(strict=True)
+    except OSError as error:
+        raise SbomError(f"{description} is unavailable: {absolute_supplied}") from error
     try:
         resolved.relative_to(resolved_root)
     except ValueError as error:
@@ -891,22 +1478,32 @@ def cross_check_adblock_payload(
     file_components: list[dict[str, Any]],
     expected_files: dict[str, tuple[str, int]],
 ) -> None:
+    cross_check_provenance_payload(
+        file_components, expected_files, "adblock provenance"
+    )
+
+
+def cross_check_provenance_payload(
+    file_components: list[dict[str, Any]],
+    expected_files: dict[str, tuple[str, int]],
+    description: str,
+) -> None:
     by_name = {component.get("name"): component for component in file_components}
     for relative, (digest, size) in expected_files.items():
         component = by_name.get(relative)
         if not isinstance(component, dict):
             raise SbomError(
-                f"adblock provenance file is absent from payload inventory: {relative}"
+                f"{description} file is absent from payload inventory: {relative}"
             )
         hashes = component.get("hashes")
         if hashes != [{"alg": "SHA-256", "content": digest}]:
             raise SbomError(
-                f"adblock provenance payload hash disagrees for {relative}"
+                f"{description} payload hash disagrees for {relative}"
             )
         properties = component.get("properties")
         if not isinstance(properties, list):
             raise SbomError(
-                f"adblock provenance payload metadata is absent for {relative}"
+                f"{description} payload metadata is absent for {relative}"
             )
         property_map = {
             item.get("name"): item.get("value")
@@ -919,7 +1516,7 @@ def cross_check_adblock_payload(
             or property_map.get("zephium:payload:path") != relative
         ):
             raise SbomError(
-                f"adblock provenance payload metadata disagrees for {relative}"
+                f"{description} payload metadata disagrees for {relative}"
             )
 
 
@@ -1065,6 +1662,147 @@ def executable_properties(
     return properties
 
 
+def installed_blocker_legal_resources(
+    root: Path,
+    platform: str,
+    executables: list[Path],
+    blocker_seed_files: dict[str, tuple[str, int]],
+) -> dict[str, tuple[str, int]]:
+    """Prove that every installed application carries the reviewed legal files."""
+    if root.is_symlink() or not root.is_dir():
+        raise SbomError("staged payload root must be a non-symbolic directory")
+    absolute_root = Path(os.path.abspath(root))
+
+    executable_relatives: list[Path] = []
+    for executable in executables:
+        absolute_executable = Path(os.path.abspath(executable))
+        try:
+            relative = absolute_executable.relative_to(absolute_root)
+        except ValueError as error:
+            raise SbomError(
+                "extracted main executable escapes the staged payload"
+            ) from error
+        _fixed_staged_file(
+            root,
+            executable,
+            relative,
+            "extracted main executable",
+        )
+        executable_relatives.append(relative)
+
+    resource_roots: list[Path]
+    if platform == "linux":
+        if (
+            len(executable_relatives) != 1
+            or executable_relatives[0].parent != Path("installed/usr/bin")
+        ):
+            raise SbomError(
+                "Linux release must contain one main executable under installed/usr/bin"
+            )
+        resource_roots = [
+            Path("installed/usr/lib/app.zephium/licenses/blocker")
+        ]
+    elif platform == "macos":
+        expected_executable = Path(
+            "installed/Zephium.app/Contents/MacOS/zephium-desktop"
+        )
+        if executable_relatives != [expected_executable]:
+            raise SbomError(
+                "macOS release must contain the exact staged Zephium application executable"
+            )
+        resource_roots = [
+            Path("installed/Zephium.app/Contents/Resources/licenses/blocker")
+        ]
+    elif platform == "windows":
+        if len(executable_relatives) != 2:
+            raise SbomError(
+                "Windows release must contain one main executable from each installer"
+            )
+        by_installer: dict[str, Path] = {}
+        for executable in executable_relatives:
+            if not executable.parts:
+                raise SbomError("Windows executable path is empty")
+            installer = executable.parts[0]
+            if installer not in {"msi-installed", "nsis-installed"}:
+                raise SbomError(
+                    "Windows executable must come from an extracted MSI or NSIS payload"
+                )
+            if installer in by_installer:
+                raise SbomError(
+                    f"Windows release contains duplicate {installer} executables"
+                )
+            by_installer[installer] = executable
+        if set(by_installer) != {"msi-installed", "nsis-installed"}:
+            raise SbomError(
+                "Windows release must contain both MSI and NSIS executable payloads"
+            )
+        resource_roots = [
+            by_installer[installer].parent / "licenses/blocker"
+            for installer in ("msi-installed", "nsis-installed")
+        ]
+    else:
+        raise SbomError(f"unsupported blocker legal-resource platform: {platform}")
+
+    installed: dict[str, tuple[str, int]] = {}
+    for resource_root in resource_roots:
+        zephium_license = resource_root.parent / ZEPHIUM_INSTALLED_LICENSE
+        zephium_path = _fixed_staged_file(
+            root,
+            root / zephium_license,
+            zephium_license,
+            "installed Zephium application license",
+        )
+        zephium_digest, zephium_size, _, _ = sha256_regular_file(
+            zephium_path,
+            "installed Zephium application license",
+            absolute_root.resolve(strict=True),
+        )
+        zephium_expected = (
+            EXPECTED_ZEPHIUM_LICENSE_SHA256,
+            EXPECTED_ZEPHIUM_LICENSE_SIZE,
+        )
+        if (zephium_digest, zephium_size) != zephium_expected:
+            raise SbomError(
+                "installed Zephium application license differs from the "
+                f"reviewed MPL-2.0 text: {zephium_license.as_posix()}"
+            )
+        installed[zephium_license.as_posix()] = zephium_expected
+        for installed_name, provenance_name in BLOCKER_INSTALLED_LEGAL_FILES:
+            provenance_relative = (
+                BLOCKER_SEED_MANIFEST_ROOT / provenance_name
+            ).as_posix()
+            expected = blocker_seed_files.get(provenance_relative)
+            if expected is None:
+                raise SbomError(
+                    f"blocker seed provenance omits legal file {provenance_name}"
+                )
+            relative = resource_root / installed_name
+            path = _fixed_staged_file(
+                root,
+                root / relative,
+                relative,
+                f"installed blocker legal resource {installed_name}",
+            )
+            digest, size, _, _ = sha256_regular_file(
+                path,
+                f"installed blocker legal resource {installed_name}",
+                absolute_root.resolve(strict=True),
+            )
+            if (digest, size) != expected:
+                raise SbomError(
+                    f"installed blocker legal resource differs from reviewed "
+                    f"{provenance_name}: {relative.as_posix()}"
+                )
+            installed[relative.as_posix()] = expected
+
+    expected_count = len(resource_roots) * (
+        len(BLOCKER_INSTALLED_LEGAL_FILES) + 1
+    )
+    if len(installed) != expected_count:
+        raise SbomError("installed blocker legal-resource inventory is not exact")
+    return installed
+
+
 def finalize(args: argparse.Namespace) -> None:
     if not COMMIT_RE.fullmatch(args.commit):
         raise SbomError("release commit must be a lowercase full Git SHA")
@@ -1086,14 +1824,34 @@ def finalize(args: argparse.Namespace) -> None:
         args.adblock_upstream_inventory,
         args.adblock_source_manifest,
     )
+    blocker_seed_properties, blocker_seed_components, blocker_seed_files = (
+        blocker_seed_provenance(args.scan_root)
+    )
+    installed_blocker_files = installed_blocker_legal_resources(
+        args.scan_root,
+        args.platform,
+        args.executable,
+        blocker_seed_files,
+    )
     file_components, payload_digest = payload_components(args.scan_root)
     cross_check_adblock_payload(file_components, adblock_files)
+    cross_check_provenance_payload(
+        file_components, blocker_seed_files, "blocker seed provenance"
+    )
+    cross_check_provenance_payload(
+        file_components,
+        installed_blocker_files,
+        "installed blocker legal resource",
+    )
     if any(component["bom-ref"] in existing_refs for component in file_components):
         raise SbomError("payload file inventory collides with a Syft component reference")
+    if any(component["bom-ref"] in existing_refs for component in blocker_seed_components):
+        raise SbomError("blocker seed component collides with a Syft component reference")
 
     properties = _property_array(metadata, "SBOM metadata")
     properties.extend(dict(item) for item in adblock_properties)
     properties.extend(dict(item) for item in blocker_properties)
+    properties.extend(dict(item) for item in blocker_seed_properties)
     properties.extend(
         [
             {"name": "zephium:release:commit", "value": args.commit},
@@ -1132,6 +1890,7 @@ def finalize(args: argparse.Namespace) -> None:
         component_properties.sort(
             key=lambda item: (str(item.get("name")), str(item.get("value")))
         )
+    components.extend(blocker_seed_components)
     components.extend(file_components)
     components.sort(key=lambda item: str(item.get("bom-ref", "")))
     expected_references = bom_references(value)
@@ -1192,6 +1951,7 @@ def finalize(args: argparse.Namespace) -> None:
         verified_components, args.platform, require_bound_license=True
     )
     validate_blocker_components(verified_components, args.platform)
+    validate_blocker_seed_components(verified_components, blocker_seed_components)
     if bom_references(verified) != expected_references or verified != value:
         raise SbomError("final CycloneDX SBOM did not round-trip exactly")
 

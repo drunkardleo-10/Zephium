@@ -6,6 +6,18 @@ use tauri_utils::platform::Target;
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
+const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
+const LEGAL_RESOURCES: [(&str, &str); 3] = [
+    ("../LICENSE", "licenses/Zephium-MPL-2.0.txt"),
+    (
+        "../assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt",
+        "licenses/blocker/CC-BY-SA-3.0.txt",
+    ),
+    (
+        "../assets/blocker-seed/v1/NOTICE",
+        "licenses/blocker/EasyList-EasyPrivacy-NOTICE.txt",
+    ),
+];
 
 fn main() {
     if let Err(error) = validate_privileged_window_ownership() {
@@ -32,6 +44,9 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         "cargo:rerun-if-changed={}",
         root.join(LINUX_DESKTOP_TEMPLATE).display()
     );
+    for (source, _) in LEGAL_RESOURCES {
+        println!("cargo:rerun-if-changed={}", root.join(source).display());
+    }
     let config_override = match env::var("TAURI_CONFIG") {
         Ok(raw) => Some(serde_json::from_str::<Value>(&raw)?),
         Err(env::VarError::NotPresent) => None,
@@ -44,6 +59,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             println!("cargo:rerun-if-changed={}", path.display());
         }
         validate_target_window(target, "repository", &config)?;
+        validate_legal_resources("repository", &config, &root)?;
         if matches!(target, Target::Linux) {
             validate_linux_identity("repository", &config, &root)?;
         }
@@ -51,9 +67,40 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             // Keep this identical to tauri-build's TAURI_CONFIG merge order.
             json_patch::merge(&mut config, config_override);
             validate_target_window(target, "effective", &config)?;
+            validate_legal_resources("effective", &config, &root)?;
             if matches!(target, Target::Linux) {
                 validate_linux_identity("effective", &config, &root)?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_legal_resources(source: &str, config: &Value, root: &Path) -> io::Result<()> {
+    if config.pointer("/bundle/license").and_then(Value::as_str) != Some(PACKAGE_LICENSE) {
+        return Err(io::Error::other(format!(
+            "{source} configuration must declare package license `{PACKAGE_LICENSE}`"
+        )));
+    }
+    let resources = config
+        .pointer("/bundle/resources")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "{source} configuration must package the application and blocker legal resources"
+            ))
+        })?;
+    for (path, destination) in LEGAL_RESOURCES {
+        if resources.get(path).and_then(Value::as_str) != Some(destination) {
+            return Err(io::Error::other(format!(
+                "{source} configuration must map legal resource `{path}` to `{destination}`"
+            )));
+        }
+        let metadata = fs::symlink_metadata(root.join(path))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(io::Error::other(format!(
+                "legal resource `{path}` must be a regular non-symlink file"
+            )));
         }
     }
     Ok(())

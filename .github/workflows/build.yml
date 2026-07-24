@@ -439,6 +439,27 @@ jobs:
           } > "${RUNNER_TEMP}/zephium-fedora-build-inputs.txt"
           test -s "${RUNNER_TEMP}/zephium-fedora-build-inputs.txt"
 
+      - name: Prove Linux release seed inputs match the release commit before build
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_COMMIT}"
+          git diff --quiet "${RELEASE_COMMIT}" -- \
+            assets/blocker-seed/v1 \
+            desktop/build.rs \
+            desktop/tauri.conf.json \
+            scripts/release/finalize_sbom.py
+          mapfile -t dirty_seed_inputs < <(
+            git status --porcelain=v1 --untracked-files=all -- \
+              assets/blocker-seed/v1 \
+              desktop/build.rs \
+              desktop/tauri.conf.json \
+              scripts/release/finalize_sbom.py
+          )
+          if [[ "${#dirty_seed_inputs[@]}" -ne 0 ]]; then
+            printf 'release seed input changed: %s\n' "${dirty_seed_inputs[@]}"
+            exit 1
+          fi
+
       - name: Build the Fedora binary and retain private symbols
         run: |
           set -euo pipefail
@@ -521,6 +542,12 @@ jobs:
           mv "${hardened_rpm}" "${source_rpm}"
 
           requirements="$(rpm -qp --requires "${source_rpm}")"
+          package_license="$(rpm -qp --qf '%{LICENSE}' "${source_rpm}")"
+          if [[ "${package_license}" != "MPL-2.0 AND CC-BY-SA-3.0" ]]; then
+            echo "::error title=Invalid RPM license metadata::Expected the exact aggregate license expression for Zephium and its bundled filter lists."
+            printf '%s\n' "${package_license}"
+            exit 1
+          fi
           mapfile -t engine_requirements < <(grep -E '^webkit2gtk4\.1([[:space:]]|$)' <<<"${requirements}")
           if [[ "${#engine_requirements[@]}" -ne 1 ]] || \
              [[ "${engine_requirements[0]}" != "webkit2gtk4.1 >= ${ZEPHIUM_MIN_WEBKITGTK_VERSION}" ]]; then
@@ -613,6 +640,8 @@ jobs:
             echo "Requires:"
             printf '%s\n' "${requirements}"
             echo
+            echo "License: ${package_license}"
+            echo
             echo "Build WebKitGTK: ${build_engine} (Fedora package ${packaged_engine})"
             echo "Media runtime: host Fedora GStreamer packages listed above; no media framework is embedded."
             echo "Desktop entry: /usr/share/applications/app.zephium.desktop"
@@ -671,6 +700,7 @@ jobs:
           scan_root="${RUNNER_TEMP}/zephium-linux-sbom-payload"
           mkdir -p "${scan_root}/installed" \
             "${scan_root}/build-manifests/adblock" \
+            "${scan_root}/build-manifests/blocker-seed" \
             "${scan_root}/build-manifests/tauri" \
             "${scan_root}/build-manifests/tauri-runtime-wry" \
             "${scan_root}/build-manifests/wry" \
@@ -704,6 +734,21 @@ jobs:
             vendor/adblock/Cargo.toml.orig vendor/adblock/FORK.toml \
             vendor/adblock/UPSTREAM_FILES.toml vendor/adblock/LICENSE \
             "${scan_root}/build-manifests/adblock/"
+          git diff --quiet "${RELEASE_COMMIT}" -- \
+            assets/blocker-seed/v1 \
+            desktop/build.rs \
+            desktop/tauri.conf.json \
+            scripts/release/finalize_sbom.py
+          mapfile -t dirty_seed_inputs < <(
+            git status --porcelain=v1 --untracked-files=all -- \
+              assets/blocker-seed/v1 \
+              desktop/build.rs \
+              desktop/tauri.conf.json \
+              scripts/release/finalize_sbom.py
+          )
+          test "${#dirty_seed_inputs[@]}" -eq 0
+          cp -a assets/blocker-seed/v1/. \
+            "${scan_root}/build-manifests/blocker-seed/"
           packaged_executable="${scan_root}/installed/usr/bin/$(basename "${executables[0]}")"
           python3 scripts/release/finalize_sbom.py \
             --sbom "${output}" \
@@ -799,6 +844,23 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Prove Windows release seed inputs match the release commit before build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $headCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $headCommit -ne $env:RELEASE_COMMIT) {
+            throw "release checkout does not match RELEASE_COMMIT"
+          }
+          git diff --quiet $env:RELEASE_COMMIT -- assets/blocker-seed/v1 desktop/build.rs desktop/tauri.conf.json scripts/release/finalize_sbom.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "release seed inputs differ from RELEASE_COMMIT"
+          }
+          $dirtySeedInputs = @(git status --porcelain=v1 --untracked-files=all -- assets/blocker-seed/v1 desktop/build.rs desktop/tauri.conf.json scripts/release/finalize_sbom.py)
+          if ($LASTEXITCODE -ne 0 -or $dirtySeedInputs.Count -ne 0) {
+            throw "release seed inputs are dirty: $($dirtySeedInputs -join ', ')"
+          }
 
       - name: Build the Windows binary before exposing the signing identity
         shell: pwsh
@@ -1171,10 +1233,12 @@ jobs:
           $payloadRoot = Join-Path $env:RUNNER_TEMP "zephium-windows-payload"
           $manifestRoot = Join-Path $payloadRoot "build-manifests"
           $adblockManifestRoot = Join-Path $manifestRoot "adblock"
+          $blockerSeedManifestRoot = Join-Path $manifestRoot "blocker-seed"
           $javascriptRoot = Join-Path $manifestRoot "javascript"
           New-Item -ItemType Directory -Path `
             $manifestRoot, `
             $adblockManifestRoot, `
+            $blockerSeedManifestRoot, `
             (Join-Path $manifestRoot "tauri"), `
             (Join-Path $manifestRoot "tauri-runtime-wry"), `
             (Join-Path $manifestRoot "wry"), `
@@ -1230,6 +1294,16 @@ jobs:
             "vendor/adblock/UPSTREAM_FILES.toml",
             "vendor/adblock/LICENSE"
           ) -Destination $adblockManifestRoot
+          git diff --quiet $env:RELEASE_COMMIT -- assets/blocker-seed/v1 desktop/build.rs desktop/tauri.conf.json scripts/release/finalize_sbom.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "release seed inputs changed after the Windows build"
+          }
+          $dirtySeedInputs = @(git status --porcelain=v1 --untracked-files=all -- assets/blocker-seed/v1 desktop/build.rs desktop/tauri.conf.json scripts/release/finalize_sbom.py)
+          if ($LASTEXITCODE -ne 0 -or $dirtySeedInputs.Count -ne 0) {
+            throw "release seed inputs are dirty after the Windows build"
+          }
+          Copy-Item -Path "assets/blocker-seed/v1/*" `
+            -Destination $blockerSeedManifestRoot
           $arguments = @(
             "scripts/release/finalize_sbom.py",
             "--sbom", $output,
@@ -1382,6 +1456,27 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Prove macOS release seed inputs match the release commit before build
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_COMMIT}"
+          git diff --quiet "${RELEASE_COMMIT}" -- \
+            assets/blocker-seed/v1 \
+            desktop/build.rs \
+            desktop/tauri.conf.json \
+            scripts/release/finalize_sbom.py
+          dirty_seed_inputs="$(
+            git status --porcelain=v1 --untracked-files=all -- \
+              assets/blocker-seed/v1 \
+              desktop/build.rs \
+              desktop/tauri.conf.json \
+              scripts/release/finalize_sbom.py
+          )"
+          if [[ -n "${dirty_seed_inputs}" ]]; then
+            printf 'release seed input changed:\n%s\n' "${dirty_seed_inputs}"
+            exit 1
+          fi
 
       - name: Build the macOS binary and retain its dSYM
         env:
@@ -1539,6 +1634,7 @@ jobs:
           scan_root="${RUNNER_TEMP}/zephium-macos-sbom-payload"
           mkdir -p "${scan_root}/installed" \
             "${scan_root}/build-manifests/adblock" \
+            "${scan_root}/build-manifests/blocker-seed" \
             "${scan_root}/build-manifests/tauri" \
             "${scan_root}/build-manifests/tauri-runtime-wry" \
             "${scan_root}/build-manifests/wry" \
@@ -1586,6 +1682,21 @@ jobs:
             vendor/adblock/Cargo.toml.orig vendor/adblock/FORK.toml \
             vendor/adblock/UPSTREAM_FILES.toml vendor/adblock/LICENSE \
             "${scan_root}/build-manifests/adblock/"
+          git diff --quiet "${RELEASE_COMMIT}" -- \
+            assets/blocker-seed/v1 \
+            desktop/build.rs \
+            desktop/tauri.conf.json \
+            scripts/release/finalize_sbom.py
+          dirty_seed_inputs="$(
+            git status --porcelain=v1 --untracked-files=all -- \
+              assets/blocker-seed/v1 \
+              desktop/build.rs \
+              desktop/tauri.conf.json \
+              scripts/release/finalize_sbom.py
+          )"
+          test -z "${dirty_seed_inputs}"
+          cp -a assets/blocker-seed/v1/. \
+            "${scan_root}/build-manifests/blocker-seed/"
           python3 scripts/release/finalize_sbom.py \
             --sbom "${sbom}" \
             --scan-root "${scan_root}" \
