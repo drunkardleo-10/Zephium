@@ -6,6 +6,7 @@ mod tests;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
+use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::{DiscardProbeId, EngineEvent, NavigationPresentationId};
 
@@ -22,6 +23,11 @@ enum CoalescedKey {
     ChromePresentation(ItemId),
     PresentationFallback(ItemId),
     DiscardProbeTimeout(ItemId),
+    BlockerReady(ProfileId),
+    BlockerStoreReady(ProfileId),
+    BlockerPreferenceRetry(ProfileId),
+    BlockerCatalogPoll,
+    ContentRules(ProfileId, ContentPolicyGeneration),
     ProfileDeletionReady(ProfileId),
     ProfileDeletionRetry(ProfileId),
     StoreHistory,
@@ -54,6 +60,9 @@ impl CoalescedKey {
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
             EngineEvent::NativeActionFailed { id, .. } => Self::NativeAction(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
+            EngineEvent::ContentRulesSettled {
+                profile, requested, ..
+            } => Self::ContentRules(*profile, *requested),
             _ => return None,
         })
     }
@@ -61,18 +70,20 @@ impl CoalescedKey {
 
 // The ordinary UI band stays small, while the lifecycle band can retain one
 // latest URL, view-state and navigation result per maximum session item plus
-// profile/split/runtime-update facts and the final shutdown barrier. A shared WebKit process
-// may terminate all 1,024 live views in one native callback burst.
+// profile/split/runtime-update facts and the final shutdown barrier. A shared
+// WebKit process may terminate all 1,024 live views in one native callback
+// burst.
 const NORMAL_COMMAND_CAPACITY: usize = 960;
 // Each tracked tab can have one latest URL, presentation, navigation failure,
 // terminal view-state, zoom settlement, and native-action failure fact. Each
-// profile can independently have one process-
-// exit fact and one durable-deletion callback wakeup. The current single-
-// window shell can have one native split fact, and the process can have one
-// sticky runtime-update fact. Reserve all of those independently of the
+// profile can independently have one process-exit fact, compiler-result wake,
+// preference-store wake, native-policy settlement, and durable-deletion
+// callback wakeup. The current
+// single-window shell can have one native split fact, and the process can have
+// one sticky runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
-    + zephium_core::session::MAX_SESSION_PROFILES * 2
+    + zephium_core::session::MAX_SESSION_PROFILES * 5
     + 2;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
@@ -100,6 +111,8 @@ pub(crate) struct TimerState {
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
     discard_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, DiscardProbeId)>,
     profile_deletion_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
+    blocker_preference_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
+    blocker_catalog_deadline: Option<(std::time::Instant, u64, u8)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +141,14 @@ pub(crate) enum TimerWake {
     ProfileDeletion {
         profile: ProfileId,
         generation: u64,
+    },
+    BlockerPreference {
+        profile: ProfileId,
+        token: u64,
+    },
+    BlockerCatalog {
+        operation: u64,
+        attempt: u8,
     },
     Stopped,
 }
@@ -161,6 +182,9 @@ enum RecoveryKey {
     Zoom(ItemId),
     NativeAction(ItemId),
     Profile(ProfileId),
+    BlockerCompile(ProfileId),
+    BlockerStore(ProfileId),
+    ContentRules(ProfileId, ContentPolicyGeneration),
     ProfileDeletion(ProfileId),
     Split(zephium_core::ids::WindowId),
 }
@@ -188,6 +212,11 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
         Command::Engine(EngineEvent::ProfileProcessExited { profile, .. }) => {
             Some(RecoveryKey::Profile(*profile))
         }
+        Command::BlockerReady(profile) => Some(RecoveryKey::BlockerCompile(*profile)),
+        Command::BlockerStoreReady(profile) => Some(RecoveryKey::BlockerStore(*profile)),
+        Command::Engine(EngineEvent::ContentRulesSettled {
+            profile, requested, ..
+        }) => Some(RecoveryKey::ContentRules(*profile, *requested)),
         Command::ProfileDeletionReady(profile) => Some(RecoveryKey::ProfileDeletion(*profile)),
         Command::Engine(EngineEvent::SplitChanged { window, .. }) => {
             Some(RecoveryKey::Split(*window))
@@ -309,6 +338,13 @@ impl CommandQueue {
         } else {
             NORMAL_COMMAND_CAPACITY
         };
+        // Observational diagnostics must never perturb browser coordination.
+        // User mutations may displace an older replaceable presentation fact
+        // at the ordinary ceiling; a read-only query instead fails boundedly
+        // and lets its caller return an explicit unavailable result.
+        if command_is_observational_query(&command) && state.commands.len() >= capacity {
+            return Err(TryPushError::Full(command));
+        }
         let critical = command_is_critical(&command);
         enqueue(&mut state.commands, command, capacity, critical).map_err(TryPushError::Full)?;
         if shutdown {
@@ -393,6 +429,8 @@ impl CommandQueue {
         timer.presentation_deadlines.clear();
         timer.discard_deadlines.clear();
         timer.profile_deletion_deadlines.clear();
+        timer.blocker_preference_deadlines.clear();
+        timer.blocker_catalog_deadline = None;
         self.inner.timer_ready.notify_all();
     }
 
@@ -592,6 +630,77 @@ impl CommandQueue {
         timer.profile_deletion_deadlines.remove(&profile);
     }
 
+    pub(crate) fn schedule_blocker_preference_reconciliation(
+        &self,
+        profile: ProfileId,
+        token: u64,
+        deadline: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer
+            .blocker_preference_deadlines
+            .insert(profile, (deadline, token));
+        self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn cancel_blocker_preference_reconciliation(&self, profile: ProfileId) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        timer.blocker_preference_deadlines.remove(&profile);
+    }
+
+    pub(crate) fn schedule_blocker_catalog_poll(
+        &self,
+        operation: u64,
+        attempt: u8,
+        deadline: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        match timer.blocker_catalog_deadline {
+            Some((current_deadline, current_operation, _)) if current_operation == operation => {
+                if deadline < current_deadline {
+                    timer.blocker_catalog_deadline = Some((deadline, operation, attempt));
+                }
+            }
+            Some((_, current_operation, _)) if current_operation > operation => {}
+            Some(_) | None => {
+                timer.blocker_catalog_deadline = Some((deadline, operation, attempt));
+            }
+        }
+        self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn cancel_blocker_catalog_poll(&self, operation: u64) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer
+            .blocker_catalog_deadline
+            .is_some_and(|(_, current, _)| current == operation)
+        {
+            timer.blocker_catalog_deadline = None;
+        }
+    }
+
     /// Waits for either the low-frequency maintenance heartbeat or the one
     /// coalesced persistence deadline. Recomputing after every notification
     /// lets navigation churn move the debounce later without polling.
@@ -664,6 +773,24 @@ impl CommandQueue {
                     };
                 }
             }
+            let next_blocker_preference = timer
+                .blocker_preference_deadlines
+                .iter()
+                .min_by_key(|(_, (deadline, _))| *deadline)
+                .map(|(profile, (deadline, token))| (*profile, *deadline, *token));
+            if let Some((profile, deadline, token)) = next_blocker_preference {
+                if now >= deadline {
+                    timer.blocker_preference_deadlines.remove(&profile);
+                    return TimerWake::BlockerPreference { profile, token };
+                }
+            }
+            let next_blocker_catalog = timer.blocker_catalog_deadline;
+            if let Some((deadline, operation, attempt)) = next_blocker_catalog {
+                if now >= deadline {
+                    timer.blocker_catalog_deadline = None;
+                    return TimerWake::BlockerCatalog { operation, attempt };
+                }
+            }
             if now >= maintenance_deadline {
                 return TimerWake::Maintenance;
             }
@@ -683,6 +810,12 @@ impl CommandQueue {
             }
             if let Some((_, profile_deletion, _)) = next_profile_deletion {
                 deadline = deadline.min(profile_deletion);
+            }
+            if let Some((_, blocker_preference, _)) = next_blocker_preference {
+                deadline = deadline.min(blocker_preference);
+            }
+            if let Some((blocker_catalog, _, _)) = next_blocker_catalog {
+                deadline = deadline.min(blocker_catalog);
             }
             let timeout = deadline.saturating_duration_since(now);
             let (next, _) = self
@@ -767,13 +900,16 @@ fn enqueue(
 fn command_is_critical(command: &Command) -> bool {
     matches!(
         command,
-        Command::ProfileDeletionReady(_)
+        Command::BlockerReady(_)
+            | Command::BlockerStoreReady(_)
+            | Command::ProfileDeletionReady(_)
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
                 EngineEvent::UrlChanged { .. }
                     | EngineEvent::PresentationPending { .. }
                     | EngineEvent::PresentationReady { .. }
                     | EngineEvent::RuntimeRestartRequired
+                    | EngineEvent::ContentRulesSettled { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }
@@ -783,6 +919,13 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ViewDiscarded { .. }
                     | EngineEvent::SplitChanged { .. }
             )
+    )
+}
+
+fn command_is_observational_query(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::ContentPolicyStatus { .. } | Command::FocusedContentPolicyStatus { .. }
     )
 }
 
@@ -801,6 +944,12 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
             Some(CoalescedKey::ChromePresentation(*id))
         }
         Command::DiscardProbeTimeout { id, .. } => Some(CoalescedKey::DiscardProbeTimeout(*id)),
+        Command::BlockerReady(profile) => Some(CoalescedKey::BlockerReady(*profile)),
+        Command::BlockerStoreReady(profile) => Some(CoalescedKey::BlockerStoreReady(*profile)),
+        Command::BlockerPreferenceRetry { profile, .. } => {
+            Some(CoalescedKey::BlockerPreferenceRetry(*profile))
+        }
+        Command::BlockerCatalogPoll { .. } => Some(CoalescedKey::BlockerCatalogPoll),
         Command::ProfileDeletionReady(profile) => {
             Some(CoalescedKey::ProfileDeletionReady(*profile))
         }

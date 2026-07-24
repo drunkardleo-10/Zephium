@@ -1,12 +1,129 @@
 use super::*;
 use std::sync::Mutex;
+use zephium_core::blocker::{
+    BlockerConfig, BlockerConfigRevision, ContentPolicyFailure, ContentPolicyGeneration,
+    ContentRuleCoverage, ContentRuleDigest, ContentRules, NetworkDecision, NetworkRequest,
+    NetworkRequestPolicy, ProfileBlockerConfig,
+};
 use zephium_core::ids::WindowId;
+use zephium_core::ports::blocker::{
+    BlockerCatalog, BlockerCatalogPhase, BlockerCatalogRefreshDispatch, BlockerCatalogSnapshot,
+    BlockerCompileOutcome, BlockerCompiler, BlockerDispatch, BlockerRetirementDispatch,
+    BlockerShutdownOutcome,
+};
 use zephium_core::ports::engine::{ContentScope, NavigationRequestId, UserContent, ZoomRequestId};
+use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome};
 use zephium_core::session::{
     PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
 };
 
 type HeldErasure = (ProfileId, Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>);
+type HeldBlockerUpdate = (
+    ProfileId,
+    BlockerConfigRevision,
+    BlockerConfig,
+    Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>,
+);
+type HeldBlockerLoad = (ProfileId, Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>);
+
+pub(super) struct ImmediateAllowAllCompiler;
+
+pub(super) fn test_catalog_snapshot() -> BlockerCatalogSnapshot {
+    BlockerCatalogSnapshot {
+        revision: 1,
+        phase: BlockerCatalogPhase::Fresh,
+        enabled_policy_terminal: false,
+        package_revision: Some(1),
+        package_manifest_sha256: Some([1; 32]),
+        package_provenance: Some(
+            zephium_core::ports::blocker::BlockerCatalogProvenance::TufRepository,
+        ),
+        package_created_unix: Some(1),
+        package_expires_unix: Some(u64::MAX),
+        package_stale: Some(false),
+        source_count: Some(1),
+        source_bytes: Some(1),
+        candidate_revision: None,
+        candidate_manifest_sha256: None,
+        candidate_provenance: None,
+        candidate_created_unix: None,
+        candidate_expires_unix: None,
+        candidate_source_count: None,
+        candidate_source_bytes: None,
+        installed_revision: Some(1),
+        installed_manifest_sha256: Some([1; 32]),
+        installed_provenance: Some(
+            zephium_core::ports::blocker::BlockerCatalogProvenance::TufRepository,
+        ),
+        refresh_supported: true,
+        source_material_epoch: 0,
+        source_material_repair_pending: false,
+        source_material_repair_retry_pending: false,
+        activation_pending: false,
+        repair_retry_pending: false,
+        last_refresh_attempt_unix: Some(1),
+        refresh_operation: None,
+    }
+}
+
+struct ImmediateNetworkPolicy;
+
+impl NetworkRequestPolicy for ImmediateNetworkPolicy {
+    fn decide(&self, _request: &NetworkRequest<'_>) -> NetworkDecision {
+        NetworkDecision::Allow
+    }
+}
+
+impl BlockerCompiler for ImmediateAllowAllCompiler {
+    fn compile(
+        &self,
+        _profile: ProfileId,
+        _generation: ContentPolicyGeneration,
+        config: BlockerConfig,
+        done: Box<dyn FnOnce(BlockerCompileOutcome) + Send>,
+    ) -> BlockerDispatch {
+        let rules = if config.enabled {
+            ContentRules::runtime(
+                ContentRuleDigest::from_bytes([1; 32]),
+                ContentRuleCoverage {
+                    source_rules: 1,
+                    accepted_rules: 1,
+                    blocking_rule_entries: 1,
+                    ..ContentRuleCoverage::default()
+                },
+                Arc::new(ImmediateNetworkPolicy),
+            )
+            .expect("test policy must be valid")
+        } else {
+            ContentRules::allow_all(ContentRuleDigest::from_bytes([0; 32]))
+        };
+        done(BlockerCompileOutcome::Compiled(rules));
+        BlockerDispatch::Scheduled
+    }
+
+    fn retire_profile(
+        &self,
+        _profile: ProfileId,
+        done: Box<dyn FnOnce() + Send>,
+    ) -> BlockerRetirementDispatch {
+        done();
+        BlockerRetirementDispatch::Quiesced
+    }
+
+    fn shutdown_until(&self, _deadline: std::time::Instant) -> BlockerShutdownOutcome {
+        BlockerShutdownOutcome::Clean
+    }
+}
+
+impl BlockerCatalog for ImmediateAllowAllCompiler {
+    fn maintain(&self) -> BlockerCatalogSnapshot {
+        test_catalog_snapshot()
+    }
+
+    fn request_refresh(&self) -> BlockerCatalogRefreshDispatch {
+        BlockerCatalogRefreshDispatch::Busy
+    }
+}
 
 #[derive(Default)]
 struct FakeEngine {
@@ -14,6 +131,8 @@ struct FakeEngine {
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
     shutdown_result: Mutex<Option<bool>>,
+    shutdown_calls: std::sync::atomic::AtomicUsize,
+    shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
     skip_shutdown_callback: std::sync::atomic::AtomicBool,
     reject_create_dispatch: std::sync::atomic::AtomicBool,
     reject_navigation_dispatch: std::sync::atomic::AtomicBool,
@@ -216,7 +335,18 @@ impl Engine for FakeEngine {
     }
     fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
     fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
-    fn set_content_rules(&self, _profile: ProfileId, _compiled: String) {}
+    fn install_content_rules(
+        &self,
+        profile: ProfileId,
+        generation: ContentPolicyGeneration,
+        _rules: Arc<ContentRules>,
+    ) -> NativeDispatch {
+        self.log(format!(
+            "install-content-rules {profile} {}",
+            generation.get()
+        ));
+        self.native_admission()
+    }
     fn erase_profile_data(
         &self,
         profile: ProfileId,
@@ -239,6 +369,11 @@ impl Engine for FakeEngine {
         done(outcome);
     }
     fn shutdown(&self, done: Box<dyn FnOnce(bool) + Send>) {
+        self.shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(order) = self.shutdown_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("engine");
+        }
         if !self
             .skip_shutdown_callback
             .load(std::sync::atomic::Ordering::Acquire)
@@ -253,9 +388,19 @@ struct FakeStore {
     saved: Mutex<Option<SessionState>>,
     events: Mutex<Vec<&'static str>>,
     flush_result: Mutex<Option<bool>>,
+    shutdown_outcome: Mutex<Option<StoreShutdownOutcome>>,
     load_failed: Mutex<bool>,
     recovery_reason: Mutex<Option<String>>,
     degraded_profiles: Mutex<Vec<ProfileId>>,
+    blocker_configs: Mutex<Option<Vec<ProfileBlockerConfig>>>,
+    blocker_update_outcomes: Mutex<VecDeque<BlockerConfigUpdateOutcome>>,
+    blocker_load_outcomes: Mutex<VecDeque<BlockerConfigLoadOutcome>>,
+    held_blocker_updates: Mutex<VecDeque<HeldBlockerUpdate>>,
+    held_blocker_loads: Mutex<VecDeque<HeldBlockerLoad>>,
+    hold_blocker_updates: std::sync::atomic::AtomicBool,
+    hold_blocker_loads: std::sync::atomic::AtomicBool,
+    reject_blocker_updates: std::sync::atomic::AtomicBool,
+    reject_blocker_loads: std::sync::atomic::AtomicBool,
     panic_on_load: std::sync::atomic::AtomicBool,
     history: Vec<zephium_core::ports::store::HistoryHit>,
     history_delay_ms: std::sync::atomic::AtomicU64,
@@ -272,6 +417,28 @@ struct FakeStore {
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
 }
 
+impl FakeStore {
+    fn complete_blocker_update(&self, outcome: BlockerConfigUpdateOutcome) {
+        let (_, _, _, done) = self
+            .held_blocker_updates
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("one blocker update must be pending");
+        done(outcome);
+    }
+
+    fn complete_blocker_load(&self, outcome: BlockerConfigLoadOutcome) {
+        let (_, done) = self
+            .held_blocker_loads
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("one blocker reconciliation must be pending");
+        done(outcome);
+    }
+}
+
 impl Store for FakeStore {
     fn save_session(&self, session: SessionState) {
         *self.saved.lock().unwrap() = Some(session);
@@ -280,6 +447,15 @@ impl Store for FakeStore {
     fn flush(&self) -> bool {
         self.events.lock().unwrap().push("flush");
         self.flush_result.lock().unwrap().unwrap_or(true)
+    }
+    fn shutdown_until(&self, deadline: std::time::Instant) -> StoreShutdownOutcome {
+        self.shutdown_outcome.lock().unwrap().unwrap_or_else(|| {
+            if self.flush_until(deadline) {
+                StoreShutdownOutcome::Clean
+            } else {
+                StoreShutdownOutcome::RetryableFailure
+            }
+        })
     }
     fn load_session(&self) -> SessionLoad {
         assert!(
@@ -298,11 +474,102 @@ impl Store for FakeStore {
             return SessionLoad::Absent;
         };
         let profiles = self.degraded_profiles.lock().unwrap().clone();
+        let blocker_configs = self
+            .blocker_configs
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| {
+                state
+                    .profiles
+                    .iter()
+                    .map(|profile| ProfileBlockerConfig {
+                        profile: profile.id,
+                        revision: BlockerConfigRevision::INITIAL,
+                        config: BlockerConfig::default(),
+                    })
+                    .collect()
+            });
         if profiles.is_empty() {
-            SessionLoad::Loaded(state)
+            SessionLoad::Loaded {
+                state,
+                blocker_configs,
+            }
         } else {
-            SessionLoad::LoadedWithDegradedProfiles { state, profiles }
+            SessionLoad::LoadedWithDegradedProfiles {
+                state,
+                profiles,
+                blocker_configs,
+            }
         }
+    }
+    fn update_profile_blocker_config(
+        &self,
+        profile: ProfileId,
+        expected: BlockerConfigRevision,
+        next: BlockerConfig,
+        done: Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>,
+    ) -> bool {
+        if self
+            .reject_blocker_updates
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        if self
+            .hold_blocker_updates
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.held_blocker_updates
+                .lock()
+                .unwrap()
+                .push_back((profile, expected, next, done));
+            return true;
+        }
+        let outcome = self
+            .blocker_update_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                BlockerConfigUpdateOutcome::Updated(ProfileBlockerConfig {
+                    profile,
+                    revision: expected.next().expect("test revision must advance"),
+                    config: next,
+                })
+            });
+        done(outcome);
+        true
+    }
+    fn load_profile_blocker_config(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>,
+    ) -> bool {
+        if self
+            .reject_blocker_loads
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        if self
+            .hold_blocker_loads
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.held_blocker_loads
+                .lock()
+                .unwrap()
+                .push_back((profile, done));
+            return true;
+        }
+        let outcome = self
+            .blocker_load_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(BlockerConfigLoadOutcome::Failed);
+        done(outcome);
+        true
     }
     fn record_visit(&self, _profile: ProfileId, url: String, _title: String) {
         self.visits.lock().unwrap().push(url);
@@ -542,6 +809,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::RuntimeStatus(_) => {}
+        Projection::BlockerStatus(_) => {}
         Projection::OperationProcessed(_) => {}
     }
 }
@@ -624,6 +892,7 @@ fn add_inactive_named_profile(shell: &mut Shell, seed: u128) -> ProfileId {
         name: "Deletable".into(),
         kind: ProfileKind::Named,
     }));
+    assert!(shell.initialize_new_blocker_profile(profile));
     assert!(shell.spaces.insert(Space {
         id: space,
         profile,
@@ -744,6 +1013,7 @@ fn acknowledge_safe_discard(shell: &mut Shell, id: ItemId, probe: DiscardProbeId
 }
 
 mod actor_integration;
+mod blocker;
 mod bootstrap;
 mod engine_events;
 mod favicons;

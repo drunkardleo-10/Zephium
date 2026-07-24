@@ -74,6 +74,10 @@ fn raw_presentation_waits_for_exact_privileged_chrome_callback() {
     let queue = CommandQueue::new();
     shell.self_queue = Some(queue.clone());
     shell.handle(Command::Bootstrap);
+    while let Some(command) = queue.try_recv() {
+        assert!(matches!(command, Command::BlockerReady(_)));
+        shell.handle(command);
+    }
     let id = active_id(&screen);
     shell.handle(Command::Navigate {
         id,

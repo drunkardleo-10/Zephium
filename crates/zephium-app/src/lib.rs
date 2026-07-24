@@ -7,10 +7,14 @@ mod api;
 mod shell;
 mod store_reads;
 
-pub use actor::{spawn, CallbackHandle, Handle, ShutdownRequest, SpawnError};
+pub use actor::{
+    spawn, CallbackHandle, ContentPolicyStatusRequest, FocusedContentPolicyStatusRequest, Handle,
+    ShutdownRequest, SpawnError,
+};
 pub use api::{
-    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command, EmitFn,
-    PresentationChrome, SharedChrome, SharedEngine, SharedStore, ShutdownOutcome,
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
+    ContentPolicyStatusQueryOutcome, EmitFn, PresentationChrome, SharedBlocker, SharedChrome,
+    SharedEngine, SharedStore, ShutdownOutcome,
 };
 pub use shell::Shell;
 

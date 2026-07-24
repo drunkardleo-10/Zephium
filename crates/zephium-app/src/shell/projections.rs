@@ -19,6 +19,7 @@ impl Shell {
     }
 
     pub(super) fn project_items(&self) {
+        self.project_blocker_status();
         let Some(win) = self.windows.focused() else {
             return;
         };
@@ -110,7 +111,7 @@ impl Shell {
         view
     }
 
-    fn next_projection_revision(&self) -> u128 {
+    pub(super) fn next_projection_revision(&self) -> u128 {
         // Saturation is fail-closed: subsequent equal revisions are ignored
         // by privileged chrome, so no older projection can become current.
         let next = self

@@ -7,6 +7,7 @@ fn hostile_url_churn_cannot_force_repeated_full_session_snapshots() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);

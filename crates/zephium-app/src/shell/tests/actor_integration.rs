@@ -9,6 +9,7 @@ fn actor_panic_terminalizes_pending_and_later_shutdown_requests() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         store,
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(|_| {}),
     )
@@ -31,6 +32,7 @@ fn spawned_actor_processes_dispatched_commands() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(move |s| {
             let _ = tx.send(s);
@@ -58,6 +60,7 @@ fn slow_history_sqlite_read_never_blocks_shell_coordination() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         store,
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);
@@ -92,6 +95,7 @@ fn tracked_operation_has_exact_admission_and_actor_disposition_id() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);
@@ -128,6 +132,7 @@ fn spawned_shutdown_is_ordered_behind_prior_commands() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);
@@ -189,6 +194,7 @@ fn dropping_last_handle_does_not_cancel_an_accepted_shutdown_barrier() {
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
         Arc::new(FakeChrome),
         Box::new(|_| {}),
     )

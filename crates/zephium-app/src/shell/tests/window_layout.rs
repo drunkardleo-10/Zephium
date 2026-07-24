@@ -128,7 +128,7 @@ fn asynchronous_split_leaf_creation_failure_collapses_and_cannot_resurrect() {
         .as_ref()
         .is_none_or(|tree| !tree.contains(failed)));
     assert_eq!(engine.last_layout(), vec![first.to_string()]);
-    let SessionLoad::Loaded(saved) = store.load_session() else {
+    let SessionLoad::Loaded { state: saved, .. } = store.load_session() else {
         panic!("failed-leaf collapse must be durable");
     };
     assert!(saved
@@ -235,7 +235,7 @@ fn divider_drag_updates_ratio_and_projects_strips() {
         "the captured path is resolved against resized geometry"
     );
 
-    let SessionLoad::Loaded(saved) = store.load_session() else {
+    let SessionLoad::Loaded { state: saved, .. } = store.load_session() else {
         panic!("release persists the split")
     };
     let Some(Pane::Branch { ratio, .. }) = saved.splits else {

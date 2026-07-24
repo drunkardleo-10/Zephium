@@ -16,7 +16,12 @@ use crate::shell::{
     Shell, END_TO_END_SHUTDOWN_TIMEOUT, MAINTENANCE_INTERVAL, MAX_OPERATION_ID_BYTES,
 };
 use crate::store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderStopGuard};
-use crate::{Command, EmitFn, SharedChrome, SharedEngine, SharedStore, ShutdownOutcome};
+use crate::{
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
+    SharedStore, ShutdownOutcome,
+};
+use zephium_core::ids::ProfileId;
+use zephium_ipc::BlockerStatusView;
 
 pub struct Handle {
     pub(super) queue: CommandQueue,
@@ -28,6 +33,16 @@ pub struct ShutdownRequest {
     deadline: std::time::Instant,
     receiver: Receiver<ShutdownOutcome>,
     pub(super) workers: Arc<WorkerThreads>,
+}
+
+#[must_use = "the bounded status request must be received or deliberately dropped"]
+pub struct ContentPolicyStatusRequest {
+    receiver: Receiver<ContentPolicyStatusQueryOutcome>,
+}
+
+#[must_use = "the bounded focused status request must be received or deliberately dropped"]
+pub struct FocusedContentPolicyStatusRequest {
+    receiver: Receiver<BlockerStatusView>,
 }
 
 #[derive(Default)]
@@ -205,6 +220,28 @@ impl ShutdownRequest {
     }
 }
 
+impl ContentPolicyStatusRequest {
+    /// Waits at most `timeout` for the actor-ordered status. Timeout, actor
+    /// exit, and failed admission all become the explicit `Unavailable`
+    /// result; callers never need an unbounded wait to inspect policy state.
+    pub fn recv_timeout(&self, timeout: std::time::Duration) -> ContentPolicyStatusQueryOutcome {
+        self.receiver
+            .recv_timeout(timeout)
+            .unwrap_or(ContentPolicyStatusQueryOutcome::Unavailable)
+    }
+}
+
+impl FocusedContentPolicyStatusRequest {
+    /// Waits at most `timeout` for the actor-ordered focused-profile view.
+    /// Queue rejection, timeout, and actor exit return revision-zero
+    /// `Unavailable`, which cannot regress a real projection.
+    pub fn recv_timeout(&self, timeout: std::time::Duration) -> BlockerStatusView {
+        self.receiver
+            .recv_timeout(timeout)
+            .unwrap_or_else(|_| BlockerStatusView::unavailable())
+    }
+}
+
 /// Non-owning ingress for callbacks retained by an engine or another shell
 /// dependency. It deliberately does not count as a public owner: otherwise
 /// Shell -> Engine -> callback Handle -> queue keeps both actor threads alive
@@ -292,6 +329,45 @@ impl Handle {
         })
     }
 
+    /// Requests an actor-ordered snapshot of one profile's content policy.
+    ///
+    /// This is intentionally an in-process API. The desktop does not expose
+    /// it to raw page content, and callers must use the request's bounded
+    /// receive method instead of blocking a native UI thread indefinitely.
+    pub fn content_policy_status(&self, profile: ProfileId) -> ContentPolicyStatusRequest {
+        let (reply, receiver) = sync_channel(1);
+        let command = Command::ContentPolicyStatus { profile, reply };
+        match self.queue.try_push(command) {
+            Ok(()) => {}
+            Err(
+                TryPushError::Full(command)
+                | TryPushError::Sealed(command)
+                | TryPushError::Closed(command),
+            ) => {
+                finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+            }
+        }
+        ContentPolicyStatusRequest { receiver }
+    }
+
+    /// Requests the focused profile's revisioned diagnostics without exposing
+    /// a caller-selected profile identity.
+    pub fn focused_content_policy_status(&self) -> FocusedContentPolicyStatusRequest {
+        let (reply, receiver) = sync_channel(1);
+        let command = Command::FocusedContentPolicyStatus { reply };
+        match self.queue.try_push(command) {
+            Ok(()) => {}
+            Err(
+                TryPushError::Full(command)
+                | TryPushError::Sealed(command)
+                | TryPushError::Closed(command),
+            ) => {
+                finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+            }
+        }
+        FocusedContentPolicyStatusRequest { receiver }
+    }
+
     /// Requests an ordered shutdown without waiting for queue capacity on the
     /// caller (normally the UI thread). Only `RetryableFailure` leaves the
     /// actor and native engine available for another attempt.
@@ -309,10 +385,10 @@ impl Handle {
             // close callback. A live prior barrier is likewise retryable by
             // the coordinator; a permanently closed actor is terminal.
             Err(TryPushError::Full(command) | TryPushError::Sealed(command)) => {
-                finish_shutdown(command, ShutdownOutcome::RetryableFailure);
+                finish_unprocessed_command(command, ShutdownOutcome::RetryableFailure);
             }
             Err(TryPushError::Closed(command)) => {
-                finish_shutdown(command, ShutdownOutcome::Unclean);
+                finish_unprocessed_command(command, ShutdownOutcome::Unclean);
             }
         }
         ShutdownRequest {
@@ -323,9 +399,18 @@ impl Handle {
     }
 }
 
-fn finish_shutdown(command: Command, outcome: ShutdownOutcome) {
-    if let Command::Shutdown { ack, .. } = command {
-        let _ = ack.send(outcome);
+fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
+    match command {
+        Command::Shutdown { ack, .. } => {
+            let _ = ack.send(outcome);
+        }
+        Command::ContentPolicyStatus { reply, .. } => {
+            let _ = reply.send(ContentPolicyStatusQueryOutcome::Unavailable);
+        }
+        Command::FocusedContentPolicyStatus { reply } => {
+            let _ = reply.send(BlockerStatusView::unavailable());
+        }
+        _ => {}
     }
 }
 
@@ -347,6 +432,10 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::OpenUrl(_)
             | Command::SetAppSetting { .. }
             | Command::DeleteProfile(_)
+            | Command::RetryContentPolicy { .. }
+            | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::RetryFocusedContentPolicy { .. }
+            | Command::RefreshContentBlockerSources
     )
 }
 
@@ -359,7 +448,7 @@ impl Drop for ActorExitGuard {
         // queue that will never again be drained. A barrier abandoned by an
         // exiting actor is terminal: no retry can revive this queue.
         for pending in self.0.close_and_drain() {
-            finish_shutdown(pending, ShutdownOutcome::Unclean);
+            finish_unprocessed_command(pending, ShutdownOutcome::Unclean);
         }
     }
 }
@@ -367,6 +456,7 @@ impl Drop for ActorExitGuard {
 pub fn spawn(
     engine: SharedEngine,
     store: SharedStore,
+    blocker: SharedBlocker,
     chrome: SharedChrome,
     emit: EmitFn,
 ) -> Result<Handle, SpawnError> {
@@ -387,7 +477,16 @@ pub fn spawn(
     workers.install_store_reader(store_reader);
     let actor_queue = queue.clone();
     let actor_store_reads = store_reads.clone();
-    let mut shell = Shell::with_store_reads(engine, store, chrome, emit, store_reads.clone());
+    let mut shell = Shell::with_store_reads(
+        engine,
+        store,
+        blocker,
+        chrome,
+        emit,
+        store_reads.clone(),
+        #[cfg(test)]
+        false,
+    );
     shell.attach_queue(queue.clone());
     let actor = match spawn_worker("zephium-shell", move || {
         let _exit_guard = ActorExitGuard(actor_queue.clone());
@@ -484,6 +583,29 @@ pub fn spawn(
                     ),
                     Err(TryPushError::Closed(_)) => break,
                 },
+                TimerWake::BlockerPreference { profile, token } => {
+                    match timer_queue.try_push(Command::BlockerPreferenceRetry { profile, token }) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue
+                            .schedule_blocker_preference_reconciliation(
+                                profile,
+                                token,
+                                std::time::Instant::now() + std::time::Duration::from_millis(25),
+                            ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
+                TimerWake::BlockerCatalog { operation, attempt } => {
+                    match timer_queue.try_push(Command::BlockerCatalogPoll { operation, attempt }) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue.schedule_blocker_catalog_poll(
+                            operation,
+                            attempt,
+                            std::time::Instant::now() + std::time::Duration::from_millis(25),
+                        ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
                 TimerWake::Stopped => break,
             }
         }
@@ -493,7 +615,7 @@ pub fn spawn(
             // No Handle escapes this failed construction. Seal the queue and
             // make a bounded effort to reap the actor already started above.
             for pending in queue.close_and_drain() {
-                finish_shutdown(pending, ShutdownOutcome::Unclean);
+                finish_unprocessed_command(pending, ShutdownOutcome::Unclean);
             }
             store_reads.stop();
             let _ =

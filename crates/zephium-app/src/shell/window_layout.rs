@@ -26,7 +26,16 @@ impl Shell {
         let tree = self.pane_tree();
         let present = tree.as_ref().is_some_and(|t| self.present(t));
         let mut l = layout::compute(win.size, win.mode, win.metrics, present);
-        if !self.window_visible {
+        // `Items` marks a prospective view resident before its CreateView
+        // effect is dispatched. While the profile's first explicit native
+        // policy is still compiling/installing, that effect is intentionally
+        // held. Do not expose the logical leaf to the engine lifecycle gate
+        // until policy settlement releases the create and reserves its native
+        // item token. The settlement path applies held effects before calling
+        // `relayout`, so the first visible layout remains correctly ordered
+        // after native policy registration and view admission.
+        let native_policy_available = self.blocker.native_policy_available(win.profile);
+        if !self.window_visible || !native_policy_available {
             l.content = None;
         }
         // Raw native children still receive their final geometry while a
@@ -36,6 +45,7 @@ impl Shell {
         // The content stage itself is transparent and presentation-gated, so
         // it can sit above this real UI without painting an artificial box.
         let chrome_present = self.window_visible
+            && native_policy_available
             && tree.as_ref().is_some_and(|tree| {
                 tree.tabs().iter().any(|id| {
                     self.items.tab(*id).is_some_and(|tab| {

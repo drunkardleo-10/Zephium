@@ -3,18 +3,21 @@
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
+use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
-use zephium_ipc::{Projection, TabView};
+use zephium_ipc::{BlockerStatusView, Projection, TabView};
 
 use crate::store_reads::StoreReadResult;
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
+pub type SharedBlocker = Arc<dyn ContentBlocker + Send + Sync>;
 pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
 pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
 
@@ -66,6 +69,16 @@ pub enum ShutdownOutcome {
     RetryableFailure,
     Clean,
     Unclean,
+}
+
+/// Ordered result of a trusted profile content-policy status query.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentPolicyStatusQueryOutcome {
+    Found(ProfileContentPolicyStatus),
+    UnknownProfile,
+    /// The query was not admitted or the actor exited before replying.
+    Unavailable,
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +146,39 @@ pub enum Command {
     /// cross-store deletion coordinator. The profile id comes only from
     /// privileged chrome and is revalidated against authoritative state.
     DeleteProfile(ProfileId),
+    /// Explicitly retries one exact failed content-policy generation.
+    ///
+    /// The failed generation comes from a trusted status query. Requiring it
+    /// prevents a duplicated or delayed command from retrying a newer failure
+    /// after state has already advanced.
+    RetryContentPolicy {
+        profile: ProfileId,
+        failed_generation: ContentPolicyGeneration,
+    },
+    /// Changes only the actor-selected focused profile. The operation remains
+    /// pending until both the exact durable CAS and native policy generation
+    /// settle.
+    SetFocusedContentBlockerEnabled(bool),
+    /// Retries the focused profile's exact failed generation without exposing
+    /// a profile selector to privileged IPC.
+    RetryFocusedContentPolicy {
+        failed_generation: ContentPolicyGeneration,
+    },
+    /// Requests one authenticated source-package refresh. This is a global
+    /// browser maintenance operation, not a profile or page capability.
+    RefreshContentBlockerSources,
+    /// Trusted, bounded actor query. Raw page content has no command bridge
+    /// and the desktop layer does not expose this variant over IPC.
+    ContentPolicyStatus {
+        profile: ProfileId,
+        reply: SyncSender<ContentPolicyStatusQueryOutcome>,
+    },
+    /// Read-only privileged-chrome reconciliation query. The actor chooses the
+    /// focused profile and assigns the projection revision; IPC callers cannot
+    /// enumerate or select another profile.
+    FocusedContentPolicyStatus {
+        reply: SyncSender<BlockerStatusView>,
+    },
     /// Bounded retry for the renderer-owned asynchronous favicon decode.
     FaviconPoll {
         id: ItemId,
@@ -168,6 +214,26 @@ pub enum Command {
     /// outcome itself stays in a bounded inbox so queue overload cannot lose
     /// the security-critical proof.
     ProfileDeletionReady(ProfileId),
+    /// Small wake for one exact compiler result retained in the bounded
+    /// profile inbox. The immutable compiled artifact never enters the actor
+    /// command queue.
+    BlockerReady(ProfileId),
+    /// Wake for one token-tagged durable preference mutation or
+    /// reconciliation result retained in the bounded blocker inbox.
+    BlockerStoreReady(ProfileId),
+    /// Exact bounded-backoff retry for an indeterminate durable preference
+    /// reconciliation.
+    BlockerPreferenceRetry {
+        profile: ProfileId,
+        token: u64,
+    },
+    /// Bounded follow-up for an exact user-requested refresh or the reserved
+    /// internal activation token. Ordinary refresh scheduling remains on the
+    /// low-frequency maintenance heartbeat.
+    BlockerCatalogPoll {
+        operation: u64,
+        attempt: u8,
+    },
     /// One bounded-backoff retry for journal reconciliation, native erasure,
     /// or local SQLite finalization.
     ProfileDeletionRetry {

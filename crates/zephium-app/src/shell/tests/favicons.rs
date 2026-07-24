@@ -344,6 +344,7 @@ fn private_favicon_is_visible_but_never_written_to_persistent_storage() {
         name: "Private".into(),
         kind: ProfileKind::Incognito,
     }));
+    assert!(shell.initialize_new_blocker_profile(profile));
     assert!(shell.spaces.insert(Space {
         id: space,
         profile,

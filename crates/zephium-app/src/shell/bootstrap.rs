@@ -39,8 +39,12 @@ impl Shell {
         let mut active_space = None;
         let mut splits = None;
         let mut session_absent = false;
+        let mut blocker_configs = None;
         match self.store.load_session() {
-            SessionLoad::Loaded(state) => {
+            SessionLoad::Loaded {
+                state,
+                blocker_configs: loaded_blocker_configs,
+            } => {
                 let restored = session::restore(state);
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;
@@ -48,8 +52,13 @@ impl Shell {
                 active_item = restored.active_item;
                 active_space = restored.active_space;
                 splits = restored.splits;
+                blocker_configs = Some(loaded_blocker_configs);
             }
-            SessionLoad::LoadedWithDegradedProfiles { state, profiles } => {
+            SessionLoad::LoadedWithDegradedProfiles {
+                state,
+                profiles,
+                blocker_configs: loaded_blocker_configs,
+            } => {
                 let session_profiles: std::collections::HashSet<_> =
                     state.profiles.iter().map(|profile| profile.id).collect();
                 let mut degraded = std::collections::HashSet::new();
@@ -79,6 +88,7 @@ impl Shell {
                 active_item = restored.active_item;
                 active_space = restored.active_space;
                 splits = restored.splits;
+                blocker_configs = Some(loaded_blocker_configs);
             }
             SessionLoad::Absent => session_absent = true,
             SessionLoad::RecoveryRequired { reason } => {
@@ -108,6 +118,14 @@ impl Shell {
                 "bootstrap: profile deletion journal conflicts with the authoritative session"
             );
             return;
+        }
+        if let Some(configs) = blocker_configs {
+            if !self.initialize_blocker_cohort(configs) {
+                eprintln!(
+                    "bootstrap: blocker configuration cohort is not exact; refusing initialization"
+                );
+                return;
+            }
         }
 
         for PendingProfileDeletion {
@@ -163,6 +181,11 @@ impl Shell {
             eprintln!("bootstrap: selected space has no authoritative profile ownership");
             return;
         };
+        if !self.start_blocker_profile(profile) {
+            eprintln!(
+                "bootstrap: active profile policy compilation was not admitted; content views remain unavailable"
+            );
+        }
 
         // Restore is semi-trusted input. Recheck focus and every pane against
         // the actual window selected after fallback, before creating any
@@ -220,6 +243,14 @@ impl Shell {
             created_profile = Some(id);
             id
         };
+        if !self.blocker.profiles.contains_key(&profile)
+            && !self.initialize_new_blocker_profile(profile)
+        {
+            if created_profile == Some(profile) {
+                self.profiles.remove(profile);
+            }
+            return None;
+        }
         for _ in 0..8 {
             let id = SpaceId::generate();
             if self.spaces.insert(Space {
@@ -231,6 +262,8 @@ impl Shell {
             }
         }
         if let Some(profile) = created_profile {
+            self.blocker.discard_uncommitted_profile(profile);
+            self.finish_terminalized_blocker_native_operations();
             self.profiles.remove(profile);
         }
         None

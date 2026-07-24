@@ -19,6 +19,19 @@ impl Shell {
             Command::Run(id) => self.operation_run_command(&id),
             Command::OpenUrl(input) => self.operation_open_url(input),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
+            Command::RetryContentPolicy {
+                profile,
+                failed_generation,
+            } => self.operation_retry_content_policy(profile, failed_generation),
+            Command::RetryFocusedContentPolicy { failed_generation } => {
+                let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+                    return operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::NoFocusedWindow,
+                    );
+                };
+                self.operation_retry_content_policy(profile, failed_generation)
+            }
             _ => operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::UnsupportedCommand,

@@ -222,6 +222,12 @@ impl Shell {
     /// Native `Close` effects are deliberately suppressed: the engine's
     /// profile erasure owns closure and exact retirement of every view.
     pub(super) fn apply_profile_tombstone(&mut self, profile: ProfileId) {
+        // Retire compiler admission and erase any callback result before the
+        // native erasure boundary. A late list build can never reinstall
+        // policy state for a journal-authorized profile.
+        self.cancel_pending_blocker_mutation(profile, OperationReason::ProfileDeletionInProgress);
+        self.blocker.retire_profile(profile);
+        self.finish_terminalized_blocker_native_operations();
         let mut favicon_items: std::collections::HashSet<ItemId> = self
             .favicons
             .icon_attempts

@@ -1,5 +1,6 @@
 use super::*;
-use zephium_core::ids::ItemId;
+use zephium_core::blocker::ContentPolicyGeneration;
+use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 
 fn test_shutdown_deadline() -> std::time::Instant {
@@ -12,6 +13,83 @@ fn divider_release_is_a_tracked_operation() {
         x: None,
         y: None,
     }));
+}
+
+#[test]
+fn exact_content_policy_retry_is_a_tracked_operation() {
+    assert!(tracked_operation_command(&Command::RetryContentPolicy {
+        profile: ProfileId::from(17),
+        failed_generation: ContentPolicyGeneration::new(9).unwrap(),
+    }));
+    assert!(tracked_operation_command(
+        &Command::RetryFocusedContentPolicy {
+            failed_generation: ContentPolicyGeneration::new(9).unwrap(),
+        }
+    ));
+    assert!(tracked_operation_command(
+        &Command::SetFocusedContentBlockerEnabled(true)
+    ));
+    assert!(tracked_operation_command(
+        &Command::RefreshContentBlockerSources
+    ));
+}
+
+#[test]
+fn content_policy_status_query_is_ordered_and_fails_boundedly_when_sealed() {
+    let profile = ProfileId::from(23);
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+
+    let request = handle.content_policy_status(profile);
+    let Command::ContentPolicyStatus {
+        profile: requested,
+        reply,
+    } = queue.try_recv().expect("query is admitted")
+    else {
+        panic!("unexpected queued command");
+    };
+    assert_eq!(requested, profile);
+    reply
+        .send(ContentPolicyStatusQueryOutcome::UnknownProfile)
+        .unwrap();
+    assert_eq!(
+        request.recv_timeout(std::time::Duration::from_millis(10)),
+        ContentPolicyStatusQueryOutcome::UnknownProfile
+    );
+
+    let _shutdown = handle.shutdown();
+    let rejected = handle.content_policy_status(profile);
+    assert_eq!(
+        rejected.recv_timeout(std::time::Duration::from_millis(10)),
+        ContentPolicyStatusQueryOutcome::Unavailable
+    );
+}
+
+#[test]
+fn focused_content_policy_query_has_no_profile_selector_and_fails_with_revision_zero() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+
+    let request = handle.focused_content_policy_status();
+    let Command::FocusedContentPolicyStatus { reply } =
+        queue.try_recv().expect("focused query is admitted")
+    else {
+        panic!("unexpected queued command");
+    };
+    let mut status = BlockerStatusView::unavailable();
+    status.projection_revision = "0000000000000000000000000000002a".into();
+    reply.send(status.clone()).unwrap();
+    assert_eq!(
+        request.recv_timeout(std::time::Duration::from_millis(10)),
+        status
+    );
+
+    let _shutdown = handle.shutdown();
+    let rejected = handle.focused_content_policy_status();
+    assert_eq!(
+        rejected.recv_timeout(std::time::Duration::from_millis(10)),
+        BlockerStatusView::unavailable()
+    );
 }
 
 #[test]
@@ -68,7 +146,7 @@ fn last_public_handle_closes_actor_queue_and_wakes_ticker() {
     ));
     assert!(!queue.wait_for_tick(std::time::Duration::ZERO));
     let pending = queue.recv().expect("accepted shutdown remains ordered");
-    finish_shutdown(pending, ShutdownOutcome::Clean);
+    finish_unprocessed_command(pending, ShutdownOutcome::Clean);
     assert_eq!(completion.recv().unwrap(), ShutdownOutcome::Clean);
     assert!(queue.recv().is_none());
 }

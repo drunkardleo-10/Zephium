@@ -10,6 +10,76 @@ fn test_shutdown_deadline() -> std::time::Instant {
 }
 
 #[test]
+fn blocker_preference_retry_timer_is_exact_and_profile_bounded() {
+    let queue = CommandQueue::new();
+    let profile = ProfileId::from(61);
+    let now = std::time::Instant::now();
+    queue.schedule_blocker_preference_reconciliation(profile, 4, now);
+    queue.schedule_blocker_preference_reconciliation(profile, 5, now);
+    assert!(matches!(
+        queue.wait_for_timer(now + std::time::Duration::from_secs(1)),
+        TimerWake::BlockerPreference {
+            profile: found,
+            token: 5,
+        } if found == profile
+    ));
+}
+
+#[test]
+fn blocker_catalog_poll_timer_is_single_flight_and_operation_exact() {
+    let queue = CommandQueue::new();
+    let now = std::time::Instant::now();
+    queue.schedule_blocker_catalog_poll(0, 7, now);
+    queue.schedule_blocker_catalog_poll(4, 0, now + std::time::Duration::from_secs(1));
+    queue.schedule_blocker_catalog_poll(3, 9, now);
+    assert!(queue
+        .inner
+        .timer_state
+        .lock()
+        .unwrap()
+        .blocker_catalog_deadline
+        .is_some_and(|(_, operation, attempt)| operation == 4 && attempt == 0));
+
+    // The reserved internal activation wake is deliberately lower authority
+    // than an exact accepted user refresh and cannot displace its poll.
+    queue.schedule_blocker_catalog_poll(0, 8, now);
+    assert!(queue
+        .inner
+        .timer_state
+        .lock()
+        .unwrap()
+        .blocker_catalog_deadline
+        .is_some_and(|(_, operation, attempt)| operation == 4 && attempt == 0));
+
+    queue.schedule_blocker_catalog_poll(5, 1, now);
+    assert!(matches!(
+        queue.wait_for_timer(now + std::time::Duration::from_secs(1)),
+        TimerWake::BlockerCatalog {
+            operation: 5,
+            attempt: 1,
+        }
+    ));
+
+    queue.schedule_blocker_catalog_poll(6, 2, now);
+    queue.cancel_blocker_catalog_poll(5);
+    assert!(queue
+        .inner
+        .timer_state
+        .lock()
+        .unwrap()
+        .blocker_catalog_deadline
+        .is_some());
+    queue.cancel_blocker_catalog_poll(6);
+    assert!(queue
+        .inner
+        .timer_state
+        .lock()
+        .unwrap()
+        .blocker_catalog_deadline
+        .is_none());
+}
+
+#[test]
 fn presentation_timer_is_bounded_per_item_and_duplicate_token_keeps_earliest_deadline() {
     let queue = CommandQueue::new();
     let id = ItemId::from(7);
@@ -387,6 +457,40 @@ fn overloaded_queue_never_blocks_and_reserves_lifecycle_capacity() {
 }
 
 #[test]
+fn blocker_completion_wake_has_profile_bounded_lifecycle_admission() {
+    let queue = CommandQueue::new();
+    let id = ItemId::from(7);
+    for _ in 0..NORMAL_COMMAND_CAPACITY {
+        queue.try_push(Command::Reload(id)).ok().unwrap();
+    }
+    let profile = ProfileId::from(11);
+    assert!(queue.try_push(Command::BlockerReady(profile)).is_ok());
+    assert!(queue.try_push(Command::BlockerReady(profile)).is_ok());
+    assert!(queue.try_push(Command::BlockerStoreReady(profile)).is_ok());
+    assert!(queue.try_push(Command::BlockerStoreReady(profile)).is_ok());
+    let blocker_wakes = queue
+        .inner
+        .state
+        .lock()
+        .unwrap()
+        .commands
+        .iter()
+        .filter(|command| matches!(command, Command::BlockerReady(found) if *found == profile))
+        .count();
+    assert_eq!(blocker_wakes, 1);
+    let store_wakes = queue
+        .inner
+        .state
+        .lock()
+        .unwrap()
+        .commands
+        .iter()
+        .filter(|command| matches!(command, Command::BlockerStoreReady(found) if *found == profile))
+        .count();
+    assert_eq!(store_wakes, 1);
+}
+
+#[test]
 fn lifecycle_band_can_retain_a_whole_process_crash_and_shutdown() {
     let queue = CommandQueue::new();
     for value in 0..zephium_core::session::MAX_SESSION_ITEMS {
@@ -523,4 +627,34 @@ fn ordinary_overload_evicts_only_ordinary_presentation_state() {
     assert!(commands
         .iter()
         .any(|command| matches!(command, Command::Close(value) if *value == id)));
+}
+
+#[test]
+fn observational_status_query_never_evicts_browser_state_at_capacity() {
+    let id = ItemId::from(7);
+    let queue = CommandQueue::new();
+    assert!(queue
+        .try_push(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: "retained presentation".into(),
+        }))
+        .is_ok());
+    for _ in 1..NORMAL_COMMAND_CAPACITY {
+        assert!(queue.try_push(Command::Reload(id)).is_ok());
+    }
+
+    let (reply, _receiver) = sync_channel(1);
+    assert!(matches!(
+        queue.try_push(Command::FocusedContentPolicyStatus { reply }),
+        Err(TryPushError::Full(
+            Command::FocusedContentPolicyStatus { .. }
+        ))
+    ));
+    let state = queue.inner.state.lock().unwrap();
+    assert_eq!(state.commands.len(), NORMAL_COMMAND_CAPACITY);
+    assert!(state.commands.iter().any(|command| matches!(
+        command,
+        Command::Engine(EngineEvent::TitleChanged { title, .. })
+            if title == "retained presentation"
+    )));
 }

@@ -76,7 +76,7 @@ impl Shell {
     }
 
     pub(super) fn apply(&mut self, effects: Vec<Effect>) -> NativeWork {
-        let mut native = NativeWork::default();
+        let (effects, mut native) = self.blocker_gate_effects(effects);
         if effects.is_empty() {
             return native;
         }

@@ -33,6 +33,11 @@ impl Shell {
                     self.project_runtime_status();
                 }
             }
+            EngineEvent::ContentRulesSettled {
+                profile,
+                requested,
+                settlement,
+            } => self.on_content_rules_settled(profile, requested, settlement),
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
                 // stale or malformed callback mutate topology, swap tabs, or

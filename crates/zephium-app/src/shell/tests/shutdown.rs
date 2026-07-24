@@ -93,6 +93,28 @@ fn failed_shutdown_barrier_keeps_state_live_for_retry() {
 }
 
 #[test]
+fn uncertain_store_termination_still_initiates_native_teardown() {
+    let store = Arc::new(FakeStore::default());
+    *store.shutdown_outcome.lock().unwrap() = Some(StoreShutdownOutcome::Unclean);
+    let (mut shell, engine, _screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+#[test]
 fn failed_shutdown_folds_racing_native_failure_before_resuming() {
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);

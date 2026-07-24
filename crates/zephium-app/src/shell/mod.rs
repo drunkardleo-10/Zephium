@@ -1,5 +1,6 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
+mod blocker;
 mod bootstrap;
 mod effects;
 mod engine_events;
@@ -44,8 +45,8 @@ use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
 use crate::actor::{spawn, Handle, TryPushError};
 use crate::actor::{CallbackHandle, CommandQueue};
 use crate::api::{
-    ChromePresentation, ChromePresentationDispatch, Command, EmitFn, SharedChrome, SharedEngine,
-    SharedStore, ShutdownOutcome,
+    ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
+    EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShutdownOutcome,
 };
 #[cfg(test)]
 use crate::api::{ChromePresentationCallback, PresentationChrome};
@@ -63,6 +64,7 @@ use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::item::{Lifecycle, Placement, SpaceSection, TabState};
 use zephium_core::items::{Effect, Items};
 use zephium_core::layout;
+use zephium_core::ports::blocker::BlockerShutdownOutcome;
 #[cfg(test)]
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::chrome::ChromeFrame;
@@ -85,8 +87,11 @@ use zephium_core::split::{self, Axis, Edge, Pane};
 use zephium_core::windows::{WindowKind, Windows};
 use zephium_core::{commands, navigation};
 use zephium_ipc::{
-    DividerView, ItemsState, LayoutState, OperationDisposition, OperationOutcome, OperationReason,
-    Projection, RuntimeStatus, SearchAction, SearchResult, SearchResults, TabView,
+    BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
+    BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase, BlockerSourceProvenance,
+    BlockerStatusView, DividerView, ItemsState, LayoutState, OperationDisposition,
+    OperationOutcome, OperationReason, Projection, RuntimeStatus, SearchAction, SearchResult,
+    SearchResults, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -128,11 +133,14 @@ pub struct Shell {
     /// preserved but disabled by storage validation. Session/meta state and
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
+    blocker: blocker::BlockerCoordinator,
     engine: SharedEngine,
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
     chrome: SharedChrome,
     emit: EmitFn,
+    #[cfg(test)]
+    auto_settle_content_rules: bool,
 }
 
 impl Shell {
@@ -143,15 +151,36 @@ impl Shell {
         chrome: SharedChrome,
         emit: EmitFn,
     ) -> Self {
-        Self::with_store_reads(engine, store, chrome, emit, None)
+        Self::with_store_reads(
+            engine,
+            store,
+            Arc::new(tests::ImmediateAllowAllCompiler),
+            chrome,
+            emit,
+            None,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_blocker(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(engine, store, blocker, chrome, emit, None, false)
     }
 
     pub(super) fn with_store_reads(
         engine: SharedEngine,
         store: SharedStore,
+        blocker: SharedBlocker,
         chrome: SharedChrome,
         emit: EmitFn,
         store_reads: impl Into<Option<StoreReadQueue>>,
+        #[cfg(test)] auto_settle_content_rules: bool,
     ) -> Self {
         Self {
             profiles: Profiles::default(),
@@ -175,16 +204,20 @@ impl Shell {
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
+            blocker: blocker::BlockerCoordinator::new(blocker),
             engine,
             store,
             store_reads: store_reads.into(),
             chrome,
             emit,
+            #[cfg(test)]
+            auto_settle_content_rules,
         }
     }
 
     pub(super) fn attach_queue(&mut self, queue: CommandQueue) {
         self.self_queue = Some(queue);
+        self.schedule_blocker_catalog_activation_poll();
     }
 
     pub(super) fn is_shutdown(&self) -> bool {
@@ -228,6 +261,24 @@ impl Shell {
                         // is pending or retrying.
                         self.drive_profile_deletion(profile);
                     } else {
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::SetFocusedContentBlockerEnabled(enabled) = &command {
+                    if let Some(mut completion) =
+                        self.begin_focused_blocker_mutation(operation_id.clone(), *enabled)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if matches!(&command, Command::RefreshContentBlockerSources) {
+                    if let Some(mut completion) =
+                        self.begin_blocker_catalog_refresh(operation_id.clone())
+                    {
+                        completion.operation_id = operation_id;
                         (self.emit)(Projection::OperationProcessed(completion));
                     }
                     return;
@@ -321,9 +372,25 @@ impl Shell {
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }
-            // Profile deletion is accepted only through `Command::Operation`
+            // These mutations are accepted only through `Command::Operation`
             // so every foreground request has one truthful terminal identity.
-            Command::DeleteProfile(_) => {}
+            Command::DeleteProfile(_)
+            | Command::RetryContentPolicy { .. }
+            | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::RetryFocusedContentPolicy { .. }
+            | Command::RefreshContentBlockerSources => {}
+            Command::ContentPolicyStatus { profile, reply } => {
+                let outcome = self
+                    .blocker
+                    .status(profile)
+                    .map(ContentPolicyStatusQueryOutcome::Found)
+                    .unwrap_or(ContentPolicyStatusQueryOutcome::UnknownProfile);
+                let _ = reply.send(outcome);
+            }
+            Command::FocusedContentPolicyStatus { reply } => {
+                self.maintain_blocker_catalog();
+                let _ = reply.send(self.focused_blocker_status_view());
+            }
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
                 id,
@@ -349,6 +416,14 @@ impl Shell {
             Command::ProfileDeletionReady(profile) => {
                 self.consume_profile_deletion_outcome(profile)
             }
+            Command::BlockerReady(profile) => self.consume_blocker_compile_result(profile),
+            Command::BlockerStoreReady(profile) => self.consume_blocker_store_result(profile),
+            Command::BlockerPreferenceRetry { profile, token } => {
+                self.on_blocker_preference_reconciliation_retry(profile, token)
+            }
+            Command::BlockerCatalogPoll { operation, attempt } => {
+                self.on_blocker_catalog_poll(operation, attempt)
+            }
             Command::ProfileDeletionRetry {
                 profile,
                 generation,
@@ -365,6 +440,9 @@ impl Shell {
             Command::StoreRead(result) => self.on_store_read(result),
             Command::Persist => self.persist(),
             Command::Tick => {
+                self.maintain_blocker_catalog();
+                self.drain_blocker_inbox();
+                self.drive_blocker_preference_reconciliations();
                 self.drain_profile_deletion_inbox();
                 self.reconcile_runtime_restart_requirement();
                 if self.maintain_views() {
@@ -387,8 +465,8 @@ impl Shell {
                 }
                 self.clear_pending_store_reads();
                 self.persist();
-                match self.store.shutdown_until(deadline) {
-                    StoreShutdownOutcome::Clean => {}
+                let storage_clean = match self.store.shutdown_until(deadline) {
+                    StoreShutdownOutcome::Clean => true,
                     StoreShutdownOutcome::RetryableFailure => {
                         // The store proves its terminal command was not
                         // entered, so native teardown has not started and a
@@ -400,19 +478,22 @@ impl Shell {
                     StoreShutdownOutcome::Unclean => {
                         // Durability/actor ownership crossed an uncertain
                         // terminal boundary. Continued browsing cannot be
-                        // reconciled safely; let the outer watchdog provide
-                        // bounded process teardown and report non-zero.
+                        // reconciled safely. Still initiate both independent
+                        // teardown barriers below so the remaining portion of
+                        // the process deadline can release native and blocker
+                        // resources before the outer watchdog exits non-zero.
                         eprintln!(
                             "shutdown: storage actor termination was not proven before the deadline"
                         );
-                        if let Some(reads) = &self.store_reads {
-                            reads.stop();
-                        }
-                        self.shutdown_result = Some(ShutdownOutcome::Unclean);
-                        let _ = ack.send(ShutdownOutcome::Unclean);
-                        return;
+                        false
                     }
-                }
+                };
+                // The store's terminal marker is ordered after every admitted
+                // preference callback. Fold those exact outcomes before
+                // deciding which retained operation ids cannot reach native
+                // settlement during teardown.
+                self.drain_blocker_inbox();
+                self.finish_pending_blocker_operations_for_shutdown();
                 if let Some(reads) = &self.store_reads {
                     reads.stop();
                 }
@@ -420,6 +501,19 @@ impl Shell {
                 self.engine.shutdown(Box::new(move |clean| {
                     let _ = native_done.send(clean);
                 }));
+                // Native teardown and blocker worker joins are independent
+                // once storage durability is proven. Start the native barrier
+                // first, then spend the same absolute deadline on blocker
+                // shutdown instead of serially delaying WebView destruction.
+                let blocker_clean = match self.blocker.shutdown_until(deadline) {
+                    BlockerShutdownOutcome::Clean => true,
+                    BlockerShutdownOutcome::Unclean => {
+                        eprintln!(
+                            "shutdown: content-policy compiler termination was not proven before the deadline"
+                        );
+                        false
+                    }
+                };
                 let native_budget = deadline.saturating_duration_since(std::time::Instant::now());
                 let clean = native_wait.recv_timeout(native_budget).unwrap_or(false);
                 if !clean {
@@ -431,7 +525,7 @@ impl Shell {
                         "shutdown: native cleanup did not acknowledge cleanly; forcing process exit"
                     );
                 }
-                let outcome = if clean {
+                let outcome = if storage_clean && clean && blocker_clean {
                     ShutdownOutcome::Clean
                 } else {
                     ShutdownOutcome::Unclean
