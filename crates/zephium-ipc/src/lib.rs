@@ -80,9 +80,10 @@ pub struct OperationAdmission {
 }
 
 /// The bounded terminal classification the actor can establish while
-/// processing an admitted operation. `Deferred` means native work was queued
-/// or an exact discard acknowledgement is still required; it never means a
-/// page load or renderer callback succeeded.
+/// processing an admitted operation. `Deferred` means native work was queued,
+/// an exact discard acknowledgement is still required, or a durable write
+/// became indeterminate and entered explicit reconciliation; it never means a
+/// page load, renderer callback, or unknown store transaction succeeded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationOutcome {
@@ -113,6 +114,14 @@ pub enum OperationReason {
     DiscardCompletionPending,
     StoreWorkPending,
     StoreAdmissionRejected,
+    StoreConflict,
+    StoreOutcomeUnknown,
+    StoreReconciliationFailed,
+    ContentPolicyApplyFailed,
+    ContentPolicySourceUnavailable,
+    ContentPolicySourceRefreshPending,
+    ContentPolicySourceRefreshFailed,
+    ContentPolicySourcesRefreshed,
     ProfileDeletionPolicyRejected,
     ProfileDeletionInProgress,
     ProfileDeletionCompleted,
@@ -123,7 +132,9 @@ pub enum OperationReason {
 /// native navigation still resolves independently through engine events.
 /// Long-running profile deletion retains its id internally and emits this
 /// disposition exactly once, only after definitive rejection or both durable
-/// deletion phases complete; retry state is never mislabeled as processed.
+/// deletion phases complete; blocker preference mutations likewise retain
+/// their id through CAS and exact native settlement. Retry/reconciliation
+/// state is never mislabeled as successfully applied.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct OperationDisposition {
     pub operation_id: String,
@@ -152,6 +163,221 @@ pub struct RuntimeStatus {
     pub restart_required: bool,
 }
 
+/// Effective protection for the focused profile's exact native policy.
+/// This is derived in Rust from both desired and retained state. Privileged
+/// chrome must not infer protection from a pending preference and accidentally
+/// present a retained allow-all generation as active blocking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerProtection {
+    Disabled,
+    Pending,
+    Active,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerPhase {
+    Unavailable,
+    Uninitialized,
+    Compiling,
+    Installing,
+    Ready,
+    Failed,
+    Retired,
+}
+
+/// Authority of the focused profile's durable blocker preference.
+/// `Reconciling` and `Unavailable` are intentionally distinct from native
+/// policy state: the browser may still know which generation is installed
+/// while refusing to guess what durable preference should replace it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerPreferenceState {
+    Authoritative,
+    Updating,
+    Reconciling,
+    Unavailable,
+}
+
+/// Sanitized state of the authenticated filter-package supply chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSourcePhase {
+    NotConfigured,
+    DurableActivationUnsupported,
+    StorageUnavailable,
+    ClockUnsafe,
+    Idle,
+    Fresh,
+    Stale,
+    Refreshing,
+    Failed,
+    Shutdown,
+}
+
+/// Authority which admitted the displayed filter package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSourceProvenance {
+    ReleaseBundle,
+    TufRepository,
+}
+
+/// Stable package-refresh failure category. Endpoint, parser, and native
+/// strings are intentionally never forwarded to privileged JavaScript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSourceFailure {
+    Transport,
+    Metadata,
+    Clock,
+    Manifest,
+    Target,
+    License,
+    Rollback,
+    Storage,
+    Catalog,
+    Internal,
+}
+
+/// Stable diagnostics classification. Native/parser text and filter content
+/// never cross the privileged IPC boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerFailure {
+    GenerationExhausted,
+    CompilerDispatchRejected,
+    CompilerUnavailable,
+    CompileSourceUnavailable,
+    CompileInvalidSource,
+    CompileResourceLimit,
+    CompileInternal,
+    CompiledArtifactMismatch,
+    NativeDispatchRejected,
+    NativeUnsupported,
+    NativeUnsupportedArtifact,
+    NativeInvalidArtifact,
+    NativeCompilation,
+    NativeInstallation,
+    NativeCleanup,
+    NativeSuperseded,
+    ContradictoryNativeSettlement,
+}
+
+/// Exact coverage of the generation which native code proved applied.
+/// Counts are bounded far below JavaScript's exact-integer ceiling by the
+/// blocker compiler's hard rule limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerRuleCoverage {
+    pub source_rules: u32,
+    pub accepted_rules: u32,
+    pub rejected_rules: u32,
+    pub platform_omitted_rules: u32,
+    pub platform_approximated_rules: u32,
+    pub platform_resource_approximated_rules: u32,
+    pub platform_source_kind_approximated_rules: u32,
+    pub platform_attribution_approximated_rules: u32,
+    pub blocking_rule_entries: u32,
+}
+
+/// Exact authenticated identities for source-package transition diagnostics.
+/// This is boxed in [`BlockerStatusView`] so infrequent debug strings do not
+/// inflate every application projection on the shell actor's hot path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerSourceIdentities {
+    pub package_manifest_sha256: Option<String>,
+    pub candidate_revision: Option<String>,
+    pub candidate_manifest_sha256: Option<String>,
+    pub installed_manifest_sha256: Option<String>,
+}
+
+/// Read-only, focused-profile diagnostics delivered only to privileged main
+/// chrome. It deliberately contains no profile selector, URL, request
+/// telemetry, native error string, or filter-list text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerStatusView {
+    pub projection_revision: String,
+    pub protection: BlockerProtection,
+    pub phase: BlockerPhase,
+    pub preference: BlockerPreferenceState,
+    pub config_revision: Option<String>,
+    pub desired_enabled: Option<bool>,
+    pub applied_enabled: Option<bool>,
+    pub desired_generation: Option<String>,
+    pub retained_generation: Option<String>,
+    pub failure: Option<BlockerFailure>,
+    pub retryable: bool,
+    pub retries_remaining: u8,
+    pub applied_coverage: Option<BlockerRuleCoverage>,
+    pub source_phase: BlockerSourcePhase,
+    pub source_failure: Option<BlockerSourceFailure>,
+    pub source_package_revision: Option<String>,
+    pub source_installed_revision: Option<String>,
+    pub source_package_provenance: Option<BlockerSourceProvenance>,
+    pub source_installed_provenance: Option<BlockerSourceProvenance>,
+    pub source_identities: Option<Box<BlockerSourceIdentities>>,
+    pub source_package_created_unix: Option<String>,
+    pub source_package_expires_unix: Option<String>,
+    pub source_package_stale: Option<bool>,
+    pub source_count: Option<u32>,
+    pub source_bytes: Option<u32>,
+    pub source_activation_pending: bool,
+    pub source_material_repair_pending: bool,
+    pub source_material_repair_retry_pending: bool,
+    pub source_repair_retry_pending: bool,
+    pub source_last_refresh_attempt_unix: Option<String>,
+    pub source_refresh_operation: Option<String>,
+    /// Authoritative source-policy capability for the focused profile.
+    pub can_enable: bool,
+    /// Authoritative refresh admission capability for the active supply mode.
+    pub can_refresh_sources: bool,
+}
+
+impl BlockerStatusView {
+    /// Static reconciliation result used only when no actor-owned revision can
+    /// be obtained. Revision zero cannot overwrite a real actor projection.
+    pub fn unavailable() -> Self {
+        Self {
+            projection_revision: "00000000000000000000000000000000".into(),
+            protection: BlockerProtection::Unavailable,
+            phase: BlockerPhase::Unavailable,
+            preference: BlockerPreferenceState::Unavailable,
+            config_revision: None,
+            desired_enabled: None,
+            applied_enabled: None,
+            desired_generation: None,
+            retained_generation: None,
+            failure: None,
+            retryable: false,
+            retries_remaining: 0,
+            applied_coverage: None,
+            source_phase: BlockerSourcePhase::NotConfigured,
+            source_failure: None,
+            source_package_revision: None,
+            source_installed_revision: None,
+            source_package_provenance: None,
+            source_installed_provenance: None,
+            source_identities: None,
+            source_package_created_unix: None,
+            source_package_expires_unix: None,
+            source_package_stale: None,
+            source_count: None,
+            source_bytes: None,
+            source_activation_pending: false,
+            source_material_repair_pending: false,
+            source_material_repair_retry_pending: false,
+            source_repair_retry_pending: false,
+            source_last_refresh_attempt_unix: None,
+            source_refresh_operation: None,
+            can_enable: false,
+            can_refresh_sources: false,
+        }
+    }
+}
+
 /// Snapshots for structural changes, single-row deltas for per-tab churn.
 #[derive(Clone, Debug)]
 pub enum Projection {
@@ -161,5 +387,39 @@ pub enum Projection {
     Search(SearchResults),
     Layout(LayoutState),
     RuntimeStatus(RuntimeStatus),
+    BlockerStatus(BlockerStatusView),
     OperationProcessed(OperationDisposition),
+}
+
+#[cfg(test)]
+mod blocker_status_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_status_is_bounded_and_cannot_supersede_actor_state() {
+        let status = BlockerStatusView::unavailable();
+        assert_eq!(
+            status.projection_revision,
+            "00000000000000000000000000000000"
+        );
+        assert_eq!(status.protection, BlockerProtection::Unavailable);
+        assert_eq!(status.phase, BlockerPhase::Unavailable);
+        assert_eq!(status.preference, BlockerPreferenceState::Unavailable);
+        assert!(status.config_revision.is_none());
+        assert!(status.desired_generation.is_none());
+        assert!(status.retained_generation.is_none());
+        assert!(status.failure.is_none());
+        assert!(status.applied_coverage.is_none());
+        assert_eq!(status.source_phase, BlockerSourcePhase::NotConfigured);
+        assert!(status.source_failure.is_none());
+        assert!(status.source_package_revision.is_none());
+        assert!(status.source_installed_revision.is_none());
+        assert!(status.source_identities.is_none());
+        assert!(!status.source_activation_pending);
+        assert!(!status.source_material_repair_pending);
+        assert!(!status.source_material_repair_retry_pending);
+        assert!(!status.source_repair_retry_pending);
+        assert!(!status.retryable);
+        assert_eq!(status.retries_remaining, 0);
+    }
 }
