@@ -40,6 +40,14 @@ jobs:
       - name: Test WebKitGTK version proof helper
         run: bash scripts/ci/test_verify_webkitgtk_version.sh
 
+      - name: Test macOS blocker seed probe policy
+        run: bash scripts/ci/test_macos_blocker_seed_probe.sh
+
+      - name: Test release SBOM provenance binding
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 scripts/release/test_finalize_sbom.py
+
       - name: Validate every GitHub Actions workflow with pinned actionlint
         run: |
           set -euo pipefail
@@ -83,6 +91,102 @@ jobs:
       - name: Build frontend
         run: pnpm --dir frame run build
 
+  blocker-security-fork:
+    name: blocker security fork
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: target
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: blocker-security-fork
+
+      # This single local/CI entrypoint verifies exact local lock identities,
+      # formatting, every shipped feature graph, strict Clippy, the adapter
+      # tests, and one full upstream-derived serialization suite.
+      - name: Check the complete blocker security-fork boundary
+        run: cargo xtask check-blocker-security-fork
+
+  blocker-fuzz-smoke:
+    name: blocker deterministic sanitizer smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # `cargo fuzz` runs from the blocker crate, so keep this absolute rather
+      # than letting Cargo resolve a relative target directory from that
+      # nested working directory.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/blocker-fuzz
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # nightly-2026-07-20
+        with:
+          toolchain: nightly-2026-07-20
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: blocker-fuzz
+          workspaces: crates/zephium-blocker/fuzz
+
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        with:
+          tool: cargo-fuzz@0.13.2,cargo-deny@0.20.2
+          fallback: none
+
+      - name: Audit the independently locked fuzz harness
+        run: >-
+          cargo deny --manifest-path crates/zephium-blocker/fuzz/Cargo.toml
+          --config crates/zephium-blocker/fuzz/deny.toml --locked check
+
+      - name: Run deterministic bounded sanitizer replays
+        working-directory: crates/zephium-blocker
+        run: |
+          set -euo pipefail
+          corpus="${RUNNER_TEMP}/blocker-fuzz-corpus"
+          artifacts="${RUNNER_TEMP}/blocker-fuzz-artifacts"
+          cp -a fuzz/corpus "${corpus}"
+          mkdir -p \
+            "${artifacts}/source_admission" \
+            "${artifacts}/request_match" \
+            "${artifacts}/webkit_canonical"
+          cargo +nightly-2026-07-20 fuzz run source_admission \
+            "${corpus}/source_admission" -- \
+            -runs=4096 -seed=20260723 -max_len=131072 -timeout=10 \
+            -rss_limit_mb=4096 \
+            -artifact_prefix="${artifacts}/source_admission/"
+          cargo +nightly-2026-07-20 fuzz run request_match \
+            "${corpus}/request_match" -- \
+            -runs=4096 -seed=20260723 -max_len=16384 -timeout=10 \
+            -rss_limit_mb=4096 \
+            -artifact_prefix="${artifacts}/request_match/"
+          cargo +nightly-2026-07-20 fuzz run webkit_canonical \
+            "${corpus}/webkit_canonical" -- \
+            -runs=4096 -seed=20260723 -max_len=131072 -timeout=10 \
+            -rss_limit_mb=4096 \
+            -artifact_prefix="${artifacts}/webkit_canonical/"
+
+      - name: Retain synthetic crash inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: blocker-fuzz-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/blocker-fuzz-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
   rust:
     runs-on: ubuntu-22.04
     env:
@@ -114,8 +218,8 @@ jobs:
       - name: Enforce advisory-exception owners and expiry
         run: cargo xtask check-advisory-exceptions
 
-      - name: Enforce native-adapter sources and fixture provenance
-        run: cargo xtask check-native-adapter-locks
+      - name: Enforce vendored security-fork sources and fixture provenance
+        run: cargo xtask check-security-fork-locks
 
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
@@ -171,6 +275,15 @@ jobs:
 
       - name: Enforce licenses, advisories, and sources policy
         run: cargo deny check
+
+      - name: Audit the standalone adblock fork test graph
+        # The application graph covers every shipped adblock dependency. The
+        # excluded fork has additional dev dependencies which execute in CI;
+        # root-only advisory exceptions are necessarily absent from that
+        # smaller graph, but detected advisories remain fatal.
+        run: >-
+          cargo deny --manifest-path vendor/adblock/Cargo.toml
+          --config deny.toml --locked check -A advisory-not-detected
 
       - name: cargo nextest
         run: cargo nextest run --locked
@@ -243,6 +356,36 @@ jobs:
         run: |
           cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta" -- -D warnings
           cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --lib --features "macos-private-api,specta" -- -D warnings
+
+      # The platform-neutral materializer authenticates the exact bundled
+      # EasyList/EasyPrivacy bytes and reproduces the recorded canonical
+      # WebKit JSON. The standalone Swift probe then crosses a separate native
+      # boundary: WKContentRuleListStore must compile that complete artifact
+      # and reopen its exact digest-derived identifier from an isolated cache.
+      - name: Prove the exact bundled blocker seed compiles in native WKContentRuleListStore
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          probe_root="$(mktemp -d)"
+          cleanup() {
+            rm -rf "${probe_root}"
+          }
+          trap cleanup EXIT
+          artifact="${probe_root}/webkit-content-rules.json"
+          probe="${probe_root}/probe-macos-blocker-seed"
+          cargo xtask materialize-blocker-seed-webkit --output "${artifact}"
+          xcrun swiftc \
+            -parse-as-library \
+            -O \
+            -warnings-as-errors \
+            -module-cache-path "${probe_root}/swift-module-cache" \
+            -framework WebKit \
+            scripts/ci/probe_macos_blocker_seed.swift \
+            -o "${probe}"
+          "${probe}" --self-test
+          "${probe}" "${artifact}"
 
       # The desktop test binary needs the WebView2 loader at run time, which
       # plain Windows runners do not provide. macOS must run the full native
@@ -375,6 +518,29 @@ jobs:
             fi
           done
           rpm -V webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp
+
+      # The platform-neutral seed gate first authenticates the exact bundled
+      # EasyList/EasyPrivacy bytes and reproduces their recorded WebKit
+      # compiler golden. This then passes those exact canonical JSON bytes
+      # through Fedora's real WebKitUserContentFilterStore, including a
+      # persistent-cache reload. A synthetic rule cannot stand in for this
+      # compatibility and resource-boundary proof.
+      - name: Prove the exact bundled blocker seed compiles in native WebKitGTK
+        run: |
+          set -euo pipefail
+          probe_root="$(mktemp -d)"
+          cleanup() {
+            rm -rf "${probe_root}"
+          }
+          trap cleanup EXIT
+          artifact="${probe_root}/webkit-content-rules.json"
+          cargo xtask materialize-blocker-seed-webkit --output "${artifact}"
+          cargo test --locked -p zephium-engine --lib --no-run
+          ZEPHIUM_BLOCKER_WEBKIT_ARTIFACT="${artifact}" \
+            timeout --signal=TERM --kill-after=10s 240s \
+            xvfb-run -a cargo test --locked -p zephium-engine --lib \
+            platform::linux::content_filter::tests::exact_bundled_easylist_and_easyprivacy_compile_and_reload_natively \
+            -- --ignored --exact --test-threads=1
 
       # This launches a real renderer and fails unless the process has
       # no-new-privileges, seccomp filtering, distinct mount/user/PID

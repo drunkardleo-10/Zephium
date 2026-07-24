@@ -1,5 +1,8 @@
 //! Single deterministic entrypoint for the workspace gate: `cargo xtask ci`.
 
+mod adblock_provenance;
+mod blocker_seed;
+
 use std::process::{exit, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,23 +14,92 @@ const NATIVE_ADAPTERS: [(&str, Option<&str>); 3] = [
     ),
     ("vendor/tauri/Cargo.toml", Some("macos-private-api,specta")),
 ];
+const ADBLOCK_MANIFEST: &str = "vendor/adblock/Cargo.toml";
+const BLOCKER_FUZZ_MANIFEST: &str = "crates/zephium-blocker/fuzz/Cargo.toml";
+const BLOCKER_FEATURE_SETS: [&str; 5] = [
+    "runtime",
+    "runtime-exact",
+    "webkit",
+    "runtime,webkit",
+    "runtime-exact,webkit",
+];
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    match arguments.first().map(String::as_str) {
         Some("ci") => ci(),
         Some("check-engine-floors") => check_engine_floors(),
         Some("check-release-engine-security") => check_release_engine_security(),
         Some("check-advisory-exceptions") => check_advisory_exceptions(),
-        Some("check-native-adapter-locks") => check_native_adapter_locks(),
+        Some("check-security-fork-locks") | Some("check-native-adapter-locks") => {
+            check_security_fork_locks()
+        }
+        Some("check-blocker-security-fork") => check_blocker_security_fork(),
+        Some("check-blocker-seed") if arguments.len() == 1 => {
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+            if let Err(error) = blocker_seed::check(&repository) {
+                eprintln!("bundled blocker seed policy failed: {error}");
+                exit(1);
+            }
+        }
+        Some("materialize-blocker-seed-webkit")
+            if arguments.len() == 3 && arguments[1] == "--output" =>
+        {
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+            if let Err(error) =
+                blocker_seed::materialize_webkit(&repository, std::path::Path::new(&arguments[2]))
+            {
+                eprintln!("bundled blocker seed materialization failed: {error}");
+                exit(1);
+            }
+        }
+        Some("update-blocker-seed") => update_blocker_seed(&arguments[1..]),
+        #[cfg(any(feature = "blocker-seed-runtime", feature = "blocker-seed-webkit"))]
+        Some("__compile-blocker-seed")
+            if arguments.len() == 4 || (arguments.len() == 6 && arguments[4] == "--artifact") =>
+        {
+            if let Err(error) = blocker_seed::compile_hidden(
+                &arguments[1],
+                std::path::Path::new(&arguments[2]),
+                std::path::Path::new(&arguments[3]),
+                arguments.get(5).map(std::path::Path::new),
+            ) {
+                eprintln!("bundled blocker seed compilation failed: {error}");
+                exit(1);
+            }
+        }
         // Retain the old entrypoint for local automation while making it run
         // every engine-floor deadline, not only Windows.
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-native-adapter-locks|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
+    }
+}
+
+fn update_blocker_seed(arguments: &[String]) {
+    if arguments.len() != 6
+        || arguments[0] != "--easylist"
+        || arguments[2] != "--easyprivacy"
+        || arguments[4] != "--license"
+    {
+        eprintln!(
+            "usage: cargo xtask update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH"
+        );
+        exit(2);
+    }
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = blocker_seed::update(
+        &repository,
+        std::path::Path::new(&arguments[1]),
+        std::path::Path::new(&arguments[3]),
+        std::path::Path::new(&arguments[5]),
+    ) {
+        eprintln!("bundled blocker seed update failed: {error}");
+        exit(1);
     }
 }
 
@@ -50,19 +122,27 @@ fn check_advisory_exceptions() {
     }
 }
 
-fn check_native_adapter_locks() {
-    const ROOT_ADAPTERS: &[(&str, &str)] = &[
+fn check_security_fork_locks() {
+    const ROOT_NATIVE_ADAPTERS: &[(&str, &str)] = &[
         ("tauri", "2.11.3"),
         ("tauri-runtime-wry", "2.11.3"),
         ("wry", "0.55.1"),
     ];
+    const ROOT_FORKS: &[(&str, &str)] = &[
+        ("adblock", "0.13.2"),
+        ("tauri", "2.11.3"),
+        ("tauri-runtime-wry", "2.11.3"),
+        ("wry", "0.55.1"),
+    ];
+    const ADBLOCK_FORK: &[(&str, &str)] = &[("adblock", "0.13.2")];
     const RUNTIME_ADAPTERS: &[(&str, &str)] = &[("tauri-runtime-wry", "2.11.3"), ("wry", "0.55.1")];
     const WRY_ADAPTERS: &[(&str, &str)] = &[("wry", "0.55.1")];
 
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    for (relative, adapters) in [
-        ("Cargo.lock", ROOT_ADAPTERS),
-        ("vendor/tauri/Cargo.lock", ROOT_ADAPTERS),
+    for (relative, forks) in [
+        ("Cargo.lock", ROOT_FORKS),
+        ("vendor/adblock/Cargo.lock", ADBLOCK_FORK),
+        ("vendor/tauri/Cargo.lock", ROOT_NATIVE_ADAPTERS),
         ("vendor/tauri-runtime-wry/Cargo.lock", RUNTIME_ADAPTERS),
         ("vendor/wry/Cargo.lock", WRY_ADAPTERS),
     ] {
@@ -71,10 +151,14 @@ fn check_native_adapter_locks() {
             eprintln!("cannot read {}: {error}", path.display());
             exit(1);
         });
-        if let Err(error) = validate_native_adapter_lock(&source, adapters) {
-            eprintln!("native-adapter lock policy failed for {relative}: {error}");
+        if let Err(error) = validate_security_fork_lock(&source, forks) {
+            eprintln!("vendored security-fork lock policy failed for {relative}: {error}");
             exit(1);
         }
+    }
+    if let Err(error) = adblock_provenance::check(&repository) {
+        eprintln!("adblock fork provenance policy failed: {error}");
+        exit(1);
     }
     check_tauri_fixture_blobs(&repository);
 }
@@ -214,7 +298,7 @@ fn check_tauri_fixture_blobs(repository: &std::path::Path) {
     }
 }
 
-fn validate_native_adapter_lock(source: &str, required: &[(&str, &str)]) -> Result<(), String> {
+fn validate_security_fork_lock(source: &str, required: &[(&str, &str)]) -> Result<(), String> {
     let document = source
         .parse::<toml::Table>()
         .map_err(|error| format!("invalid Cargo.lock TOML: {error}"))?;
@@ -403,9 +487,10 @@ fn check_engine_floors() {
     );
 }
 
-/// Release-only native-engine gate. Runtime admission uses the best stable
+/// Release-only publication gate. Runtime admission uses the best stable
 /// engine that actually exists; publishing additionally requires that no
-/// vendor has acknowledged an outstanding stable-channel security fix.
+/// vendor has acknowledged an outstanding stable-channel security fix and
+/// that the immutable blocker seed will not become stale immediately.
 fn check_release_engine_security() {
     check_engine_floors();
     let now = SystemTime::now()
@@ -415,6 +500,11 @@ fn check_release_engine_security() {
             exit(1);
         })
         .as_secs();
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = blocker_seed::check_release_freshness(&repository, now) {
+        eprintln!("production release is blocked by bundled blocker seed freshness: {error}");
+        exit(1);
+    }
     if !zephium_core::webview2::production_release_security_is_current(now) {
         eprintln!(
             "production release is blocked: Microsoft acknowledged an outstanding Chromium security fix on {} (status reviewed {}); review {} and publish only after a fixed Stable WebView2 runtime is available and the floor is updated",
@@ -427,16 +517,10 @@ fn check_release_engine_security() {
 }
 
 fn ci() {
-    // Excluded adapter manifests otherwise create independent multi-gigabyte
-    // target trees. Preserve an explicit caller override, but make the normal
-    // local gate share Cargo's fingerprinted workspace output.
-    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
-        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
-        std::env::set_var("CARGO_TARGET_DIR", target);
-    }
+    share_workspace_target_dir();
     check_engine_floors();
     check_advisory_exceptions();
-    check_native_adapter_locks();
+    check_blocker_security_fork();
     run("cargo", &["fmt", "--all", "--", "--check"]);
     for (manifest, _) in NATIVE_ADAPTERS {
         run(
@@ -482,6 +566,300 @@ fn ci() {
     run("pnpm", &["--dir", "frame", "run", "check"]);
 }
 
+fn check_blocker_security_fork() {
+    share_workspace_target_dir();
+    check_security_fork_locks();
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = blocker_seed::check(&repository) {
+        eprintln!("bundled blocker seed policy failed: {error}");
+        exit(1);
+    }
+    for package in [
+        "zephium-blocker",
+        "zephium-blocker-service",
+        "zephium-blocker-update",
+    ] {
+        run("cargo", &["fmt", "--package", package, "--", "--check"]);
+    }
+    run(
+        "cargo",
+        &["fmt", "--manifest-path", ADBLOCK_MANIFEST, "--", "--check"],
+    );
+    run(
+        "cargo",
+        &[
+            "fmt",
+            "--manifest-path",
+            BLOCKER_FUZZ_MANIFEST,
+            "--",
+            "--check",
+        ],
+    );
+    run_blocker_feature_gates();
+    run_blocker_product_gates();
+    run_adblock_fork_gates();
+}
+
+fn share_workspace_target_dir() {
+    // Excluded fork manifests otherwise create independent multi-gigabyte
+    // target trees. Preserve an explicit caller override, but make local gates
+    // share Cargo's fingerprinted workspace output.
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::env::set_var("CARGO_TARGET_DIR", target);
+    }
+}
+
+fn run_blocker_feature_gates() {
+    for features in BLOCKER_FEATURE_SETS {
+        run(
+            "cargo",
+            &[
+                "check",
+                "-p",
+                "zephium-blocker",
+                "--lib",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "-p",
+                "zephium-blocker",
+                "--lib",
+                "--tests",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "test",
+                "-p",
+                "zephium-blocker",
+                "--lib",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+            ],
+        );
+    }
+}
+
+fn run_blocker_product_gates() {
+    for package in ["zephium-blocker-update", "zephium-blocker-service"] {
+        run(
+            "cargo",
+            &["check", "-p", package, "--all-targets", "--locked"],
+        );
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "-p",
+                package,
+                "--all-targets",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+        run("cargo", &["test", "-p", package, "--locked"]);
+    }
+    run(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "zephium-blocker",
+            "--test",
+            "synthetic_quality",
+            "--locked",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "check",
+            "--manifest-path",
+            BLOCKER_FUZZ_MANIFEST,
+            "--locked",
+            "--bins",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            BLOCKER_FUZZ_MANIFEST,
+            "--locked",
+            "--bins",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "run",
+            "-p",
+            "zephium-blocker",
+            "--example",
+            "synthetic_blocker_lab",
+            "--locked",
+            "--",
+            "--rules",
+            "256",
+            "--requests",
+            "1024",
+            "--target",
+            "all",
+        ],
+    );
+}
+
+fn run_adblock_fork_gates() {
+    for features in adblock_provenance::SHIPPING_FEATURE_SETS {
+        run(
+            "cargo",
+            &[
+                "check",
+                "--manifest-path",
+                ADBLOCK_MANIFEST,
+                "--lib",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--manifest-path",
+                ADBLOCK_MANIFEST,
+                "--lib",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--manifest-path",
+                ADBLOCK_MANIFEST,
+                "--lib",
+                "--tests",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "test",
+                "--manifest-path",
+                ADBLOCK_MANIFEST,
+                "--lib",
+                "--test",
+                "fork_contract",
+                "--locked",
+                "--no-default-features",
+                "--features",
+                features,
+            ],
+        );
+    }
+    let exact = adblock_provenance::OPTIONAL_EXACT_FEATURES;
+    run(
+        "cargo",
+        &[
+            "check",
+            "--manifest-path",
+            ADBLOCK_MANIFEST,
+            "--lib",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            exact,
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            ADBLOCK_MANIFEST,
+            "--lib",
+            "--tests",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            exact,
+            "--",
+            "-D",
+            "warnings",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "test",
+            "--manifest-path",
+            ADBLOCK_MANIFEST,
+            "--lib",
+            "--test",
+            "fork_contract",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            exact,
+        ],
+    );
+    // Retain an upstream-default compatibility run, but never let its
+    // single-thread/embedded-resolver graph substitute for the exact shipped
+    // graph tests above.
+    run(
+        "cargo",
+        &[
+            "test",
+            "--manifest-path",
+            ADBLOCK_MANIFEST,
+            "--lib",
+            "--test",
+            "fork_contract",
+            "--locked",
+        ],
+    );
+}
+
 fn run_native_adapter_clippy(manifest: &str, features: Option<&str>, target: &str) {
     let mut args = vec!["clippy", "--manifest-path", manifest, target, "--locked"];
     if let Some(features) = features {
@@ -518,7 +896,7 @@ fn run(cmd: &str, args: &[&str]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_advisory_exceptions, validate_native_adapter_lock};
+    use super::{validate_advisory_exceptions, validate_security_fork_lock};
 
     #[test]
     fn advisory_exceptions_require_owner_and_short_live_expiry() {
@@ -545,7 +923,7 @@ ignore = [{ id = "RUSTSEC-2026-0001", reason = "owner=security; expires=2026-01-
     }
 
     #[test]
-    fn native_adapter_locks_require_exact_local_packages() {
+    fn security_fork_locks_require_exact_local_packages() {
         let local = r#"
 version = 4
 
@@ -558,17 +936,17 @@ name = "tauri-runtime-wry"
 version = "2.11.3"
 "#;
         let required = &[("tauri", "2.11.3"), ("tauri-runtime-wry", "2.11.3")];
-        assert!(validate_native_adapter_lock(local, required).is_ok());
+        assert!(validate_security_fork_lock(local, required).is_ok());
 
         let registry = format!(
             "{local}\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
         );
-        assert!(validate_native_adapter_lock(&registry, required)
+        assert!(validate_security_fork_lock(&registry, required)
             .unwrap_err()
             .contains("registry/git sourced"));
 
         let duplicate = format!("{local}\n[[package]]\nname = \"tauri\"\nversion = \"2.11.3\"\n");
-        assert!(validate_native_adapter_lock(&duplicate, required)
+        assert!(validate_security_fork_lock(&duplicate, required)
             .unwrap_err()
             .contains("exactly one"));
     }

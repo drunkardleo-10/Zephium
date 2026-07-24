@@ -761,6 +761,10 @@ fn rule_identifier(digest: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::io::Read as _;
+    use std::time::Duration;
+    use zephium_core::blocker::{ContentRuleCoverage, ContentRuleDigest};
 
     #[test]
     fn rule_identifier_is_exact_and_bounded() {
@@ -951,5 +955,132 @@ mod tests {
         assert!(!cancellation.is_cancelled());
         cancellation.cancel();
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and WebKitGTK at the supported security floor; Fedora CI materializes and compiles the exact bundled EasyList + EasyPrivacy artifact"]
+    fn exact_bundled_easylist_and_easyprivacy_compile_and_reload_natively() {
+        crate::platform::linux::enforce_runtime_security_floor()
+            .expect("test runner must use supported WebKitGTK");
+        gtk::init().expect("GTK requires an Xvfb/Wayland display for native WebKit tests");
+
+        let encoded = read_exact_ci_artifact();
+        let coverage = ContentRuleCoverage {
+            source_rules: 1,
+            accepted_rules: 1,
+            rejected_rules: 0,
+            platform_omitted_rules: 0,
+            platform_approximated_rules: 0,
+            platform_resource_approximated_rules: 0,
+            platform_source_kind_approximated_rules: 0,
+            platform_attribution_approximated_rules: 0,
+            blocking_rule_entries: 1,
+        };
+        let rules = ContentRules::declarative(
+            ContentRuleDigest::from_bytes([0x5a; 32]),
+            coverage,
+            DeclarativeRuleFormat::WebKitContentBlockerV1,
+            encoded,
+        )
+        .expect("verified release artifact must satisfy the engine boundary");
+        let ContentRulesPayload::Declarative {
+            artifact_digest, ..
+        } = rules.payload()
+        else {
+            panic!("verified release artifact changed representation");
+        };
+        let artifact_digest = *artifact_digest.as_bytes();
+        let cache = tempfile::tempdir().expect("isolated native content-filter cache");
+        let context = glib::MainContext::new();
+
+        context
+            .with_thread_default(|| {
+                let compiled = wait_for_native_compilation(
+                    &context,
+                    cache.path(),
+                    rules.clone(),
+                    artifact_digest,
+                )
+                .expect("exact release artifact must compile in native WebKitGTK");
+                assert_eq!(content_policy_digest(&compiled), Some(artifact_digest));
+
+                let reloaded =
+                    wait_for_native_compilation(&context, cache.path(), rules, artifact_digest)
+                        .expect("exact release artifact must reload from the native cache");
+                assert_eq!(content_policy_digest(&reloaded), Some(artifact_digest));
+                drop((compiled, reloaded));
+            })
+            .expect("test must own its isolated GLib context");
+    }
+
+    fn read_exact_ci_artifact() -> Arc<str> {
+        let path = std::env::var_os("ZEPHIUM_BLOCKER_WEBKIT_ARTIFACT")
+            .map(std::path::PathBuf::from)
+            .expect("CI must provide the verified WebKit blocker artifact");
+        let path_metadata =
+            std::fs::symlink_metadata(&path).expect("inspect verified WebKit blocker artifact");
+        assert!(
+            path_metadata.is_file() && !path_metadata.file_type().is_symlink(),
+            "verified WebKit blocker artifact must be a regular non-symlink file"
+        );
+        assert!(
+            path_metadata.len() > 2
+                && path_metadata.len() <= zephium_core::blocker::MAX_DECLARATIVE_RULE_BYTES as u64,
+            "verified WebKit blocker artifact has an invalid byte length"
+        );
+        let mut file = std::fs::File::open(&path).expect("open verified WebKit blocker artifact");
+        let opened_metadata = file
+            .metadata()
+            .expect("inspect open verified WebKit blocker artifact");
+        assert_eq!(
+            opened_metadata.len(),
+            path_metadata.len(),
+            "verified WebKit blocker artifact changed before open"
+        );
+        let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+        file.by_ref()
+            .take(zephium_core::blocker::MAX_DECLARATIVE_RULE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .expect("read verified WebKit blocker artifact");
+        assert_eq!(
+            bytes.len() as u64,
+            opened_metadata.len(),
+            "verified WebKit blocker artifact changed while being read"
+        );
+        assert_eq!(bytes.first(), Some(&b'['));
+        assert_eq!(bytes.last(), Some(&b']'));
+        Arc::from(String::from_utf8(bytes).expect("verified WebKit blocker artifact is UTF-8"))
+    }
+
+    fn wait_for_native_compilation(
+        context: &glib::MainContext,
+        cache: &Path,
+        rules: Arc<ContentRules>,
+        artifact_digest: [u8; 32],
+    ) -> Result<NativeContentPolicy, ContentRuleApplyFailure> {
+        let result = Rc::new(RefCell::new(None));
+        let callback_result = result.clone();
+        let timed_out = Rc::new(Cell::new(false));
+        let timeout_fired = timed_out.clone();
+        let cancellation = compile(cache, rules, artifact_digest, move |outcome| {
+            *callback_result.borrow_mut() = Some(outcome);
+        });
+        let timeout = crate::platform::linux::schedule_content_policy_timeout(
+            Duration::from_secs(120),
+            move || timeout_fired.set(true),
+        )
+        .expect("owned native compiler context must admit its watchdog");
+        while result.borrow().is_none() && !timed_out.get() {
+            let _ = context.iteration(true);
+        }
+        if timed_out.get() {
+            cancellation.cancel();
+            panic!("native WebKitGTK content-filter compilation exceeded 120 seconds");
+        }
+        timeout.cancel();
+        result
+            .borrow_mut()
+            .take()
+            .expect("native content-filter compiler must settle exactly once")
     }
 }
