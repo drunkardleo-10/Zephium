@@ -11,6 +11,11 @@ pub use crate::blocker::BlockerCompileFailure;
 pub enum BlockerDispatch {
     Scheduled,
     Rejected,
+    /// Enabled source-policy admission is terminal for this process.
+    ///
+    /// Disabled allow-all compilation remains admissible; this must not be
+    /// widened into global compiler terminality by consumers.
+    EnabledPolicyTerminal,
     /// The compiler is process-terminal and retry cannot restore admission.
     Terminal,
 }
@@ -88,6 +93,18 @@ pub enum BlockerCatalogPhase {
     Shutdown,
 }
 
+/// Authority which admitted one immutable filter package.
+///
+/// Release-bundled material is authenticated by the signed application
+/// artifact. Repository material is authenticated by the separately
+/// provisioned TUF trust domain. Keeping the distinction at the policy port
+/// prevents a bundled fallback from being mislabeled as an online update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockerCatalogProvenance {
+    ReleaseBundle,
+    TufRepository,
+}
+
 /// Small, immutable catalog status consumed by the authoritative shell actor.
 ///
 /// It contains package metadata only. Repository URLs, source names, rules,
@@ -97,11 +114,17 @@ pub struct BlockerCatalogSnapshot {
     /// Strictly increasing process-local service revision.
     pub revision: u64,
     pub phase: BlockerCatalogPhase,
+    /// Enabled source-policy admission is permanently sealed for this process.
+    ///
+    /// This is monotonic and independent from transient updater failures.
+    /// Disabled allow-all compilation remains available when this is true.
+    pub enabled_policy_terminal: bool,
     /// Current authenticated package revision, including while stale, failed,
     /// or refreshing.
     pub package_revision: Option<u64>,
     /// SHA-256 of the exact canonical manifest for the current package.
     pub package_manifest_sha256: Option<[u8; 32]>,
+    pub package_provenance: Option<BlockerCatalogProvenance>,
     pub package_created_unix: Option<u64>,
     pub package_expires_unix: Option<u64>,
     /// Freshness of the retained current package even while a refresh is in
@@ -115,6 +138,7 @@ pub struct BlockerCatalogSnapshot {
     /// durable commit barriers complete.
     pub candidate_revision: Option<u64>,
     pub candidate_manifest_sha256: Option<[u8; 32]>,
+    pub candidate_provenance: Option<BlockerCatalogProvenance>,
     pub candidate_created_unix: Option<u64>,
     pub candidate_expires_unix: Option<u64>,
     pub candidate_source_count: Option<u32>,
@@ -124,9 +148,29 @@ pub struct BlockerCatalogSnapshot {
     /// SHA-256 of the exact canonical manifest already authoritative inside
     /// the compiler.
     pub installed_manifest_sha256: Option<[u8; 32]>,
+    pub installed_provenance: Option<BlockerCatalogProvenance>,
+    /// Whether this exact supply mode can admit an authenticated network
+    /// refresh. Release-only builds keep filtering available while exposing
+    /// refresh as unsupported rather than pretending to be unconfigured.
+    pub refresh_supported: bool,
+    /// Process-local generation of authenticated source material for the
+    /// installed package.
+    ///
+    /// This advances only after the updater has reauthenticated and repaired
+    /// the exact installed package without changing its signed identity.
+    pub source_material_epoch: u64,
+    /// Exact installed-package material is crossing its bounded authenticated
+    /// repair barrier.
+    pub source_material_repair_pending: bool,
+    /// Exact installed-package material remains unusable after its bounded
+    /// automatic repair admission and requires an explicit source refresh.
+    pub source_material_repair_retry_pending: bool,
     /// A newer authenticated package is waiting for or crossing the compiler
     /// replacement barrier.
     pub activation_pending: bool,
+    /// Candidate repair is idle until an explicit user request consumes one
+    /// of the bounded retry admissions.
+    pub repair_retry_pending: bool,
     /// Non-authoritative scheduling hint recorded before network work begins.
     pub last_refresh_attempt_unix: Option<u64>,
     /// Exact updater operation while refreshing or for the retained failure.
@@ -138,8 +182,10 @@ impl BlockerCatalogSnapshot {
         Self {
             revision: 1,
             phase: BlockerCatalogPhase::Unavailable(BlockerCatalogUnavailable::NotConfigured),
+            enabled_policy_terminal: false,
             package_revision: None,
             package_manifest_sha256: None,
+            package_provenance: None,
             package_created_unix: None,
             package_expires_unix: None,
             package_stale: None,
@@ -147,13 +193,20 @@ impl BlockerCatalogSnapshot {
             source_bytes: None,
             candidate_revision: None,
             candidate_manifest_sha256: None,
+            candidate_provenance: None,
             candidate_created_unix: None,
             candidate_expires_unix: None,
             candidate_source_count: None,
             candidate_source_bytes: None,
             installed_revision: None,
             installed_manifest_sha256: None,
+            installed_provenance: None,
+            refresh_supported: false,
+            source_material_epoch: 0,
+            source_material_repair_pending: false,
+            source_material_repair_retry_pending: false,
             activation_pending: false,
+            repair_retry_pending: false,
             last_refresh_attempt_unix: None,
             refresh_operation: None,
         }
@@ -164,8 +217,18 @@ impl BlockerCatalogSnapshot {
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockerCatalogRefreshDispatch {
-    Accepted { operation: u64 },
+    Accepted {
+        operation: u64,
+    },
     Busy,
+    /// The exact candidate consumed its bounded process retry budget.
+    ///
+    /// Catalog refresh admission stops, but this is not global compiler
+    /// terminality: retained enabled policy and disabled allow-all remain
+    /// usable.
+    RetryLimitReached,
+    /// The current authenticated supply is immutable for this build.
+    Unsupported,
     Unavailable(BlockerCatalogUnavailable),
     Terminal,
 }
