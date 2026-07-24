@@ -11,9 +11,16 @@ const MAX_RECENT_RESULTS = 256;
 const RECONCILE_ATTEMPTS = 20;
 const RECONCILE_RETRY_MS = 250;
 const ACK_RETRY_MS = 1_000;
+const IPC_ATTEMPT_TIMEOUT_MS = 2_000;
+const MAX_ACKNOWLEDGEMENTS_IN_FLIGHT = 16;
+const SETTLEMENT_POLL_MS = 1_000;
+const DEFAULT_SETTLEMENT_TIMEOUT_MS = 2 * 60 * 1_000;
+const OPERATION_ID = /^[0-9a-f]{16}$/;
 
 const recent = new Map<string, OperationDisposition>();
 const pendingAcks = new Set<string>();
+const acknowledgementsInFlight = new Set<string>();
+const settlementSignals = new Map<string, Set<() => void>>();
 
 let lifecycle = 0;
 let initialized = false;
@@ -25,6 +32,20 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("bounded privileged IPC timeout")), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function remember(disposition: OperationDisposition) {
   if (!recent.has(disposition.operation_id)) {
     recent.set(disposition.operation_id, disposition);
@@ -33,6 +54,7 @@ function remember(disposition: OperationDisposition) {
       if (oldest !== undefined) recent.delete(oldest);
     }
   }
+  for (const signal of settlementSignals.get(disposition.operation_id) ?? []) signal();
   pendingAcks.add(disposition.operation_id);
   scheduleAcknowledgements(0);
 }
@@ -45,26 +67,38 @@ function scheduleAcknowledgements(after: number) {
   }, after);
 }
 
-async function flushAcknowledgements() {
-  for (const operationId of [...pendingAcks]) {
-    try {
-      // A successful false means another delivery path already acknowledged
-      // the result (or the process-local ledger was replaced). Either way,
-      // there is no server entry left for this client to retain.
-      await commands.operationAcknowledge(operationId);
-      pendingAcks.delete(operationId);
-    } catch {
-      // Keep the id and retry. Never turn a temporary IPC failure into an
-      // ever-growing native ledger or a duplicate user-visible disposition.
-    }
+function flushAcknowledgements() {
+  const generation = lifecycle;
+  const available =
+    MAX_ACKNOWLEDGEMENTS_IN_FLIGHT -
+    Math.min(MAX_ACKNOWLEDGEMENTS_IN_FLIGHT, acknowledgementsInFlight.size);
+  const batch = [...pendingAcks]
+    .filter((operationId) => !acknowledgementsInFlight.has(operationId))
+    .slice(0, available);
+  for (const operationId of batch) {
+    acknowledgementsInFlight.add(operationId);
+    void boundedIpc(commands.operationAcknowledge(operationId), IPC_ATTEMPT_TIMEOUT_MS)
+      .then(() => {
+        // A successful false means another delivery path already acknowledged
+        // the result (or the process-local ledger was replaced). Either way,
+        // there is no server entry left for this client to retain.
+        pendingAcks.delete(operationId);
+      })
+      .catch(() => {
+        // Keep the id and retry. Never turn a temporary IPC failure into an
+        // ever-growing native ledger or a duplicate user-visible disposition.
+      })
+      .finally(() => {
+        acknowledgementsInFlight.delete(operationId);
+        if (generation === lifecycle) scheduleAcknowledgements(ACK_RETRY_MS);
+      });
   }
-  scheduleAcknowledgements(ACK_RETRY_MS);
 }
 
 async function reconcile(generation: number) {
   for (let attempt = 0; attempt < RECONCILE_ATTEMPTS && generation === lifecycle; attempt++) {
     try {
-      const dispositions = await commands.operationsReconcile();
+      const dispositions = await boundedIpc(commands.operationsReconcile(), IPC_ATTEMPT_TIMEOUT_MS);
       if (generation !== lifecycle) return;
       for (const disposition of dispositions) remember(disposition);
       return;
@@ -84,7 +118,8 @@ async function initialize(generation: number) {
   }
   unlisten = stop;
   initialized = true;
-  await reconcile(generation);
+  void reconcile(generation);
+  scheduleAcknowledgements(0);
 }
 
 export function init(): Promise<void> {
@@ -112,6 +147,89 @@ export function dispose() {
   unlisten = null;
   if (ackTimer !== null) clearTimeout(ackTimer);
   ackTimer = null;
+  for (const signals of settlementSignals.values()) {
+    for (const signal of signals) signal();
+  }
+  settlementSignals.clear();
 }
 
 export const result = (operationId: string) => recent.get(operationId);
+
+export type OperationResolution =
+  | { state: "processed"; disposition: OperationDisposition }
+  | { state: "pending"; operation_id: string }
+  | { state: "unknown"; operation_id: string };
+
+function waitForSettlementSignal(operationId: string, milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const signals = settlementSignals.get(operationId);
+      signals?.delete(finish);
+      if (signals?.size === 0) settlementSignals.delete(operationId);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const signals = settlementSignals.get(operationId) ?? new Set<() => void>();
+    signals.add(finish);
+    settlementSignals.set(operationId, signals);
+
+    // Close the event-before-subscription window without another native call.
+    if (recent.has(operationId)) finish();
+  });
+}
+
+/**
+ * Waits for the actor's exact disposition while events are healthy and uses
+ * the bounded desktop ledger as reconciliation fallback. A timeout reports
+ * `pending`; it never turns absent evidence into success or failure.
+ */
+export async function waitForDisposition(
+  operationId: string,
+  timeoutMs = DEFAULT_SETTLEMENT_TIMEOUT_MS,
+): Promise<OperationResolution> {
+  if (!OPERATION_ID.test(operationId)) return { state: "unknown", operation_id: operationId };
+
+  const cached = recent.get(operationId);
+  if (cached !== undefined) return { state: "processed", disposition: cached };
+
+  const generation = lifecycle;
+  const boundedTimeout = Math.max(0, Math.min(timeoutMs, DEFAULT_SETTLEMENT_TIMEOUT_MS));
+  const deadline = Date.now() + boundedTimeout;
+
+  while (generation === lifecycle) {
+    const remembered = recent.get(operationId);
+    if (remembered !== undefined) return { state: "processed", disposition: remembered };
+
+    try {
+      const remainingBeforeQuery = deadline - Date.now();
+      if (remainingBeforeQuery <= 0) break;
+      const status = await boundedIpc(
+        commands.operationStatus(operationId),
+        Math.min(remainingBeforeQuery, IPC_ATTEMPT_TIMEOUT_MS),
+      );
+      const afterQuery = recent.get(operationId);
+      if (afterQuery !== undefined) return { state: "processed", disposition: afterQuery };
+      if (status.state === "processed") {
+        remember(status.disposition);
+        return { state: "processed", disposition: status.disposition };
+      }
+      if (status.state === "unknown") return { state: "unknown", operation_id: operationId };
+    } catch {
+      // The scoped event may still deliver the disposition. Retry the ledger
+      // query at a low fixed rate until the same bounded deadline.
+    }
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await waitForSettlementSignal(operationId, Math.min(remaining, SETTLEMENT_POLL_MS));
+  }
+
+  const final = recent.get(operationId);
+  return final === undefined
+    ? { state: "pending", operation_id: operationId }
+    : { state: "processed", disposition: final };
+}
