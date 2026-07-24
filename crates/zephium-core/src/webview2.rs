@@ -17,35 +17,34 @@ mod runtime;
 #[cfg(target_os = "windows")]
 pub use runtime::{RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind};
 
-/// Windows Stable security release published by Microsoft on 2026-07-09.
-pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(150, 0, 4078, 65);
-pub const SECURITY_FLOOR_TEXT: &str = "150.0.4078.65";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-07-09";
-/// 2026-07-09T00:00:00Z. A wall clock before the reviewed release cannot
+/// Windows Stable security release published by Microsoft on 2026-07-23.
+pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(150, 0, 4078, 96);
+pub const SECURITY_FLOOR_TEXT: &str = "150.0.4078.96";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-07-23";
+/// 2026-07-23T00:00:00Z. A wall clock before the reviewed release cannot
 /// establish that the floor is current and must fail closed just like an
 /// expired review.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_783_555_200;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_784_764_800;
 pub const SECURITY_FLOOR_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes-security";
 
-/// Microsoft reported on 2026-07-14 that the current Stable channel does not
-/// yet contain a newly disclosed Chromium security update. The latest Stable
-/// runtime remains suitable for development and is still the only runtime we
-/// can admit, but it is not a production-release baseline until Microsoft
-/// publishes the corresponding fixed Stable build and this floor is reviewed
-/// again. Keep this explicit release blocker separate from startup admission:
-/// making the application unusable cannot manufacture a patched runtime.
-pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = true;
+/// Microsoft reported a pending Chromium security update on 2026-07-14 and
+/// subsequently published fixed Stable releases beginning with 150.0.4078.80
+/// on 2026-07-16. The current floor is the later 150.0.4078.96 security release
+/// from 2026-07-23, so the historical release blocker is resolved. Keep the
+/// notice date and post-notice floor check: clearing the flag alone must never
+/// turn an older runtime into release evidence.
+pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-07-14";
-pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-07-16";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-07-24";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-07-23";
-/// 2026-07-24T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_784_851_200;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-07-30";
+/// 2026-07-31T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_785_456_000;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -399,17 +398,17 @@ mod tests {
 
     #[test]
     fn numeric_order_compares_all_four_components() {
-        let required = WebView2Version::stable(150, 0, 4078, 65);
+        let required = WebView2Version::stable(150, 0, 4078, 96);
         for older in [
             WebView2Version::stable(149, u32::MAX, u32::MAX, u32::MAX),
             WebView2Version::stable(150, 0, 4077, u32::MAX),
-            WebView2Version::stable(150, 0, 4078, 64),
+            WebView2Version::stable(150, 0, 4078, 95),
         ] {
             assert!(!older.is_at_least(required), "{older} must be older");
         }
         for accepted in [
             required,
-            WebView2Version::stable(150, 0, 4078, 66),
+            WebView2Version::stable(150, 0, 4078, 97),
             WebView2Version::stable(150, 0, 4079, 0),
             WebView2Version::stable(151, 0, 0, 0),
         ] {
@@ -423,13 +422,13 @@ mod tests {
     #[test]
     fn admission_rejects_old_invalid_and_preview_runtimes() {
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
-        assert!(admit_runtime("150.0.4078.66").is_ok());
+        assert!(admit_runtime("150.0.4078.97").is_ok());
         assert!(matches!(
-            admit_runtime("150.0.4078.64"),
+            admit_runtime("150.0.4078.95"),
             Err(AdmissionError::BelowSecurityFloor { .. })
         ));
         assert_eq!(
-            admit_runtime("150.0.4078.65 beta"),
+            admit_runtime("150.0.4078.96 beta"),
             Err(AdmissionError::PreviewChannel(Channel::Beta))
         );
         assert!(matches!(
@@ -457,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn outstanding_vendor_security_fix_blocks_release_but_not_runtime_admission() {
+    fn post_notice_stable_floor_resolves_the_vendor_release_blocker() {
         let production_release_blocked =
             std::hint::black_box(PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX);
         let floor_published = std::hint::black_box(SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS);
@@ -465,9 +464,9 @@ mod tests {
 
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
         assert!(security_floor_review_is_current(floor_published));
-        assert!(production_release_blocked);
-        assert!(floor_published <= vendor_notice);
-        assert!(!production_release_security_is_current(floor_published));
+        assert!(!production_release_blocked);
+        assert!(floor_published > vendor_notice);
+        assert!(production_release_security_is_current(floor_published));
     }
 
     #[test]
