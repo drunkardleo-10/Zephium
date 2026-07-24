@@ -1,4 +1,5 @@
 import type {
+  BlockerStatusChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -34,4 +35,5 @@ export const events = {
   layoutChanged: scopedEvent<LayoutChanged>("zephium:layout"),
   operationProcessed: scopedEvent<OperationProcessed>("zephium:operation-processed"),
   runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>("zephium:runtime-status"),
+  blockerStatusChanged: scopedEvent<BlockerStatusChanged>("zephium:blocker-status"),
 };

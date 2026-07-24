@@ -15,6 +15,10 @@ export const commands = {
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
+	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
+	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
+	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
+	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
 	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
 	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
 	operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
@@ -38,6 +42,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -48,6 +53,116 @@ export const events = {
 };
 
 /* Types */
+/**
+ *  Stable diagnostics classification. Native/parser text and filter content
+ *  never cross the privileged IPC boundary.
+ */
+export type BlockerFailure = "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
+
+export type BlockerPhase = "unavailable" | "uninitialized" | "compiling" | "installing" | "ready" | "failed" | "retired";
+
+/**
+ *  Authority of the focused profile's durable blocker preference.
+ *  `Reconciling` and `Unavailable` are intentionally distinct from native
+ *  policy state: the browser may still know which generation is installed
+ *  while refusing to guess what durable preference should replace it.
+ */
+export type BlockerPreferenceState = "authoritative" | "updating" | "reconciling" | "unavailable";
+
+/**
+ *  Effective protection for the focused profile's exact native policy.
+ *  This is derived in Rust from both desired and retained state. Privileged
+ *  chrome must not infer protection from a pending preference and accidentally
+ *  present a retained allow-all generation as active blocking.
+ */
+export type BlockerProtection = "disabled" | "pending" | "active" | "degraded" | "unavailable";
+
+/**
+ *  Exact coverage of the generation which native code proved applied.
+ *  Counts are bounded far below JavaScript's exact-integer ceiling by the
+ *  blocker compiler's hard rule limits.
+ */
+export type BlockerRuleCoverage = {
+	source_rules: number,
+	accepted_rules: number,
+	rejected_rules: number,
+	platform_omitted_rules: number,
+	platform_approximated_rules: number,
+	platform_resource_approximated_rules: number,
+	platform_source_kind_approximated_rules: number,
+	platform_attribution_approximated_rules: number,
+	blocking_rule_entries: number,
+};
+
+/**
+ *  Stable package-refresh failure category. Endpoint, parser, and native
+ *  strings are intentionally never forwarded to privileged JavaScript.
+ */
+export type BlockerSourceFailure = "transport" | "metadata" | "clock" | "manifest" | "target" | "license" | "rollback" | "storage" | "catalog" | "internal";
+
+/**
+ *  Exact authenticated identities for source-package transition diagnostics.
+ *  This is boxed in [`BlockerStatusView`] so infrequent debug strings do not
+ *  inflate every application projection on the shell actor's hot path.
+ */
+export type BlockerSourceIdentities = {
+	package_manifest_sha256: string | null,
+	candidate_revision: string | null,
+	candidate_manifest_sha256: string | null,
+	installed_manifest_sha256: string | null,
+};
+
+/**  Sanitized state of the authenticated filter-package supply chain. */
+export type BlockerSourcePhase = "not_configured" | "durable_activation_unsupported" | "storage_unavailable" | "clock_unsafe" | "idle" | "fresh" | "stale" | "refreshing" | "failed" | "shutdown";
+
+/**  Authority which admitted the displayed filter package. */
+export type BlockerSourceProvenance = "release_bundle" | "tuf_repository";
+
+export type BlockerStatusChanged = BlockerStatusView;
+
+/**
+ *  Read-only, focused-profile diagnostics delivered only to privileged main
+ *  chrome. It deliberately contains no profile selector, URL, request
+ *  telemetry, native error string, or filter-list text.
+ */
+export type BlockerStatusView = {
+	projection_revision: string,
+	protection: BlockerProtection,
+	phase: BlockerPhase,
+	preference: BlockerPreferenceState,
+	config_revision: string | null,
+	desired_enabled: boolean | null,
+	applied_enabled: boolean | null,
+	desired_generation: string | null,
+	retained_generation: string | null,
+	failure: BlockerFailure | null,
+	retryable: boolean,
+	retries_remaining: number,
+	applied_coverage: BlockerRuleCoverage | null,
+	source_phase: BlockerSourcePhase,
+	source_failure: BlockerSourceFailure | null,
+	source_package_revision: string | null,
+	source_installed_revision: string | null,
+	source_package_provenance: BlockerSourceProvenance | null,
+	source_installed_provenance: BlockerSourceProvenance | null,
+	source_identities: BlockerSourceIdentities | null,
+	source_package_created_unix: string | null,
+	source_package_expires_unix: string | null,
+	source_package_stale: boolean | null,
+	source_count: number | null,
+	source_bytes: number | null,
+	source_activation_pending: boolean,
+	source_material_repair_pending: boolean,
+	source_material_repair_retry_pending: boolean,
+	source_repair_retry_pending: boolean,
+	source_last_refresh_attempt_unix: string | null,
+	source_refresh_operation: string | null,
+	/**  Authoritative source-policy capability for the focused profile. */
+	can_enable: boolean,
+	/**  Authoritative refresh admission capability for the active supply mode. */
+	can_refresh_sources: boolean,
+};
+
 /**
  *  Split divider hit-strip in window logical coordinates; the chrome renders
  *  these as drag targets on platforms without native stage dividers.
@@ -93,7 +208,9 @@ export type OperationAdmission = {
  *  native navigation still resolves independently through engine events.
  *  Long-running profile deletion retains its id internally and emits this
  *  disposition exactly once, only after definitive rejection or both durable
- *  deletion phases complete; retry state is never mislabeled as processed.
+ *  deletion phases complete; blocker preference mutations likewise retain
+ *  their id through CAS and exact native settlement. Retry/reconciliation
+ *  state is never mislabeled as successfully applied.
  */
 export type OperationDisposition = {
 	operation_id: string,
@@ -103,9 +220,10 @@ export type OperationDisposition = {
 
 /**
  *  The bounded terminal classification the actor can establish while
- *  processing an admitted operation. `Deferred` means native work was queued
- *  or an exact discard acknowledgement is still required; it never means a
- *  page load or renderer callback succeeded.
+ *  processing an admitted operation. `Deferred` means native work was queued,
+ *  an exact discard acknowledgement is still required, or a durable write
+ *  became indeterminate and entered explicit reconciliation; it never means a
+ *  page load, renderer callback, or unknown store transaction succeeded.
  */
 export type OperationOutcome = "applied" | "no_op" | "rejected" | "native_admission_failed" | "deferred";
 
@@ -116,7 +234,7 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
@@ -181,6 +299,15 @@ export type UiInfo = {
 };
 
 /* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
+
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
 
 function makeEvent<T>(name: string, serialize?: (payload: T) => unknown, deserialize?: (payload: any) => T) {

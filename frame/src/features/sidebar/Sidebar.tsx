@@ -16,6 +16,7 @@ import * as tabs from "../../state/tabs";
 import * as ui from "../../state/ui";
 import { FavIcon } from "../../ui/FavIcon";
 import { Icon } from "../../ui/Icon";
+import { BlockerStatus } from "./BlockerStatus";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 
@@ -264,6 +265,8 @@ export function Sidebar() {
           )}
         </For>
       </nav>
+
+      <BlockerStatus />
 
       <div class="px-2.5 pb-3 pt-1">
         <button

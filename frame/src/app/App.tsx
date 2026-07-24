@@ -3,6 +3,7 @@ import { onCleanup, onMount, Show } from "solid-js";
 import { Launcher } from "../features/launcher/Launcher";
 import { Dividers } from "../features/split/Dividers";
 import { commands } from "../ipc/bindings";
+import * as blocker from "../state/blocker";
 import * as layout from "../state/layout";
 import * as operations from "../state/operations";
 import * as tabs from "../state/tabs";
@@ -78,12 +79,14 @@ export default function App() {
 
   onMount(() => {
     void operations.init();
+    void blocker.init();
     void tabs.init();
     void ui.init();
     if (!IS_MAC) void layout.init();
     document.addEventListener("keydown", onKeyDown);
     onCleanup(() => {
       operations.dispose();
+      blocker.dispose();
       tabs.dispose();
       ui.dispose();
       if (!IS_MAC) layout.dispose();
