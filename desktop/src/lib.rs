@@ -1,6 +1,7 @@
 //! Composition root: the only crate that knows Tauri. Wires the dependency graph
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
+mod blocker_service;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -30,8 +31,10 @@ use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command, EmitFn,
     Handle, SharedChrome, ShutdownOutcome,
 };
+use zephium_blocker_service::ManagedBlocker;
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome};
 use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
@@ -49,6 +52,15 @@ static AUTH_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NAVIGATION_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 static NATIVE_APPEARANCE: AtomicU8 = AtomicU8::new(APPEARANCE_SYSTEM);
+static BLOCKER_STATUS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct AtomicFlagReset(&'static AtomicBool);
+
+impl Drop for AtomicFlagReset {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 const APPEARANCE_SYSTEM: u8 = 0;
 const APPEARANCE_LIGHT: u8 = 1;
@@ -61,11 +73,13 @@ const EVENT_UI: &str = "zephium:ui-command";
 const EVENT_SEARCH: &str = "zephium:search";
 const EVENT_LAYOUT: &str = "zephium:layout";
 const EVENT_RUNTIME_STATUS: &str = "zephium:runtime-status";
+const EVENT_BLOCKER_STATUS: &str = "zephium:blocker-status";
 const EVENT_OPERATION_PROCESSED: &str = "zephium:operation-processed";
 // Accepted operations are never evicted before privileged chrome explicitly
 // acknowledges the actor's disposition. Refuse new admission at the bound
 // rather than lose the public record of how accepted work was processed.
 const MAX_OPERATION_LEDGER_ENTRIES: usize = 1024;
+const BLOCKER_STATUS_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 const PRIVILEGED_PERMISSIONS_POLICY: &str = "accelerometer=(), attribution-reporting=(), autoplay=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(), compute-pressure=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), join-ad-interest-group=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), private-state-token-issuance=(), private-state-token-redemption=(), publickey-credentials-get=(), run-ad-auction=(), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), sync-xhr=(), unload=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()";
 const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
@@ -83,7 +97,7 @@ struct ShutdownCoordinator {
 /// Retains the storage actor from the instant it is admitted. Before the
 /// shell exists, startup failure uses this handle to close SQLite under the
 /// same bounded process-exit policy; after shell admission, the shell owns the
-/// ordered store/native shutdown instead.
+/// ordered store/native/blocker shutdown instead.
 #[derive(Clone)]
 struct StartupStore(Arc<SqliteStore>);
 
@@ -144,6 +158,7 @@ impl<T> StartupOwner<T> {
 }
 
 type StartupEngine = StartupOwner<WebviewEngine>;
+type StartupBlocker = StartupOwner<ManagedBlocker>;
 
 #[derive(Default)]
 struct HardExitWatchdog {
@@ -387,7 +402,8 @@ impl ShutdownCoordinator {
         &self,
         app: tauri::AppHandle,
         shell: Option<Handle>,
-        engine: Option<Arc<WebviewEngine>>,
+        engine_owner: Option<StartupEngine>,
+        blocker_owner: Option<StartupBlocker>,
         store: Option<Arc<SqliteStore>>,
     ) {
         self.terminal_failure.store(true, Ordering::Release);
@@ -410,7 +426,12 @@ impl ShutdownCoordinator {
             return;
         }
 
-        if store.is_some() || engine.is_some() {
+        // Claim the single-flight gate before taking either temporary owner.
+        // Otherwise two concurrent failure callbacks could each remove one
+        // resource while only one callback remains authorized to reap it.
+        let engine = engine_owner.and_then(|owner| owner.take());
+        let blocker = blocker_owner.and_then(|owner| owner.take());
+        if store.is_some() || engine.is_some() || blocker.is_some() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
             let coordinator = self.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -425,11 +446,27 @@ impl ShutdownCoordinator {
                         )),
                     }
                 }
-                if let Some(engine) = engine {
+
+                // Native teardown must be admitted first. The blocker may
+                // then drain its updater/compiler workers while the native
+                // callback is outstanding; both consume the same absolute
+                // deadline. Retain the engine until its exact completion is
+                // observed so an Arc drop cannot race the callback.
+                let native_cleanup = engine.map(|engine| {
                     let (native_done, native_wait) = std::sync::mpsc::sync_channel(1);
                     engine.shutdown(Box::new(move |clean| {
                         let _ = native_done.send(clean);
                     }));
+                    (engine, native_wait)
+                });
+                if let Some(blocker) = blocker {
+                    if blocker.shutdown_until(deadline) != BlockerShutdownOutcome::Clean {
+                        write_diagnostic(format_args!(
+                            "startup: pre-shell blocker updater/compiler cleanup was not proven before the deadline"
+                        ));
+                    }
+                }
+                if let Some((_engine, native_wait)) = native_cleanup {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if native_wait.recv_timeout(remaining) != Ok(true) {
                         write_diagnostic(format_args!(
@@ -576,14 +613,26 @@ fn request_startup_failure(app: &tauri::AppHandle, error: impl std::fmt::Display
         return;
     };
     let shell = app.try_state::<Handle>().map(|shell| shell.inner().clone());
-    let engine = if shell.is_none() {
+    let engine_owner = if shell.is_none() {
         app.try_state::<StartupEngine>()
-            .and_then(|engine| engine.take())
+            .map(|engine| engine.inner().clone())
+    } else {
+        None
+    };
+    let blocker_owner = if shell.is_none() {
+        app.try_state::<StartupBlocker>()
+            .map(|blocker| blocker.inner().clone())
     } else {
         None
     };
     let store = app.try_state::<StartupStore>().map(|store| store.0.clone());
-    coordinator.request_terminal_startup_failure(app.clone(), shell, engine, store);
+    coordinator.request_terminal_startup_failure(
+        app.clone(),
+        shell,
+        engine_owner,
+        blocker_owner,
+        store,
+    );
 }
 
 fn request_unrecoverable_native_failure(app: &tauri::AppHandle, reason: &str) {
@@ -617,6 +666,9 @@ struct LayoutChanged(zephium_ipc::LayoutState);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct RuntimeStatusChanged(zephium_ipc::RuntimeStatus);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct BlockerStatusChanged(zephium_ipc::BlockerStatusView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct OperationProcessed(zephium_ipc::OperationDisposition);
@@ -772,6 +824,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_forward,
             tabs_split,
             tabs_unsplit,
+            blocker_status,
+            blocker_set_enabled,
+            blocker_retry,
+            blocker_refresh_sources,
             profiles_delete,
             operation_status,
             operations_reconcile,
@@ -799,6 +855,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             SearchChanged,
             LayoutChanged,
             RuntimeStatusChanged,
+            BlockerStatusChanged,
             OperationProcessed
         ])
 }
@@ -1242,6 +1299,92 @@ fn tabs_bootstrap(caller: WebviewWindow, shell: State<'_, Handle>) {
         return;
     }
     shell.dispatch(Command::Bootstrap);
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn blocker_status(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+) -> Result<zephium_ipc::BlockerStatusView, ()> {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_status") {
+        return Ok(zephium_ipc::BlockerStatusView::unavailable());
+    }
+    if BLOCKER_STATUS_QUERY_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(zephium_ipc::BlockerStatusView::unavailable());
+    }
+    let _query_guard = AtomicFlagReset(&BLOCKER_STATUS_QUERY_IN_FLIGHT);
+    let request = shell.focused_content_policy_status();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        request.recv_timeout(BLOCKER_STATUS_QUERY_TIMEOUT)
+    })
+    .await
+    .unwrap_or_else(|_| zephium_ipc::BlockerStatusView::unavailable());
+    Ok(status)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn blocker_set_enabled(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    enabled: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_set_enabled") {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::SetFocusedContentBlockerEnabled(enabled),
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn blocker_retry(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    failed_generation: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_retry")
+        || failed_generation.len() != 16
+        || !failed_generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return rejected_operation();
+    }
+    let Some(failed_generation) = u64::from_str_radix(&failed_generation, 16)
+        .ok()
+        .and_then(zephium_core::blocker::ContentPolicyGeneration::new)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::RetryFocusedContentPolicy { failed_generation },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn blocker_refresh_sources(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_refresh_sources") {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::RefreshContentBlockerSources,
+    )
 }
 
 #[tauri::command]
@@ -2006,11 +2149,20 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         coordinator.request(app.clone(), shell.inner().clone());
     } else {
         write_diagnostic(format_args!("shutdown: exit requested before shell setup"));
-        let engine = app
+        let engine_owner = app
             .try_state::<StartupEngine>()
-            .and_then(|engine| engine.take());
+            .map(|engine| engine.inner().clone());
+        let blocker_owner = app
+            .try_state::<StartupBlocker>()
+            .map(|blocker| blocker.inner().clone());
         let store = app.try_state::<StartupStore>().map(|store| store.0.clone());
-        coordinator.request_terminal_startup_failure(app.clone(), None, engine, store);
+        coordinator.request_terminal_startup_failure(
+            app.clone(),
+            None,
+            engine_owner,
+            blocker_owner,
+            store,
+        );
     }
 }
 
@@ -2076,6 +2228,10 @@ pub fn run() {
         // published. Setup failures in that narrow interval can therefore
         // execute the same explicit bounded engine teardown.
         .manage(StartupEngine::default())
+        // The managed blocker starts its own compiler/updater workers. Keep
+        // their exact Arc reachable from the instant construction succeeds
+        // until the app-managed shell publishes authoritative ownership.
+        .manage(StartupBlocker::default())
         .setup(move |app| {
             let setup_result: SetupResult = (|| {
                 let shutdown = app
@@ -2398,6 +2554,9 @@ pub fn run() {
                 Projection::RuntimeStatus(status) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
                 }
+                Projection::BlockerStatus(status) => {
+                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_BLOCKER_STATUS, &status)
+                }
                 Projection::OperationProcessed(disposition) => {
                     if !record_and_deliver_operation(
                         &disposition_ledger,
@@ -2417,8 +2576,32 @@ pub fn run() {
             });
 
             let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
+            // The managed service owns the release-authenticated seed,
+            // compiled cache, and—once provisioned—the independently
+            // authenticated source updater. Startup fails rather than
+            // silently substituting an empty catalog.
+            let blocker = blocker_service::start(&data_dir).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to start managed content-policy service: {error}"
+                ))
+            })?;
+            let startup_blocker = app.try_state::<StartupBlocker>().ok_or_else(|| {
+                std::io::Error::other("startup blocker cleanup owner is unavailable")
+            })?;
+            if !startup_blocker.install(blocker.clone()) {
+                // A second setup transaction is an invariant violation, but
+                // the newly-created workers are still ours to reap because
+                // they were never published into the temporary owner.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(8);
+                let _ = blocker.shutdown_until(deadline);
+                return Err(
+                    std::io::Error::other("startup blocker cleanup owner is already armed").into(),
+                );
+            }
 
-            let shell = zephium_app::spawn(engine.clone(), store, chrome, emit)?;
+            let shell =
+                zephium_app::spawn(engine.clone(), store, blocker.clone(), chrome, emit)?;
             if !app.manage(shell.clone()) {
                 return Err(std::io::Error::other(
                     "shell cleanup state is already installed",
@@ -2428,6 +2611,12 @@ pub fn run() {
             if !startup_engine.transfer_to(&engine) {
                 return Err(std::io::Error::other(
                     "startup engine ownership did not transfer to the shell",
+                )
+                .into());
+            }
+            if !startup_blocker.transfer_to(&blocker) {
+                return Err(std::io::Error::other(
+                    "startup blocker ownership did not transfer to the shell",
                 )
                 .into());
             }
@@ -2966,18 +3155,36 @@ mod tests {
     }
 
     #[test]
-    fn startup_engine_owner_transfers_exactly_once() {
+    fn startup_resource_owner_transfers_exactly_once() {
         let owner = super::StartupOwner::<u8>::default();
-        let engine = std::sync::Arc::new(7);
+        let resource = std::sync::Arc::new(7);
         let unrelated = std::sync::Arc::new(7);
 
-        assert!(owner.install(engine.clone()));
+        assert!(owner.install(resource.clone()));
         assert!(!owner.install(unrelated.clone()));
         assert!(!owner.transfer_to(&unrelated));
-        assert!(owner.transfer_to(&engine));
+        assert!(owner.transfer_to(&resource));
         assert!(owner.take().is_none());
-        assert!(owner.install(engine.clone()));
-        assert!(std::sync::Arc::ptr_eq(&owner.take().unwrap(), &engine));
+        assert!(owner.install(resource.clone()));
+        assert!(std::sync::Arc::ptr_eq(&owner.take().unwrap(), &resource));
+    }
+
+    #[test]
+    fn pre_shell_blocker_owner_reaps_the_real_managed_compiler() {
+        let root = tempfile::tempdir().unwrap();
+        let blocker = super::blocker_service::start(root.path()).unwrap();
+        let owner = super::StartupBlocker::default();
+        assert!(owner.install(blocker.clone()));
+
+        let owned = owner.take().expect("pre-shell blocker owner");
+        assert!(std::sync::Arc::ptr_eq(&owned, &blocker));
+        assert_eq!(
+            zephium_core::ports::blocker::BlockerCompiler::shutdown_until(
+                owned.as_ref(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            ),
+            zephium_core::ports::blocker::BlockerShutdownOutcome::Clean
+        );
     }
 
     #[test]
@@ -3209,6 +3416,13 @@ mod tests {
             1,
             "exactly one coordinator must exist before setup begins"
         );
+        assert_eq!(
+            production
+                .matches(".manage(StartupBlocker::default())")
+                .count(),
+            1,
+            "exactly one temporary blocker owner must predate setup"
+        );
         assert!(setup.contains("let setup_result: SetupResult = (|| {"));
         assert!(setup.contains("contain_tauri_setup_failure(setup_result"));
         assert!(setup.contains("APP_STORE.set(store.clone()).map_err"));
@@ -3245,6 +3459,18 @@ mod tests {
         let engine_transfer = setup
             .find("if !startup_engine.transfer_to(&engine)")
             .expect("exact engine ownership transfer");
+        let blocker_start = setup
+            .find("let blocker = blocker_service::start(&data_dir)")
+            .expect("managed blocker construction");
+        let startup_blocker_owner = setup
+            .find("if !startup_blocker.install(blocker.clone())")
+            .expect("temporary pre-shell blocker owner");
+        let shell_spawn = setup
+            .find("zephium_app::spawn(engine.clone(), store, blocker.clone(), chrome, emit)")
+            .expect("shell actor construction");
+        let blocker_transfer = setup
+            .find("if !startup_blocker.transfer_to(&blocker)")
+            .expect("exact blocker ownership transfer");
         let panel_webview = setup
             .find("let panel_builder = tauri::WebviewWindowBuilder::new")
             .expect("panel privileged WebView construction");
@@ -3260,6 +3486,10 @@ mod tests {
         assert!(engine_install < startup_engine_owner);
         assert!(startup_engine_owner < shell_owner);
         assert!(shell_owner < engine_transfer);
+        assert!(blocker_start < startup_blocker_owner);
+        assert!(startup_blocker_owner < shell_spawn);
+        assert!(shell_spawn < shell_owner);
+        assert!(shell_owner < blocker_transfer);
         assert!(shell_owner < panel_webview);
         assert!(panel_webview < panel_navigation);
         assert!(panel_navigation < main_navigation);
@@ -3281,6 +3511,77 @@ mod tests {
             !production.contains("std::process::exit(70)"),
             "terminal native failures must preserve App/run_return finalization"
         );
+    }
+
+    #[test]
+    fn pre_shell_failure_reaps_store_native_and_blocker_under_one_deadline() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("desktop production source");
+        let cleanup = production
+            .split("fn request_terminal_startup_failure(")
+            .nth(1)
+            .expect("terminal startup cleanup")
+            .split("fn request_unrecoverable_native_failure(")
+            .next()
+            .expect("bounded terminal startup cleanup");
+
+        let single_flight = cleanup
+            .find("self.started.swap(true, Ordering::AcqRel)")
+            .expect("startup cleanup single-flight gate");
+        let engine_take = cleanup
+            .find("engine_owner.and_then(|owner| owner.take())")
+            .expect("engine temporary-owner take");
+        let blocker_take = cleanup
+            .find("blocker_owner.and_then(|owner| owner.take())")
+            .expect("blocker temporary-owner take");
+        let deadline = cleanup
+            .find("let deadline = std::time::Instant::now()")
+            .expect("single cleanup deadline");
+        let store = cleanup
+            .find("store.shutdown_until(deadline)")
+            .expect("storage durability barrier");
+        let native = cleanup
+            .find("engine.shutdown(Box::new")
+            .expect("native teardown admission");
+        let blocker = cleanup
+            .find("blocker.shutdown_until(deadline)")
+            .expect("blocker worker teardown");
+        let native_wait = cleanup
+            .find("native_wait.recv_timeout(remaining)")
+            .expect("native teardown completion");
+
+        assert!(single_flight < engine_take);
+        assert!(single_flight < blocker_take);
+        assert!(engine_take < deadline);
+        assert!(blocker_take < deadline);
+        assert!(deadline < store);
+        assert!(store < native);
+        assert!(native < blocker);
+        assert!(blocker < native_wait);
+        assert_eq!(cleanup.matches("from_secs(8)").count(), 1);
+
+        let startup_failure = production
+            .split("fn request_startup_failure(")
+            .nth(1)
+            .expect("startup failure dispatcher")
+            .split("fn request_unrecoverable_native_failure(")
+            .next()
+            .expect("bounded startup failure dispatcher");
+        assert!(startup_failure.contains("try_state::<StartupBlocker>()"));
+        assert!(!startup_failure.contains("|blocker| blocker.take()"));
+
+        let run_event = production
+            .split("fn handle_run_event(")
+            .nth(1)
+            .expect("desktop run-event handler")
+            .split("pub fn run()")
+            .next()
+            .expect("bounded desktop run-event handler");
+        assert!(run_event.contains("try_state::<StartupBlocker>()"));
+        assert!(!run_event.contains("|blocker| blocker.take()"));
     }
 
     #[test]
@@ -3559,6 +3860,72 @@ mod tests {
         assert!(!super::caller_allowed(Both, "content"));
         assert!(!super::caller_allowed(Both, "Main"));
         assert!(!super::caller_allowed(Both, ""));
+    }
+
+    #[test]
+    fn blocker_diagnostics_are_main_only_and_have_no_profile_selector() {
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("async fn blocker_status(")
+            .nth(1)
+            .expect("blocker status command")
+            .split("#[tauri::command]")
+            .next()
+            .expect("bounded blocker status command");
+        assert!(command.contains("CallerPolicy::Main"));
+        assert!(command.contains("focused_content_policy_status()"));
+        assert!(command.contains("spawn_blocking"));
+        assert!(command.contains("BLOCKER_STATUS_QUERY_TIMEOUT"));
+        assert!(command.contains("BLOCKER_STATUS_QUERY_IN_FLIGHT"));
+        assert!(!command.contains("ProfileId"));
+        assert!(!command.contains("profile:"));
+
+        let delivery = source
+            .split("Projection::BlockerStatus(status)")
+            .nth(1)
+            .expect("blocker projection route")
+            .split("Projection::OperationProcessed")
+            .next()
+            .expect("bounded blocker projection route");
+        assert!(delivery.contains("MAIN_LABEL"));
+        assert!(delivery.contains("EVENT_BLOCKER_STATUS"));
+        assert!(!delivery.contains("PANEL_LABEL"));
+
+        for command_name in [
+            "blocker_set_enabled",
+            "blocker_retry",
+            "blocker_refresh_sources",
+        ] {
+            let command = source
+                .split(&format!("fn {command_name}("))
+                .nth(1)
+                .expect("blocker mutation command")
+                .split("#[tauri::command]")
+                .next()
+                .expect("bounded blocker mutation command");
+            assert!(command.contains("CallerPolicy::Main"));
+            assert!(command.contains("dispatch_operation"));
+            assert!(!command.contains("ProfileId"));
+            assert!(!command.contains("profile:"));
+        }
+    }
+
+    #[test]
+    fn blocker_status_single_flight_flag_has_scope_owned_reset() {
+        static FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        assert!(FLAG
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok());
+        {
+            let _reset = super::AtomicFlagReset(&FLAG);
+            assert!(FLAG.load(std::sync::atomic::Ordering::Acquire));
+        }
+        assert!(!FLAG.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
