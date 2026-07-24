@@ -1,0 +1,36 @@
+[package]
+name = "zephium-blocker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["runtime", "runtime-exact", "webkit"]
+runtime = []
+runtime-exact = ["runtime", "adblock/embedded-domain-resolver"]
+webkit = ["adblock/content-blocking", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+zephium-core.workspace = true
+adblock = { version = "=0.13.2", default-features = false, features = ["full-regex-handling"] }
+idna = "=1.1.0"
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = "=0.10.9"
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
