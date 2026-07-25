@@ -1,7 +1,7 @@
 schema = 1
 fork = "Zephium adblock-rust network-policy adapter"
-reviewed_on = "2026-07-23"
-production_status = "backend foundation only; disabled by default and supplied an empty catalog"
+reviewed_on = "2026-07-25"
+production_status = "release-authenticated EasyList and EasyPrivacy baseline; profile protection remains disabled by default pending native and endurance release gates"
 
 [upstream]
 repository = "https://github.com/brave/adblock-rust"
@@ -65,6 +65,8 @@ paths = [
 invariants = [
   "source-sensitive rules never become broader blocks when the initiating frame is unknown",
   "a potentially applicable source-sensitive exception makes a normal generic block fail open",
+  "source-independent exception candidates are classified in one pass and consume the shared budget exactly once",
+  "structurally skipped attribution-sensitive candidates do not consume the source-independent evaluation budget",
   "source-independent important rules retain their documented priority",
   "source-sensitive exceptions remain discoverable by requested-URL tokens or the zero bucket",
 ]

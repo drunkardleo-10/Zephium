@@ -1018,6 +1018,91 @@ trustedSetLocalStorageItem("mol.ads.cmp.tcf.cache", "{\"getTCData\":{\"cmpId\":2
     }
 
     #[test]
+    fn source_independent_exception_partition_is_scanned_once() {
+        let engine = Engine::new_with_list_text(concat!(
+            "*$script\n",
+            "@@*$script,domain=publisher.example\n",
+        ));
+        engine
+            .prepare_and_freeze_network_matcher(NetworkMatcherPreparationLimits {
+                max_regexes: 32,
+                max_pattern_bytes: 1024 * 1024,
+                max_patterns_per_regex: 32,
+                max_pattern_bytes_per_regex: 64 * 1024,
+                max_regex_size_bytes: 256 * 1024,
+                max_regex_dfa_size_bytes: 64 * 1024,
+                max_filter_checks_per_request: 2,
+            })
+            .unwrap();
+        let request =
+            Request::new_source_independent("https://cdn.example/ad.js", "script", "get").unwrap();
+        let result = engine
+            .try_check_prepared_source_independent_network_request(&request)
+            .expect("one blocking candidate and one conservative exception candidate fit");
+        assert!(
+            !result.should_block(),
+            "a potentially matching attribution-sensitive exception must fail open",
+        );
+        assert!(
+            result.filter.is_none() && result.exception.is_none(),
+            "a conservative attribution result must not be reported as an exact rule match",
+        );
+    }
+
+    #[test]
+    fn source_independent_nonmatching_exception_is_scanned_once() {
+        let engine = Engine::new_with_list_text(concat!(
+            "*$script\n",
+            "@@*$image,domain=publisher.example\n",
+        ));
+        engine
+            .prepare_and_freeze_network_matcher(NetworkMatcherPreparationLimits {
+                max_regexes: 32,
+                max_pattern_bytes: 1024 * 1024,
+                max_patterns_per_regex: 32,
+                max_pattern_bytes_per_regex: 64 * 1024,
+                max_regex_size_bytes: 256 * 1024,
+                max_regex_dfa_size_bytes: 64 * 1024,
+                max_filter_checks_per_request: 2,
+            })
+            .unwrap();
+        let request =
+            Request::new_source_independent("https://cdn.example/ad.js", "script", "get").unwrap();
+        assert!(
+            engine
+                .try_check_prepared_source_independent_network_request(&request)
+                .expect("one block and one nonmatching exception candidate fit")
+                .should_block(),
+        );
+    }
+
+    #[test]
+    fn source_independent_exception_partition_preserves_exact_matches() {
+        let engine = Engine::new_with_list_text(concat!("*$script\n", "@@*$script\n",));
+        engine
+            .prepare_and_freeze_network_matcher(NetworkMatcherPreparationLimits {
+                max_regexes: 32,
+                max_pattern_bytes: 1024 * 1024,
+                max_patterns_per_regex: 32,
+                max_pattern_bytes_per_regex: 64 * 1024,
+                max_regex_size_bytes: 256 * 1024,
+                max_regex_dfa_size_bytes: 64 * 1024,
+                max_filter_checks_per_request: 2,
+            })
+            .unwrap();
+        let request =
+            Request::new_source_independent("https://cdn.example/ad.js", "script", "get").unwrap();
+        let result = engine
+            .try_check_prepared_source_independent_network_request(&request)
+            .expect("the blocking and exact exception candidates fit");
+        assert!(!result.should_block());
+        assert!(
+            result.filter.is_some() && result.exception.is_some(),
+            "a source-independent exception remains an exact reported match",
+        );
+    }
+
+    #[test]
     fn exact_match_budget_is_shared_with_exception_scans() {
         let rules = concat!("*$script\n", "@@*$script,domain=publisher.example\n",);
         let request = Request::new(
