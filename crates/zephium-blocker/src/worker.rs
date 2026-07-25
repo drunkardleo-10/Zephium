@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zephium_core::blocker::{
     BlockerConfig, ContentPolicyGeneration, ContentRuleCoverage, ContentRuleDigest, ContentRules,
-    NetworkAttribution, NetworkDecision as CoreDecision, NetworkRequest as CoreRequest,
-    NetworkRequestPolicy, NetworkResourceType,
+    NetworkAttribution, NetworkDecision as CoreDecision, NetworkPolicyDiagnostics,
+    NetworkRequest as CoreRequest, NetworkRequestPolicy, NetworkResourceType,
 };
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::blocker::{
@@ -94,9 +94,11 @@ enum PolicyCatalogSource {
 /// cache miss actually requires parsing.
 ///
 /// Clones share one exact source lease. Deferred source I/O is serialized and
-/// memoized only after success, so an authenticated on-disk repair remains
-/// observable without permitting duplicate concurrent loads. A
-/// persistent-cache hit drops the lease without reading source bodies.
+/// failures are never memoized, so an authenticated on-disk repair remains
+/// observable without permitting duplicate concurrent loads. Loaders may
+/// retain successful material, or deliberately reload it after each compiled
+/// cache miss so large release-seed source strings are not held indefinitely.
+/// A persistent-cache hit drops the lease without reading source bodies.
 #[derive(Clone)]
 pub struct PolicyCatalog {
     manifest_sha256: Option<[u8; 32]>,
@@ -392,11 +394,15 @@ impl SharedAdmission {
     }
 }
 
-/// Bounded asynchronous compiler and one-artifact cache.
+/// Bounded asynchronous compiler and one-artifact recovery cache.
 ///
 /// One worker serializes expensive parsing, coalesces all profiles onto the
 /// same immutable `Arc<ContentRules>`, and never performs I/O in a native
-/// request callback. The queue is bounded by the maximum profile cohort.
+/// request callback. Durable declarative bytes are held weakly after delivery,
+/// so their lifetime follows only the exact app/engine/native compilation
+/// cohort; the worker retains their authenticated reload recipe. A missing or
+/// failed persistent cache instead keeps the successful artifact strong. The
+/// queue is bounded by the maximum profile cohort.
 pub struct WorkerBlocker {
     // Taking and dropping the sole sender is the worker's shutdown signal.
     // This lets the idle worker block indefinitely instead of polling.
@@ -649,7 +655,12 @@ impl WorkerBlocker {
 /// Result of compiling a catalog candidate without activating it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogPreparationOutcome {
-    /// The exact catalog has a validated in-memory and persistent artifact.
+    /// The exact catalog has a validated recoverable artifact.
+    ///
+    /// A healthy persistent cache permits declarative bytes to be released
+    /// after preparation; an unavailable cache instead retains the successful
+    /// in-memory artifact strongly. Activation revalidates this proof before
+    /// changing compiler authority.
     Prepared,
     /// Compilation failed while the prior catalog remained authoritative.
     Failed(BlockerCompileFailure),
@@ -987,14 +998,34 @@ fn run_worker(
                 }));
             }
             WorkerCommand::ActivateCatalog(activation) => {
-                let activated = prepared
-                    .take()
-                    .filter(|(identity, _)| *identity == activation.identity);
-                let success = if let Some((_, candidate)) = activated {
-                    artifacts = candidate;
-                    true
-                } else {
-                    false
+                let success = match prepared.take() {
+                    Some((identity, mut candidate)) if identity == activation.identity => {
+                        // Preparation may deliberately retain only a weak
+                        // declarative handle after proving the persistent
+                        // artifact. Revalidate recoverability at the activation
+                        // linearization point so cache/source damage between
+                        // prepare and commit cannot publish an unusable
+                        // compiler authority.
+                        let recoverable =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                candidate.resolve(compiler, &mut persistent)
+                            }));
+                        if matches!(recoverable, Ok(BlockerCompileOutcome::Compiled(_))) {
+                            artifacts = candidate;
+                            true
+                        } else {
+                            prepared = Some((identity, candidate));
+                            false
+                        }
+                    }
+                    Some(candidate) => {
+                        // A stale or contradictory activation must not destroy
+                        // the one exact prepared candidate. Its caller receives
+                        // false and may retry only with the matching identity.
+                        prepared = Some(candidate);
+                        false
+                    }
+                    None => false,
                 };
                 admission
                     .state
@@ -1029,16 +1060,40 @@ fn run_worker(
 
 #[derive(Clone)]
 enum CachedArtifact {
-    Compiled(Arc<ContentRules>),
+    Strong(Arc<ContentRules>),
+    Declarative(Weak<ContentRules>),
     Failed(BlockerCompileFailure),
 }
 
 impl CachedArtifact {
-    fn outcome(&self) -> BlockerCompileOutcome {
-        match self {
-            Self::Compiled(rules) => BlockerCompileOutcome::Compiled(rules.clone()),
-            Self::Failed(failure) => BlockerCompileOutcome::Failed(*failure),
+    fn compiled(rules: &Arc<ContentRules>, durably_cached: bool) -> Self {
+        if durably_cached
+            && matches!(
+                rules.payload(),
+                zephium_core::blocker::ContentRulesPayload::Declarative { .. }
+            )
+        {
+            Self::Declarative(Arc::downgrade(rules))
+        } else {
+            // Runtime policies are also retained by the native synchronous
+            // matcher. Keeping the compiler's strong handle avoids rebuilding
+            // that matcher merely because the small ContentRules envelope
+            // itself was released. A declarative artifact stays strong here
+            // only when no durable recovery copy was proven.
+            Self::Strong(rules.clone())
         }
+    }
+
+    fn outcome(&self) -> Option<BlockerCompileOutcome> {
+        match self {
+            Self::Strong(rules) => Some(BlockerCompileOutcome::Compiled(rules.clone())),
+            Self::Declarative(rules) => rules.upgrade().map(BlockerCompileOutcome::Compiled),
+            Self::Failed(failure) => Some(BlockerCompileOutcome::Failed(*failure)),
+        }
+    }
+
+    fn retains_reload_recipe(&self) -> bool {
+        matches!(self, Self::Declarative(_))
     }
 }
 
@@ -1079,11 +1134,18 @@ impl ArtifactCache {
         persistent: &mut Option<PersistentArtifactCache>,
     ) -> BlockerCompileOutcome {
         if let Some(cached) = &self.artifact {
-            return cached.outcome();
+            if let Some(outcome) = cached.outcome() {
+                return outcome;
+            }
+            // The declarative bytes outlived neither an application delivery
+            // nor native compilation. Recover from the checksummed persistent
+            // artifact, or from the retained authenticated source recipe if
+            // that cache has since become unavailable.
+            self.artifact = None;
         }
         let Some(catalog) = self.catalog.as_ref() else {
             let failure = CachedArtifact::Failed(BlockerCompileFailure::Internal);
-            let outcome = failure.outcome();
+            let outcome = BlockerCompileOutcome::Failed(BlockerCompileFailure::Internal);
             self.artifact = Some(failure);
             return outcome;
         };
@@ -1091,9 +1153,8 @@ impl ArtifactCache {
         let cache_key = match catalog.cache_key(target, compiler.limits()) {
             Ok(cache_key) => cache_key,
             Err(failure) => {
-                let failure = CachedArtifact::Failed(failure);
-                let outcome = failure.outcome();
-                self.artifact = Some(failure);
+                let outcome = BlockerCompileOutcome::Failed(failure);
+                self.artifact = Some(CachedArtifact::Failed(failure));
                 return outcome;
             }
         };
@@ -1105,10 +1166,13 @@ impl ArtifactCache {
                         {
                             self.persistent_hits += 1;
                         }
-                        let artifact = CachedArtifact::Compiled(rules);
-                        let outcome = artifact.outcome();
+                        let artifact = CachedArtifact::compiled(&rules, true);
+                        let retain_catalog = artifact.retains_reload_recipe();
+                        let outcome = BlockerCompileOutcome::Compiled(rules);
                         self.artifact = Some(artifact);
-                        self.catalog = None;
+                        if !retain_catalog {
+                            self.catalog = None;
+                        }
                         return outcome;
                     }
                     *persistent = None;
@@ -1133,31 +1197,43 @@ impl ArtifactCache {
             // storage failure into a process-lifetime cache entry.
             Err(failure) => return BlockerCompileOutcome::Failed(failure),
         };
-        let artifact = if catalog.is_empty() {
-            CachedArtifact::Failed(BlockerCompileFailure::SourceUnavailable)
+        let failure = if catalog.is_empty() {
+            BlockerCompileFailure::SourceUnavailable
         } else {
             match compiler.compile(target, catalog.instantiate()) {
                 Ok(compiled) => {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
                         Ok(rules) => {
-                            if persistent.as_ref().is_some_and(|cache| {
-                                cache.store(cache_key, &persistent_copy, &rules).is_err()
-                            }) {
-                                *persistent = None;
+                            let durably_cached = match persistent.as_ref() {
+                                Some(cache)
+                                    if cache.store(cache_key, &persistent_copy, &rules).is_ok() =>
+                                {
+                                    true
+                                }
+                                Some(_) => {
+                                    *persistent = None;
+                                    false
+                                }
+                                None => false,
+                            };
+                            let artifact = CachedArtifact::compiled(&rules, durably_cached);
+                            let retain_catalog = artifact.retains_reload_recipe();
+                            self.artifact = Some(artifact);
+                            if !retain_catalog {
+                                self.catalog = None;
                             }
-                            CachedArtifact::Compiled(rules)
+                            return BlockerCompileOutcome::Compiled(rules);
                         }
-                        Err(failure) => CachedArtifact::Failed(failure),
+                        Err(failure) => failure,
                     }
                 }
-                Err(error) => CachedArtifact::Failed(map_compile_error(&error)),
+                Err(error) => map_compile_error(&error),
             }
         };
-        let outcome = artifact.outcome();
-        self.artifact = Some(artifact);
+        self.artifact = Some(CachedArtifact::Failed(failure));
         self.catalog = None;
-        outcome
+        BlockerCompileOutcome::Failed(failure)
     }
 }
 
@@ -1267,7 +1343,7 @@ pub(crate) fn adapt_rules(
     match rules.target() {
         CompileTarget::Runtime => {
             let digest = ContentRuleDigest::from_bytes(*rules.digest().as_bytes());
-            ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::Compiled(rules)))
+            ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::compiled(rules)))
                 .ok_or(BlockerCompileFailure::Internal)
         }
         CompileTarget::WebKit => {
@@ -1301,7 +1377,7 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             digest,
             coverage,
             rules,
-        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::Persistent(rules))),
+        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules))),
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
@@ -1327,22 +1403,100 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
     }
 }
 
-enum RuntimePolicy {
+enum RuntimePolicyArtifact {
     Compiled(CompiledRules),
     #[cfg(feature = "runtime")]
     Persistent(Box<CachedRuntimeRules>),
 }
 
+#[derive(Default)]
+struct RuntimePolicyCounters {
+    total_decisions: AtomicU64,
+    candidate_budget_exhausted: AtomicU64,
+    matcher_unavailable: AtomicU64,
+    matcher_unprepared: AtomicU64,
+    attribution_unavailable: AtomicU64,
+    evaluation_errors: AtomicU64,
+}
+
+impl RuntimePolicyCounters {
+    fn increment(counter: &AtomicU64, success: Ordering) {
+        // Never let a long-running browser turn diagnostics into a wrapping
+        // value. The ordinary decision path needs only one relaxed atomic
+        // update. Exceptional updates publish after the total update so an
+        // acquiring snapshot cannot observe a classified decision without
+        // also observing its membership in `total_decisions`.
+        let _ = counter.fetch_update(success, Ordering::Relaxed, |value| value.checked_add(1));
+    }
+
+    fn record_total(&self) {
+        Self::increment(&self.total_decisions, Ordering::Relaxed);
+    }
+
+    fn record_attribution_unavailable(&self) {
+        Self::increment(&self.attribution_unavailable, Ordering::Release);
+    }
+
+    fn record_error(&self, error: crate::MatchError) {
+        let counter = match error {
+            crate::MatchError::CandidateBudgetExhausted => &self.candidate_budget_exhausted,
+            crate::MatchError::MatcherUnavailable => &self.matcher_unavailable,
+            crate::MatchError::MatcherUnprepared => &self.matcher_unprepared,
+            crate::MatchError::WrongArtifactTarget
+            | crate::MatchError::RequestUrlTooLong { .. }
+            | crate::MatchError::SourceUrlTooLong { .. }
+            | crate::MatchError::InvalidRequest
+            | crate::MatchError::ExactAttributionUnsupported
+            | crate::MatchError::UnexpectedMutation => &self.evaluation_errors,
+        };
+        Self::increment(counter, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> NetworkPolicyDiagnostics {
+        // Exceptional counters are acquired first. Every writer records total
+        // before releasing its exceptional class, so the final total load
+        // includes every classified decision observed by this snapshot.
+        NetworkPolicyDiagnostics {
+            candidate_budget_exhausted: self.candidate_budget_exhausted.load(Ordering::Acquire),
+            matcher_unavailable: self.matcher_unavailable.load(Ordering::Acquire),
+            matcher_unprepared: self.matcher_unprepared.load(Ordering::Acquire),
+            attribution_unavailable: self.attribution_unavailable.load(Ordering::Acquire),
+            evaluation_errors: self.evaluation_errors.load(Ordering::Acquire),
+            total_decisions: self.total_decisions.load(Ordering::Acquire),
+        }
+    }
+}
+
+struct RuntimePolicy {
+    artifact: RuntimePolicyArtifact,
+    counters: RuntimePolicyCounters,
+}
+
 impl RuntimePolicy {
+    fn compiled(rules: CompiledRules) -> Self {
+        Self {
+            artifact: RuntimePolicyArtifact::Compiled(rules),
+            counters: RuntimePolicyCounters::default(),
+        }
+    }
+
+    #[cfg(feature = "runtime")]
+    fn persistent(rules: Box<CachedRuntimeRules>) -> Self {
+        Self {
+            artifact: RuntimePolicyArtifact::Persistent(rules),
+            counters: RuntimePolicyCounters::default(),
+        }
+    }
+
     #[cfg(feature = "runtime-exact")]
     fn evaluate(
         &self,
         request: NetworkRequest<'_>,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
-        match self {
-            Self::Compiled(rules) => rules.evaluate(request),
+        match &self.artifact {
+            RuntimePolicyArtifact::Compiled(rules) => rules.evaluate(request),
             #[cfg(feature = "runtime")]
-            Self::Persistent(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Persistent(rules) => rules.evaluate(request),
         }
     }
 
@@ -1350,16 +1504,17 @@ impl RuntimePolicy {
         &self,
         request: NetworkRequest<'_>,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
-        match self {
-            Self::Compiled(rules) => rules.evaluate_source_independent(request),
+        match &self.artifact {
+            RuntimePolicyArtifact::Compiled(rules) => rules.evaluate_source_independent(request),
             #[cfg(feature = "runtime")]
-            Self::Persistent(rules) => rules.evaluate_source_independent(request),
+            RuntimePolicyArtifact::Persistent(rules) => rules.evaluate_source_independent(request),
         }
     }
 }
 
 impl NetworkRequestPolicy for RuntimePolicy {
     fn decide(&self, request: &CoreRequest<'_>) -> CoreDecision {
+        self.counters.record_total();
         let attribution = request.attribution();
         let resource_type = map_resource_type(request.resource_type());
         let method = map_method(request.method());
@@ -1369,6 +1524,7 @@ impl NetworkRequestPolicy for RuntimePolicy {
                     #[cfg(feature = "runtime-exact")]
                     {
                         let Some(source_url) = request.source_url() else {
+                            self.counters.record_attribution_unavailable();
                             return CoreDecision::Allow;
                         };
                         self.evaluate(NetworkRequest::new(
@@ -1384,6 +1540,7 @@ impl NetworkRequestPolicy for RuntimePolicy {
                         // exact initiating-frame URL nor the public-suffix
                         // resolver required to classify one. Treat an unexpected
                         // exact request as a capability mismatch and fail open.
+                        self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
                     }
                 }
@@ -1391,12 +1548,23 @@ impl NetworkRequestPolicy for RuntimePolicy {
                 | NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
                     NetworkRequest::source_independent(request.url(), resource_type, method),
                 ),
-                NetworkAttribution::Unavailable => return CoreDecision::Allow,
+                NetworkAttribution::Unavailable => {
+                    self.counters.record_attribution_unavailable();
+                    return CoreDecision::Allow;
+                }
             };
         match decision {
             Ok(decision) if decision.action() == NetworkAction::Block => CoreDecision::Block,
-            Ok(_) | Err(_) => CoreDecision::Allow,
+            Ok(_) => CoreDecision::Allow,
+            Err(error) => {
+                self.counters.record_error(error);
+                CoreDecision::Allow
+            }
         }
+    }
+
+    fn diagnostics(&self) -> NetworkPolicyDiagnostics {
+        self.counters.snapshot()
     }
 }
 
@@ -2239,7 +2407,7 @@ mod tests {
                 )],
             )
             .unwrap();
-        let policy = RuntimePolicy::Compiled(rules);
+        let policy = RuntimePolicy::compiled(rules);
         let source_kind = zephium_core::blocker::NetworkRequestSourceKind::Document;
 
         let potentially_excepted = CoreRequest::source_independent(
@@ -2259,6 +2427,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy.decide(&generic), CoreDecision::Block);
+
+        let unavailable = CoreRequest::unavailable(
+            "https://generic.example/ad.js",
+            "GET",
+            NetworkResourceType::Script,
+            source_kind,
+        )
+        .unwrap();
+        assert_eq!(policy.decide(&unavailable), CoreDecision::Allow);
+        assert_eq!(
+            policy.diagnostics(),
+            NetworkPolicyDiagnostics {
+                total_decisions: 3,
+                attribution_unavailable: 1,
+                ..NetworkPolicyDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_diagnostics_classify_fail_open_causes_without_wrapping() {
+        let counters = RuntimePolicyCounters::default();
+        for error in [
+            crate::MatchError::CandidateBudgetExhausted,
+            crate::MatchError::MatcherUnavailable,
+            crate::MatchError::MatcherUnprepared,
+            crate::MatchError::InvalidRequest,
+        ] {
+            counters.record_total();
+            counters.record_error(error);
+        }
+        counters.record_total();
+        counters.record_attribution_unavailable();
+
+        assert_eq!(
+            counters.snapshot(),
+            NetworkPolicyDiagnostics {
+                total_decisions: 5,
+                candidate_budget_exhausted: 1,
+                matcher_unavailable: 1,
+                matcher_unprepared: 1,
+                attribution_unavailable: 1,
+                evaluation_errors: 1,
+            }
+        );
+        counters.total_decisions.store(u64::MAX, Ordering::SeqCst);
+        counters.record_total();
+        assert_eq!(
+            counters.snapshot().total_decisions,
+            u64::MAX,
+            "a long-lived matcher diagnostic must saturate instead of wrapping"
+        );
     }
 
     #[cfg(feature = "runtime-exact")]
@@ -2278,7 +2498,7 @@ mod tests {
                 )],
             )
             .unwrap();
-        let policy = RuntimePolicy::Compiled(rules);
+        let policy = RuntimePolicy::compiled(rules);
         let source_kind = zephium_core::blocker::NetworkRequestSourceKind::Document;
         let request = |source_url| {
             CoreRequest::exact(
@@ -2324,7 +2544,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            RuntimePolicy::Compiled(rules).decide(&request),
+            RuntimePolicy::compiled(rules).decide(&request),
             CoreDecision::Allow
         );
     }
@@ -2411,7 +2631,7 @@ mod tests {
         all(not(target_os = "windows"), feature = "webkit")
     ))]
     #[test]
-    fn persistent_cache_warm_hit_skips_source_parsing_and_drops_catalog() {
+    fn persistent_cache_warm_hit_skips_source_parsing_and_retains_only_required_recovery() {
         let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         #[cfg(unix)]
         {
@@ -2434,7 +2654,16 @@ mod tests {
         ));
         assert_eq!(cold.compilation_attempts, 1);
         assert_eq!(cold.persistent_hits, 0);
-        assert!(cold.catalog.is_none());
+        if native_target() == CompileTarget::WebKit {
+            assert!(cold.catalog.is_some());
+            assert!(matches!(
+                cold.artifact,
+                Some(CachedArtifact::Declarative(_))
+            ));
+        } else {
+            assert!(cold.catalog.is_none());
+            assert!(matches!(cold.artifact, Some(CachedArtifact::Strong(_))));
+        }
         drop(cold);
         drop(cold_persistent);
 
@@ -2446,7 +2675,16 @@ mod tests {
         ));
         assert_eq!(warm.compilation_attempts, 0);
         assert_eq!(warm.persistent_hits, 1);
-        assert!(warm.catalog.is_none());
+        if native_target() == CompileTarget::WebKit {
+            assert!(warm.catalog.is_some());
+            assert!(matches!(
+                warm.artifact,
+                Some(CachedArtifact::Declarative(_))
+            ));
+        } else {
+            assert!(warm.catalog.is_none());
+            assert!(matches!(warm.artifact, Some(CachedArtifact::Strong(_))));
+        }
     }
 
     #[cfg(all(unix, feature = "webkit"))]
@@ -2473,6 +2711,368 @@ mod tests {
         ));
         assert_eq!(cache.compilation_attempts, 1);
         assert_eq!(cache.persistent_hits, 0);
+        assert!(cache.catalog.is_none());
+        assert!(matches!(cache.artifact, Some(CachedArtifact::Strong(_))));
         assert!(!root.path().join("current.bin").exists());
+    }
+
+    #[cfg(all(not(target_os = "windows"), feature = "webkit"))]
+    #[test]
+    fn durable_declarative_artifact_lives_only_while_a_consumer_owns_it() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^$script"),
+        )])
+        .unwrap();
+        let mut cache = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = PersistentArtifactCache::open(&config).ok();
+
+        let first = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected compilation failure: {failure:?}")
+            }
+        };
+        let digest = first.digest();
+        let released = Arc::downgrade(&first);
+        assert_eq!(cache.compilation_attempts, 1);
+        assert_eq!(cache.persistent_hits, 0);
+
+        // A second profile in the same delivery/native-compilation cohort
+        // upgrades the exact allocation without disk I/O or recompilation.
+        let cohort = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected cohort failure: {failure:?}")
+            }
+        };
+        assert!(Arc::ptr_eq(&first, &cohort));
+        assert_eq!(cache.compilation_attempts, 1);
+        assert_eq!(cache.persistent_hits, 0);
+
+        drop(first);
+        drop(cohort);
+        assert!(released.upgrade().is_none());
+        assert!(matches!(
+            cache.artifact,
+            Some(CachedArtifact::Declarative(_))
+        ));
+
+        let recovered = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected cache recovery failure: {failure:?}")
+            }
+        };
+        assert_eq!(recovered.digest(), digest);
+        assert_eq!(cache.compilation_attempts, 1);
+        assert_eq!(cache.persistent_hits, 1);
+    }
+
+    #[cfg(all(not(target_os = "windows"), feature = "webkit"))]
+    #[test]
+    fn missing_persistent_cache_keeps_declarative_fallback_strong() {
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^$script"),
+        )])
+        .unwrap();
+        let mut cache = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = None;
+
+        let delivered = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected compilation failure: {failure:?}")
+            }
+        };
+        let retained = Arc::downgrade(&delivered);
+        drop(delivered);
+
+        assert!(retained.upgrade().is_some());
+        assert!(cache.catalog.is_none());
+        assert!(matches!(cache.artifact, Some(CachedArtifact::Strong(_))));
+        assert!(matches!(
+            cache.resolve(Compiler::default(), &mut persistent),
+            BlockerCompileOutcome::Compiled(_)
+        ));
+        assert_eq!(cache.compilation_attempts, 1);
+    }
+
+    #[cfg(all(not(target_os = "windows"), feature = "webkit"))]
+    #[test]
+    fn persistent_store_failure_keeps_declarative_fallback_strong() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^$script"),
+        )])
+        .unwrap();
+        let mut cache = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = PersistentArtifactCache::open(&config).ok();
+        std::fs::create_dir(root.path().join("stage.bin")).unwrap();
+
+        let delivered = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected compilation failure: {failure:?}")
+            }
+        };
+        let retained = Arc::downgrade(&delivered);
+        drop(delivered);
+
+        assert!(persistent.is_none());
+        assert!(retained.upgrade().is_some());
+        assert!(cache.catalog.is_none());
+        assert!(matches!(cache.artifact, Some(CachedArtifact::Strong(_))));
+        assert!(matches!(
+            cache.resolve(Compiler::default(), &mut persistent),
+            BlockerCompileOutcome::Compiled(_)
+        ));
+        assert_eq!(cache.compilation_attempts, 1);
+    }
+
+    #[cfg(all(not(target_os = "windows"), feature = "webkit"))]
+    #[test]
+    fn corrupt_durable_declarative_artifact_recompiles_from_retained_recipe() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^$script"),
+        )])
+        .unwrap();
+        let mut cache = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = PersistentArtifactCache::open(&config).ok();
+
+        let first = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected compilation failure: {failure:?}")
+            }
+        };
+        let digest = first.digest();
+        drop(first);
+        std::fs::write(root.path().join("current.bin"), b"corrupt").unwrap();
+
+        let recovered = match cache.resolve(Compiler::default(), &mut persistent) {
+            BlockerCompileOutcome::Compiled(rules) => rules,
+            BlockerCompileOutcome::Failed(failure) => {
+                panic!("unexpected recompilation failure: {failure:?}")
+            }
+        };
+        assert_eq!(recovered.digest(), digest);
+        assert_eq!(cache.compilation_attempts, 2);
+        assert_eq!(cache.persistent_hits, 0);
+        assert!(persistent.is_some());
+        assert!(cache.catalog.is_some());
+        assert!(matches!(
+            cache.artifact,
+            Some(CachedArtifact::Declarative(_))
+        ));
+    }
+
+    #[cfg(all(not(target_os = "windows"), feature = "webkit"))]
+    #[test]
+    fn prepared_candidate_reloads_durable_artifact_after_activation() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let worker = WorkerBlocker::start_with_policy_catalog(
+            PolicyCatalog::eager(StaticPolicyCatalog::empty()),
+            config,
+        )
+        .unwrap();
+        let source = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("candidate").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^$script"),
+        )])
+        .unwrap();
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_loads = loads.clone();
+        let candidate = PolicyCatalog::deferred_reloadable([11; 32], move || {
+            if loader_loads.fetch_add(1, Ordering::Relaxed) == 0 {
+                Ok(source.clone())
+            } else {
+                Err(BlockerCompileFailure::SourceUnavailable)
+            }
+        });
+
+        let identity = [12; 32];
+        let (prepared_tx, prepared_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.prepare_catalog(
+                identity,
+                candidate,
+                Box::new(move |outcome| prepared_tx.send(outcome).unwrap()),
+            ),
+            CatalogReplacementDispatch::Scheduled
+        );
+        assert_eq!(
+            prepared_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CatalogPreparationOutcome::Prepared
+        );
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+
+        let (stale_tx, stale_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.activate_prepared_catalog(
+                [13; 32],
+                Box::new(move |activated| stale_tx.send(activated).unwrap()),
+            ),
+            CatalogReplacementDispatch::Scheduled
+        );
+        assert!(!stale_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        let (activated_tx, activated_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.activate_prepared_catalog(
+                identity,
+                Box::new(move |activated| activated_tx.send(activated).unwrap()),
+            ),
+            CatalogReplacementDispatch::Scheduled
+        );
+        assert!(activated_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        let (compiled_tx, compiled_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.compile(
+                profile(),
+                generation(1),
+                BlockerConfig { enabled: true },
+                Box::new(move |outcome| compiled_tx.send(outcome).unwrap()),
+            ),
+            BlockerDispatch::Scheduled
+        );
+        assert!(matches!(
+            compiled_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            BlockerCompileOutcome::Compiled(_)
+        ));
+        // The candidate's sole in-memory artifact was released after prepare;
+        // activation recovered the exact checksummed persistent copy rather
+        // than consulting source material a second time.
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            worker.shutdown_until(Instant::now() + Duration::from_secs(2)),
+            BlockerShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(all(not(target_os = "windows"), feature = "webkit"))]
+    #[test]
+    fn activation_revalidates_and_preserves_a_temporarily_unrecoverable_candidate() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let worker = WorkerBlocker::start_with_policy_catalog(
+            PolicyCatalog::eager(StaticPolicyCatalog::empty()),
+            config,
+        )
+        .unwrap();
+        let source = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("candidate").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^$script"),
+        )])
+        .unwrap();
+        let source_available = Arc::new(AtomicBool::new(true));
+        let loader_available = source_available.clone();
+        let candidate = PolicyCatalog::deferred_reloadable([14; 32], move || {
+            if loader_available.load(Ordering::Acquire) {
+                Ok(source.clone())
+            } else {
+                Err(BlockerCompileFailure::SourceUnavailable)
+            }
+        });
+        let identity = [15; 32];
+        let (prepared_tx, prepared_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.prepare_catalog(
+                identity,
+                candidate,
+                Box::new(move |outcome| prepared_tx.send(outcome).unwrap()),
+            ),
+            CatalogReplacementDispatch::Scheduled
+        );
+        assert_eq!(
+            prepared_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CatalogPreparationOutcome::Prepared
+        );
+
+        // Invalidate the only persistent copy after prepare and make the exact
+        // source recipe transiently unavailable. Activation must fail without
+        // displacing either active authority or the prepared candidate.
+        std::fs::write(root.path().join("current.bin"), b"corrupt").unwrap();
+        source_available.store(false, Ordering::Release);
+        let (failed_tx, failed_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.activate_prepared_catalog(
+                identity,
+                Box::new(move |activated| failed_tx.send(activated).unwrap()),
+            ),
+            CatalogReplacementDispatch::Scheduled
+        );
+        assert!(!failed_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        source_available.store(true, Ordering::Release);
+        let (activated_tx, activated_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.activate_prepared_catalog(
+                identity,
+                Box::new(move |activated| activated_tx.send(activated).unwrap()),
+            ),
+            CatalogReplacementDispatch::Scheduled
+        );
+        assert!(activated_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        let (compiled_tx, compiled_rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            worker.compile(
+                profile(),
+                generation(1),
+                BlockerConfig { enabled: true },
+                Box::new(move |outcome| compiled_tx.send(outcome).unwrap()),
+            ),
+            BlockerDispatch::Scheduled
+        );
+        assert!(matches!(
+            compiled_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            BlockerCompileOutcome::Compiled(_)
+        ));
+        assert_eq!(
+            worker.shutdown_until(Instant::now() + Duration::from_secs(2)),
+            BlockerShutdownOutcome::Clean
+        );
     }
 }

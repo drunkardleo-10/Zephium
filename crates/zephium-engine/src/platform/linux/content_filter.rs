@@ -628,10 +628,13 @@ where
             ._bytes
             .as_ref()
             .ok_or(ContentRuleApplyFailure::NativeCompilation)?;
+        let bytes_ptr = ToGlibPtr::<*const glib::ffi::GBytes>::to_glib_none(bytes)
+            .0
+            .cast_mut();
         Ok::<_, ContentRuleApplyFailure>((
             context._store.0.as_ptr(),
             context.identifier.as_ptr(),
-            bytes.to_glib_none().0.cast_mut(),
+            bytes_ptr,
             context._cancellable.to_glib_none().0,
         ))
     }));

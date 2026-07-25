@@ -61,12 +61,24 @@ fn take_pwstr_bounded(
     max_utf16_units: usize,
     max_utf8_bytes: usize,
 ) -> Option<String> {
+    let mut value = String::new();
+    take_pwstr_bounded_into(source, max_utf16_units, max_utf8_bytes, &mut value)?;
+    Some(value)
+}
+
+fn take_pwstr_bounded_into(
+    source: PWSTR,
+    max_utf16_units: usize,
+    max_utf8_bytes: usize,
+    value: &mut String,
+) -> Option<()> {
     // WebView2 owns this out-string via CoTaskMemAlloc. The guard frees it on
     // success and every rejection without an unbounded intermediate String.
     let source = webview2_com::CoTaskMemPWSTR::from(source);
     let pointer = source.as_ref().as_pcwstr().as_ptr();
     if pointer.is_null() {
-        return Some(String::new());
+        value.clear();
+        return Some(());
     }
     let mut length = 0;
     while length <= max_utf16_units {
@@ -84,11 +96,12 @@ fn take_pwstr_bounded(
                     return None;
                 }
             }
-            let mut value = String::with_capacity(utf8_bytes);
+            value.clear();
+            value.try_reserve(utf8_bytes).ok()?;
             for character in char::decode_utf16(units.iter().copied()) {
                 value.push(character.unwrap_or(char::REPLACEMENT_CHARACTER));
             }
-            return Some(value);
+            return Some(());
         }
         length += 1;
     }

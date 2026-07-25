@@ -903,20 +903,23 @@ impl EngineHost {
         // because WebKit keys registrations by identifier. Promote the exact
         // generation in place instead; this also avoids needless per-view COM
         // and WebKit work for unchanged maintained-list refreshes.
-        let unchanged = self
-            .content_policies
-            .get(&profile)
-            .and_then(|state| state.applied.as_ref())
-            .is_some_and(|applied| {
-                crate::platform::imp::same_content_policy(&applied.native, &native)
-            });
-        if unchanged {
+        let retained_native = retained_equivalent_native_policy(
+            self.content_policies
+                .get(&profile)
+                .and_then(|state| state.applied.as_ref()),
+            &native,
+        );
+        if let Some(retained_native) = retained_native {
             let Some(state) = self.content_policies.get_mut(&profile) else {
                 return;
             };
             state.applied = Some(AppliedContentPolicy {
                 generation,
-                native,
+                // Existing WebView2 handlers capture this object. Retaining it
+                // also makes future views share the exact same runtime
+                // diagnostics counters instead of splitting one digest across
+                // old and newly constructed policy objects.
+                native: retained_native,
                 #[cfg(not(target_os = "windows"))]
                 digest: native_digest,
             });
@@ -1336,6 +1339,16 @@ fn failed_settlement(
         },
         None => ContentRuleSettlement::Unavailable { failure },
     }
+}
+
+fn retained_equivalent_native_policy(
+    applied: Option<&AppliedContentPolicy>,
+    candidate: &std::rc::Rc<crate::platform::imp::NativeContentPolicy>,
+) -> Option<std::rc::Rc<crate::platform::imp::NativeContentPolicy>> {
+    applied.and_then(|applied| {
+        crate::platform::imp::same_content_policy(&applied.native, candidate)
+            .then(|| applied.native.clone())
+    })
 }
 
 fn content_policy_generations(
@@ -2000,7 +2013,7 @@ mod tests {
             "/src/host/content_rules.rs"
         ));
         let equivalence = source
-            .find("same_content_policy")
+            .find("let retained_native = retained_equivalent_native_policy")
             .expect("native artifact equivalence gate disappeared");
         let cohort = source
             .find("let mut registrations = Vec::new();")
@@ -2009,6 +2022,23 @@ mod tests {
             equivalence < cohort,
             "identical named WebKit artifacts must bypass add-then-remove replacement"
         );
+    }
+
+    #[test]
+    fn identical_promotion_retains_the_installed_native_policy_object() {
+        let installed = std::rc::Rc::new(crate::platform::imp::NativeContentPolicy::AllowAll);
+        let candidate = std::rc::Rc::new(crate::platform::imp::NativeContentPolicy::AllowAll);
+        let applied = AppliedContentPolicy {
+            generation: ContentPolicyGeneration::new(1).unwrap(),
+            native: installed.clone(),
+            #[cfg(not(target_os = "windows"))]
+            digest: None,
+        };
+
+        let retained = retained_equivalent_native_policy(Some(&applied), &candidate)
+            .expect("digest-equivalent promotion must retain the installed policy");
+        assert!(std::rc::Rc::ptr_eq(&retained, &installed));
+        assert!(!std::rc::Rc::ptr_eq(&retained, &candidate));
     }
 
     #[test]

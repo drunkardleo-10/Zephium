@@ -13,7 +13,9 @@ use super::profiles::{
     profile_scoped_value, profile_value_is_isolated, MAX_PROFILE_PERSISTENCE_BINDINGS,
 };
 use super::scripts::{DISCARD_SAFETY_BOOTSTRAP_JS, EXTRACT_HTML_BOOTSTRAP_JS};
-use super::{EngineHost, ObservedView, Spare};
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+use super::Spare;
+use super::{EngineHost, ObservedView};
 
 use std::cell::Cell;
 #[cfg(target_os = "windows")]

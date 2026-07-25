@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -39,6 +40,13 @@ const FILTER_CONTEXTS: [COREWEBVIEW2_WEB_RESOURCE_CONTEXT; 8] = [
 const FILTER_REGISTRATION_COUNT: usize = FILTER_PATTERNS.len() * FILTER_CONTEXTS.len();
 const FILTER_SOURCE_KINDS: COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS =
     COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT;
+
+thread_local! {
+    /// WebResourceRequested is delivered on the WebView's apartment thread.
+    /// Reuse bounded UTF-8 capacity there, but never hold this borrow across
+    /// COM response creation because a native call may pump re-entrant work.
+    static REQUEST_BUFFERS: RefCell<RequestBuffers> = RefCell::new(RequestBuffers::default());
+}
 
 fn filter_registration(index: usize) -> Option<(PCWSTR, COREWEBVIEW2_WEB_RESOURCE_CONTEXT)> {
     if index >= FILTER_REGISTRATION_COUNT {
@@ -191,13 +199,7 @@ pub(crate) fn install_on_view(
             let Some(args) = args else {
                 return Ok(());
             };
-            let Some(request) = extract_request(&args) else {
-                return Ok(());
-            };
-            let Some(request) = request.as_borrowed() else {
-                return Ok(());
-            };
-            if callback_policy.decide(&request) != NetworkDecision::Block {
+            if decide_observed_request(&args, callback_policy.as_ref()) != NetworkDecision::Block {
                 return Ok(());
             }
             let Ok(response) = (unsafe {
@@ -255,29 +257,40 @@ pub(crate) fn install_on_view(
     Ok(registration)
 }
 
-struct ObservedRequest {
+#[derive(Default)]
+struct RequestBuffers {
     url: String,
     method: String,
-    resource_type: NetworkResourceType,
 }
 
-impl ObservedRequest {
-    fn as_borrowed(&self) -> Option<NetworkRequest<'_>> {
-        NetworkRequest::source_independent(
-            &self.url,
-            &self.method,
-            self.resource_type,
-            // The registration admits only the DOCUMENT source kind. Avoid a
-            // redundant per-request interface cast and COM query on this
-            // synchronous hot path.
-            NetworkRequestSourceKind::Document,
-        )
-    }
-}
-
-fn extract_request(
+fn decide_observed_request(
     args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs,
-) -> Option<ObservedRequest> {
+    policy: &dyn NetworkRequestPolicy,
+) -> NetworkDecision {
+    REQUEST_BUFFERS
+        .try_with(|buffers| {
+            let mut buffers = buffers.try_borrow_mut().ok()?;
+            let resource_type = extract_request_into(args, &mut buffers)?;
+            let request = NetworkRequest::source_independent(
+                &buffers.url,
+                &buffers.method,
+                resource_type,
+                // The registration admits only the DOCUMENT source kind. Avoid a
+                // redundant per-request interface cast and COM query on this
+                // synchronous hot path.
+                NetworkRequestSourceKind::Document,
+            )?;
+            Some(policy.decide(&request))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(NetworkDecision::Allow)
+}
+
+fn extract_request_into(
+    args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs,
+    buffers: &mut RequestBuffers,
+) -> Option<NetworkResourceType> {
     let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
     unsafe { args.ResourceContext(&mut context) }.ok()?;
     // Defend against a runtime violating the exact filter tuple before
@@ -287,17 +300,19 @@ fn extract_request(
     let native_request = unsafe { args.Request() }.ok()?;
     let mut uri = PWSTR::null();
     unsafe { native_request.Uri(&mut uri) }.ok()?;
-    let uri = super::take_pwstr_bounded(
+    super::take_pwstr_bounded_into(
         uri,
         MAX_NETWORK_REQUEST_URL_BYTES,
         MAX_NETWORK_REQUEST_URL_BYTES,
+        &mut buffers.url,
     )?;
     let mut method = PWSTR::null();
     unsafe { native_request.Method(&mut method) }.ok()?;
-    let method = super::take_pwstr_bounded(
+    super::take_pwstr_bounded_into(
         method,
         MAX_NETWORK_REQUEST_METHOD_BYTES,
         MAX_NETWORK_REQUEST_METHOD_BYTES,
+        &mut buffers.method,
     )?;
 
     // WebView2 does not distinguish main documents, iframes, and some worker
@@ -306,11 +321,7 @@ fn extract_request(
     // therefore intercepts only contexts with exact native classifications;
     // compiler coverage reports the resulting resource- and source-kind
     // dimensions separately.
-    Some(ObservedRequest {
-        url: uri,
-        method,
-        resource_type,
-    })
+    Some(resource_type)
 }
 
 fn resource_type(context: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> Option<NetworkResourceType> {
@@ -394,14 +405,13 @@ mod tests {
 
     #[test]
     fn exactly_typed_requests_do_not_depend_on_top_level_source() {
-        let request = ObservedRequest {
-            url: "https://cdn.example/script.js".to_owned(),
-            method: "GET".to_owned(),
-            resource_type: NetworkResourceType::Script,
-        };
-        let request = request
-            .as_borrowed()
-            .expect("exactly typed request lost source-independent matching");
+        let request = NetworkRequest::source_independent(
+            "https://cdn.example/script.js",
+            "GET",
+            NetworkResourceType::Script,
+            NetworkRequestSourceKind::Document,
+        )
+        .expect("exactly typed request lost source-independent matching");
         assert_eq!(request.attribution(), NetworkAttribution::SourceIndependent);
         assert_eq!(request.source_url(), None);
     }
@@ -453,13 +463,49 @@ mod tests {
     }
 
     #[test]
+    fn replacement_filter_cohort_uses_webview2s_documented_reference_count_contract() {
+        // Microsoft specifies that adding an identical filter multiple times
+        // requires the same number of removals before it becomes ineffective:
+        // https://learn.microsoft.com/dotnet/api/microsoft.web.webview2.core.corewebview2.removewebresourcerequestedfilter
+        //
+        // EngineHost installs the complete replacement registration before
+        // retiring the prior one. Pin both sides here: every registration owns
+        // one exact add/remove per tuple, so retiring the old cohort leaves the
+        // replacement cohort's reference effective.
+        assert_eq!(FILTER_REGISTRATION_COUNT, 16);
+        for index in 0..FILTER_REGISTRATION_COUNT {
+            assert!(filter_registration(index).is_some());
+        }
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/content_filter.rs"
+        ));
+        let installation = source
+            .split_once("pub(crate) fn install_on_view(")
+            .expect("content-policy installation disappeared")
+            .1
+            .split_once("struct RequestBuffers")
+            .expect("content-policy installation boundary disappeared")
+            .0;
+        assert!(installation.contains("AddWebResourceRequestedFilterWithRequestSourceKinds"));
+        let cleanup = source
+            .split_once("fn cleanup(&mut self)")
+            .expect("content-policy cleanup disappeared")
+            .1
+            .split_once("impl Drop for ContentPolicyRegistration")
+            .expect("content-policy cleanup boundary disappeared")
+            .0;
+        assert!(cleanup.contains("RemoveWebResourceRequestedFilterWithRequestSourceKinds"));
+    }
+
+    #[test]
     fn unexpected_context_is_rejected_before_request_string_allocation() {
         let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/platform/windows/content_filter.rs"
         ));
         let extraction = source
-            .split_once("fn extract_request(")
+            .split_once("fn extract_request_into(")
             .expect("request extraction disappeared")
             .1
             .split_once("fn resource_type(")

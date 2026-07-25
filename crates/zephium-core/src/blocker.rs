@@ -435,6 +435,36 @@ pub enum NetworkDecision {
     Block,
 }
 
+/// Volatile, URL-free aggregate health of one immutable runtime matcher.
+///
+/// Counters saturate at `u64::MAX`, are never persisted, and are intentionally
+/// limited to fail-open classes needed to assess matcher capacity. They do not
+/// contain profile IDs, origins, URLs, rule identities, or request metadata.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkPolicyDiagnostics {
+    pub total_decisions: u64,
+    pub candidate_budget_exhausted: u64,
+    pub matcher_unavailable: u64,
+    pub matcher_unprepared: u64,
+    pub attribution_unavailable: u64,
+    pub evaluation_errors: u64,
+}
+
+impl NetworkPolicyDiagnostics {
+    /// Every exceptional class is mutually exclusive and must be a subset of
+    /// the decisions observed by the same matcher. Saturating addition keeps
+    /// the invariant meaningful after the counters themselves saturate.
+    pub const fn is_consistent(self) -> bool {
+        let exceptional = self
+            .candidate_budget_exhausted
+            .saturating_add(self.matcher_unavailable)
+            .saturating_add(self.matcher_unprepared)
+            .saturating_add(self.attribution_unavailable)
+            .saturating_add(self.evaluation_errors);
+        exceptional <= self.total_decisions
+    }
+}
+
 /// Synchronous request policy used only by native adapters with a trustworthy
 /// interception callback.
 ///
@@ -442,6 +472,15 @@ pub enum NetworkDecision {
 /// filesystem, actor, UI, and network dependencies.
 pub trait NetworkRequestPolicy: Send + Sync {
     fn decide(&self, request: &NetworkRequest<'_>) -> NetworkDecision;
+
+    /// Returns a lock-free snapshot of volatile aggregate matcher health.
+    ///
+    /// Policies which do not instrument runtime matching retain the explicit
+    /// all-zero default. Native callbacks must not dispatch work merely to
+    /// publish these diagnostics.
+    fn diagnostics(&self) -> NetworkPolicyDiagnostics {
+        NetworkPolicyDiagnostics::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -547,6 +586,15 @@ impl ContentRules {
 
     pub const fn payload(&self) -> &ContentRulesPayload {
         &self.payload
+    }
+
+    /// Returns the immutable runtime policy for a native adapter or a
+    /// non-owning diagnostics observer.
+    pub fn runtime_policy(&self) -> Option<&Arc<dyn NetworkRequestPolicy>> {
+        match &self.payload {
+            ContentRulesPayload::Runtime(policy) => Some(policy),
+            ContentRulesPayload::AllowAll | ContentRulesPayload::Declarative { .. } => None,
+        }
     }
 
     pub const fn enabled(&self) -> bool {
@@ -782,6 +830,33 @@ mod tests {
             platform_source_kind_approximated_rules: 1,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+        }
+        .is_consistent());
+    }
+
+    #[test]
+    fn runtime_diagnostics_require_exceptional_counts_to_fit_total() {
+        assert!(NetworkPolicyDiagnostics {
+            total_decisions: 5,
+            candidate_budget_exhausted: 1,
+            matcher_unavailable: 1,
+            matcher_unprepared: 1,
+            attribution_unavailable: 1,
+            evaluation_errors: 1,
+        }
+        .is_consistent());
+        assert!(!NetworkPolicyDiagnostics {
+            total_decisions: 1,
+            candidate_budget_exhausted: 1,
+            matcher_unavailable: 1,
+            ..NetworkPolicyDiagnostics::default()
+        }
+        .is_consistent());
+        assert!(NetworkPolicyDiagnostics {
+            total_decisions: u64::MAX,
+            candidate_budget_exhausted: u64::MAX,
+            matcher_unavailable: 1,
+            ..NetworkPolicyDiagnostics::default()
         }
         .is_consistent());
     }

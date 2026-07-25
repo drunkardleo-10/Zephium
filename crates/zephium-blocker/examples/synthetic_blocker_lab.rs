@@ -25,6 +25,29 @@ struct Config {
     target: SelectedTarget,
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeAttribution {
+    Exact,
+    SourceIndependent,
+}
+
+impl RuntimeAttribution {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::SourceIndependent => "source_independent",
+        }
+    }
+}
+
+struct RuntimeMeasurements {
+    blocked: usize,
+    allowed: usize,
+    candidate_budget_exhausted: usize,
+    other_errors: usize,
+    samples: Vec<u128>,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -157,6 +180,31 @@ fn measure_runtime(policy: &str, rule_count: usize, request_count: usize) -> Res
         .map_err(|error| format!("runtime compilation failed: {error}"))?;
     let compile_ns = started.elapsed().as_nanos();
     let request_set = synthetic_requests(rule_count.clamp(1, 4_096));
+    for attribution in [
+        RuntimeAttribution::Exact,
+        RuntimeAttribution::SourceIndependent,
+    ] {
+        let measurements =
+            measure_runtime_requests(&compiled, &request_set, request_count, attribution)?;
+        print_runtime_measurement(
+            &compiled,
+            policy,
+            rule_count,
+            request_count,
+            compile_ns,
+            attribution,
+            &measurements,
+        );
+    }
+    Ok(())
+}
+
+fn measure_runtime_requests(
+    compiled: &zephium_blocker::CompiledRules,
+    request_set: &[(String, String, ResourceType)],
+    request_count: usize,
+    attribution: RuntimeAttribution,
+) -> Result<RuntimeMeasurements, String> {
     let mut samples = Vec::with_capacity(request_count);
     let mut blocked = 0usize;
     let mut allowed = 0usize;
@@ -164,9 +212,18 @@ fn measure_runtime(policy: &str, rule_count: usize, request_count: usize) -> Res
     let mut other_errors = 0usize;
     for index in 0..request_count {
         let (url, source_url, resource) = &request_set[index % request_set.len()];
-        let request = NetworkRequest::new(url, source_url, *resource, RequestMethod::Get);
         let started = Instant::now();
-        let result = compiled.evaluate(request);
+        let result = match attribution {
+            RuntimeAttribution::Exact => compiled.evaluate(NetworkRequest::new(
+                url,
+                source_url,
+                *resource,
+                RequestMethod::Get,
+            )),
+            RuntimeAttribution::SourceIndependent => compiled.evaluate_source_independent(
+                NetworkRequest::source_independent(url, *resource, RequestMethod::Get),
+            ),
+        };
         samples.push(started.elapsed().as_nanos());
         match result {
             Ok(decision) if decision.action() == NetworkAction::Block => blocked += 1,
@@ -178,33 +235,61 @@ fn measure_runtime(policy: &str, rule_count: usize, request_count: usize) -> Res
     let errors = candidate_budget_exhausted.saturating_add(other_errors);
     if blocked == 0 || allowed.saturating_add(errors) == 0 || other_errors != 0 {
         return Err(format!(
-            "runtime semantic probe was not representative: blocked={blocked}, allowed={allowed}, \
-             candidate_budget_exhausted={candidate_budget_exhausted}, other_errors={other_errors}"
+            "runtime {} semantic probe was not representative: blocked={blocked}, \
+             allowed={allowed}, candidate_budget_exhausted={candidate_budget_exhausted}, \
+             other_errors={other_errors}",
+            attribution.label(),
         ));
     }
     samples.sort_unstable();
+    Ok(RuntimeMeasurements {
+        blocked,
+        allowed,
+        candidate_budget_exhausted,
+        other_errors,
+        samples,
+    })
+}
+
+fn print_runtime_measurement(
+    compiled: &zephium_blocker::CompiledRules,
+    policy: &str,
+    rule_count: usize,
+    request_count: usize,
+    compile_ns: u128,
+    attribution: RuntimeAttribution,
+    measurements: &RuntimeMeasurements,
+) {
     let report = compiled.report();
+    let errors = measurements
+        .candidate_budget_exhausted
+        .saturating_add(measurements.other_errors);
     println!(
-        "{{\"target\":\"runtime\",\"synthetic_namespace\":\".invalid\",\
+        "{{\"target\":\"runtime\",\"attribution\":\"{}\",\
+         \"synthetic_namespace\":\".invalid\",\
          \"rules_requested\":{rule_count},\"source_bytes\":{},\
          \"candidate_rules\":{},\"accepted_rules\":{},\"rejected_rules\":{},\
          \"policy_digest\":\"{}\",\"compile_ns\":{compile_ns},\
-         \"requests\":{request_count},\"blocked\":{blocked},\"allowed\":{allowed},\
+         \"requests\":{request_count},\"blocked\":{},\"allowed\":{},\
          \"errors\":{errors},\
-         \"candidate_budget_exhausted\":{candidate_budget_exhausted},\
-         \"other_errors\":{other_errors},\"match_ns_p50\":{},\"match_ns_p95\":{},\
+         \"candidate_budget_exhausted\":{},\
+         \"other_errors\":{},\"match_ns_p50\":{},\"match_ns_p95\":{},\
          \"match_ns_p99\":{},\"match_ns_max\":{}}}",
+        attribution.label(),
         policy.len(),
         report.candidate_rules(),
         report.accepted_rules(),
         report.rejected_rules(),
         compiled.digest(),
-        percentile(&samples, 50),
-        percentile(&samples, 95),
-        percentile(&samples, 99),
-        samples.last().copied().unwrap_or(0),
+        measurements.blocked,
+        measurements.allowed,
+        measurements.candidate_budget_exhausted,
+        measurements.other_errors,
+        percentile(&measurements.samples, 50),
+        percentile(&measurements.samples, 95),
+        percentile(&measurements.samples, 99),
+        measurements.samples.last().copied().unwrap_or(0),
     );
-    Ok(())
 }
 
 fn measure_webkit(policy: &str, rule_count: usize) -> Result<(), String> {
