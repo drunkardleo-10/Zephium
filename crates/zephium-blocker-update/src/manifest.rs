@@ -15,7 +15,7 @@ pub const CATALOG_MANIFEST_TARGET: &str = "zephium-filter-catalog-v1.json";
 pub const CATALOG_MANIFEST_VERSION: u32 = 1;
 const MAX_LICENSE_FIELD_BYTES: usize = 2 * 1024;
 const MAX_SOURCE_URL_BYTES: usize = 4 * 1024;
-const MAX_TARGET_NAME_BYTES: usize = 512;
+const MAX_TARGET_NAME_BYTES: usize = 128;
 const MAX_PACKAGE_LIFETIME_SECONDS: u64 = 93 * 24 * 60 * 60;
 const MAX_FUTURE_CLOCK_SKEW_SECONDS: u64 = 24 * 60 * 60;
 const MIN_PACKAGE_REMAINING_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
@@ -111,6 +111,7 @@ impl CatalogManifest {
         Ok(manifest)
     }
 
+    #[cfg(feature = "tuf")]
     pub(crate) fn parse_cached(
         bytes: &[u8],
         limits: UpdateLimits,
@@ -122,11 +123,12 @@ impl CatalogManifest {
     /// Parses an exact canonical manifest embedded in a signed application
     /// release.
     ///
-    /// Release assets remain usable as an explicitly stale fallback after
-    /// their source freshness window ends, so this validates the complete
-    /// structural, resource, and license policy without applying the online
-    /// candidate's current-time admission check. Callers must still expose
-    /// freshness from [`CatalogManifest::expires_unix`].
+    /// A signed release remains authoritative after the sources' recommended
+    /// refresh interval ends, so this validates the complete structural,
+    /// resource, and license policy without applying the online candidate's
+    /// current-time admission check. Callers must expose
+    /// [`CatalogManifest::expires_unix`] as refresh advice, not as release
+    /// policy invalidation.
     pub fn parse_release_seed(
         bytes: &[u8],
         limits: UpdateLimits,
@@ -297,17 +299,17 @@ fn validate_bounded_text(value: &str) -> Result<(), ManifestError> {
 }
 
 fn validate_target_name(value: &str) -> Result<(), ManifestError> {
-    if value.is_empty()
-        || value.len() > MAX_TARGET_NAME_BYTES
-        || value == CATALOG_MANIFEST_TARGET
-        || value.starts_with('.')
-        || value.contains('\\')
-        || value.contains('%')
-    {
+    if value.is_empty() || value.len() > MAX_TARGET_NAME_BYTES || value == CATALOG_MANIFEST_TARGET {
         return Err(ManifestError::TargetName);
     }
-    let name = tough::TargetName::new(value).map_err(|_| ManifestError::TargetName)?;
-    if name.raw() != name.resolved() || name.raw() != value {
+    let bytes = value.as_bytes();
+    let endpoint = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    if !endpoint(bytes[0])
+        || !endpoint(bytes[bytes.len() - 1])
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
+    {
         return Err(ManifestError::TargetName);
     }
     Ok(())
@@ -399,4 +401,36 @@ pub enum ManifestError {
     /// Verified sources exceed the compiler catalog boundary.
     #[error("verified sources cannot form a compiler catalog")]
     Catalog,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_target_name;
+
+    #[test]
+    fn source_target_names_are_single_segment_and_canonical() {
+        for valid in ["easylist.txt", "easyprivacy-v2.txt", "list_01.dat"] {
+            assert_eq!(validate_target_name(valid), Ok(()), "{valid}");
+        }
+        for invalid in [
+            "",
+            ".hidden",
+            "trailing.",
+            "Uppercase.txt",
+            "nested/list.txt",
+            r"nested\list.txt",
+            "../list.txt",
+            "list%2etxt",
+            "white space.txt",
+            "zephium-filter-catalog-v1.json",
+        ] {
+            assert!(validate_target_name(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn source_target_name_length_is_bounded() {
+        assert!(validate_target_name(&format!("a{}z", "x".repeat(126))).is_ok());
+        assert!(validate_target_name(&format!("a{}z", "x".repeat(127))).is_err());
+    }
 }

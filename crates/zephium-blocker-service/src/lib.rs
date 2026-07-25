@@ -15,16 +15,20 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(any(feature = "tuf", test))]
+use zephium_blocker::PolicyCatalog;
 use zephium_blocker::{
     CatalogPreparationOutcome, CatalogReplacementDispatch, CompiledArtifactCacheConfig,
-    PolicyCatalog, StaticPolicyCatalog, WorkerBlocker,
+    StaticPolicyCatalog, WorkerBlocker,
 };
+#[cfg(feature = "tuf")]
+use zephium_blocker_update::RepositoryConfig;
 use zephium_blocker_update::{
     ActivatedCatalog, CandidateCommitDispatch, CandidateCommitOutcome, CandidateRejectDispatch,
     CandidateRejectOutcome, CandidateRejectionReason, CandidateRepairDispatch,
     CandidateRepairOutcome, CatalogAvailability, CatalogIdentity, CatalogUpdateWorker, FailureKind,
-    RefreshAdmission, RepositoryConfig, ShutdownOutcome as UpdateShutdownOutcome, StatusSnapshot,
-    UnavailableReason, UpdateStatus,
+    RefreshAdmission, ShutdownOutcome as UpdateShutdownOutcome, StatusSnapshot, UnavailableReason,
+    UpdateStatus,
 };
 use zephium_core::blocker::{BlockerConfig, ContentPolicyGeneration};
 use zephium_core::ids::ProfileId;
@@ -39,6 +43,7 @@ pub use release_seed::{
     EmbeddedReleaseAsset, ReleaseCatalogSeed, ReleaseSeedAssetManifest, ReleaseSeedCompression,
     ReleaseSeedError, ReleaseSeedManifest,
 };
+pub use zephium_blocker_update::{LicensePolicy, UpdateLimits};
 
 const NORMAL_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const EXPIRY_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -76,6 +81,7 @@ pub struct ManagedBlocker {
 enum SupplyMode {
     Unconfigured,
     ReleaseSeed,
+    #[cfg(feature = "tuf")]
     TufRepository,
 }
 
@@ -280,6 +286,12 @@ impl ManagedBlocker {
 
     /// Starts the authenticated updater, recovers its durable current package,
     /// and makes that exact catalog authoritative before returning.
+    ///
+    /// This low-level repository-only constructor exists for updater
+    /// verification. A future desktop integration must preserve the embedded
+    /// release seed as its offline baseline and admit only a monotonic,
+    /// provenance-carrying transition to repository authority.
+    #[cfg(feature = "tuf")]
     pub fn with_repository(
         repository: RepositoryConfig,
         artifact_cache: CompiledArtifactCacheConfig,
@@ -1286,6 +1298,7 @@ impl ServiceState {
         }
     }
 
+    #[cfg(feature = "tuf")]
     fn recompute_schedule(&mut self, update: &StatusSnapshot, now: u64) {
         self.observed_update = None;
         self.observe_update(update, now);
@@ -1334,21 +1347,21 @@ impl ServiceState {
             self.fail(BlockerCatalogFailure::Internal, true);
             return;
         };
-        let stale = identity.expires_unix <= now;
+        // Source currency is advisory, but it must still be monotonic for one
+        // immutable bundled identity. A wall-clock rollback cannot make an
+        // already-observed refresh recommendation disappear.
+        let source_refresh_due = self.snapshot.source_refresh_due || identity.expires_unix <= now;
         let mut next = BlockerCatalogSnapshot {
             revision: 1,
-            phase: if stale {
-                BlockerCatalogPhase::Stale
-            } else {
-                BlockerCatalogPhase::Fresh
-            },
+            phase: BlockerCatalogPhase::Fresh,
             enabled_policy_terminal: self.enabled_policy_terminal,
             package_revision: Some(identity.revision),
             package_manifest_sha256: Some(identity.manifest_sha256),
             package_provenance: Some(BlockerCatalogProvenance::ReleaseBundle),
             package_created_unix: Some(identity.created_unix),
             package_expires_unix: Some(identity.expires_unix),
-            package_stale: Some(stale),
+            package_stale: Some(false),
+            source_refresh_due,
             source_count: Some(identity.source_count),
             source_bytes: Some(identity.source_bytes),
             candidate_revision: None,
@@ -1756,6 +1769,7 @@ fn snapshot_from_update_at(
         package_created_unix: current.map(|identity| identity.created_unix),
         package_expires_unix: current.map(|identity| identity.expires_unix),
         package_stale,
+        source_refresh_due: current.is_some_and(|identity| identity.expires_unix <= now),
         source_count: current.map(|identity| identity.source_count),
         source_bytes: current.map(|identity| identity.source_bytes),
         candidate_revision: candidate.map(|identity| identity.revision),
@@ -1868,6 +1882,7 @@ fn now_unix() -> u64 {
         .map_or(u64::MAX, |duration| duration.as_secs())
 }
 
+#[cfg(feature = "tuf")]
 fn refresh_jitter() -> Duration {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -2164,6 +2179,24 @@ mod tests {
             source_material_repair: None,
             automatic_source_material_repair: None,
         }
+    }
+
+    #[test]
+    fn bundled_source_refresh_due_never_invalidates_release_authority() {
+        let current = identity(4, 4);
+        let mut state = state_with_installed(current.clone());
+        state.publish_release_seed(current.expires_unix);
+
+        assert_eq!(state.snapshot.phase, BlockerCatalogPhase::Fresh);
+        assert_eq!(state.snapshot.package_stale, Some(false));
+        assert!(state.snapshot.source_refresh_due);
+        assert_eq!(state.snapshot.package_revision, Some(current.revision));
+        assert_eq!(state.snapshot.installed_revision, Some(current.revision));
+        assert!(!state.snapshot.refresh_supported);
+
+        state.publish_release_seed(current.expires_unix - 1);
+        assert!(state.snapshot.source_refresh_due);
+        assert_eq!(state.snapshot.phase, BlockerCatalogPhase::Fresh);
     }
 
     fn refreshing_status(current: Option<CatalogIdentity>) -> StatusSnapshot {
@@ -2951,6 +2984,7 @@ mod tests {
         );
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Refreshing);
         assert_eq!(snapshot.package_stale, Some(true));
+        assert!(snapshot.source_refresh_due);
     }
 
     #[test]
@@ -2974,5 +3008,7 @@ mod tests {
         assert_eq!(before.package_stale, Some(false));
         assert_eq!(after.phase, BlockerCatalogPhase::Stale);
         assert_eq!(after.package_stale, Some(true));
+        assert!(!before.source_refresh_due);
+        assert!(after.source_refresh_due);
     }
 }

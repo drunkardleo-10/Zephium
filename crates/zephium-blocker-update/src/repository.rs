@@ -151,7 +151,7 @@ async fn verify_loaded_repository(
         return Err(VerificationError::Metadata);
     }
     let manifest_name =
-        TargetName::new(CATALOG_MANIFEST_TARGET).map_err(|_| VerificationError::Manifest)?;
+        exact_target_name(CATALOG_MANIFEST_TARGET).ok_or(VerificationError::Manifest)?;
     let manifest_metadata = repository
         .all_targets()
         .find_map(|(name, target)| (name == &manifest_name).then_some(target))
@@ -213,8 +213,7 @@ async fn verify_loaded_repository(
 
     let mut total_bytes = 0u64;
     for source in &manifest.sources {
-        let target_name =
-            TargetName::new(source.target.clone()).map_err(|_| VerificationError::Target)?;
+        let target_name = exact_target_name(&source.target).ok_or(VerificationError::Target)?;
         let metadata = repository
             .all_targets()
             .find_map(|(name, target)| (name == &target_name).then_some(target))
@@ -281,8 +280,8 @@ async fn verify_loaded_repository(
                 {
                     continue;
                 }
-                let target_name = TargetName::new(source.target.clone())
-                    .map_err(|_| VerificationError::Target)?;
+                let target_name =
+                    exact_target_name(&source.target).ok_or(VerificationError::Target)?;
                 let bytes = read_target(repository, &target_name)
                     .await?
                     .ok_or(VerificationError::Target)?;
@@ -301,8 +300,8 @@ async fn verify_loaded_repository(
         crate::storage::CatalogIdentityDisposition::New => {
             let mut source_contents = Vec::with_capacity(manifest.sources.len());
             for source in &manifest.sources {
-                let target_name = TargetName::new(source.target.clone())
-                    .map_err(|_| VerificationError::Target)?;
+                let target_name =
+                    exact_target_name(&source.target).ok_or(VerificationError::Target)?;
                 let expected_digest =
                     decode_sha256(&source.sha256).map_err(|_| VerificationError::Target)?;
                 let bytes = read_target_cached(
@@ -345,8 +344,8 @@ async fn verify_loaded_repository(
             }
             let mut source_contents = Vec::with_capacity(manifest.sources.len());
             for source in &manifest.sources {
-                let target_name = TargetName::new(source.target.clone())
-                    .map_err(|_| VerificationError::Target)?;
+                let target_name =
+                    exact_target_name(&source.target).ok_or(VerificationError::Target)?;
                 let expected_digest =
                     decode_sha256(&source.sha256).map_err(|_| VerificationError::Target)?;
                 // Repair is deliberately a one-shot full package read. It
@@ -397,6 +396,11 @@ pub(crate) async fn verify_candidate_repair_at(
     now_unix: u64,
 ) -> Result<VerifiedCatalog, VerificationError> {
     verify_repository_with_time(config, prepared, store, Some(now_unix), Some(expected)).await
+}
+
+fn exact_target_name(value: &str) -> Option<TargetName> {
+    let name = TargetName::new(value).ok()?;
+    (name.raw() == value && name.resolved() == value).then_some(name)
 }
 
 async fn read_target_cached(

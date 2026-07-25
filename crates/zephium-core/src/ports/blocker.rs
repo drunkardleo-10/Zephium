@@ -127,9 +127,18 @@ pub struct BlockerCatalogSnapshot {
     pub package_provenance: Option<BlockerCatalogProvenance>,
     pub package_created_unix: Option<u64>,
     pub package_expires_unix: Option<u64>,
-    /// Freshness of the retained current package even while a refresh is in
-    /// progress or its last attempt failed.
+    /// Whether the authenticated package authority itself is stale.
+    ///
+    /// This is meaningful for refreshable repository packages. A signed
+    /// application release remains valid authority for its embedded package,
+    /// independently from the upstream lists' recommended update cadence.
     pub package_stale: Option<bool>,
+    /// The source publisher's recommended refresh time has elapsed.
+    ///
+    /// This is advisory for release-bundled packages and must not downgrade
+    /// otherwise healthy protection. Repository mode can act on it through
+    /// an authenticated refresh.
+    pub source_refresh_due: bool,
     pub source_count: Option<u32>,
     pub source_bytes: Option<u64>,
     /// Authenticated package which has not yet become durable current
@@ -189,6 +198,7 @@ impl BlockerCatalogSnapshot {
             package_created_unix: None,
             package_expires_unix: None,
             package_stale: None,
+            source_refresh_due: false,
             source_count: None,
             source_bytes: None,
             candidate_revision: None,

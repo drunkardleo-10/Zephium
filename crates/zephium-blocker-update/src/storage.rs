@@ -1591,12 +1591,7 @@ fn create_private_directory(path: &Path) -> Result<(), StoreError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let parent = path.parent().ok_or(StoreError::UnsafePath)?;
             validate_directory_chain(parent, false)?;
-            let mut builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
+            let builder = private_directory_builder();
             builder.create(path).map_err(|_| StoreError::Io)?;
             sync_directory(parent)?;
             validate_directory_chain(path, true)
@@ -1611,12 +1606,7 @@ fn create_child_directory(parent: &Path, name: &str) -> Result<PathBuf, StoreErr
     match fs::symlink_metadata(&path) {
         Ok(_) => validate_private_directory(&path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
+            let builder = private_directory_builder();
             builder.create(&path).map_err(|_| StoreError::Io)?;
             sync_directory(parent)?;
             validate_private_directory(&path)?;
@@ -1624,6 +1614,21 @@ fn create_child_directory(parent: &Path, name: &str) -> Result<PathBuf, StoreErr
         Err(_) => return Err(StoreError::Io),
     }
     Ok(path)
+}
+
+fn private_directory_builder() -> fs::DirBuilder {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    }
+    #[cfg(not(unix))]
+    {
+        fs::DirBuilder::new()
+    }
 }
 
 fn validate_directory(path: &Path) -> Result<(), StoreError> {

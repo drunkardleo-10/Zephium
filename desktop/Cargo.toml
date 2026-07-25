@@ -22,7 +22,6 @@ zephium-app.workspace = true
 zephium-engine.workspace = true
 zephium-store.workspace = true
 zephium-blocker-service.workspace = true
-zephium-blocker-update.workspace = true
 tauri-plugin-single-instance.workspace = true
 window-vibrancy = "0.7"
 serde.workspace = true

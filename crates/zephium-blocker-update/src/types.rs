@@ -1,11 +1,14 @@
 use std::collections::HashSet;
+#[cfg(feature = "tuf")]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tuf")]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+#[cfg(feature = "tuf")]
 use url::Url;
 use zephium_blocker::PolicyCatalog;
 
@@ -72,6 +75,7 @@ impl Default for UpdateLimits {
 }
 
 impl UpdateLimits {
+    #[cfg(feature = "tuf")]
     fn validate(self) -> Result<Self, ConfigError> {
         let bounded = self.max_root_bytes > 0
             && self.max_root_bytes <= HARD_MAX_ROOT_BYTES as u64
@@ -105,6 +109,7 @@ impl UpdateLimits {
 /// There is intentionally no default endpoint or root. Release engineering
 /// must inject both together after provisioning production keys.
 #[derive(Clone, Debug)]
+#[cfg(feature = "tuf")]
 pub struct RepositoryConfig {
     pub(crate) trusted_root: Arc<[u8]>,
     pub(crate) metadata_base_url: Url,
@@ -115,6 +120,7 @@ pub struct RepositoryConfig {
     pub(crate) repository_identity: [u8; 32],
 }
 
+#[cfg(feature = "tuf")]
 impl RepositoryConfig {
     /// Creates a fixed-origin HTTPS configuration.
     pub fn new(
@@ -173,7 +179,10 @@ impl RepositoryConfig {
 
     pub(crate) fn package_admission_policy_sha256(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"zephium:blocker-package-admission:v1\0");
+        // v2 binds the project-owned single-segment target-name grammar.
+        // Durable TUF state admitted under the former Tough-only grammar must
+        // be reauthenticated before it can cross the compiler boundary.
+        hasher.update(b"zephium:blocker-package-admission:v2\0");
         for value in [
             self.limits.max_manifest_bytes as u64,
             self.limits.max_sources as u64,
@@ -228,8 +237,10 @@ impl RepositoryConfig {
 /// migration or emergency trust re-anchoring requires a new identifier and a
 /// separate cache namespace.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg(feature = "tuf")]
 pub struct RepositoryId(Box<str>);
 
+#[cfg(feature = "tuf")]
 impl RepositoryId {
     /// Creates a lowercase ASCII identifier of at most 64 bytes.
     pub fn new(value: impl Into<Box<str>>) -> Result<Self, ConfigError> {
@@ -293,6 +304,7 @@ impl LicensePolicy {
     }
 }
 
+#[cfg(feature = "tuf")]
 fn parse_https_base(raw: &str) -> Result<Url, ConfigError> {
     if raw.is_empty()
         || raw.len() > 2048
@@ -327,6 +339,7 @@ fn parse_https_base(raw: &str) -> Result<Url, ConfigError> {
     Ok(url)
 }
 
+#[cfg(feature = "tuf")]
 fn repository_identity(
     repository_id: &RepositoryId,
     metadata_base_url: &Url,
@@ -342,6 +355,7 @@ fn repository_identity(
     digest.finalize().into()
 }
 
+#[cfg(feature = "tuf")]
 fn validate_storage_path(path: &Path) -> Result<(), ConfigError> {
     if !path.is_absolute() || path.file_name().is_none() {
         return Err(ConfigError::InvalidStoragePath);
@@ -469,6 +483,7 @@ pub enum CatalogAvailability {
 }
 
 impl CatalogAvailability {
+    #[cfg(feature = "tuf")]
     pub(crate) fn from_identity(identity: CatalogIdentity, now_unix: u64) -> Self {
         if identity.expires_unix > now_unix {
             Self::Fresh(identity)
@@ -677,7 +692,7 @@ impl Default for GcBudget {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tuf"))]
 mod tests {
     use super::*;
 

@@ -1,35 +1,140 @@
-//! Authenticated, rollback-resistant filter-package acquisition.
+//! Filter-package validation and optional authenticated acquisition.
 //!
 //! This crate deliberately has no browser, profile, page, or UI dependency.
-//! It accepts one application-shipped TUF root and two fixed HTTPS repository
-//! origins, verifies a bounded package, and publishes only immutable
-//! [`zephium_blocker::StaticPolicyCatalog`] values.
+//! Canonical package validation is always available for application-bundled
+//! catalogs. The `tuf` feature adds one application-shipped trust root, fixed
+//! HTTPS repository origins, durable state, and the bounded update worker.
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-mod cache_lock;
-mod file_identity;
 mod manifest;
-mod repository;
-mod storage;
-mod transport;
 mod types;
+
+#[cfg(feature = "tuf")]
+mod cache_lock;
+#[cfg(feature = "tuf")]
+mod file_identity;
+#[cfg(feature = "tuf")]
+mod repository;
+#[cfg(feature = "tuf")]
+mod storage;
+#[cfg(feature = "tuf")]
+mod transport;
+#[cfg(feature = "tuf")]
 mod worker;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tuf"))]
 mod tests;
 
 pub use manifest::{
     CatalogManifest, LicenseMetadata, ManifestError, ManifestSource, ManifestSourceFormat,
     CATALOG_MANIFEST_TARGET, CATALOG_MANIFEST_VERSION,
 };
+#[cfg(feature = "tuf")]
 pub use storage::{GarbageCollectionReport, StoreError};
 pub use types::{
     ActivatedCatalog, CandidateCommitDispatch, CandidateCommitOutcome, CandidateRejectDispatch,
     CandidateRejectOutcome, CandidateRejectionReason, CandidateRepairDispatch,
     CandidateRepairOutcome, CatalogAvailability, CatalogIdentity, ConfigError, FailureKind,
-    GcBudget, LicensePolicy, RefreshAdmission, RepositoryConfig, RepositoryId, ShutdownOutcome,
-    StatusSnapshot, UnavailableReason, UpdateLimits, UpdateStatus, WaitForStatus,
+    GcBudget, LicensePolicy, RefreshAdmission, ShutdownOutcome, StatusSnapshot, UnavailableReason,
+    UpdateLimits, UpdateStatus, WaitForStatus,
 };
+#[cfg(feature = "tuf")]
+pub use types::{RepositoryConfig, RepositoryId};
+#[cfg(feature = "tuf")]
 pub use worker::CatalogUpdateWorker;
+
+#[cfg(not(feature = "tuf"))]
+mod disabled_worker {
+    use std::time::Duration;
+
+    use crate::types::{
+        ActivatedCatalog, CandidateCommitDispatch, CandidateCommitOutcome, CandidateRejectDispatch,
+        CandidateRejectOutcome, CandidateRejectionReason, CandidateRepairDispatch,
+        CandidateRepairOutcome, CatalogIdentity, RefreshAdmission, ShutdownOutcome, StatusSnapshot,
+        WaitForStatus,
+    };
+
+    /// Uninhabited update-worker marker for builds without the `tuf` feature.
+    ///
+    /// `Option<CatalogUpdateWorker>` is therefore provably always `None`.
+    /// Keeping the type available lets the bundle coordinator share one
+    /// audited layout without linking repository, network, TLS, or worker
+    /// code into the product.
+    pub enum CatalogUpdateWorker {}
+
+    impl CatalogUpdateWorker {
+        /// Unreachable without the feature that can construct this type.
+        pub fn request_refresh(&self) -> RefreshAdmission {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn status(&self) -> StatusSnapshot {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn observe_and_take_catalogs(
+            &self,
+        ) -> (
+            StatusSnapshot,
+            Option<ActivatedCatalog>,
+            Option<ActivatedCatalog>,
+        ) {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn commit_candidate(
+            &self,
+            _identity: CatalogIdentity,
+            _done: Box<dyn FnOnce(CandidateCommitOutcome) + Send>,
+        ) -> CandidateCommitDispatch {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn repair_candidate(
+            &self,
+            _identity: CatalogIdentity,
+            _done: Box<dyn FnOnce(CandidateRepairOutcome) + Send>,
+        ) -> CandidateRepairDispatch {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn retry_candidate(
+            &self,
+            _identity: CatalogIdentity,
+            _done: Box<dyn FnOnce(CandidateRepairOutcome) + Send>,
+        ) -> CandidateRepairDispatch {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn reject_candidate(
+            &self,
+            _identity: CatalogIdentity,
+            _failure: crate::FailureKind,
+            _reason: CandidateRejectionReason,
+            _done: Box<dyn FnOnce(CandidateRejectOutcome) + Send>,
+        ) -> CandidateRejectDispatch {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn wait_for_change(&self, _after_revision: u64, _deadline: Duration) -> WaitForStatus {
+            match *self {}
+        }
+
+        /// Unreachable without the feature that can construct this type.
+        pub fn shutdown(self, _timeout: Duration) -> ShutdownOutcome {
+            match self {}
+        }
+    }
+}
+
+#[cfg(not(feature = "tuf"))]
+pub use disabled_worker::CatalogUpdateWorker;

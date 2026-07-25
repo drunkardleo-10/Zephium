@@ -4,8 +4,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use zephium_blocker::CompiledArtifactCacheConfig;
-use zephium_blocker_service::{EmbeddedReleaseAsset, ManagedBlocker, ReleaseCatalogSeed};
-use zephium_blocker_update::{LicensePolicy, RepositoryConfig, UpdateLimits};
+use zephium_blocker_service::{
+    EmbeddedReleaseAsset, LicensePolicy, ManagedBlocker, ReleaseCatalogSeed, UpdateLimits,
+};
 
 const COMPILED_CACHE_DIRECTORY: &str = "blocker-compiled-v1";
 const RELEASE_SEED_LICENSE: &str = "CC-BY-SA-3.0";
@@ -23,23 +24,7 @@ const RELEASE_SEED_EASYPRIVACY: &[u8] =
 pub(crate) fn start(data_dir: &Path) -> std::io::Result<Arc<ManagedBlocker>> {
     let artifact_cache = CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    match provisioned_repository(data_dir) {
-        Some(repository) => ManagedBlocker::with_repository(repository, artifact_cache),
-        None => ManagedBlocker::with_release_seed(bundled_release_seed()?, artifact_cache),
-    }
-}
-
-/// Returns the TUF trust root, fixed repository origins, cache namespace, and
-/// exact approved-license policy when online updates are provisioned.
-///
-/// This stays explicitly unprovisioned until Zephium owns the signing keys,
-/// publishes the TUF repository, and completes redistribution review for the
-/// selected lists. Do not replace this with runtime environment variables or a
-/// writable configuration file: changing any of these values changes the
-/// browser's software supply-chain trust boundary and must be code-reviewed
-/// and covered by release provenance.
-fn provisioned_repository(_data_dir: &Path) -> Option<RepositoryConfig> {
-    None
+    ManagedBlocker::with_release_seed(bundled_release_seed()?, artifact_cache)
 }
 
 fn bundled_release_seed() -> std::io::Result<ReleaseCatalogSeed> {
@@ -89,12 +74,6 @@ mod tests {
     };
 
     #[test]
-    fn development_and_release_builds_do_not_accept_ambient_repository_configuration() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(provisioned_repository(root.path()).is_none());
-    }
-
-    #[test]
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
@@ -132,10 +111,8 @@ mod tests {
         let service = start(root.path()).unwrap();
         let snapshot = service.maintain();
 
-        assert!(matches!(
-            snapshot.phase,
-            BlockerCatalogPhase::Fresh | BlockerCatalogPhase::Stale
-        ));
+        assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
+        assert_eq!(snapshot.package_stale, Some(false));
         assert_eq!(snapshot.package_revision, Some(202_607_241_759));
         assert_eq!(
             snapshot.package_provenance,
