@@ -95,6 +95,21 @@ export type BlockerRuleCoverage = {
 };
 
 /**
+ *  Volatile, process-local health counters for the exact applied runtime
+ *  matcher. Decimal strings preserve the full saturating `u64` range in
+ *  JavaScript. These counters are never persisted and contain no request,
+ *  origin, URL, profile, or rule identity.
+ */
+export type BlockerRuntimeDiagnostics = {
+	total_decisions: string,
+	candidate_budget_exhausted: string,
+	matcher_unavailable: string,
+	matcher_unprepared: string,
+	attribution_unavailable: string,
+	evaluation_errors: string,
+};
+
+/**
  *  Stable package-refresh failure category. Endpoint, parser, and native
  *  strings are intentionally never forwarded to privileged JavaScript.
  */
@@ -122,8 +137,9 @@ export type BlockerStatusChanged = BlockerStatusView;
 
 /**
  *  Read-only, focused-profile diagnostics delivered only to privileged main
- *  chrome. It deliberately contains no profile selector, URL, request
- *  telemetry, native error string, or filter-list text.
+ *  chrome. It deliberately contains no profile selector, URL, origin, request
+ *  metadata, native error string, or filter-list text. Runtime health is
+ *  represented only by volatile aggregate counters.
  */
 export type BlockerStatusView = {
 	projection_revision: string,
@@ -138,7 +154,16 @@ export type BlockerStatusView = {
 	failure: BlockerFailure | null,
 	retryable: boolean,
 	retries_remaining: number,
+	/**
+	 *  Boxed with the other diagnostic-only payloads so ordinary projection
+	 *  queue entries do not carry the full coverage report inline.
+	 */
 	applied_coverage: BlockerRuleCoverage | null,
+	/**
+	 *  Boxed because the six decimal counters are diagnostic-only and should
+	 *  not inflate every projection enum value on the actor/UI hot path.
+	 */
+	runtime_diagnostics: BlockerRuntimeDiagnostics | null,
 	source_phase: BlockerSourcePhase,
 	source_failure: BlockerSourceFailure | null,
 	source_package_revision: string | null,
@@ -149,6 +174,11 @@ export type BlockerStatusView = {
 	source_package_created_unix: string | null,
 	source_package_expires_unix: string | null,
 	source_package_stale: boolean | null,
+	/**
+	 *  Advisory source update cadence. This never downgrades a healthy
+	 *  release-bundled policy.
+	 */
+	source_refresh_due: boolean,
 	source_count: number | null,
 	source_bytes: number | null,
 	source_activation_pending: boolean,

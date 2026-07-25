@@ -283,6 +283,20 @@ pub struct BlockerRuleCoverage {
     pub blocking_rule_entries: u32,
 }
 
+/// Volatile, process-local health counters for the exact applied runtime
+/// matcher. Decimal strings preserve the full saturating `u64` range in
+/// JavaScript. These counters are never persisted and contain no request,
+/// origin, URL, profile, or rule identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerRuntimeDiagnostics {
+    pub total_decisions: String,
+    pub candidate_budget_exhausted: String,
+    pub matcher_unavailable: String,
+    pub matcher_unprepared: String,
+    pub attribution_unavailable: String,
+    pub evaluation_errors: String,
+}
+
 /// Exact authenticated identities for source-package transition diagnostics.
 /// This is boxed in [`BlockerStatusView`] so infrequent debug strings do not
 /// inflate every application projection on the shell actor's hot path.
@@ -295,8 +309,9 @@ pub struct BlockerSourceIdentities {
 }
 
 /// Read-only, focused-profile diagnostics delivered only to privileged main
-/// chrome. It deliberately contains no profile selector, URL, request
-/// telemetry, native error string, or filter-list text.
+/// chrome. It deliberately contains no profile selector, URL, origin, request
+/// metadata, native error string, or filter-list text. Runtime health is
+/// represented only by volatile aggregate counters.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct BlockerStatusView {
     pub projection_revision: String,
@@ -311,7 +326,12 @@ pub struct BlockerStatusView {
     pub failure: Option<BlockerFailure>,
     pub retryable: bool,
     pub retries_remaining: u8,
-    pub applied_coverage: Option<BlockerRuleCoverage>,
+    /// Boxed with the other diagnostic-only payloads so ordinary projection
+    /// queue entries do not carry the full coverage report inline.
+    pub applied_coverage: Option<Box<BlockerRuleCoverage>>,
+    /// Boxed because the six decimal counters are diagnostic-only and should
+    /// not inflate every projection enum value on the actor/UI hot path.
+    pub runtime_diagnostics: Option<Box<BlockerRuntimeDiagnostics>>,
     pub source_phase: BlockerSourcePhase,
     pub source_failure: Option<BlockerSourceFailure>,
     pub source_package_revision: Option<String>,
@@ -322,6 +342,9 @@ pub struct BlockerStatusView {
     pub source_package_created_unix: Option<String>,
     pub source_package_expires_unix: Option<String>,
     pub source_package_stale: Option<bool>,
+    /// Advisory source update cadence. This never downgrades a healthy
+    /// release-bundled policy.
+    pub source_refresh_due: bool,
     pub source_count: Option<u32>,
     pub source_bytes: Option<u32>,
     pub source_activation_pending: bool,
@@ -354,6 +377,7 @@ impl BlockerStatusView {
             retryable: false,
             retries_remaining: 0,
             applied_coverage: None,
+            runtime_diagnostics: None,
             source_phase: BlockerSourcePhase::NotConfigured,
             source_failure: None,
             source_package_revision: None,
@@ -364,6 +388,7 @@ impl BlockerStatusView {
             source_package_created_unix: None,
             source_package_expires_unix: None,
             source_package_stale: None,
+            source_refresh_due: false,
             source_count: None,
             source_bytes: None,
             source_activation_pending: false,
