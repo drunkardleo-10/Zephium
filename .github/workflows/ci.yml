@@ -243,6 +243,11 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Clippy dormant TUF blocker graph
+        run: |
+          cargo clippy -p zephium-blocker-update --all-targets --locked --no-default-features --features tuf -- -D warnings
+          cargo clippy -p zephium-blocker-service --all-targets --locked --no-default-features --features tuf -- -D warnings
+
       - name: Clippy production workspace libraries
         run: cargo clippy --workspace --lib --locked -- -D warnings
 
@@ -393,6 +398,11 @@ jobs:
       - name: cargo nextest (Windows)
         if: runner.os == 'Windows'
         run: cargo nextest run --locked --retries 2 --workspace --exclude zephium-desktop
+
+      - name: Test dormant TUF blocker graph
+        run: |
+          cargo nextest run -p zephium-blocker-update --locked --no-default-features --features tuf
+          cargo nextest run -p zephium-blocker-service --locked --no-default-features --features tuf
 
       - name: Windows bounded diagnostic-log policy tests
         if: runner.os == 'Windows'

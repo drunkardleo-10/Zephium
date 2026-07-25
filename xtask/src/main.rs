@@ -490,7 +490,8 @@ fn check_engine_floors() {
 /// Release-only publication gate. Runtime admission uses the best stable
 /// engine that actually exists; publishing additionally requires that no
 /// vendor has acknowledged an outstanding stable-channel security fix and
-/// that the immutable blocker seed will not become stale immediately.
+/// that the immutable blocker sources are still within their upstream
+/// recommended refresh cadence at the exact publication boundary.
 fn check_release_engine_security() {
     check_engine_floors();
     let now = SystemTime::now()
@@ -597,6 +598,7 @@ fn check_blocker_security_fork() {
     );
     run_blocker_feature_gates();
     run_blocker_product_gates();
+    check_blocker_dependency_graphs();
     run_adblock_fork_gates();
 }
 
@@ -659,25 +661,35 @@ fn run_blocker_feature_gates() {
 }
 
 fn run_blocker_product_gates() {
-    for package in ["zephium-blocker-update", "zephium-blocker-service"] {
-        run(
-            "cargo",
-            &["check", "-p", package, "--all-targets", "--locked"],
-        );
-        run(
-            "cargo",
-            &[
-                "clippy",
-                "-p",
-                package,
-                "--all-targets",
-                "--locked",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        );
-        run("cargo", &["test", "-p", package, "--locked"]);
+    for (package, features) in [
+        ("zephium-blocker-update", None),
+        ("zephium-blocker-update", Some("tuf")),
+        ("zephium-blocker-service", None),
+        ("zephium-blocker-service", Some("tuf")),
+    ] {
+        let mut common = vec![
+            "-p",
+            package,
+            "--all-targets",
+            "--locked",
+            "--no-default-features",
+        ];
+        if let Some(features) = features {
+            common.extend(["--features", features]);
+        }
+
+        let mut check = vec!["check"];
+        check.extend(common.iter().copied());
+        run("cargo", &check);
+
+        let mut clippy = vec!["clippy"];
+        clippy.extend(common.iter().copied());
+        clippy.extend(["--", "-D", "warnings"]);
+        run("cargo", &clippy);
+
+        let mut test = vec!["test"];
+        test.extend(common.iter().copied());
+        run("cargo", &test);
     }
     run(
         "cargo",
@@ -731,6 +743,85 @@ fn run_blocker_product_gates() {
             "all",
         ],
     );
+}
+
+fn check_blocker_dependency_graphs() {
+    let bundled = cargo_tree(&[
+        "-p",
+        "zephium-desktop",
+        "--no-default-features",
+        "--locked",
+        "-e",
+        "features",
+        "--prefix",
+        "none",
+    ]);
+    for forbidden in [
+        "zephium-blocker-update feature \"tuf\"",
+        "tough v",
+        "reqwest v",
+        "rustls-platform-verifier v",
+        "aws-lc-rs v",
+    ] {
+        if bundled.lines().any(|line| line.starts_with(forbidden)) {
+            eprintln!("bundled desktop dependency graph unexpectedly contains `{forbidden}`");
+            exit(1);
+        }
+    }
+    if !bundled
+        .lines()
+        .any(|line| line.starts_with("zephium-blocker-update v"))
+    {
+        eprintln!("bundled desktop graph lost canonical blocker package validation");
+        exit(1);
+    }
+
+    let tuf = cargo_tree(&[
+        "-p",
+        "zephium-blocker-update",
+        "--no-default-features",
+        "--features",
+        "tuf",
+        "--locked",
+        "-e",
+        "features",
+        "--prefix",
+        "none",
+    ]);
+    for required in [
+        "zephium-blocker-update v",
+        "tough v",
+        "reqwest v",
+        "rustls-platform-verifier v",
+        "aws-lc-rs v",
+    ] {
+        if !tuf.lines().any(|line| line.starts_with(required)) {
+            eprintln!("TUF verification graph is missing `{required}`");
+            exit(1);
+        }
+    }
+}
+
+fn cargo_tree(arguments: &[&str]) -> String {
+    let output = Command::new("cargo")
+        .arg("tree")
+        .args(arguments)
+        .output()
+        .unwrap_or_else(|error| {
+            eprintln!("failed to execute cargo tree: {error}");
+            exit(1);
+        });
+    if !output.status.success() {
+        eprintln!(
+            "cargo tree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        exit(1);
+    }
+    String::from_utf8(output.stdout).unwrap_or_else(|error| {
+        eprintln!("cargo tree emitted non-UTF-8 output: {error}");
+        exit(1);
+    })
 }
 
 fn run_adblock_fork_gates() {

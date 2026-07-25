@@ -731,11 +731,12 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             .ok_or_else(|| format!("root workspace has no structured {name} dependency"))?;
         require_key_set(
             dependency,
-            &["path", "version"],
+            &["default-features", "path", "version"],
             &format!("root {name} dependency"),
         )?;
         require_string(dependency, "path", path)?;
         require_string(dependency, "version", "=0.1.0")?;
+        require_bool(dependency, "default-features", false)?;
     }
     let tough = workspace_dependencies
         .get("tough")
@@ -804,7 +805,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     for kind in ["dependencies", "build-dependencies", "dev-dependencies"] {
         if let Some(dependencies) = desktop.get(kind).and_then(toml::Value::as_table) {
             let allowed = if kind == "dependencies" {
-                ["zephium-blocker-service", "zephium-blocker-update"].as_slice()
+                ["zephium-blocker-service"].as_slice()
             } else {
                 [].as_slice()
             };
@@ -818,18 +819,16 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         }
     }
     let desktop_dependencies = require_table(&desktop, "dependencies")?;
-    for name in ["zephium-blocker-service", "zephium-blocker-update"] {
-        let dependency = desktop_dependencies
-            .get(name)
-            .and_then(toml::Value::as_table)
-            .ok_or_else(|| format!("desktop has no structured {name} dependency"))?;
-        require_key_set(
-            dependency,
-            &["workspace"],
-            &format!("desktop {name} dependency"),
-        )?;
-        require_bool(dependency, "workspace", true)?;
-    }
+    let service = desktop_dependencies
+        .get("zephium-blocker-service")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "desktop has no structured zephium-blocker-service dependency".to_owned())?;
+    require_key_set(
+        service,
+        &["workspace"],
+        "desktop zephium-blocker-service dependency",
+    )?;
+    require_bool(service, "workspace", true)?;
     let targets = require_table(&desktop, "target")?;
     let reviewed_targets = BTreeSet::from([
         "cfg(target_os = \"windows\")",
@@ -897,6 +896,26 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     )?;
     let package = require_table(&update, "package")?;
     require_string(package, "name", "zephium-blocker-update")?;
+    let features = require_table(&update, "features")?;
+    require_key_set(
+        features,
+        &["default", "tuf"],
+        "zephium-blocker-update feature table",
+    )?;
+    require_string_array(features, "default", &[])?;
+    require_string_array(
+        features,
+        "tuf",
+        &[
+            "dep:async-trait",
+            "dep:futures-util",
+            "dep:reqwest",
+            "dep:rustix",
+            "dep:tokio",
+            "dep:tough",
+            "dep:windows",
+        ],
+    )?;
 
     let dependencies = require_table(&update, "dependencies")?;
     require_key_set(
@@ -915,37 +934,55 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
         ],
         "zephium-blocker-update dependency table",
     )?;
-    require_dependency_version(dependencies, "async-trait", "=0.1.89")?;
+    let async_trait = require_dependency_table(dependencies, "async-trait")?;
+    require_key_set(
+        async_trait,
+        &["optional", "version"],
+        "zephium-blocker-update async-trait dependency",
+    )?;
+    require_string(async_trait, "version", "=0.1.89")?;
+    require_bool(async_trait, "optional", true)?;
     require_dependency_version(dependencies, "sha2", "=0.10.9")?;
-    for name in ["serde", "serde_json", "thiserror", "tough", "url"] {
+    for name in ["serde", "serde_json", "thiserror", "url"] {
         require_workspace_dependency(dependencies, name, &[])?;
     }
+    let tough = require_dependency_table(dependencies, "tough")?;
+    require_key_set(
+        tough,
+        &["optional", "workspace"],
+        "zephium-blocker-update tough dependency",
+    )?;
+    require_bool(tough, "workspace", true)?;
+    require_bool(tough, "optional", true)?;
     let futures = require_dependency_table(dependencies, "futures-util")?;
     require_key_set(
         futures,
-        &["default-features", "features", "version"],
+        &["default-features", "features", "optional", "version"],
         "zephium-blocker-update futures-util dependency",
     )?;
     require_string(futures, "version", "=0.3.32")?;
     require_bool(futures, "default-features", false)?;
     require_string_array(futures, "features", &["std"])?;
+    require_bool(futures, "optional", true)?;
     let reqwest = require_dependency_table(dependencies, "reqwest")?;
     require_key_set(
         reqwest,
-        &["default-features", "features", "version"],
+        &["default-features", "features", "optional", "version"],
         "zephium-blocker-update reqwest dependency",
     )?;
     require_string(reqwest, "version", "=0.13.4")?;
     require_bool(reqwest, "default-features", false)?;
     require_string_array(reqwest, "features", &["rustls", "stream", "system-proxy"])?;
+    require_bool(reqwest, "optional", true)?;
     let tokio = require_dependency_table(dependencies, "tokio")?;
     require_key_set(
         tokio,
-        &["features", "workspace"],
+        &["features", "optional", "workspace"],
         "zephium-blocker-update tokio dependency",
     )?;
     require_bool(tokio, "workspace", true)?;
     require_string_array(tokio, "features", &["fs", "io-util", "rt", "time"])?;
+    require_bool(tokio, "optional", true)?;
 
     let dev_dependencies = require_table(&update, "dev-dependencies")?;
     require_key_set(
@@ -988,11 +1025,12 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let rustix = require_dependency_table(unix, "rustix")?;
     require_key_set(
         rustix,
-        &["features", "version"],
+        &["features", "optional", "version"],
         "zephium-blocker-update rustix dependency",
     )?;
     require_string(rustix, "version", "=1.1.4")?;
     require_string_array(rustix, "features", &["fs", "process"])?;
+    require_bool(rustix, "optional", true)?;
 
     let windows = target_dependencies(targets, "cfg(target_os = \"windows\")")?;
     require_key_set(
@@ -1003,7 +1041,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let windows_crate = require_dependency_table(windows, "windows")?;
     require_key_set(
         windows_crate,
-        &["features", "version"],
+        &["features", "optional", "version"],
         "zephium-blocker-update windows dependency",
     )?;
     require_string(windows_crate, "version", "=0.61.3")?;
@@ -1016,6 +1054,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
             "Win32_System_IO",
         ],
     )?;
+    require_bool(windows_crate, "optional", true)?;
     Ok(())
 }
 
@@ -1029,6 +1068,14 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
         "name",
         "zephium-blocker-service",
     )?;
+    let features = require_table(&service, "features")?;
+    require_key_set(
+        features,
+        &["default", "tuf"],
+        "zephium-blocker-service feature table",
+    )?;
+    require_string_array(features, "default", &[])?;
+    require_string_array(features, "tuf", &["zephium-blocker-update/tuf"])?;
     let dependencies = require_table(&service, "dependencies")?;
     require_key_set(
         dependencies,
@@ -1924,7 +1971,6 @@ fn verify_desktop_feature_graph(
     let tree = parse_feature_tree(source)?;
     require_direct_product_package(&tree, target, "zephium-blocker", "0.1.0")?;
     require_direct_product_package(&tree, target, "zephium-blocker-service", "0.1.0")?;
-    require_direct_product_package(&tree, target, "zephium-blocker-update", "0.1.0")?;
     require_package_features(
         &tree,
         target,
@@ -1939,21 +1985,24 @@ fn verify_desktop_feature_graph(
         "0.13.2",
         expected_adblock_features,
     )?;
-    require_package_features(
-        &tree,
-        target,
-        "reqwest",
-        "0.13.4",
-        &[
-            "__rustls",
-            "__rustls-aws-lc-rs",
-            "__tls",
-            "rustls",
-            "stream",
-            "system-proxy",
-        ],
-    )?;
-    require_package_features(&tree, target, "tough", "0.24.0", &[])
+    require_package_features(&tree, target, "zephium-blocker-service", "0.1.0", &[])?;
+    require_package_features(&tree, target, "zephium-blocker-update", "0.1.0", &[])?;
+    for package in ["aws-lc-rs", "reqwest", "rustls-platform-verifier", "tough"] {
+        reject_package(&tree, target, package)?;
+    }
+    Ok(())
+}
+
+fn reject_package(tree: &[FeatureTreeRow], target: &str, package: &str) -> Result<(), String> {
+    if tree
+        .iter()
+        .any(|row| parse_package_spec(&row.package).is_some_and(|(name, _)| name == package))
+    {
+        return Err(format!(
+            "desktop target `{target}` unexpectedly resolves dormant `{package}` code"
+        ));
+    }
+    Ok(())
 }
 
 fn require_direct_product_package(

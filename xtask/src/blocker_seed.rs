@@ -32,7 +32,6 @@ const ATTRIBUTION: &str = "The EasyList authors (https://easylist.to/)";
 const REDISTRIBUTION: &str = "Unmodified upstream subscription; deterministic gzip packaging only";
 const LICENSE_URL: &str = "https://easylist.to/pages/licence.html";
 const SOURCE_EXPIRY_SECONDS: u64 = 4 * 24 * 60 * 60;
-const MIN_RELEASE_SEED_REMAINING_SECONDS: u64 = 24 * 60 * 60;
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LICENSE_BYTES: u64 = 64 * 1024;
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x02, 0xff];
@@ -275,13 +274,10 @@ fn validate_release_freshness(catalog: &CatalogManifest, now: u64) -> Result<(),
     if catalog.created_unix > now {
         return Err("blocker seed was created in the future".into());
     }
-    let required_expiry = now
-        .checked_add(MIN_RELEASE_SEED_REMAINING_SECONDS)
-        .ok_or_else(|| "release freshness deadline overflowed".to_owned())?;
-    if catalog.expires_unix < required_expiry {
+    if catalog.expires_unix <= now {
         return Err(format!(
-            "blocker seed expires at {}; production release requires at least {} seconds of remaining freshness",
-            catalog.expires_unix, MIN_RELEASE_SEED_REMAINING_SECONDS
+            "blocker sources recommended refreshing at {}; production publication requires a reviewed seed that is current at publication",
+            catalog.expires_unix
         ));
     }
     Ok(())
@@ -1641,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn production_release_requires_a_full_day_of_seed_freshness() {
+    fn production_release_requires_source_material_current_at_publication() {
         let now = 1_800_000_000;
         let source = CatalogSource {
             id: "fixture".into(),
@@ -1660,27 +1656,22 @@ mod tests {
             schema_version: 1,
             revision: 1,
             created_unix: now,
-            expires_unix: now + MIN_RELEASE_SEED_REMAINING_SECONDS,
+            expires_unix: now + 1,
             sources: vec![source.clone(), source],
         };
         assert!(validate_release_freshness(&catalog, now).is_ok());
 
-        catalog.expires_unix -= 1;
+        catalog.expires_unix = now;
         assert!(validate_release_freshness(&catalog, now)
             .unwrap_err()
-            .contains("at least 86400 seconds"));
+            .contains("current at publication"));
 
-        catalog.expires_unix = now + MIN_RELEASE_SEED_REMAINING_SECONDS;
+        catalog.expires_unix = now + 1;
         catalog.created_unix = now + 1;
         assert_eq!(
             validate_release_freshness(&catalog, now).unwrap_err(),
             "blocker seed was created in the future"
         );
-
-        catalog.created_unix = now;
-        assert!(validate_release_freshness(&catalog, u64::MAX)
-            .unwrap_err()
-            .contains("overflowed"));
     }
 
     #[test]

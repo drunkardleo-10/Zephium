@@ -65,12 +65,7 @@ EXPECTED_BLOCKER_FEATURE_GRAPHS = {
 EXPECTED_BLOCKER_COMPONENTS = (
     ("compiler", "zephium-blocker", "0.1.0"),
     ("service", "zephium-blocker-service", "0.1.0"),
-    ("updater", "zephium-blocker-update", "0.1.0"),
-    ("update-framework", "tough", "0.24.0"),
-    ("transport", "reqwest", "0.13.4"),
-    ("tls", "rustls", "0.23.42"),
-    ("platform-verifier", "rustls-platform-verifier", "0.7.0"),
-    ("crypto-provider", "aws-lc-rs", "1.17.3"),
+    ("package-validator", "zephium-blocker-update", "0.1.0"),
 )
 EXPECTED_BLOCKER_SEED_LICENSE = "CC-BY-SA-3.0"
 EXPECTED_BLOCKER_SEED_LICENSE_SHA256 = (
@@ -640,8 +635,8 @@ def blocker_component_properties(platform: str) -> list[dict[str, str]]:
             "value": feature_graph,
         },
         {
-            "name": "zephium:blocker:update-transport-features",
-            "value": "rustls,stream,system-proxy",
+            "name": "zephium:blocker:supply-feature-graph",
+            "value": "release-bundle",
         },
     ]
     properties.extend(
