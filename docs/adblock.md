@@ -10,10 +10,13 @@ filter-language parity or continuously maintained online protection.
   EasyList + EasyPrivacy seed. The exact compressed and raw bytes, upstream
   versions/commits, license metadata, compiler reports, and platform artifacts
   are reproducibly verified by `cargo xtask check-blocker-seed`.
-- The authenticated TUF updater, parser/compiler, persistent caches, profile
-  lifecycle, native enforcement adapters, and bounded cache maintenance are
-  implemented. Production TUF keys and repository origins are deliberately
-  not provisioned yet; bundled mode performs no source-network request.
+- The parser/compiler, persistent compiled-artifact caches, profile lifecycle,
+  native enforcement adapters, and bounded cache maintenance are active. The
+  authenticated TUF updater is retained behind an explicit `tuf` Cargo
+  feature and tested independently, but production keys and repository
+  origins are deliberately not provisioned. The desktop release-bundle graph
+  links no TUF, HTTP, TLS, update-worker, timer, or source-cache implementation
+  and performs no source-network request.
 - New profile preferences default to `enabled = false`.
 - Privileged main chrome has a minimal focused-profile diagnostics control for
   source status, enable/disable, and exact-generation retry. Manual refresh is
@@ -24,8 +27,8 @@ filter-language parity or continuously maintained online protection.
   until native installation settles. It never labels an empty rule set as
   protection.
 
-Stable product claims remain gated on authenticated online maintenance,
-packaged native validation, and operational evidence in
+Claims of continuously maintained protection remain gated on authenticated
+online maintenance, packaged native validation, and operational evidence in
 [Enablement gates](#enablement-gates).
 
 ## Scope
@@ -73,10 +76,10 @@ redirect resources or page-world replacement code.
 
 The boundary is intentionally split by responsibility:
 
-1. `zephium-blocker-update` defines and validates the canonical catalog
-   format. In online mode it also authenticates a fixed-origin TUF repository,
-   enforces the release's exact license policy and source budgets, and
-   crash-safely stages immutable source catalogs.
+1. `zephium-blocker-update` always defines and validates the canonical catalog
+   format. Its optional `tuf` feature additionally authenticates a
+   fixed-origin repository, enforces the release's exact license policy and
+   source budgets, and crash-safely stages immutable source catalogs.
 2. `zephium-blocker-service` admits either the signed release bundle or the
    independently authenticated TUF authority, owns updater/compiler
    coordination, and exposes one monotonic catalog state to the application.
@@ -252,11 +255,13 @@ public-suffix resolver: this hot path parses only the target URL and cannot
 accidentally infer source attribution.
 
 The callback reads the native context before copying URL/method strings,
-accepts at most a 32-KiB URL and 32-byte method, performs no filesystem,
-network, actor, UI, deferral, or blocking-channel work, and never waits for
-the matcher lock. Malformed native values, oversized values, lock contention,
-matcher errors, and response-construction failures allow the request.
-Availability failures must not become an application-wide network outage.
+accepts at most a 32-KiB URL and 32-byte method, and reuses bounded
+apartment-thread UTF-8 buffer capacity after warm-up. It performs no
+filesystem, network, actor, UI, deferral, or blocking-channel work and never
+waits for the matcher lock. Re-entrant buffer access, malformed native values,
+oversized values, lock contention, matcher errors, and response-construction
+failures allow the request. Availability failures must not become an
+application-wide network outage.
 
 All regex-backed rules are compiled transactionally on the worker before the
 matcher is published. Frozen matching does not compile, evict, or mutate regex
@@ -265,7 +270,18 @@ regex NFA/DFA construction limits, and a 256-filter-evaluation ceiling shared
 by block, exception, redirect, and remove-parameter scans for an
 exact-attribution request. Source-independent block, exception, and
 unknown-attribution checks share the same ceiling. Exhausting either path
-returns matcher-unavailable, and the native adapter allows that request.
+returns a distinct candidate-budget error, and the native adapter allows that
+request.
+
+The immutable matcher owns saturating, lock-free, process-local health
+counters. The normal callback path adds one relaxed saturating atomic RMW; a
+fail-open classification adds one release RMW. Privileged chrome reads only aggregate
+counts for total decisions, candidate-budget exhaustion, unavailable or
+unprepared matcher state, unavailable attribution, and other evaluation
+errors. Matchers can be shared by profiles using the same exact policy, so
+these counters are deliberately not presented as per-profile measurements.
+They are volatile, are never persisted or networked, and contain no URL,
+origin, request metadata, rule identity, or profile identifier.
 
 ### macOS / WKWebView
 
@@ -385,7 +401,8 @@ native compilation work:
   compiled-artifact hit never reads them; a miss performs one bounded inflate
   and exact raw length/SHA-256/header verification, then drops the raw source
   strings after compilation. The signed binary retains only the compressed
-  source bytes and compiled policy. Bundles also install the exact
+  source assets; declarative compiler bytes then follow the bounded
+  persistent/native ownership described below. Bundles also install the exact
   CC-BY-SA-3.0 legal text and EasyList/EasyPrivacy attribution notice.
 - After current TUF metadata is authenticated, unchanged source targets can be
   read from the private content-addressed store only when their signed digest
@@ -401,9 +418,21 @@ native compilation work:
   use. `current`, `previous`, and crash-only `stage` records are protected by
   a lifetime lock and directory synchronization. Cache unavailability or
   corruption falls back to authenticated source compilation. Deferred source
-  loaders serialize clone access, memoize only successful material, and remain
-  reusable after a source-store failure so an authenticated same-process
-  repair is not hidden by a cached error.
+  loaders serialize clone access and never memoize failures. Durable-package
+  loaders may memoize successful material; the release-seed reloadable mode
+  deliberately drops it. Both remain reusable after a source-store failure so
+  an authenticated same-process repair is not hidden by a cached error.
+- After a declarative artifact is durably cached, the worker retains only a
+  weak artifact handle plus its authenticated reload recipe. The canonical
+  WebKit JSON remains alive while an application delivery or native
+  compilation cohort owns it, then is released; a later request revalidates
+  and reloads the checksummed cache or recompiles from the exact source
+  recipe. A missing or failed persistent cache deliberately retains the
+  successful artifact strongly so memory reclamation can never make an
+  installed generation unrecoverable. Candidate activation revalidates this
+  exact recovery proof; a stale identity or temporarily unrecoverable
+  candidate cannot displace the prepared candidate or active compiler
+  authority.
 - macOS and Linux reuse exact digest-addressed native content-rule entries and
   apply the bounded namespace garbage collection described above.
 
@@ -481,13 +510,18 @@ and immediately before staging. Updating a subscription therefore requires a
 reviewed seed regeneration and an explicit release-anchor update; an
 internally consistent replacement package cannot self-attest.
 
-The release catalog has an explicit freshness interval. Expiry does not erase
-the last-known-good bundled policy or make startup depend on a network
-service; status becomes stale and active protection is reported as degraded.
-Only a newly reviewed application release can replace this authority today.
-The release workflow refuses to publish a build with less than 24 hours of
-remaining seed validity. The UI therefore offers no misleading refresh action
-in bundled mode.
+The catalog records the sources' recommended refresh interval, currently the
+four-day `! Expires` value published by EasyList. For release-bundle
+provenance, reaching that timestamp sets `source_refresh_due`: it advises that
+a newer Zephium build should carry newer lists, but it does not invalidate the
+signed release's immutable policy or degrade proved native protection. Only a
+newly reviewed application release can replace that authority today, and the
+UI offers no action that bundled mode cannot perform. The release workflow
+requires the reviewed source snapshot to remain inside its recommended
+refresh interval at the exact publication boundary; it does not invent a
+minimum remaining-validity window or reinterpret that recommendation as a
+client-side security expiry. In future TUF mode, the same timestamp is
+actionable source freshness and drives authenticated refresh.
 
 The source updater is a separate browser-owned component and accepts no
 page-derived configuration. Once provisioned, its release configuration will
@@ -515,13 +549,15 @@ file-identity checks, content-addressed objects, a journal and checkpoint,
 directory synchronization, a durable clock high-water record, and distinct
 current, previous, and candidate packages. An authenticated candidate first
 becomes durable without being represented as current. The compiler prepares
-and persists its exact artifact; only that exact candidate can then be
-committed as durable current and activated from the already-prepared compiler
-state. A crash or failure between commit and activation leaves the exact
-candidate transition visible and recoverable rather than silently claiming
-the new policy is installed. Deterministic compiler rejection is bound to the
-exact compiler-policy fingerprint; transient source/storage failures are not
-made into permanent package rejection.
+an exact recoverable artifact: a healthy artifact cache persists it and can
+release declarative memory, while cache unavailability retains the validated
+artifact strongly. Only that exact candidate can then be committed as durable
+current. Activation revalidates the prepared recovery proof before changing
+compiler authority. A crash or failure between commit and activation leaves
+the exact candidate transition visible and recoverable rather than silently
+claiming the new policy is installed. Deterministic compiler rejection is
+bound to the exact compiler-policy fingerprint; transient source/storage
+failures are not made into permanent package rejection.
 
 TUF-backed startup either recovers one exact committed/candidate state or reports
 storage/clock unavailable; corruption and equivocation are not interpreted as
@@ -548,9 +584,12 @@ unchanged absolute deadline.
 
 Production TUF keys, root metadata, endpoints, repository identity, and the
 signing/rotation/recovery runbook still belong to the next implementation
-phase and release operations. The dormant updater performs no network access
-in the current build; the source service publishes the distinct
-`release_bundle` provenance instead of falsely labeling bundled bytes as TUF.
+phase and release operations. TUF repository, transport, TLS, durable-update
+state, and worker code are preserved behind the `tuf` feature and exercised
+in their own CI matrix. That feature is absent from the desktop release graph,
+so bundled builds contain no dormant updater runtime to start or wake. The
+source service publishes the distinct `release_bundle` provenance instead of
+falsely labeling bundled bytes as TUF.
 Provisioning must preserve the embedded package as the trusted offline
 baseline. Refresh capability and current-package authority are separate
 state: startup begins with `(release_bundle, embedded identity)`, and only an
@@ -573,14 +612,17 @@ A clean-upstream differential remains separate rebase evidence because normal
 builds must not fetch executable source from the network.
 
 Production SBOM finalization independently requires pinned Syft to discover
-exactly one Cargo component for each security-critical blocker/update
-dependency at its lock-pinned version: `zephium-blocker`,
-`zephium-blocker-service`, `zephium-blocker-update`, `adblock`,
-`tough`, `reqwest`, `rustls`, `rustls-platform-verifier`, and `aws-lc-rs`.
-The finalizer checks each component's package URL, lockfile discovery source,
-platform location, and uniqueness. It records the runtime compiler feature
-graph selected for the release platform and the exact update-transport
-features.
+exactly one Cargo component for each shipping blocker layer at its lock-pinned
+version: `zephium-blocker`, `zephium-blocker-service`, and the
+`zephium-blocker-update` package validator. It separately binds the vendored
+`adblock` component to its reviewed provenance. The finalizer checks each
+component's package URL, lockfile discovery source, platform location, and
+uniqueness; records the runtime compiler feature graph selected for the
+release platform; and records the supply feature graph as `release-bundle`.
+CI proves the bundled desktop graph does not select `tuf`, `tough`, `reqwest`,
+`rustls-platform-verifier`, or `aws-lc-rs`, while a separate positive graph,
+Clippy, and test matrix keeps the retained TUF implementation buildable and
+audited.
 
 The finalizer also revalidates the staged closed release-seed inventory,
 boundedly inflates both gzip assets, cross-checks their raw and compressed
@@ -613,8 +655,9 @@ The source tree includes four complementary quality paths:
   `.invalid` domains, then check deterministic compilation, source-order
   independence, canonical WebKit output, digest stability, and stable runtime
   decisions;
-- `synthetic_blocker_lab` measures bounded compile time and runtime
-  p50/p95/p99/max decision latency and reports exact rule, artifact, and error
+- `synthetic_blocker_lab` measures bounded compile time plus exact-attribution
+  and Windows-style source-independent runtime p50/p95/p99/max decision
+  latency, and reports exact rule, artifact, budget-exhaustion, and other-error
   counts as machine-readable JSON lines;
 - an independently locked `cargo-fuzz` package has source-admission,
   request-match, and canonical-WebKit targets with retained Zephium-authored
@@ -654,7 +697,11 @@ are complete:
    and Fedora hosts. Cover block/exception priority, domains and party
    predicates, methods and protocols, redirects, iframes, workers, service
    workers, cache hit/miss/corruption, policy replacement, native callback
-   timeout/re-entry, profile deletion, crash recovery, and shutdown.
+   timeout/re-entry, profile deletion, crash recovery, and shutdown. On
+   WebView2, specifically prove that installing an identical replacement
+   filter cohort and retiring the prior cohort leaves interception active;
+   this is the runtime proof of Microsoft's documented duplicate-filter
+   reference-count contract.
 3. Record cold/warm/source-CAS compilation, request-match p50/p95/p99/max,
    the percentage of Windows decisions allowed because the 256-check budget
    was exhausted,
@@ -678,7 +725,8 @@ are complete:
    redistribution path and its aggregate package metadata.
 
 Until then, documentation and UI must distinguish the usable
-release-authenticated seed from a maintained TUF source, show stale/degraded
-state honestly, and avoid claims of full EasyList semantics. Profiles must
-remain disabled by default; “enabled” is valid only after a non-empty exact
-artifact is installed for that profile.
+release-authenticated seed from a maintained TUF source, distinguish bundled
+refresh advice from an invalid authority, show genuine stale/degraded state
+honestly, and avoid claims of full EasyList semantics. Profiles must remain
+disabled by default; “enabled” is valid only after a non-empty exact artifact
+is installed for that profile.

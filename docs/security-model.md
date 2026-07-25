@@ -530,25 +530,32 @@ slot quarantined until its exact callback.
 
 The release-seed loader verifies deterministic gzip identity and performs bounded lazy
 inflation plus exact raw length/digest/header validation after a compiled-cache miss. It
-drops inflated source strings after compilation and reports expiry as stale/degraded
-without inventing an online refresh. Bundles install the exact attribution notice and
-license legal text.
+drops inflated source strings after compilation. EasyList's source-refresh timestamp is
+reported as advisory `source_refresh_due` for release-bundle provenance; it cannot
+invalidate the signed release's immutable policy or degrade an exactly installed native
+generation. Bundles install the exact attribution notice and license legal text.
 
-The optional updater admits only a fixed-origin licensed TUF package, persists a monotonic
-rollback/clock high-water and content-addressed current/previous/candidate state, and keeps
-the durable candidate distinct from current until its exact compiler artifact is prepared.
-The coordinator then durably commits that candidate before activating only the already
-prepared artifact; interrupted transitions remain explicit and recoverable. Compiled/source
-caches and native WebKit namespaces have bounded identity-safe garbage collection.
+The optional `tuf` feature admits only a fixed-origin licensed TUF package, persists a
+monotonic rollback/clock high-water and content-addressed current/previous/candidate state,
+and keeps the durable candidate distinct from current until its exact compiler artifact is
+prepared. The feature, including HTTP/TLS transport, update worker, timers, and source
+cache, is absent from the desktop release-bundle dependency graph; an independent CI
+feature matrix prevents that retained implementation from rotting.
+The coordinator then durably commits that candidate before activation revalidates the exact
+prepared recovery state. A stale identity or newly unavailable candidate leaves compiler
+authority unchanged; interrupted transitions remain explicit and recoverable.
+Compiled/source caches and native WebKit namespaces have bounded identity-safe garbage
+collection.
 
 Only privileged main chrome receives the revisioned focused-profile diagnostics and bounded
 enable/disable and exact-generation retry controls; refresh is exposed only for TUF
 provenance. The DTO contains aggregate coverage and bounded public package
 revision/SHA-256 identities, never profile IDs, URLs, request decisions, filter text, or
-native/parser strings. Raw pages have no blocker command surface. Before stable product
-claims, Zephium still needs production TUF trust material, packaged hostile enforcement
-tests on every supported OS, legal approval, external review, and recorded
-resource/endurance budgets. Full capability and failure details are in `docs/adblock.md`.
+native/parser strings. Raw pages have no blocker command surface. Before claiming stable,
+continuously maintained blocker protection, Zephium still needs production TUF trust
+material, packaged hostile enforcement tests on every supported OS, legal approval,
+external review, and recorded resource/endurance budgets. Full capability and failure
+details are in `docs/adblock.md`.
 
 **Dependency policy.** Tauri, Tauri Runtime Wry, Wry, and adblock-rust are vendored from
 the immutable upstream revisions recorded in their respective
