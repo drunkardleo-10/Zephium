@@ -88,10 +88,10 @@ use zephium_core::windows::{WindowKind, Windows};
 use zephium_core::{commands, navigation};
 use zephium_ipc::{
     BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
-    BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase, BlockerSourceProvenance,
-    BlockerStatusView, DividerView, ItemsState, LayoutState, OperationDisposition,
-    OperationOutcome, OperationReason, Projection, RuntimeStatus, SearchAction, SearchResult,
-    SearchResults, TabView,
+    BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
+    BlockerSourceProvenance, BlockerStatusView, DividerView, ItemsState, LayoutState,
+    OperationDisposition, OperationOutcome, OperationReason, Projection, RuntimeStatus,
+    SearchAction, SearchResult, SearchResults, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled

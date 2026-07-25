@@ -46,6 +46,21 @@ function freshness(value: boolean | null): string {
   return value ? "Stale" : "Fresh";
 }
 
+function sourceCurrency(due: boolean): string {
+  return due ? "Update recommended" : "Current";
+}
+
+function diagnosticRate(count: string, total: string): string {
+  if (!/^\d+$/.test(count) || !/^\d+$/.test(total)) return "—";
+  const numerator = BigInt(count);
+  const denominator = BigInt(total);
+  if (denominator === 0n || numerator > denominator) return `${count} / ${total}`;
+  const basisPoints = (numerator * 10_000n) / denominator;
+  const whole = basisPoints / 100n;
+  const fraction = (basisPoints % 100n).toString().padStart(2, "0");
+  return `${count} / ${total} (${whole}.${fraction}%)`;
+}
+
 function sourceAuthority(value: BlockerStatusView["source_package_provenance"]): string {
   switch (value) {
     case "release_bundle":
@@ -248,6 +263,40 @@ export function BlockerStatus() {
               </div>
             )}
           </Show>
+          <Show when={blocker.status().runtime_diagnostics}>
+            {(diagnostics) => (
+              <div class="mt-2 border-t border-white/8 pt-2">
+                <div class="mb-1 text-faint">Volatile runtime matcher health</div>
+                <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                  <Detail label="Decisions" value={diagnostics().total_decisions} mono />
+                  <Detail
+                    label="Budget exhausted"
+                    value={diagnosticRate(
+                      diagnostics().candidate_budget_exhausted,
+                      diagnostics().total_decisions,
+                    )}
+                    mono
+                  />
+                  <Detail
+                    label="Matcher unavailable"
+                    value={diagnostics().matcher_unavailable}
+                    mono
+                  />
+                  <Detail
+                    label="Matcher unprepared"
+                    value={diagnostics().matcher_unprepared}
+                    mono
+                  />
+                  <Detail
+                    label="Attribution unavailable"
+                    value={diagnostics().attribution_unavailable}
+                    mono
+                  />
+                  <Detail label="Other errors" value={diagnostics().evaluation_errors} mono />
+                </dl>
+              </div>
+            )}
+          </Show>
           <div class="mt-2 border-t border-white/8 pt-2">
             <div class="mb-1 text-faint">Filter sources</div>
             <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
@@ -304,7 +353,21 @@ export function BlockerStatus() {
                   </>
                 )}
               </Show>
-              <Detail label="Freshness" value={freshness(blocker.status().source_package_stale)} />
+              <Show
+                when={blocker.status().source_package_provenance === "release_bundle"}
+                fallback={
+                  <Detail
+                    label="Freshness"
+                    value={freshness(blocker.status().source_package_stale)}
+                  />
+                }
+              >
+                <Detail
+                  label="List currency"
+                  value={sourceCurrency(blocker.status().source_refresh_due)}
+                />
+                <Detail label="Updates" value="With Zephium releases" />
+              </Show>
               <Detail
                 label="Lists"
                 value={
@@ -314,7 +377,11 @@ export function BlockerStatus() {
               />
               <Detail label="Bytes" value={formatBytes(blocker.status().source_bytes)} mono />
               <Detail
-                label="Expires"
+                label={
+                  blocker.status().source_package_provenance === "release_bundle"
+                    ? "Update advised"
+                    : "Expires"
+                }
                 value={formatTimestamp(blocker.status().source_package_expires_unix)}
               />
               <Detail
@@ -361,7 +428,8 @@ export function BlockerStatus() {
             )}
           </Show>
           <div class="mt-2 text-[10px] leading-4 text-faint">
-            This diagnostics view collects no browsing requests or page URLs.
+            Matcher-health counters are volatile and aggregate. No URLs, origins, request metadata,
+            rule identities, or profile identifiers are retained.
           </div>
         </section>
       </Show>

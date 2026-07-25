@@ -1,13 +1,72 @@
 use super::*;
 
-use crate::shell::blocker::{BlockerProfileState, INTERNAL_CATALOG_POLL_OPERATION};
+use crate::shell::blocker::{
+    blocker_runtime_diagnostics_view, catalog_snapshot_valid, settled_runtime_policy_observer,
+    BlockerProfileState, RuntimePolicyObserver, INTERNAL_CATALOG_POLL_OPERATION,
+};
 use zephium_core::blocker::{
-    ContentRuleApplyFailure, NetworkDecision, NetworkRequest, NetworkRequestPolicy,
+    ContentRuleApplyFailure, NetworkDecision, NetworkPolicyDiagnostics, NetworkRequest,
+    NetworkRequestPolicy,
 };
 use zephium_core::ports::blocker::BlockerCompileFailure;
 use zephium_core::ports::engine::ContentRuleSettlement;
 
 type CompileCallback = Box<dyn FnOnce(BlockerCompileOutcome) + Send>;
+
+#[test]
+fn runtime_diagnostics_projection_is_exact_and_javascript_safe() {
+    let view = blocker_runtime_diagnostics_view(NetworkPolicyDiagnostics {
+        total_decisions: u64::MAX,
+        candidate_budget_exhausted: 2,
+        matcher_unavailable: 3,
+        matcher_unprepared: 5,
+        attribution_unavailable: 7,
+        evaluation_errors: 11,
+    });
+    assert_eq!(view.total_decisions, u64::MAX.to_string());
+    assert_eq!(view.candidate_budget_exhausted, "2");
+    assert_eq!(view.matcher_unavailable, "3");
+    assert_eq!(view.matcher_unprepared, "5");
+    assert_eq!(view.attribution_unavailable, "7");
+    assert_eq!(view.evaluation_errors, "11");
+}
+
+#[test]
+fn digest_identical_settlement_retains_the_installed_diagnostics_cohort() {
+    let installed: Arc<dyn NetworkRequestPolicy> = Arc::new(TestNetworkPolicy);
+    let candidate: Arc<dyn NetworkRequestPolicy> = Arc::new(TestNetworkPolicy);
+    let digest = ContentRuleDigest::from_bytes([41; 32]);
+    let observer = settled_runtime_policy_observer(
+        Some(RuntimePolicyObserver {
+            digest,
+            policy: Arc::downgrade(&installed),
+        }),
+        Some(RuntimePolicyObserver {
+            digest,
+            policy: Arc::downgrade(&candidate),
+        }),
+    )
+    .expect("the installed observer must remain available");
+    let observed = observer
+        .policy
+        .upgrade()
+        .expect("the installed policy remains live");
+    assert!(Arc::ptr_eq(&observed, &installed));
+    assert!(!Arc::ptr_eq(&observed, &candidate));
+
+    let replacement = settled_runtime_policy_observer(
+        Some(observer),
+        Some(RuntimePolicyObserver {
+            digest: ContentRuleDigest::from_bytes([42; 32]),
+            policy: Arc::downgrade(&candidate),
+        }),
+    )
+    .expect("a different digest must publish its own observer");
+    assert!(Arc::ptr_eq(
+        &replacement.policy.upgrade().unwrap(),
+        &candidate
+    ));
+}
 
 struct CompileRequest {
     profile: ProfileId,
@@ -295,6 +354,7 @@ fn catalog_revision(status_revision: u64, package_revision: u64) -> BlockerCatal
         package_created_unix: Some(package_revision),
         package_expires_unix: Some(u64::MAX),
         package_stale: Some(false),
+        source_refresh_due: false,
         source_count: Some(1),
         source_bytes: Some(1),
         candidate_revision: None,
@@ -938,6 +998,54 @@ fn catalog_replacements_coalesce_without_displacing_an_inflight_native_generatio
         status.source_installed_revision.as_deref(),
         Some("0000000000000003")
     );
+}
+
+#[test]
+fn bundled_refresh_advice_does_not_degrade_an_exact_active_policy() {
+    let mut bundled = catalog_revision(2, 2);
+    bundled.package_provenance =
+        Some(zephium_core::ports::blocker::BlockerCatalogProvenance::ReleaseBundle);
+    bundled.installed_provenance =
+        Some(zephium_core::ports::blocker::BlockerCatalogProvenance::ReleaseBundle);
+    bundled.refresh_supported = false;
+    bundled.last_refresh_attempt_unix = None;
+    bundled.source_refresh_due = true;
+    assert!(catalog_snapshot_valid(bundled));
+    let (mut shell, compiler) = shell_with_initial_catalog(bundled);
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let initial = compiler.complete_next(allow_all());
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: initial,
+        settlement: ContentRuleSettlement::Applied {
+            generation: initial,
+        },
+    }));
+
+    shell.handle(blocker_operation("enable-bundled", true));
+    let enabled = compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: enabled,
+        settlement: ContentRuleSettlement::Applied {
+            generation: enabled,
+        },
+    }));
+
+    let status = shell.focused_blocker_status_view();
+    assert_eq!(status.protection, BlockerProtection::Active);
+    assert!(status.source_refresh_due);
+    assert_eq!(status.source_package_stale, Some(false));
+    assert_eq!(
+        status.source_package_provenance,
+        Some(zephium_ipc::BlockerSourceProvenance::ReleaseBundle)
+    );
+    assert!(!status.can_refresh_sources);
 }
 
 #[test]
@@ -1616,7 +1724,7 @@ fn focused_status_reports_only_exact_applied_coverage_and_retained_protection() 
     assert_eq!(disabled.applied_enabled, Some(false));
     assert_eq!(
         disabled.applied_coverage,
-        Some(BlockerRuleCoverage::default())
+        Some(Box::new(BlockerRuleCoverage::default()))
     );
 
     assert!(shell
@@ -1632,7 +1740,7 @@ fn focused_status_reports_only_exact_applied_coverage_and_retained_protection() 
     assert_eq!(installing.applied_enabled, Some(false));
     assert_eq!(
         installing.applied_coverage,
-        Some(BlockerRuleCoverage::default())
+        Some(Box::new(BlockerRuleCoverage::default()))
     );
 
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
@@ -1650,12 +1758,12 @@ fn focused_status_reports_only_exact_applied_coverage_and_retained_protection() 
     assert_eq!(active.applied_enabled, Some(true));
     assert_eq!(
         active.applied_coverage,
-        Some(BlockerRuleCoverage {
+        Some(Box::new(BlockerRuleCoverage {
             source_rules: 1,
             accepted_rules: 1,
             blocking_rule_entries: 1,
             ..BlockerRuleCoverage::default()
-        })
+        }))
     );
 
     assert!(shell

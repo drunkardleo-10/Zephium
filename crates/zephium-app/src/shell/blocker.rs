@@ -7,7 +7,8 @@ use std::collections::{HashMap, VecDeque};
 
 use zephium_core::blocker::{
     BlockerCompileFailure, BlockerConfig, BlockerConfigRevision, ContentPolicyFailure,
-    ContentPolicyGeneration, ContentRuleApplyFailure, ContentRuleCoverage, ProfileBlockerConfig,
+    ContentPolicyGeneration, ContentRuleApplyFailure, ContentRuleCoverage, ContentRuleDigest,
+    NetworkPolicyDiagnostics, NetworkRequestPolicy, ProfileBlockerConfig,
     ProfileContentPolicyState, ProfileContentPolicyStatus,
 };
 use zephium_core::ports::blocker::{
@@ -73,12 +74,19 @@ pub(super) struct BlockerProfile {
     applied_config: Option<BlockerConfig>,
     pending_coverage: Option<(ContentPolicyGeneration, ContentRuleCoverage)>,
     applied_coverage: Option<ContentRuleCoverage>,
+    pending_runtime_policy: Option<(ContentPolicyGeneration, RuntimePolicyObserver)>,
+    applied_runtime_policy: Option<RuntimePolicyObserver>,
     preference: BlockerPreferenceAuthority,
     pending_mutation: Option<PendingBlockerMutation>,
     background_target: Option<BlockerConfig>,
     pending_catalog_revision: Option<u64>,
     compiling_catalog: Option<CatalogCompileAttempt>,
     applied_catalog_revision: Option<u64>,
+}
+
+pub(super) struct RuntimePolicyObserver {
+    pub(super) digest: ContentRuleDigest,
+    pub(super) policy: std::sync::Weak<dyn NetworkRequestPolicy>,
 }
 
 pub(super) struct PendingCompileResult {
@@ -419,6 +427,8 @@ impl BlockerCoordinator {
                     applied_config: None,
                     pending_coverage: None,
                     applied_coverage: None,
+                    pending_runtime_policy: None,
+                    applied_runtime_policy: None,
                     preference: BlockerPreferenceAuthority::Authoritative,
                     pending_mutation: None,
                     background_target: None,
@@ -451,6 +461,8 @@ impl BlockerCoordinator {
                 applied_config: None,
                 pending_coverage: None,
                 applied_coverage: None,
+                pending_runtime_policy: None,
+                applied_runtime_policy: None,
                 preference: BlockerPreferenceAuthority::Authoritative,
                 pending_mutation: None,
                 background_target: None,
@@ -516,6 +528,7 @@ impl BlockerCoordinator {
             if let Some(entry) = self.profiles.get_mut(&profile) {
                 entry.desired_config = config;
                 entry.pending_coverage = None;
+                entry.pending_runtime_policy = None;
                 entry.compiling_catalog = None;
                 entry.state = Self::failed_state(
                     exhausted,
@@ -531,6 +544,7 @@ impl BlockerCoordinator {
             if let Some(entry) = self.profiles.get_mut(&profile) {
                 entry.desired_config = config;
                 entry.pending_coverage = None;
+                entry.pending_runtime_policy = None;
                 entry.compiling_catalog = None;
                 entry.state = Self::failed_state(
                     generation,
@@ -545,6 +559,7 @@ impl BlockerCoordinator {
             if let Some(entry) = self.profiles.get_mut(&profile) {
                 entry.desired_config = config;
                 entry.pending_coverage = None;
+                entry.pending_runtime_policy = None;
                 entry.compiling_catalog = None;
                 entry.state = Self::failed_state(
                     generation,
@@ -558,6 +573,7 @@ impl BlockerCoordinator {
         if let Some(entry) = self.profiles.get_mut(&profile) {
             entry.desired_config = config;
             entry.pending_coverage = None;
+            entry.pending_runtime_policy = None;
             entry.compiling_catalog = config.enabled.then_some(()).and_then(|()| {
                 catalog_installed_identity(self.catalog)
                     .ok()
@@ -828,6 +844,8 @@ impl BlockerCoordinator {
             entry.applied_config = None;
             entry.pending_coverage = None;
             entry.applied_coverage = None;
+            entry.pending_runtime_policy = None;
+            entry.applied_runtime_policy = None;
             entry.preference = BlockerPreferenceAuthority::Unavailable;
             entry.pending_mutation = None;
             entry.background_target = None;
@@ -934,9 +952,23 @@ impl Shell {
         }
     }
 
+    fn focused_runtime_policy_diagnostics(&self) -> Option<NetworkPolicyDiagnostics> {
+        let profile = self.windows.focused()?.profile;
+        self.blocker
+            .profiles
+            .get(&profile)?
+            .applied_runtime_policy
+            .as_ref()?
+            .policy
+            .upgrade()
+            .map(|policy| policy.diagnostics())
+            .filter(|diagnostics| diagnostics.is_consistent())
+    }
+
     pub(super) fn focused_blocker_status_view(&self) -> BlockerStatusView {
         blocker_status_view(
             self.focused_blocker_status(),
+            self.focused_runtime_policy_diagnostics(),
             self.next_projection_revision(),
         )
     }
@@ -946,6 +978,7 @@ impl Shell {
         if self.blocker.should_project(status) {
             (self.emit)(Projection::BlockerStatus(blocker_status_view(
                 status,
+                self.focused_runtime_policy_diagnostics(),
                 self.next_projection_revision(),
             )));
         }
@@ -2087,6 +2120,7 @@ impl Shell {
             BlockerCompileOutcome::Failed(failure) => {
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                     entry.pending_coverage = None;
+                    entry.pending_runtime_policy = None;
                     if failure != BlockerCompileFailure::SourceUnavailable {
                         entry.compiling_catalog = None;
                     }
@@ -2119,6 +2153,7 @@ impl Shell {
         {
             if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                 entry.pending_coverage = None;
+                entry.pending_runtime_policy = None;
                 entry.compiling_catalog = None;
                 entry.state = BlockerCoordinator::failed_state(
                     desired,
@@ -2133,11 +2168,16 @@ impl Shell {
             return;
         }
         let coverage = rules.coverage();
+        let runtime_policy = rules.runtime_policy().map(|policy| RuntimePolicyObserver {
+            digest: rules.digest(),
+            policy: std::sync::Arc::downgrade(policy),
+        });
         let admission = self.engine.install_content_rules(profile, desired, rules);
         match admission {
             NativeDispatch::Scheduled => {
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                     entry.pending_coverage = Some((desired, coverage));
+                    entry.pending_runtime_policy = runtime_policy.map(|policy| (desired, policy));
                     entry.state = BlockerProfileState::Installing {
                         desired,
                         retained,
@@ -2159,6 +2199,7 @@ impl Shell {
             NativeDispatch::Rejected => {
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                     entry.pending_coverage = None;
+                    entry.pending_runtime_policy = None;
                     entry.compiling_catalog = None;
                     entry.state = BlockerCoordinator::failed_state(
                         desired,
@@ -2172,6 +2213,7 @@ impl Shell {
             NativeDispatch::Unsupported => {
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                     entry.pending_coverage = None;
+                    entry.pending_runtime_policy = None;
                     entry.compiling_catalog = None;
                     entry.state = BlockerCoordinator::failed_state(
                         desired,
@@ -2234,9 +2276,18 @@ impl Shell {
                         .take()
                         .filter(|(generation, _)| *generation == desired)
                         .map(|(_, coverage)| coverage);
+                    let runtime_policy = entry
+                        .pending_runtime_policy
+                        .take()
+                        .filter(|(generation, _)| *generation == desired)
+                        .map(|(_, policy)| policy);
                     if let Some(coverage) = coverage {
                         entry.applied_config = Some(entry.desired_config);
                         entry.applied_coverage = Some(coverage);
+                        entry.applied_runtime_policy = settled_runtime_policy_observer(
+                            entry.applied_runtime_policy.take(),
+                            runtime_policy,
+                        );
                         if entry.desired_config.enabled {
                             entry.applied_catalog_revision = attempted_catalog_revision;
                             if entry.pending_catalog_revision.is_some_and(|pending| {
@@ -2252,6 +2303,7 @@ impl Shell {
                     } else {
                         entry.applied_config = None;
                         entry.applied_coverage = None;
+                        entry.applied_runtime_policy = None;
                         entry.applied_catalog_revision = None;
                         entry.state = BlockerCoordinator::failed_state(
                             desired,
@@ -2286,6 +2338,8 @@ impl Shell {
                     entry.applied_config = None;
                     entry.pending_coverage = None;
                     entry.applied_coverage = None;
+                    entry.pending_runtime_policy = None;
+                    entry.applied_runtime_policy = None;
                     entry.applied_catalog_revision = None;
                     entry.state = BlockerCoordinator::failed_state(
                         desired,
@@ -2303,6 +2357,7 @@ impl Shell {
             } if Some(generation) == retained => {
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                     entry.pending_coverage = None;
+                    entry.pending_runtime_policy = None;
                     entry.state = BlockerCoordinator::failed_state(
                         desired,
                         Some(generation),
@@ -2316,6 +2371,8 @@ impl Shell {
                     entry.applied_config = None;
                     entry.pending_coverage = None;
                     entry.applied_coverage = None;
+                    entry.pending_runtime_policy = None;
+                    entry.applied_runtime_policy = None;
                     entry.applied_catalog_revision = None;
                     entry.state = BlockerCoordinator::failed_state(
                         desired,
@@ -2333,6 +2390,8 @@ impl Shell {
                     entry.applied_config = None;
                     entry.pending_coverage = None;
                     entry.applied_coverage = None;
+                    entry.pending_runtime_policy = None;
+                    entry.applied_runtime_policy = None;
                     entry.applied_catalog_revision = None;
                     entry.state = BlockerCoordinator::failed_state(
                         desired,
@@ -2406,6 +2465,7 @@ impl Shell {
 
 fn blocker_status_view(
     focused: FocusedBlockerStatus,
+    runtime_diagnostics: Option<NetworkPolicyDiagnostics>,
     projection_revision: u128,
 ) -> BlockerStatusView {
     let revision = format!("{projection_revision:032x}");
@@ -2550,7 +2610,11 @@ fn blocker_status_view(
         retryable,
         retries_remaining,
         applied_coverage: authoritative_applied
-            .and_then(|(_, coverage)| blocker_coverage_view(coverage)),
+            .and_then(|(_, coverage)| blocker_coverage_view(coverage))
+            .map(Box::new),
+        runtime_diagnostics: runtime_diagnostics
+            .map(blocker_runtime_diagnostics_view)
+            .map(Box::new),
         ..BlockerStatusView::unavailable()
     };
     apply_catalog_status(&mut view, catalog);
@@ -2626,6 +2690,12 @@ impl CatalogAuthority {
         if self.current == next_current
             && previous.package_stale == Some(true)
             && observed.package_stale == Some(false)
+        {
+            return None;
+        }
+        if self.current == next_current
+            && previous.source_refresh_due
+            && !observed.source_refresh_due
         {
             return None;
         }
@@ -2811,7 +2881,7 @@ fn source_material_retry_ready(entry: &BlockerProfile, catalog: BlockerCatalogSn
         })
 }
 
-fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
+pub(super) fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
     if catalog.revision == 0 {
         return false;
     }
@@ -2839,6 +2909,9 @@ fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
         return false;
     }
     if current.is_some() != catalog.package_stale.is_some() {
+        return false;
+    }
+    if current.is_none() && catalog.source_refresh_due {
         return false;
     }
     if let (Some(current), Some(candidate)) = (current, candidate) {
@@ -3049,6 +3122,7 @@ fn apply_catalog_status(view: &mut BlockerStatusView, catalog: BlockerCatalogSna
     view.source_package_created_unix = catalog.package_created_unix.map(|value| value.to_string());
     view.source_package_expires_unix = catalog.package_expires_unix.map(|value| value.to_string());
     view.source_package_stale = catalog.package_stale;
+    view.source_refresh_due = catalog.source_refresh_due;
     view.source_count = catalog.source_count;
     view.source_bytes = catalog
         .source_bytes
@@ -3157,4 +3231,34 @@ fn blocker_coverage_view(coverage: ContentRuleCoverage) -> Option<BlockerRuleCov
         .ok()?,
         blocking_rule_entries: u32::try_from(coverage.blocking_rule_entries).ok()?,
     })
+}
+
+pub(super) fn settled_runtime_policy_observer(
+    applied: Option<RuntimePolicyObserver>,
+    candidate: Option<RuntimePolicyObserver>,
+) -> Option<RuntimePolicyObserver> {
+    match (applied, candidate) {
+        (Some(applied), Some(candidate))
+            if applied.digest == candidate.digest && applied.policy.strong_count() != 0 =>
+        {
+            // Digest-identical native promotion intentionally retains the
+            // installed policy object so existing and future WebView2
+            // callbacks continue sharing one diagnostics counter cohort.
+            Some(applied)
+        }
+        (_, candidate) => candidate,
+    }
+}
+
+pub(super) fn blocker_runtime_diagnostics_view(
+    diagnostics: NetworkPolicyDiagnostics,
+) -> BlockerRuntimeDiagnostics {
+    BlockerRuntimeDiagnostics {
+        total_decisions: diagnostics.total_decisions.to_string(),
+        candidate_budget_exhausted: diagnostics.candidate_budget_exhausted.to_string(),
+        matcher_unavailable: diagnostics.matcher_unavailable.to_string(),
+        matcher_unprepared: diagnostics.matcher_unprepared.to_string(),
+        attribution_unavailable: diagnostics.attribution_unavailable.to_string(),
+        evaluation_errors: diagnostics.evaluation_errors.to_string(),
+    }
 }

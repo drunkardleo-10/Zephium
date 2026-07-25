@@ -41,6 +41,7 @@ pub(super) fn test_catalog_snapshot() -> BlockerCatalogSnapshot {
         package_created_unix: Some(1),
         package_expires_unix: Some(u64::MAX),
         package_stale: Some(false),
+        source_refresh_due: false,
         source_count: Some(1),
         source_bytes: Some(1),
         candidate_revision: None,
