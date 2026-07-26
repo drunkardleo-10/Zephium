@@ -30,6 +30,9 @@ export const commands = {
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
 	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
 	menuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
+	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
+	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
+	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	launcherSearch: (query: string) => __TAURI_INVOKE<void>("launcher_search", { query }),
 	launcherRun: (action: SearchAction) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
@@ -209,8 +212,18 @@ export type ItemsChanged = ItemsState;
 
 export type ItemsState = {
 	projection_revision: string,
+	/**
+	 *  `None` is reserved for the frame's cold pre-bootstrap state. Native
+	 *  snapshots are emitted only with an exact focused profile and space.
+	 */
+	profile: ProfileView | null,
+	spaces: SpaceView[],
+	active_space_id: string | null,
+	nodes: SidebarNodeView[],
+	/**  Every tab referenced by `nodes`, in the same pre-order traversal. */
 	tabs: TabView[],
 	active: string | null,
+	split_group: SplitGroupView | null,
 };
 
 export type LayoutChanged = LayoutState;
@@ -275,6 +288,18 @@ export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_
  */
 export type OperationStatus = { state: "unknown" } | { state: "pending" } | { state: "processed"; disposition: OperationDisposition };
 
+export type ProfileKindView = "default" | "named" | "incognito";
+
+/**
+ *  Focused profile metadata. Profile isolation and lifecycle remain native
+ *  authority; this view is display-only.
+ */
+export type ProfileView = {
+	id: string,
+	name: string,
+	kind: ProfileKindView,
+};
+
 /**
  *  Process-lifetime browser-runtime state. Once `restart_required` becomes
  *  true it remains true until the whole application exits; it is not cleared
@@ -301,6 +326,46 @@ export type SearchResult = {
 export type SearchResults = {
 	query: string,
 	results: SearchResult[],
+};
+
+/**
+ *  A folder carries bounded display metadata; a tab is a normalized reference
+ *  into [`ItemsState::tabs`]. The node id and tab id intentionally match, but
+ *  the explicit reference keeps consumers from inferring that invariant.
+ */
+export type SidebarNodeKindView = { type: "folder"; name: string } | { type: "tab"; tab_id: string };
+
+/**
+ *  One pre-order entry in the focused sidebar tree. Parents always precede
+ *  descendants, sibling order is native aggregate order, and `parent_id` is
+ *  `None` only for a section root.
+ */
+export type SidebarNodeView = {
+	id: string,
+	parent_id: string | null,
+	section: SidebarSectionView,
+	kind: SidebarNodeKindView,
+};
+
+/**
+ *  Stable display section for a sidebar node. Children inherit their
+ *  authoritative placement from the native item aggregate.
+ */
+export type SidebarSectionView = "favorites" | "pinned" | "today";
+
+/**  One ordered space owned by the focused profile. */
+export type SpaceView = {
+	id: string,
+	name: string,
+};
+
+/**
+ *  The one retained split group owned by the focused window. Members are
+ *  normalized references into [`ItemsState::tabs`] in native pane traversal
+ *  order; geometry and mutable divider ratios remain native-only authority.
+ */
+export type SplitGroupView = {
+	members: string[],
 };
 
 export type TabChanged = TabView;

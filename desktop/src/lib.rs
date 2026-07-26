@@ -839,6 +839,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ui_info,
             ui_ready,
             menu_popup,
+            add_menu_popup,
+            tab_menu_popup,
+            profile_menu_popup,
             launcher_search,
             launcher_run,
             sidebar_set_width,
@@ -1138,6 +1141,30 @@ const MAX_WINDOW_COORDINATE: f64 = 1_000_000.0;
 const MIN_SIDEBAR_WIDTH: f64 = 180.0;
 const MAX_SIDEBAR_WIDTH: f64 = 420.0;
 
+/// The tab a native context menu was opened for.
+///
+/// Popup menus are modal on every platform, so exactly one target can be
+/// pending at a time. The id is parsed and bounded at the IPC boundary and is
+/// revalidated by the shell actor, which ignores unknown items.
+#[derive(Default)]
+struct TabMenuTarget(std::sync::Mutex<Option<ItemId>>);
+
+impl TabMenuTarget {
+    fn arm(&self, id: ItemId) -> bool {
+        match self.0.lock() {
+            Ok(mut slot) => {
+                *slot = Some(id);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn take(&self) -> Option<ItemId> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn expected_privileged_environment_labels(bits: u8) -> Vec<&'static str> {
     let mut labels = Vec::with_capacity(2);
@@ -1224,7 +1251,12 @@ fn search_action_in_bounds(action: &zephium_ipc::SearchAction) -> bool {
     match action {
         SearchAction::ActivateTab { id } => bounded(id, MAX_ITEM_ID_BYTES),
         SearchAction::OpenUrl { url } => bounded(url, MAX_NAVIGATION_INPUT_BYTES),
-        SearchAction::RunCommand { id } => bounded(id, MAX_COMMAND_ID_BYTES),
+        // The launcher may only run registry commands. Context-menu actions
+        // resolve against an armed target and are reachable from main chrome
+        // alone; the panel must never be able to replay one.
+        SearchAction::RunCommand { id } => {
+            bounded(id, MAX_COMMAND_ID_BYTES) && zephium_core::commands::get(id).is_some()
+        }
     }
 }
 
@@ -1715,6 +1747,16 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         }
         return rejected_operation();
     }
+    if id == "split.choose" {
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
+    if let Some(action) = id.strip_prefix("tabmenu.") {
+        return execute_tab_menu_action(app, action);
+    }
     if let Some(mode) = id.strip_prefix("theme.") {
         if matches!(mode, "system" | "light" | "dark") {
             if let Some(shell) = app.try_state::<Handle>() {
@@ -1737,6 +1779,46 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         }
     }
     rejected_operation()
+}
+
+/// Applies one tab context-menu action to the exact tab the menu was armed
+/// for. Taking the target means a duplicated or delayed menu event cannot
+/// replay the action against whatever tab happens to be focused later.
+fn execute_tab_menu_action(
+    app: &tauri::AppHandle,
+    action: &str,
+) -> zephium_ipc::OperationAdmission {
+    let Some(target) = app.try_state::<TabMenuTarget>() else {
+        return rejected_operation();
+    };
+    let Some(id) = target.take() else {
+        return rejected_operation();
+    };
+    if action == "copyLink" {
+        // The clipboard write stays in privileged chrome, which already holds
+        // the authoritative URL for this tab. Native never handles page text.
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &TAB_MENU_COPY_LINK_COMMAND) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
+    let Some(shell) = app.try_state::<Handle>() else {
+        return rejected_operation();
+    };
+    match action {
+        "reload" => dispatch_operation(app, &shell, Command::Reload(id)),
+        "close" => dispatch_operation(app, &shell, Command::Close(id)),
+        "split" => dispatch_operation(
+            app,
+            &shell,
+            Command::SplitWith {
+                other: id,
+                axis: Axis::Row,
+            },
+        ),
+        _ => rejected_operation(),
+    }
 }
 
 #[tauri::command]
@@ -1868,6 +1950,44 @@ fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> b
     caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
+const ADD_MENU_COMMAND_IDS: [&str; 2] = ["tab.new", "split.choose"];
+
+#[tauri::command]
+#[specta::specta]
+fn add_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    can_split: bool,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "add_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let keymap = load_keymap();
+    let Ok(menu) = build_add_menu(&app, &keymap, can_split) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
 #[tauri::command]
 #[specta::specta]
 fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
@@ -1899,6 +2019,82 @@ fn setting_set(
         return dispatch_operation(&app, &shell, Command::SetAppSetting { key, value });
     }
     rejected_operation()
+}
+
+#[tauri::command]
+#[specta::specta]
+fn tab_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    id: String,
+    x: f64,
+    y: f64,
+    can_split: bool,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "tab_menu_popup") || !bounded(&id, MAX_ITEM_ID_BYTES)
+    {
+        return false;
+    }
+    let Some(item) = ItemId::parse(&id) else {
+        return false;
+    };
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let Some(target) = app.try_state::<TabMenuTarget>() else {
+        return false;
+    };
+    if !target.arm(item) {
+        return false;
+    }
+    let Ok(menu) = build_tab_menu(&app, can_split) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
+fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "profile_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let keymap = load_keymap();
+    let Ok(menu) = build_profile_menu(&app, &keymap) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
 #[tauri::command]
@@ -2020,25 +2216,45 @@ fn inner_logical(window: &tauri::WebviewWindow) -> Size {
         .unwrap_or_default()
 }
 
+fn build_command_menu_item(
+    handle: &tauri::AppHandle,
+    resolved: &[zephium_core::commands::ResolvedCommand],
+    id: &str,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    build_command_menu_item_enabled(handle, resolved, id, true)
+}
+
+fn build_command_menu_item_enabled(
+    handle: &tauri::AppHandle,
+    resolved: &[zephium_core::commands::ResolvedCommand],
+    id: &str,
+    enabled: bool,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    use tauri::menu::MenuItemBuilder;
+
+    let command = resolved
+        .iter()
+        .find(|command| command.id == id)
+        .ok_or_else(|| {
+            tauri::Error::Io(std::io::Error::other(format!(
+                "native menu references unregistered command {id}"
+            )))
+        })?;
+    let mut builder = MenuItemBuilder::with_id(command.id, command.title).enabled(enabled);
+    if let Some(accelerator) = &command.accelerator {
+        builder = builder.accelerator(accelerator);
+    }
+    builder.build(handle)
+}
+
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
+    use tauri::menu::{Menu, SubmenuBuilder};
 
     let resolved = zephium_core::commands::resolve(overrides);
-    let item = |id: &str| -> tauri::Result<MenuItem<tauri::Wry>> {
-        let c = resolved.iter().find(|c| c.id == id).ok_or_else(|| {
-            tauri::Error::Io(std::io::Error::other(format!(
-                "menu references unregistered command {id}"
-            )))
-        })?;
-        let mut b = MenuItemBuilder::with_id(c.id, c.title);
-        if let Some(accel) = &c.accelerator {
-            b = b.accelerator(accel);
-        }
-        b.build(handle)
-    };
+    let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
     let app_menu = SubmenuBuilder::new(handle, "Zephium")
         .about(None)
@@ -2095,6 +2311,84 @@ fn build_menu(
         .build()?;
 
     Menu::with_items(handle, &[&app_menu, &file, &edit, &view, &history, &window])
+}
+
+fn build_add_menu(
+    handle: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+    can_split: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::Menu;
+
+    let resolved = zephium_core::commands::resolve(overrides);
+    let item = |id: &str| build_command_menu_item(handle, &resolved, id);
+
+    let new_tab = item(ADD_MENU_COMMAND_IDS[0])?;
+    // A new tab has nothing to pair with, so the action is shown unavailable
+    // rather than offered and then silently refused by the actor.
+    let split_view =
+        build_command_menu_item_enabled(handle, &resolved, ADD_MENU_COMMAND_IDS[1], can_split)?;
+    Menu::with_items(handle, &[&new_tab, &split_view])
+}
+
+/// Delivered to privileged chrome, which holds the authoritative URL for the
+/// armed tab. Native code never handles page-derived text for the clipboard.
+const TAB_MENU_COPY_LINK_COMMAND: &str = "tab.copyLink";
+
+const TAB_MENU_ACTION_IDS: [&str; 4] = [
+    "tabmenu.reload",
+    "tabmenu.copyLink",
+    "tabmenu.split",
+    "tabmenu.close",
+];
+
+fn build_tab_menu(
+    handle: &tauri::AppHandle,
+    can_split: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+
+    let reload = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[0], "Reload").build(handle)?;
+    let copy_link = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[1], "Copy Link").build(handle)?;
+    let split = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[2], "Open in Split View")
+        .enabled(can_split)
+        .build(handle)?;
+    let close = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[3], "Close Tab").build(handle)?;
+    let separator = PredefinedMenuItem::separator(handle)?;
+
+    Menu::with_items(handle, &[&reload, &copy_link, &split, &separator, &close])
+}
+
+/// The profile chip is identity first. On macOS the real menu bar already
+/// carries browsing commands, so the chip stays a short appearance and
+/// lifecycle menu; elsewhere it is also the application menu.
+#[cfg(not(target_os = "macos"))]
+fn build_profile_menu(
+    handle: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    build_menu(handle, overrides)
+}
+
+#[cfg(target_os = "macos")]
+fn build_profile_menu(
+    handle: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
+
+    let resolved = zephium_core::commands::resolve(overrides);
+    let item = |id: &str| build_command_menu_item(handle, &resolved, id);
+
+    let appearance = SubmenuBuilder::new(handle, "Appearance")
+        .item(&item("theme.system")?)
+        .item(&item("theme.light")?)
+        .item(&item("theme.dark")?)
+        .build()?;
+    let separator = PredefinedMenuItem::separator(handle)?;
+    let quit = PredefinedMenuItem::quit(handle, None)?;
+
+    Menu::with_items(handle, &[&appearance, &separator, &quit])
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -2472,6 +2766,7 @@ pub fn run() {
 
             let operation_ledger = OperationLedger::default();
             app.manage(operation_ledger.clone());
+            app.manage(TabMenuTarget::default());
 
             let keymap = load_keymap();
             // Windows and Linux get the same menu as a popup from the sidebar
@@ -3009,6 +3304,149 @@ mod tests {
     }
 
     #[test]
+    fn add_menu_contains_only_registered_truthful_actions() {
+        assert_eq!(super::ADD_MENU_COMMAND_IDS, ["tab.new", "split.choose"]);
+        for id in super::ADD_MENU_COMMAND_IDS {
+            assert!(
+                zephium_core::commands::get(id).is_some(),
+                "native add-menu command is not registered: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_menu_is_main_only_and_uses_the_bounded_local_anchor() {
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("fn add_menu_popup(")
+            .nth(1)
+            .expect("add-menu popup command")
+            .split("fn setting_get")
+            .next()
+            .expect("bounded add-menu popup command");
+
+        assert!(command.contains(r#"CallerPolicy::Main, "add_menu_popup""#));
+        assert!(command.contains("menu_popup_anchor("));
+        assert!(command.contains("build_add_menu(&app, &keymap, can_split)"));
+        assert!(command.contains("caller.popup_menu_at(&menu, anchor)"));
+        assert!(!command.contains("cursor_position"));
+        assert!(!command.contains("popup_menu(&menu)"));
+    }
+
+    #[test]
+    fn tab_menu_exposes_only_actions_the_shell_can_execute() {
+        assert_eq!(
+            super::TAB_MENU_ACTION_IDS,
+            [
+                "tabmenu.reload",
+                "tabmenu.copyLink",
+                "tabmenu.split",
+                "tabmenu.close"
+            ]
+        );
+        // Context-menu actions carry their own target and must never collide
+        // with the registry ids the launcher and the keymap may run directly.
+        for id in super::TAB_MENU_ACTION_IDS {
+            assert!(
+                zephium_core::commands::get(id).is_none(),
+                "tab-menu action shadows a registered command: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_menu_target_is_armed_once_and_consumed_by_the_first_action() {
+        let target = super::TabMenuTarget::default();
+        assert_eq!(target.take(), None);
+
+        let id = zephium_core::ids::ItemId::generate();
+        assert!(target.arm(id));
+        assert_eq!(target.take(), Some(id));
+        // A duplicated or delayed menu event cannot replay against a stale tab.
+        assert_eq!(target.take(), None);
+    }
+
+    #[test]
+    fn tab_menu_is_main_only_and_uses_the_bounded_local_anchor() {
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("fn tab_menu_popup(")
+            .nth(1)
+            .expect("tab menu popup command")
+            .split("fn profile_menu_popup")
+            .next()
+            .expect("bounded tab menu popup command");
+
+        assert!(command.contains(r#"CallerPolicy::Main, "tab_menu_popup""#));
+        assert!(command.contains("bounded(&id, MAX_ITEM_ID_BYTES)"));
+        assert!(command.contains("ItemId::parse(&id)"));
+        assert!(command.contains("menu_popup_anchor("));
+        assert!(command.contains("caller.popup_menu_at(&menu, anchor)"));
+        assert!(!command.contains("cursor_position"));
+        assert!(!command.contains("popup_menu(&menu)"));
+    }
+
+    #[test]
+    fn the_launcher_may_only_run_registered_commands() {
+        use zephium_ipc::SearchAction;
+
+        assert!(super::search_action_in_bounds(&SearchAction::RunCommand {
+            id: "tab.new".into(),
+        }));
+        // The panel is privileged but must not be able to drive a context-menu
+        // action against whichever tab main chrome last armed.
+        for id in super::TAB_MENU_ACTION_IDS {
+            assert!(!super::search_action_in_bounds(&SearchAction::RunCommand {
+                id: id.into(),
+            }));
+        }
+    }
+
+    #[test]
+    fn split_selection_is_a_delivered_ui_action_not_a_mutation_admission() {
+        let source = include_str!("lib.rs");
+        let branch = source
+            .split(r#"if id == "split.choose" {"#)
+            .nth(1)
+            .expect("split-selection command branch")
+            .split("if let Some(mode)")
+            .next()
+            .expect("bounded split-selection branch");
+
+        assert!(branch.contains("try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id)"));
+        assert!(branch.contains("accepted_ui_operation()"));
+        assert!(branch.contains("rejected_operation()"));
+        assert!(!branch.contains("dispatch_operation"));
+        assert!(!branch.contains("Command::Run"));
+    }
+
+    #[test]
+    fn svelte_sidebar_routes_add_and_split_selection_through_trusted_native_state() {
+        let sidebar = include_str!("../../frame/src/features/sidebar/Sidebar.svelte");
+        let footer = include_str!("../../frame/src/features/sidebar/SidebarFooter.svelte");
+
+        assert!(footer.contains("haspopup"));
+        assert!(footer
+            .contains("commands.addMenuPopup(anchor.left, anchor.top, tabs.canSplitActive())"));
+        assert!(footer.contains("commands.profileMenuPopup(anchor.left, anchor.top)"));
+        assert!(sidebar.contains(r#"command.id === "split.choose""#));
+        assert!(sidebar.contains("splitting = true"));
+        assert!(!sidebar.contains("onclick={tabs.open}"));
+    }
+
+    #[test]
+    fn svelte_tab_rows_open_a_native_context_menu_rather_than_a_dom_one() {
+        let list = include_str!("../../frame/src/features/sidebar/TabList.svelte");
+        let state = include_str!("../../frame/src/state/tabs.svelte.ts");
+
+        // A DOM menu cannot paint over a content WebView, so the tab menu must
+        // stay native and must carry the exact tab it was opened for.
+        assert!(list.contains("event.preventDefault()"));
+        assert!(list.contains("tabs.openTabMenu(tab.id, event.clientX, event.clientY)"));
+        assert!(state.contains("commands.tabMenuPopup(id, x, y, canSplitWith(id))"));
+    }
+
+    #[test]
     fn native_menu_is_never_positioned_from_the_global_pointer() {
         let source = include_str!("lib.rs");
         let command = source
@@ -3238,6 +3676,99 @@ mod tests {
         assert!(barrier.contains("tab.projection_revision"));
         assert!(barrier.contains("zephium-presentation-v1:"));
         assert!(barrier.contains("eval_with_callback"));
+    }
+
+    #[test]
+    fn svelte_chrome_keeps_the_synchronous_presentation_contract() {
+        let entry = include_str!("../../frame/src/main.ts");
+        let shell = include_str!("../../frame/src/app/Shell.svelte");
+        let list = include_str!("../../frame/src/features/sidebar/TabList.svelte");
+        let row = include_str!("../../frame/src/features/sidebar/TabRow.svelte");
+        let split_group = include_str!("../../frame/src/features/sidebar/SplitGroupRow.svelte");
+        let address = include_str!("../../frame/src/features/sidebar/AddressField.svelte");
+        let tabs = include_str!("../../frame/src/state/tabs.svelte.ts");
+
+        let mount = entry.find("mount(App, { target })").expect("Svelte mount");
+        let initial_flush = entry
+            .find("flushSync();")
+            .expect("synchronous initial mount flush");
+        assert!(mount < initial_flush);
+
+        assert_eq!(shell.matches("data-zephium-active-tab").count(), 1);
+        assert!(shell.contains(r#"data-zephium-active-tab={tabs.activeId() ?? ""}"#));
+        assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
+        assert!(shell.contains("{#if !tabs.activeTab()?.url}"));
+        assert!(!shell.contains("transition:"));
+        assert!(!shell.contains("out:"));
+
+        for sentinel in [
+            "data-zephium-tab-id",
+            "data-zephium-tab-url",
+            "data-zephium-projection-revision",
+            "data-zephium-tab-label",
+        ] {
+            assert_eq!(
+                row.matches(sentinel).count(),
+                1,
+                "tab row must own exactly one {sentinel} binding"
+            );
+        }
+        assert!(row.contains("data-zephium-tab-id={tab.id}"));
+        assert!(row.contains(r#"data-zephium-tab-url={tab.url ?? ""}"#));
+        assert!(row.contains("data-zephium-projection-revision={tab.projection_revision}"));
+        assert!(list.contains("{#each displayUnits as unit (unit.key)}"));
+        assert!(list.contains("<SplitGroupRow"));
+        assert!(split_group.contains("<TabRow"));
+        for sentinel in [
+            "data-zephium-tab-id",
+            "data-zephium-tab-url",
+            "data-zephium-projection-revision",
+            "data-zephium-tab-label",
+        ] {
+            assert!(
+                !split_group.contains(sentinel),
+                "split wrapper must not duplicate the member-owned {sentinel}"
+            );
+        }
+        let label = row
+            .split("<span data-zephium-tab-label")
+            .nth(1)
+            .and_then(|source| source.split("</span>").next())
+            .expect("bounded exact title sentinel");
+        assert_eq!(label.matches("{tab.title}").count(), 1);
+        assert!(
+            label.trim_end().ends_with("{tab.title}"),
+            "title must be the sentinel's sole child"
+        );
+
+        let address_input = address
+            .split("<input")
+            .nth(1)
+            .and_then(|source| source.split("/>").next())
+            .expect("bounded address input");
+        assert!(address_input.contains("data-zephium-address"));
+        assert!(address_input.contains("{value}"));
+        assert!(address_input.contains("oninput={handleInput}"));
+        assert!(!address_input.contains("bind:value"));
+        assert!(!address_input.contains("isTrusted"));
+
+        let presentation = tabs
+            .split("events.presentationTab.listen")
+            .nth(1)
+            .and_then(|source| source.split("\n  ]);").next())
+            .expect("bounded presentation listener");
+        let flush = presentation
+            .find("flushSync(() =>")
+            .expect("synchronous presentation flush");
+        let admission = presentation
+            .find("model.applyPresentation")
+            .expect("presentation revision admission");
+        let publication = presentation
+            .find("publishModelState()")
+            .expect("presentation state publication");
+        assert!(flush < admission && admission < publication);
+        assert!(!presentation.contains("await"));
+        assert!(!presentation.contains("requestAnimationFrame"));
     }
 
     #[test]
@@ -3780,6 +4311,55 @@ mod tests {
         assert!(!super::ui_navigation_allowed(
             &Url::parse("file:///etc/passwd").unwrap()
         ));
+    }
+
+    #[test]
+    fn production_csp_remains_fail_closed_for_privileged_chrome() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let csp = config
+            .pointer("/app/security/csp")
+            .and_then(serde_json::Value::as_object)
+            .expect("production CSP object");
+
+        let directive = |name: &str| {
+            csp.get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("missing production CSP directive: {name}"))
+        };
+
+        assert_eq!(directive("default-src"), "'self'");
+        assert_eq!(directive("script-src"), "'self'");
+        assert_eq!(
+            directive("connect-src"),
+            "ipc: http://ipc.localhost",
+            "privileged IPC origins must remain exact"
+        );
+        assert_eq!(directive("style-src"), "'self' 'unsafe-inline'");
+        assert_eq!(directive("img-src"), "'self' data:");
+        assert_eq!(directive("font-src"), "'self' data:");
+
+        for name in [
+            "child-src",
+            "frame-src",
+            "media-src",
+            "worker-src",
+            "object-src",
+            "base-uri",
+            "form-action",
+            "frame-ancestors",
+        ] {
+            assert_eq!(directive(name), "'none'", "{name} must remain denied");
+        }
+
+        for forbidden in ["'unsafe-eval'", "'unsafe-inline'", "data:", "blob:"] {
+            assert!(
+                !directive("script-src")
+                    .split_ascii_whitespace()
+                    .any(|source| source == forbidden),
+                "production script-src admitted forbidden source {forbidden}"
+            );
+        }
     }
 
     #[test]

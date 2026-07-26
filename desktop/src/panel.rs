@@ -3,9 +3,12 @@
 //! method overrides; replacing that live object's class with an unrelated
 //! `NSPanel` subclass violates Objective-C's layout and dispatch invariants.
 
-use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+use objc2_app_kit::{NSColor, NSWindow, NSWindowCollectionBehavior};
 use objc2_foundation::MainThreadMarker;
 use tauri::WebviewWindow;
+
+/// Matches the launcher's CSS corner and the vibrancy view's own radius.
+const PANEL_CORNER_RADIUS: f64 = 16.0;
 
 fn with_window(window: &WebviewWindow, f: impl FnOnce(&NSWindow)) {
     if MainThreadMarker::new().is_none() {
@@ -26,6 +29,21 @@ pub fn configure(window: &WebviewWindow) {
                 | NSWindowCollectionBehavior::FullScreenAuxiliary,
         );
         window.setHidesOnDeactivate(false);
+
+        // The vibrancy view is rounded, but the WKWebView layered above it is
+        // not, so its square corners and the shadow derived from them show
+        // through. Clip the whole content hierarchy and recompute the shadow
+        // from the clipped shape.
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        if let Some(view) = window.contentView() {
+            view.setWantsLayer(true);
+            if let Some(layer) = view.layer() {
+                layer.setCornerRadius(PANEL_CORNER_RADIUS);
+                layer.setMasksToBounds(true);
+            }
+        }
+        window.invalidateShadow();
     });
 }
 
