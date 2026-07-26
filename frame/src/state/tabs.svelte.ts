@@ -1,0 +1,172 @@
+import { flushSync } from "svelte";
+import type { ItemsState, TabView } from "../ipc/bindings";
+import { commands } from "../ipc/bindings";
+import { events } from "../ipc/native-events";
+import { TabProjectionModel } from "./tabs-model";
+
+const model = new TabProjectionModel();
+let state = $state.raw<ItemsState>(model.value);
+
+export const tabs = () => state.tabs;
+export const activeId = () => state.active;
+export const splitGroup = () => state.split_group;
+export const profile = () => state.profile;
+export const spaces = () => state.spaces;
+export const activeSpaceId = () => state.active_space_id;
+export const sidebarNodes = () => state.nodes;
+export const activeTab = (): TabView | undefined =>
+  state.tabs.find((tab) => tab.id === state.active);
+
+type Unlisten = () => void;
+
+let lifecycle = 0;
+let initialized = false;
+let initializing: Promise<void> | null = null;
+let unlisten: Unlisten | null = null;
+
+function publishModelState() {
+  state = model.value;
+}
+
+async function resolveListeners(promises: readonly Promise<Unlisten>[]): Promise<Unlisten[]> {
+  const results = await Promise.allSettled(promises);
+  const listeners: Unlisten[] = [];
+  let failed = false;
+  let failure: unknown;
+
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      listeners.push(result.value);
+    } else if (!failed) {
+      failed = true;
+      failure = result.reason;
+    }
+  }
+
+  if (failed) {
+    for (const stop of listeners) stop();
+    throw failure;
+  }
+
+  return listeners;
+}
+
+async function initialize(generation: number) {
+  // These calls synchronously install their DOM listeners. Keep every scoped
+  // listener registration before the first await so no privileged projection
+  // can arrive in a gap during startup.
+  const listeners = await resolveListeners([
+    events.itemsChanged.listen((event) => {
+      if (generation !== lifecycle) return;
+      if (model.applySnapshot(event.payload)) publishModelState();
+    }),
+    events.tabChanged.listen((event) => {
+      if (generation !== lifecycle) return;
+      if (model.applyTab(event.payload)) publishModelState();
+    }),
+    events.presentationTab.listen((event) => {
+      if (generation !== lifecycle) return;
+
+      // Rust verifies the committed chrome in the same synchronous dispatch.
+      // State admission and DOM publication therefore belong to one flush.
+      flushSync(() => {
+        if (model.applyPresentation(event.payload)) publishModelState();
+      });
+    }),
+  ]);
+
+  if (generation !== lifecycle) {
+    for (const stop of listeners) stop();
+    return;
+  }
+
+  unlisten = () => {
+    for (const stop of listeners) stop();
+  };
+  initialized = true;
+
+  // A cold first run can outrace Tauri setup. Preserve the bounded bootstrap
+  // retry while allowing disposal to cancel further attempts.
+  for (let attempt = 0; attempt < 20 && generation === lifecycle; attempt += 1) {
+    try {
+      await commands.tabsBootstrap();
+      return;
+    } catch {
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
+export function init(): Promise<void> {
+  if (initializing !== null) return initializing;
+  if (initialized) return Promise.resolve();
+
+  const generation = ++lifecycle;
+  const task = initialize(generation);
+  initializing = task;
+  void task.then(
+    () => {
+      if (initializing === task) initializing = null;
+    },
+    () => {
+      if (initializing === task) initializing = null;
+    },
+  );
+  return task;
+}
+
+export function dispose() {
+  if (!initialized && initializing === null && unlisten === null) return;
+
+  lifecycle += 1;
+  initialized = false;
+  initializing = null;
+  unlisten?.();
+  unlisten = null;
+}
+
+export const open = () => void commands.tabsOpen();
+export const activate = (id: string) => void commands.tabsActivate(id);
+export const close = (id: string) => void commands.tabsClose(id);
+export const navigate = (id: string, input: string) => void commands.tabsNavigate(id, input);
+
+const onActive = (fn: (id: string) => void) => () => {
+  const id = state.active;
+  if (id !== null) fn(id);
+};
+
+export const reloadActive = onActive((id) => void commands.tabsReload(id));
+export const backActive = onActive((id) => void commands.tabsBack(id));
+export const forwardActive = onActive((id) => void commands.tabsForward(id));
+export const split = (other: string) => void commands.tabsSplit(other);
+export const unsplit = () => void commands.tabsUnsplit();
+export const setSidebarWidth = (width: number) => void commands.sidebarSetWidth(width);
+export const dragOver = (x: number, y: number) => void commands.tabDragOver(x, y);
+export const dropTab = (id: string, x: number, y: number) => void commands.tabDrop(id, x, y);
+
+/** A tab pairs with the active one, so it must exist and not already be it. */
+export const canSplitWith = (id: string) =>
+  state.tabs.length > 1 && state.active !== null && state.active !== id;
+
+/** A new tab has nothing to pair, so split stays unavailable until it loads. */
+export const canSplitActive = () => state.tabs.length > 1 && (activeTab()?.url ?? null) !== null;
+
+// Native holds the authoritative menu target; this mirror exists only so the
+// clipboard action can resolve a URL privileged chrome already projects.
+let menuTarget: string | null = null;
+
+export function openTabMenu(id: string, x: number, y: number) {
+  menuTarget = id;
+  void commands.tabMenuPopup(id, x, y, canSplitWith(id));
+}
+
+export function copyMenuTargetLink() {
+  const id = menuTarget;
+  menuTarget = null;
+  if (id === null) return;
+  const url = state.tabs.find((tab) => tab.id === id)?.url;
+  if (!url) return;
+  void navigator.clipboard.writeText(url).catch(() => {
+    // A denied clipboard is a user-visible no-op, never a chrome failure.
+  });
+}

@@ -1,0 +1,67 @@
+<script lang="ts">
+  import type { TabView } from "../../ipc/bindings";
+  import TabRow from "./TabRow.svelte";
+
+  let {
+    tabs,
+    activeId,
+    splitting,
+    closable = true,
+    class: className = "",
+    onSelect,
+    onClose,
+    onContextMenu,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onPointerCancel,
+  }: {
+    tabs: TabView[];
+    activeId: string | null;
+    splitting: boolean;
+    closable?: boolean;
+    class?: string;
+    onSelect: (id: string) => void;
+    onClose: (id: string) => void;
+    onContextMenu: (event: MouseEvent, tab: TabView) => void;
+    onPointerDown: (event: PointerEvent, tab: TabView) => void;
+    onPointerMove: (event: PointerEvent) => void;
+    onPointerUp: (event: PointerEvent) => void;
+    onPointerCancel: (event: PointerEvent) => void;
+  } = $props();
+
+  let holdsActive = $derived(tabs.some((tab) => tab.id === activeId));
+</script>
+
+<!--
+  One split group reads as a single object: the members share an enclosure and
+  a hairline seam, so the pairing is visible without a badge or a label.
+-->
+<li
+  class={[
+    "overflow-hidden rounded-md transition-[box-shadow] duration-[var(--motion-fast)]",
+    className,
+  ]}
+  class:bg-fill={!holdsActive}
+  class:shadow-raised={holdsActive}
+>
+  <ul class="grid grid-cols-2" role="list" aria-label="Split group">
+    {#each tabs as tab, index (tab.id)}
+      <TabRow
+        {tab}
+        grouped
+        {closable}
+        class={index > 0 ? "border-s border-border" : ""}
+        active={tab.id === activeId}
+        splitCandidate={splitting && tab.id !== activeId}
+        {onSelect}
+        {onClose}
+        {onContextMenu}
+        {onPointerDown}
+        {onPointerMove}
+        {onPointerUp}
+        {onPointerCancel}
+      />
+    {/each}
+  </ul>
+</li>

@@ -1,11 +1,10 @@
-import { createStore, reconcile } from "solid-js/store";
 import type { BlockerStatusView, OperationAdmission } from "../ipc/bindings";
 import { commands } from "../ipc/bindings";
 import { events } from "../ipc/native-events";
 import { BLOCKER_ZERO_REVISION, initialBlockerStatus, newestBlockerStatus } from "./blocker-model";
 import * as operations from "./operations";
 
-const [state, setState] = createStore<BlockerStatusView>(initialBlockerStatus());
+let state = $state.raw<BlockerStatusView>(initialBlockerStatus());
 
 const RECONCILE_ATTEMPTS = 3;
 const RECONCILE_RETRY_MS = 500;
@@ -40,7 +39,7 @@ async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise
 
 function apply(candidate: BlockerStatusView) {
   const newest = newestBlockerStatus(state, candidate);
-  if (newest !== state) setState(reconcile(newest));
+  if (newest !== state) state = newest;
 }
 
 async function reconcileStatus(generation: number) {
@@ -100,8 +99,9 @@ async function initialize(generation: number) {
 }
 
 export function init(): Promise<void> {
-  if (initialized) return Promise.resolve();
   if (initializing !== null) return initializing;
+  if (initialized) return Promise.resolve();
+
   const generation = ++lifecycle;
   const task = initialize(generation);
   initializing = task;
@@ -130,9 +130,7 @@ export async function refresh(): Promise<void> {
 }
 
 export type BlockerMutationResult =
-  | operations.OperationResolution
-  | { state: "not_admitted" }
-  | { state: "unavailable" };
+  operations.OperationResolution | { state: "not_admitted" } | { state: "unavailable" };
 
 async function settleMutation(
   dispatch: () => Promise<OperationAdmission>,
@@ -177,6 +175,10 @@ export const retry = (failedGeneration: string) =>
 export const refreshSources = () => settleMutation(() => commands.blockerRefreshSources());
 
 export function dispose() {
+  if (!initialized && initializing === null && reconciling === null && unlisten === null) {
+    return;
+  }
+
   lifecycle += 1;
   initialized = false;
   initializing = null;

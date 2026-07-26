@@ -105,6 +105,33 @@ export function protectionLabel(protection: BlockerProtection): string {
   }
 }
 
+export type ShieldPresentation = {
+  visible: boolean;
+  tone: "quiet" | "warning";
+  blocked: boolean;
+  label: string;
+};
+
+/**
+ * Chrome presentation of the focused profile's exact protection state. The
+ * shield stays silent whenever protection is doing its job or the user turned
+ * it off deliberately; only a degraded policy earns color.
+ */
+export function shieldPresentation(status: BlockerStatusView): ShieldPresentation {
+  const label = protectionLabel(status.protection);
+  switch (status.protection) {
+    case "unavailable":
+      return { visible: false, tone: "quiet", blocked: false, label };
+    case "degraded":
+      return { visible: true, tone: "warning", blocked: false, label };
+    case "disabled":
+      return { visible: true, tone: "quiet", blocked: true, label };
+    case "pending":
+    case "active":
+      return { visible: true, tone: "quiet", blocked: false, label };
+  }
+}
+
 export function diagnosticLabel(value: string): string {
   return value
     .split("_")
