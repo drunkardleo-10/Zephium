@@ -61,7 +61,7 @@ use std::sync::{Arc, Mutex};
 
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
-use zephium_core::item::{Lifecycle, Placement, SpaceSection, TabState};
+use zephium_core::item::{ItemKind, Lifecycle, Placement, SpaceSection, TabState};
 use zephium_core::items::{Effect, Items};
 use zephium_core::layout;
 use zephium_core::ports::blocker::BlockerShutdownOutcome;
@@ -90,8 +90,9 @@ use zephium_ipc::{
     BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ItemsState, LayoutState,
-    OperationDisposition, OperationOutcome, OperationReason, Projection, RuntimeStatus,
-    SearchAction, SearchResult, SearchResults, TabView,
+    OperationDisposition, OperationOutcome, OperationReason, ProfileKindView, ProfileView,
+    Projection, RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView,
+    SidebarNodeView, SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled

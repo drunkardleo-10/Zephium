@@ -21,11 +21,82 @@ pub struct TabView {
     pub favicon: Option<String>,
 }
 
+/// The one retained split group owned by the focused window. Members are
+/// normalized references into [`ItemsState::tabs`] in native pane traversal
+/// order; geometry and mutable divider ratios remain native-only authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct SplitGroupView {
+    pub members: Vec<String>,
+}
+
+/// Focused profile metadata. Profile isolation and lifecycle remain native
+/// authority; this view is display-only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileView {
+    pub id: String,
+    pub name: String,
+    pub kind: ProfileKindView,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKindView {
+    Default,
+    Named,
+    Incognito,
+}
+
+/// One ordered space owned by the focused profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SpaceView {
+    pub id: String,
+    pub name: String,
+}
+
+/// Stable display section for a sidebar node. Children inherit their
+/// authoritative placement from the native item aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarSectionView {
+    Favorites,
+    Pinned,
+    Today,
+}
+
+/// A folder carries bounded display metadata; a tab is a normalized reference
+/// into [`ItemsState::tabs`]. The node id and tab id intentionally match, but
+/// the explicit reference keeps consumers from inferring that invariant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SidebarNodeKindView {
+    Folder { name: String },
+    Tab { tab_id: String },
+}
+
+/// One pre-order entry in the focused sidebar tree. Parents always precede
+/// descendants, sibling order is native aggregate order, and `parent_id` is
+/// `None` only for a section root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SidebarNodeView {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub section: SidebarSectionView,
+    pub kind: SidebarNodeKindView,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct ItemsState {
     pub projection_revision: String,
+    /// `None` is reserved for the frame's cold pre-bootstrap state. Native
+    /// snapshots are emitted only with an exact focused profile and space.
+    pub profile: Option<ProfileView>,
+    pub spaces: Vec<SpaceView>,
+    pub active_space_id: Option<String>,
+    pub nodes: Vec<SidebarNodeView>,
+    /// Every tab referenced by `nodes`, in the same pre-order traversal.
     pub tabs: Vec<TabView>,
     pub active: Option<String>,
+    pub split_group: Option<SplitGroupView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]

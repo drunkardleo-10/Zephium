@@ -6,8 +6,13 @@ fn favicon_pipeline_accepts_only_fixed_renderer_rasters_for_current_origin() {
     let store = Arc::new(FakeStore::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -322,8 +327,13 @@ fn private_favicon_is_visible_but_never_written_to_persistent_storage() {
     let store = Arc::new(FakeStore::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(

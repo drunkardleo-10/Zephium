@@ -34,6 +34,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         group: Group::File,
     },
     CommandSpec {
+        id: "split.choose",
+        title: "Split View…",
+        accelerator: None,
+        group: Group::File,
+    },
+    CommandSpec {
         id: "nav.reload",
         title: "Reload Page",
         accelerator: Some("CmdOrCtrl+R"),
@@ -180,5 +186,13 @@ mod tests {
             Some("CmdOrCtrl+R")
         );
         assert!(!resolved.iter().any(|c| c.id == "bogus.id"));
+    }
+
+    #[test]
+    fn split_selection_is_a_registered_ui_command_without_an_accelerator() {
+        let command = get("split.choose").expect("split selection command");
+        assert_eq!(command.title, "Split View…");
+        assert_eq!(command.accelerator, None);
+        assert_eq!(command.group, Group::File);
     }
 }

@@ -102,6 +102,119 @@ fn split_group_survives_tab_switches() {
 }
 
 #[test]
+fn items_projection_tracks_retained_split_group_in_native_pane_order() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+
+    assert_eq!(
+        last(&screen).split_group.unwrap().members,
+        vec![second.to_string(), first.to_string()]
+    );
+
+    // The retained Arc-style group remains represented while a non-member is
+    // the one native pane currently visible.
+    shell.handle(Command::Open);
+    let third = active_id(&screen);
+    navigate_and_commit(&mut shell, third, "third.example");
+    assert_eq!(engine.last_layout(), vec![third.to_string()]);
+    assert_eq!(
+        last(&screen).split_group.unwrap().members,
+        vec![second.to_string(), first.to_string()]
+    );
+
+    // Extending the group preserves the native tree's left/top-to-right/bottom
+    // traversal order instead of re-sorting members by the flat sidebar list.
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::SplitWith {
+        other: third,
+        axis: Axis::Col,
+    });
+    assert_eq!(
+        last(&screen).split_group.unwrap().members,
+        vec![second.to_string(), first.to_string(), third.to_string()]
+    );
+}
+
+#[test]
+fn projected_split_group_clears_after_unsplit_or_single_leaf_collapse() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    assert!(last(&screen).split_group.is_some());
+    shell.handle(Command::Unsplit);
+    assert!(last(&screen).split_group.is_none());
+
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    assert!(last(&screen).split_group.is_some());
+    shell.handle(Command::Close(first));
+    assert_eq!(active_id(&screen), second);
+    assert!(last(&screen).split_group.is_none());
+}
+
+#[test]
+fn split_projection_includes_pinned_members_and_their_authoritative_rows() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    let window = shell.windows.focused().unwrap().id;
+    let space = shell.windows.focused().unwrap().space;
+    let pinned = ItemId::from(91_001);
+    assert!(shell.items.insert_tab(
+        pinned,
+        Placement::Space {
+            space,
+            section: SpaceSection::Pinned,
+        },
+    ));
+    shell.windows.get_mut(window).unwrap().splits = Some(Pane::Branch {
+        axis: Axis::Row,
+        ratio: 0.5,
+        a: Box::new(Pane::Leaf(active)),
+        b: Box::new(Pane::Leaf(pinned)),
+    });
+
+    shell.project_items();
+
+    let state = last(&screen);
+    assert_eq!(
+        state.split_group,
+        Some(SplitGroupView {
+            members: vec![active.to_string(), pinned.to_string()],
+        })
+    );
+    assert!(state.tabs.iter().any(|tab| tab.id == pinned.to_string()));
+    assert!(state.nodes.iter().any(|node| {
+        node.kind
+            == (SidebarNodeKindView::Tab {
+                tab_id: pinned.to_string(),
+            })
+            && node.section == SidebarSectionView::Pinned
+    }));
+}
+
+#[test]
 fn asynchronous_split_leaf_creation_failure_collapses_and_cannot_resurrect() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, engine, screen) = setup_with(store.clone());
@@ -187,8 +300,13 @@ fn divider_drag_updates_ratio_and_projects_strips() {
     let strips: Arc<Mutex<Vec<DividerView>>> = Arc::new(Mutex::new(Vec::new()));
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let (sink, strip_sink) = (screen.clone(), strips.clone());
     let mut shell = Shell::new(

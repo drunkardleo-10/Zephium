@@ -1,6 +1,16 @@
 //! Revisioned privileged-chrome projections.
 
+use std::collections::HashSet;
+
 use super::*;
+
+#[derive(Default)]
+struct SidebarProjection {
+    nodes: Vec<SidebarNodeView>,
+    tabs: Vec<TabView>,
+    visited_ids: HashSet<ItemId>,
+    tab_ids: HashSet<ItemId>,
+}
 
 impl Shell {
     pub(super) fn project_runtime_status(&self) {
@@ -23,22 +33,147 @@ impl Shell {
         let Some(win) = self.windows.focused() else {
             return;
         };
-        let profile = win.profile;
-        let tabs: Vec<TabView> = self
-            .today_tabs(win.space)
-            .into_iter()
-            .filter_map(|id| {
-                self.items
-                    .tab(id)
-                    .map(|tab| self.generic_tab_view(id, tab, Some(profile)))
+        let Some(profile) = self.profiles.get(win.profile) else {
+            return;
+        };
+        let Some(active_space) = self
+            .spaces
+            .get(win.space)
+            .filter(|space| space.profile == profile.id)
+        else {
+            return;
+        };
+
+        let profile_view = ProfileView {
+            id: profile.id.to_string(),
+            name: profile.name.clone(),
+            kind: match profile.kind {
+                ProfileKind::Default => ProfileKindView::Default,
+                ProfileKind::Named => ProfileKindView::Named,
+                ProfileKind::Incognito => ProfileKindView::Incognito,
+            },
+        };
+        let spaces = self
+            .spaces
+            .iter()
+            .filter(|space| space.profile == profile.id)
+            .map(|space| SpaceView {
+                id: space.id.to_string(),
+                name: space.name.clone(),
             })
             .collect();
-        self.record_tab_projection_revisions(&tabs);
+
+        let mut sidebar = SidebarProjection::default();
+        for (placement, section) in [
+            (
+                Placement::Favorites {
+                    profile: profile.id,
+                },
+                SidebarSectionView::Favorites,
+            ),
+            (
+                Placement::Space {
+                    space: active_space.id,
+                    section: SpaceSection::Pinned,
+                },
+                SidebarSectionView::Pinned,
+            ),
+            (
+                Placement::Space {
+                    space: active_space.id,
+                    section: SpaceSection::Today,
+                },
+                SidebarSectionView::Today,
+            ),
+        ] {
+            for id in self.items.roots(placement) {
+                self.project_sidebar_node(*id, None, placement, section, profile.id, &mut sidebar);
+            }
+        }
+
+        let split_group = win.splits.as_ref().and_then(|tree| {
+            if !self.pane_in_scope(tree, win.profile, win.space) {
+                return None;
+            }
+
+            let members = tree.tabs();
+            let mut unique = HashSet::with_capacity(members.len());
+            let valid = (2..=MAX_VISIBLE_PANES).contains(&members.len())
+                && members
+                    .iter()
+                    .all(|id| unique.insert(*id) && sidebar.tab_ids.contains(id));
+            valid.then(|| SplitGroupView {
+                members: members.into_iter().map(|id| id.to_string()).collect(),
+            })
+        });
+        self.record_tab_projection_revisions(&sidebar.tabs);
         (self.emit)(Projection::Items(ItemsState {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
-            tabs,
-            active: win.active.map(|i| i.to_string()),
+            profile: Some(profile_view),
+            spaces,
+            active_space_id: Some(active_space.id.to_string()),
+            nodes: sidebar.nodes,
+            tabs: sidebar.tabs,
+            active: win
+                .active
+                .filter(|id| sidebar.tab_ids.contains(id))
+                .map(|id| id.to_string()),
+            split_group,
         }));
+    }
+
+    fn project_sidebar_node(
+        &self,
+        id: ItemId,
+        parent: Option<ItemId>,
+        placement: Placement,
+        section: SidebarSectionView,
+        profile: ProfileId,
+        projection: &mut SidebarProjection,
+    ) {
+        let Some(item) = self
+            .items
+            .get(id)
+            .filter(|item| item.parent == parent && item.placement == placement)
+        else {
+            return;
+        };
+        if !projection.visited_ids.insert(id) {
+            return;
+        }
+
+        let id_string = id.to_string();
+        let kind = match &item.kind {
+            ItemKind::Folder { name } => SidebarNodeKindView::Folder { name: name.clone() },
+            ItemKind::Tab(tab) => {
+                projection.tab_ids.insert(id);
+                projection
+                    .tabs
+                    .push(self.generic_tab_view(id, tab, Some(profile)));
+                SidebarNodeKindView::Tab {
+                    tab_id: id_string.clone(),
+                }
+            }
+        };
+        projection.nodes.push(SidebarNodeView {
+            id: id_string,
+            parent_id: parent.map(|id| id.to_string()),
+            section,
+            kind,
+        });
+
+        if matches!(item.kind, ItemKind::Folder { .. }) {
+            for child in self.items.children(id) {
+                self.project_sidebar_node(
+                    *child,
+                    Some(id),
+                    placement,
+                    section,
+                    profile,
+                    projection,
+                );
+            }
+        }
     }
 
     pub(super) fn project_tab(&self, id: ItemId) {

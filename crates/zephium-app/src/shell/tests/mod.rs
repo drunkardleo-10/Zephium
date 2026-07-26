@@ -819,8 +819,13 @@ fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -842,8 +847,13 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
     let chrome = Arc::new(AsyncChrome::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -864,8 +874,13 @@ fn setup_with_operation_log(
     let engine = Arc::new(FakeEngine::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
@@ -1024,6 +1039,7 @@ mod operations;
 mod persistence;
 mod presentation;
 mod profile_deletion;
+mod projections;
 mod search;
 mod shutdown;
 mod tabs;

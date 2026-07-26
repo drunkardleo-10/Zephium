@@ -270,8 +270,13 @@ fn controlled_shell() -> (
     let store = Arc::new(FakeStore::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
         tabs: Vec::new(),
         active: None,
+        split_group: None,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new_with_blocker(
