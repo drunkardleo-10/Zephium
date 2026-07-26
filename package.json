@@ -1,11 +1,14 @@
 {
   "name": "zephium",
   "private": true,
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
   "scripts": {
     "dev": "pnpm -C desktop dev",
     "build": "pnpm -C desktop build",
     "frame:dev": "pnpm -C frame dev",
     "frame:build": "pnpm -C frame build"
   },
-  "packageManager": "pnpm@11.5.0+sha512.dbfcc4f81cf48597afd4bc391ffdf12c11f1a9fb83a395bfa6b0a2d9cc2fd8ffebafdb1ccbd529632153f793904c2615b7f09fe1a345473fd1c35845172a8eb1"
+  "packageManager": "pnpm@11.17.0"
 }

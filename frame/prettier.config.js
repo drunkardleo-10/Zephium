@@ -1,0 +1,7 @@
+/** @type {import("prettier").Config} */
+export default {
+  printWidth: 100,
+  plugins: ["prettier-plugin-svelte", "prettier-plugin-tailwindcss"],
+  tailwindStylesheet: "./src/styles/global.css",
+  overrides: [{ files: "*.svelte", options: { parser: "svelte" } }],
+};

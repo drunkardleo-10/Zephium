@@ -1,0 +1,3 @@
+dist
+src/ipc/bindings.ts
+src/vite-env.d.ts

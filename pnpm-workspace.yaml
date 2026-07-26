@@ -3,6 +3,7 @@ packages:
   - desktop
 
 allowBuilds:
+  '@hugeicons/svelte': true
   esbuild: true
 
 overrides:
