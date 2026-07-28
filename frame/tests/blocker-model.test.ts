@@ -6,7 +6,7 @@ import {
   initialBlockerStatus,
   newestBlockerStatus,
   protectionLabel,
-} from "../src/state/blocker-model";
+} from "../src/domain/blocker/blocker-model";
 
 function revision(value: number): string {
   return value.toString(16).padStart(32, "0");

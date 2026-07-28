@@ -22,7 +22,7 @@ const native = vi.hoisted(() => {
   };
 });
 
-vi.mock("../src/ipc/native-events", () => ({
+vi.mock("../src/shared/ipc/native-events", () => ({
   events: {
     uiCommand: {
       listen: native.listen,
@@ -37,7 +37,7 @@ describe("trusted UI command state", () => {
   });
 
   it("publishes repeated split-selection requests with distinct sequences", async () => {
-    const ui = await import("../src/state/ui.svelte");
+    const ui = await import("../src/domain/ui-commands/ui-commands.svelte");
     const first = ui.init();
     const second = ui.init();
 

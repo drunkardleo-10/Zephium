@@ -7,11 +7,11 @@
     Search01Icon,
   } from "@hugeicons/core-free-icons";
   import { onMount } from "svelte";
-  import type { SearchResult } from "../../ipc/bindings";
-  import { commands } from "../../ipc/bindings";
-  import { events } from "../../ipc/native-events";
-  import FavIcon from "../../ui/FavIcon.svelte";
-  import Icon from "../../ui/Icon.svelte";
+  import type { SearchResult } from "../../shared/ipc/bindings";
+  import { commands } from "../../shared/ipc/bindings";
+  import { events } from "../../shared/ipc/native-events";
+  import FavIcon from "../../shared/ui/FavIcon.svelte";
+  import Icon from "../../shared/ui/Icon.svelte";
 
   const KIND_LABEL: Record<string, string> = {
     tab: "Open tab",

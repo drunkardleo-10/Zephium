@@ -7,7 +7,7 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
-      "src/ipc/bindings.ts",
+      "src/shared/ipc/bindings.ts",
       "src/vite-env.d.ts",
       "svelte.config.js",
       "vite.config.ts",

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OperationDisposition } from "../src/ipc/bindings";
+import type { OperationDisposition } from "../src/shared/ipc/bindings";
 
 const native = vi.hoisted(() => {
   let listener: ((event: { payload: OperationDisposition }) => void) | null = null;
@@ -33,8 +33,8 @@ const native = vi.hoisted(() => {
   };
 });
 
-vi.mock("../src/ipc/bindings", () => ({ commands: native.commands }));
-vi.mock("../src/ipc/native-events", () => ({
+vi.mock("../src/shared/ipc/bindings", () => ({ commands: native.commands }));
+vi.mock("../src/shared/ipc/native-events", () => ({
   events: {
     operationProcessed: {
       listen: native.listen,
@@ -51,7 +51,7 @@ function disposition(operationId: string): OperationDisposition {
 }
 
 async function loadOperations() {
-  return import("../src/state/operations");
+  return import("../src/domain/operations/operations");
 }
 
 async function flushPromises(): Promise<void> {

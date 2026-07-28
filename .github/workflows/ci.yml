@@ -302,7 +302,7 @@ jobs:
           cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta"
 
       - name: Bindings drift
-        run: git diff --exit-code frame/src/ipc/bindings.ts
+        run: git diff --exit-code frame/src/shared/ipc/bindings.ts
 
   rust-platforms:
     name: rust-test (${{ matrix.os }})

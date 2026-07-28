@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editingAddress, restingAddress } from "../src/features/sidebar/address-model";
+import { editingAddress, restingAddress } from "../src/features/sidebar/address/address-model";
 
 describe("address presentation", () => {
   it("shows only the host while browser chrome is at rest", () => {

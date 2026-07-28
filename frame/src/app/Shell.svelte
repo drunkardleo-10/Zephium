@@ -1,14 +1,13 @@
 <script lang="ts">
   import NewTab from "../features/newtab/NewTab.svelte";
   import Sidebar from "../features/sidebar/Sidebar.svelte";
-  import * as tabs from "../state/tabs.svelte";
-
-  const isMac = navigator.userAgent.includes("Mac");
+  import { IS_MAC } from "../shared/platform";
+  import * as tabs from "../domain/tabs/tabs.svelte";
 </script>
 
 <div
   class="shell flex h-screen w-screen"
-  class:p-2={!isMac}
+  class:p-2={!IS_MAC}
   data-zephium-active-tab={tabs.activeId() ?? ""}
 >
   <Sidebar />

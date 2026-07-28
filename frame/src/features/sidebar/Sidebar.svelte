@@ -1,16 +1,16 @@
 <script lang="ts">
-  import * as tabs from "../../state/tabs.svelte";
-  import * as ui from "../../state/ui.svelte";
-  import AddressField from "./AddressField.svelte";
-  import { sidebarTree } from "./sidebar-model";
-  import SidebarBody from "./SidebarBody.svelte";
-  import SidebarFooter from "./SidebarFooter.svelte";
-  import SidebarHeader from "./SidebarHeader.svelte";
+  import { IS_MAC } from "../../shared/platform";
+  import * as tabs from "../../domain/tabs/tabs.svelte";
+  import * as ui from "../../domain/ui-commands/ui-commands.svelte";
+  import AddressField from "./address/AddressField.svelte";
+  import EssentialsEmpty from "./essentials/EssentialsEmpty.svelte";
+  import { sidebarTree } from "./tabs/sidebar-model";
+  import SidebarBody from "./tabs/SidebarBody.svelte";
+  import SidebarFooter from "./footer/SidebarFooter.svelte";
+  import SidebarHeader from "./header/SidebarHeader.svelte";
   import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
-  import SpaceHeader from "./SpaceHeader.svelte";
-  import TabList from "./TabList.svelte";
-
-  const isMac = navigator.userAgent.includes("Mac");
+  import SpaceHeader from "./space/SpaceHeader.svelte";
+  import TabList from "./tabs/TabList.svelte";
 
   let width = $state(240);
   let splitting = $state(false);
@@ -42,11 +42,11 @@
 >
   <SidebarResizeHandle {width} onWidthChange={(next) => (width = next)} />
 
-  <SidebarHeader {isMac} />
+  <SidebarHeader isMac={IS_MAC} />
   <AddressField />
 
-  {#if tree.favorites.length > 0}
-    <div class="shrink-0 pb-1.5">
+  <div class="shrink-0 pb-1.5">
+    {#if tree.favorites.length > 0}
       <TabList
         entries={tree.favorites}
         section="favorites"
@@ -55,8 +55,12 @@
         {splitting}
         onSelect={selectTab}
       />
-    </div>
-  {/if}
+    {:else}
+      <div class="px-1.5">
+        <EssentialsEmpty />
+      </div>
+    {/if}
+  </div>
 
   <SpaceHeader />
 

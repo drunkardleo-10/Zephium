@@ -1,5 +1,5 @@
 <script lang="ts">
-  import * as tabs from "../../state/tabs.svelte";
+  import * as tabs from "../../domain/tabs/tabs.svelte";
 
   const minimum = 180;
   const maximum = 420;

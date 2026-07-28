@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ItemsState, TabView } from "../src/ipc/bindings";
+import type { ItemsState, TabView } from "../src/shared/ipc/bindings";
 
 const harness = vi.hoisted(() => {
   const order: string[] = [];
@@ -22,7 +22,7 @@ const harness = vi.hoisted(() => {
 });
 
 vi.mock("svelte", () => ({ flushSync: harness.flushSync }));
-vi.mock("../src/ipc/bindings", () => ({
+vi.mock("../src/shared/ipc/bindings", () => ({
   commands: {
     tabsBootstrap: harness.tabsBootstrap,
     tabsOpen: vi.fn(),
@@ -39,7 +39,7 @@ vi.mock("../src/ipc/bindings", () => ({
     tabDrop: vi.fn(),
   },
 }));
-vi.mock("../src/ipc/native-events", () => ({
+vi.mock("../src/shared/ipc/native-events", () => ({
   events: {
     itemsChanged: {
       listen: vi.fn((listener: (event: { payload: ItemsState }) => void) => {
@@ -97,7 +97,7 @@ describe("Svelte tab state lifecycle", () => {
   });
 
   it("installs every scoped projection listener before bootstrap and only once", async () => {
-    const state = await import("../src/state/tabs.svelte");
+    const state = await import("../src/domain/tabs/tabs.svelte");
     const first = state.init();
     const second = state.init();
 
@@ -113,7 +113,7 @@ describe("Svelte tab state lifecycle", () => {
   });
 
   it("publishes presentation state inside the synchronous Svelte flush", async () => {
-    const state = await import("../src/state/tabs.svelte");
+    const state = await import("../src/domain/tabs/tabs.svelte");
     await state.init();
 
     const first = tab("a", 1);

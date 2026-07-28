@@ -1,8 +1,8 @@
 <script lang="ts">
   import { Search01Icon } from "@hugeicons/core-free-icons";
   import { onMount } from "svelte";
-  import * as tabs from "../../state/tabs.svelte";
-  import Icon from "../../ui/Icon.svelte";
+  import * as tabs from "../../domain/tabs/tabs.svelte";
+  import Icon from "../../shared/ui/Icon.svelte";
   import { greetingFor } from "./greeting";
 
   let input: HTMLInputElement;

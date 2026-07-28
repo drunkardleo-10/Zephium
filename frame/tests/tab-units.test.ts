@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { TabView } from "../src/ipc/bindings";
-import { tabDisplayUnits } from "../src/features/sidebar/tab-units";
+import type { TabView } from "../src/shared/ipc/bindings";
+import { tabDisplayUnits } from "../src/features/sidebar/tabs/tab-units";
 
 function tab(id: string): TabView {
   return {

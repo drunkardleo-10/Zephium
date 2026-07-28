@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeStatus } from "../src/ipc/bindings";
+import type { RuntimeStatus } from "../src/shared/ipc/bindings";
 
 const native = vi.hoisted(() => {
   let listener: ((event: { payload: RuntimeStatus }) => void) | undefined;
@@ -23,7 +23,7 @@ const native = vi.hoisted(() => {
   };
 });
 
-vi.mock("../src/ipc/native-events", () => ({
+vi.mock("../src/shared/ipc/native-events", () => ({
   events: {
     runtimeStatusChanged: {
       listen: native.listen,
@@ -38,7 +38,7 @@ describe("runtime status projection state", () => {
   });
 
   it("installs one listener, accepts the actor projection, and clears on disposal", async () => {
-    const runtime = await import("../src/state/runtime.svelte");
+    const runtime = await import("../src/domain/runtime/runtime.svelte");
     const first = runtime.init();
     const second = runtime.init();
 

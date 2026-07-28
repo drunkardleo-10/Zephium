@@ -564,7 +564,7 @@ fn ci() {
         run_native_adapter_clippy(manifest, features, "--all-targets");
         run_native_adapter_clippy(manifest, features, "--lib");
     }
-    // The desktop test suite regenerates frame/src/ipc/bindings.ts, so the
+    // The desktop test suite regenerates frame/src/shared/ipc/bindings.ts, so the
     // frontend typecheck after it doubles as a Rust/TS drift check.
     run("cargo", &["test", "--workspace"]);
     for (manifest, features) in NATIVE_ADAPTERS {

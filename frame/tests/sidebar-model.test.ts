@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { SidebarNodeView, SplitGroupView, TabView } from "../src/ipc/bindings";
-import { sidebarDisplayUnits, sidebarTree } from "../src/features/sidebar/sidebar-model";
+import type { SidebarNodeView, SplitGroupView, TabView } from "../src/shared/ipc/bindings";
+import { sidebarDisplayUnits, sidebarTree } from "../src/features/sidebar/tabs/sidebar-model";
 
 function tab(id: string): TabView {
   return {

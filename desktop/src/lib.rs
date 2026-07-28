@@ -3291,7 +3291,7 @@ mod tests {
         super::specta_builder()
             .export(
                 specta_typescript::Typescript::default(),
-                "../frame/src/ipc/bindings.ts",
+                "../frame/src/shared/ipc/bindings.ts",
             )
             .expect("export bindings");
     }
@@ -3436,7 +3436,7 @@ mod tests {
     #[test]
     fn svelte_sidebar_routes_add_and_split_selection_through_trusted_native_state() {
         let sidebar = include_str!("../../frame/src/features/sidebar/Sidebar.svelte");
-        let footer = include_str!("../../frame/src/features/sidebar/SidebarFooter.svelte");
+        let footer = include_str!("../../frame/src/features/sidebar/footer/SidebarFooter.svelte");
 
         assert!(footer.contains("haspopup"));
         assert!(footer
@@ -3450,7 +3450,7 @@ mod tests {
     #[test]
     fn runtime_advisory_listener_precedes_bootstrap_and_stays_in_the_sidebar() {
         let app = include_str!("../../frame/src/app/App.svelte");
-        let footer = include_str!("../../frame/src/features/sidebar/SidebarFooter.svelte");
+        let footer = include_str!("../../frame/src/features/sidebar/footer/SidebarFooter.svelte");
         let runtime_listener = app
             .find("const runtimeReady = runtime.init()")
             .expect("runtime projection listener");
@@ -3472,8 +3472,8 @@ mod tests {
 
     #[test]
     fn svelte_tab_rows_open_a_native_context_menu_rather_than_a_dom_one() {
-        let list = include_str!("../../frame/src/features/sidebar/TabList.svelte");
-        let state = include_str!("../../frame/src/state/tabs.svelte.ts");
+        let list = include_str!("../../frame/src/features/sidebar/tabs/TabList.svelte");
+        let state = include_str!("../../frame/src/domain/tabs/tabs.svelte.ts");
 
         // A DOM menu cannot paint over a content WebView, so the tab menu must
         // stay native and must carry the exact tab it was opened for.
@@ -3718,11 +3718,12 @@ mod tests {
     fn svelte_chrome_keeps_the_synchronous_presentation_contract() {
         let entry = include_str!("../../frame/src/main.ts");
         let shell = include_str!("../../frame/src/app/Shell.svelte");
-        let list = include_str!("../../frame/src/features/sidebar/TabList.svelte");
-        let row = include_str!("../../frame/src/features/sidebar/TabRow.svelte");
-        let split_group = include_str!("../../frame/src/features/sidebar/SplitGroupRow.svelte");
-        let address = include_str!("../../frame/src/features/sidebar/AddressField.svelte");
-        let tabs = include_str!("../../frame/src/state/tabs.svelte.ts");
+        let list = include_str!("../../frame/src/features/sidebar/tabs/TabList.svelte");
+        let row = include_str!("../../frame/src/features/sidebar/tabs/TabRow.svelte");
+        let split_group =
+            include_str!("../../frame/src/features/sidebar/tabs/SplitGroupRow.svelte");
+        let address = include_str!("../../frame/src/features/sidebar/address/AddressField.svelte");
+        let tabs = include_str!("../../frame/src/domain/tabs/tabs.svelte.ts");
 
         let mount = entry.find("mount(App, { target })").expect("Svelte mount");
         let initial_flush = entry

@@ -31,14 +31,14 @@ const harness = vi.hoisted(() => {
   };
 });
 
-vi.mock("../src/ipc/bindings", () => ({
+vi.mock("../src/shared/ipc/bindings", () => ({
   commands: {
     uiInfo: harness.uiInfo,
     settingGet: harness.settingGet,
   },
 }));
 
-vi.mock("../src/ipc/native-events", () => ({
+vi.mock("../src/shared/ipc/native-events", () => ({
   events: {
     uiCommand: {
       listen: harness.listen,
@@ -77,7 +77,7 @@ describe("theme startup lifecycle", () => {
   });
 
   it("applies a deterministic theme and subscribes before native queries", async () => {
-    const theme = await import("../src/state/theme");
+    const theme = await import("../src/domain/theme/theme");
     const first = theme.init();
     const second = theme.init();
 
@@ -107,7 +107,7 @@ describe("theme startup lifecycle", () => {
         }),
     );
 
-    const theme = await import("../src/state/theme");
+    const theme = await import("../src/domain/theme/theme");
     const ready = theme.init();
     await vi.waitFor(() => expect(resolveStored).toBeTypeOf("function"));
 
@@ -129,7 +129,7 @@ describe("theme startup lifecycle", () => {
         }),
     );
 
-    const theme = await import("../src/state/theme");
+    const theme = await import("../src/domain/theme/theme");
     const ready = theme.init();
     theme.dispose();
     resolveInfo?.({ material: true });

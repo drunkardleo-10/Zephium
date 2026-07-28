@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { RuntimeStatus } from "../src/ipc/bindings";
-import { runtimeNotifications } from "../src/state/runtime-model";
+import type { RuntimeStatus } from "../src/shared/ipc/bindings";
+import { runtimeNotifications } from "../src/domain/runtime/runtime-model";
 
 const clear: RuntimeStatus = {
   restart_required: false,

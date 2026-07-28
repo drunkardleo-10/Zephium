@@ -1,3 +1,3 @@
 dist
-src/ipc/bindings.ts
+src/shared/ipc/bindings.ts
 src/vite-env.d.ts

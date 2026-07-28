@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ItemsState, TabView } from "../src/ipc/bindings";
+import type { ItemsState, TabView } from "../src/shared/ipc/bindings";
 import {
   initialItemsState,
   TabProjectionModel,
   ZERO_PROJECTION_REVISION,
-} from "../src/state/tabs-model";
+} from "../src/domain/tabs/tabs-model";
 
 function revision(value: number): string {
   return value.toString(16).padStart(32, "0");

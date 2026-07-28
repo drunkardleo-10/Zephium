@@ -3,19 +3,19 @@
   import { onMount } from "svelte";
   import Launcher from "../features/launcher/Launcher.svelte";
   import Dividers from "../features/split/Dividers.svelte";
-  import { commands } from "../ipc/bindings";
-  import * as blocker from "../state/blocker.svelte";
-  import * as layout from "../state/layout.svelte";
-  import * as operations from "../state/operations";
-  import * as runtime from "../state/runtime.svelte";
-  import * as tabs from "../state/tabs.svelte";
-  import * as theme from "../state/theme";
-  import * as ui from "../state/ui.svelte";
+  import { commands } from "../shared/ipc/bindings";
+  import { IS_MAC } from "../shared/platform";
+  import * as blocker from "../domain/blocker/blocker.svelte";
+  import * as layout from "../features/split/layout.svelte";
+  import * as operations from "../domain/operations/operations";
+  import * as runtime from "../domain/runtime/runtime.svelte";
+  import * as tabs from "../domain/tabs/tabs.svelte";
+  import * as theme from "../domain/theme/theme";
+  import * as ui from "../domain/ui-commands/ui-commands.svelte";
   import Shell from "./Shell.svelte";
 
   const currentWindow = getCurrentWindow();
   const isPanel = currentWindow.label === "panel";
-  const isMac = navigator.userAgent.includes("Mac");
 
   type ChromeShortcut = {
     matches: (event: KeyboardEvent) => boolean;
@@ -33,7 +33,7 @@
     },
   ];
 
-  if (!isMac) {
+  if (!IS_MAC) {
     const primaryShortcuts: ReadonlyArray<readonly [string, string]> = [
       ["t", "tab.new"],
       ["w", "tab.close"],
@@ -90,7 +90,7 @@
     const uiEventsReady = ui.init();
     void operations.init();
     void blocker.init();
-    if (!isMac) void layout.init();
+    if (!IS_MAC) void layout.init();
     document.addEventListener("keydown", handleKeydown);
 
     void (async () => {
@@ -120,7 +120,7 @@
       runtime.dispose();
       tabs.dispose();
       ui.dispose();
-      if (!isMac) layout.dispose();
+      if (!IS_MAC) layout.dispose();
       document.removeEventListener("keydown", handleKeydown);
     };
   });
@@ -130,7 +130,7 @@
   <Launcher />
 {:else}
   <Shell />
-  {#if !isMac}
+  {#if !IS_MAC}
     <Dividers />
   {/if}
 {/if}
