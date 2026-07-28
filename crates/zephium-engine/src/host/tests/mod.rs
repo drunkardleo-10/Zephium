@@ -62,6 +62,37 @@ fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
 }
 
 #[test]
+fn retained_layouts_accept_reserved_views_awaiting_native_construction() {
+    let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
+    let macos = stages
+        .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_content(")
+        .nth(1)
+        .expect("macOS host layout")
+        .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_drop_indicator")
+        .next()
+        .expect("bounded macOS host layout");
+    let other = stages
+        .split("#[cfg(not(target_os = \"macos\"))]\n    pub(crate) fn set_content(")
+        .nth(1)
+        .expect("Windows/Linux host layout")
+        .split("#[cfg(not(target_os = \"macos\"))]\n    pub(crate) fn set_drop_indicator")
+        .next()
+        .expect("bounded Windows/Linux host layout");
+
+    for layout in [macos, other] {
+        let pending_construction = layout
+            .split("let Some(view) = self.views.get(id) else {")
+            .nth(1)
+            .expect("native view lookup")
+            .split("};")
+            .next()
+            .expect("missing-view branch");
+        assert!(pending_construction.contains("continue;"));
+        assert!(!pending_construction.contains("return false;"));
+    }
+}
+
+#[test]
 fn windows_superseded_native_placement_requeues_without_spending_failure_budget() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

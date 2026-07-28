@@ -213,8 +213,12 @@ impl EngineHost {
         let mut invalid_views = Vec::new();
         for id in &tabs {
             let Some(view) = self.views.get(id) else {
-                stage.abort_content_update(update_epoch);
-                return false;
+                // The lifecycle gate already proved this id has a live
+                // reservation. A coalesced layout may overtake its later
+                // native construction task, so retain the tree with this
+                // leaf concealed. `finish_new_view_insertion` attaches the
+                // exact generation and catches it up to this layout.
+                continue;
             };
             let mut inserted = false;
             if !stage.has_view(*id) {
@@ -299,7 +303,11 @@ impl EngineHost {
         };
         for id in &tabs {
             let Some(view) = self.views.get(id) else {
-                return false;
+                // The outer lifecycle gate distinguishes an inactive item
+                // from a live reservation whose native construction has not
+                // run yet. Retain the authoritative tree; insertion will
+                // attach and synchronize that exact generation.
+                continue;
             };
             let mut inserted = false;
             if !stage.has_view(*id) {
