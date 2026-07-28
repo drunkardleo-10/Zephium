@@ -1,11 +1,16 @@
 //! Platform-independent WebKitGTK runtime admission and review policy.
 //!
 //! The installed Linux library is part of the browser's security boundary.
-//! Keep the enforced minimum tied to a published security advisory, admit
-//! only the stable release line reviewed by maintainers, and separately
-//! record the newest stable release included in that review.
+//! Keep the enforced minimum tied to a published security advisory. The
+//! reviewed stable line receives patch recommendations, while a newer stable
+//! even-minor 2.x line is admitted with an explicit unreviewed-runtime warning.
 
 use std::fmt;
+
+use crate::runtime_security::{
+    overdue_review_advisory, RuntimeSecurityAdvisories, RuntimeSecurityAdvisory,
+    RuntimeSecurityUpdateTarget,
+};
 
 pub const SECURITY_FLOOR: [u32; 3] = [2, 52, 5];
 pub const SECURITY_FLOOR_TEXT: &str = "2.52.5";
@@ -85,13 +90,57 @@ pub fn admit_runtime(major: u32, minor: u32, micro: u32) -> Result<(), Admission
             required: SECURITY_FLOOR,
         });
     }
-    if [major, minor] != REVIEWED_STABLE_RELEASE_LINE {
+    // WebKitGTK uses even minor numbers for stable release lines. A newer
+    // stable 2.x line retains the hard ABI/security postconditions and is
+    // admitted with an advisory by `assess_runtime`; development or unrelated
+    // major lines remain hard failures.
+    if major != REVIEWED_STABLE_RELEASE_LINE[0]
+        || minor < REVIEWED_STABLE_RELEASE_LINE[1]
+        || !minor.is_multiple_of(2)
+    {
         return Err(AdmissionError::UnreviewedReleaseLine {
             found,
             reviewed: REVIEWED_STABLE_RELEASE_LINE,
         });
     }
     Ok(())
+}
+
+pub fn assess_runtime(
+    major: u32,
+    minor: u32,
+    micro: u32,
+    unix_seconds: u64,
+) -> Result<RuntimeSecurityAdvisories, AdmissionError> {
+    admit_runtime(major, minor, micro)?;
+    Ok(runtime_advisories(
+        [major, minor, micro],
+        REVIEWED_STABLE_RELEASE_LINE,
+        LATEST_REVIEWED,
+        unix_seconds,
+        SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+    ))
+}
+
+fn runtime_advisories(
+    found: [u32; 3],
+    reviewed_line: [u32; 2],
+    latest_reviewed: [u32; 3],
+    unix_seconds: u64,
+    review_deadline_exclusive: u64,
+) -> RuntimeSecurityAdvisories {
+    let mut advisories = RuntimeSecurityAdvisories::new().with_optional(overdue_review_advisory(
+        unix_seconds,
+        review_deadline_exclusive,
+    ));
+    if [found[0], found[1]] != reviewed_line {
+        advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
+    } else if found < latest_reviewed {
+        advisories.insert(RuntimeSecurityAdvisory::update_recommended(
+            RuntimeSecurityUpdateTarget::OperatingSystem,
+        ));
+    }
+    advisories
 }
 
 pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
@@ -104,7 +153,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admission_is_limited_to_the_reviewed_stable_release_line() {
+    fn admission_rejects_obsolete_and_development_release_lines() {
         assert_eq!(
             admit_runtime(2, 52, 4),
             Err(AdmissionError::BelowSecurityFloor {
@@ -114,8 +163,9 @@ mod tests {
         );
         assert_eq!(admit_runtime(2, 52, 5), Ok(()));
         assert_eq!(admit_runtime(2, 52, u32::MAX), Ok(()));
+        assert_eq!(admit_runtime(2, 54, 0), Ok(()));
 
-        for found in [[2, 53, 0], [2, 54, 0], [3, 0, 0]] {
+        for found in [[2, 53, 0], [2, 55, 0], [3, 0, 0]] {
             assert_eq!(
                 admit_runtime(found[0], found[1], found[2]),
                 Err(AdmissionError::UnreviewedReleaseLine {
@@ -124,6 +174,37 @@ mod tests {
                 })
             );
         }
+        assert_eq!(
+            assess_runtime(2, 54, 0, SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS),
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::unreviewed_runtime(),
+            ))
+        );
+        assert_eq!(
+            assess_runtime(
+                2,
+                52,
+                5,
+                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+            ),
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::review_overdue(),
+            ))
+        );
+    }
+
+    #[test]
+    fn reviewed_line_patch_updates_and_independent_review_age_are_reported() {
+        let recommended = runtime_advisories([2, 52, 5], [2, 52], [2, 52, 6], 10, 20);
+        assert!(
+            recommended.contains(RuntimeSecurityAdvisory::update_recommended(
+                RuntimeSecurityUpdateTarget::OperatingSystem,
+            ))
+        );
+
+        let combined = runtime_advisories([2, 54, 0], [2, 52], [2, 52, 6], 20, 20);
+        assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
+        assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
     }
 
     #[test]

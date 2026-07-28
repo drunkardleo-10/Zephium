@@ -64,23 +64,19 @@ pub fn finalize_privileged_environment_observers(expected_labels: &[&str]) -> bo
 /// Query the runtime selected by WebView2 before Tauri creates any controller.
 /// Capability checks still run per-view; this is the independently maintained
 /// security-patch floor for all privileged and untrusted content views.
-pub fn enforce_runtime_security_floor() -> Result<(), String> {
+pub fn enforce_runtime_security_floor(
+) -> Result<zephium_core::runtime_security::RuntimeSecurityAdvisories, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| {
-            "system clock is before the Unix epoch; cannot enforce the WebView2 security review deadline".to_owned()
+            "system clock is before the Unix epoch; cannot assess WebView2 runtime security"
+                .to_owned()
         })?
         .as_secs();
     if now < zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
         return Err(format!(
             "system clock predates the reviewed WebView2 security release {}; correct the clock before browsing",
             zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_ON
-        ));
-    }
-    if !zephium_core::webview2::security_floor_review_is_current(now) {
-        return Err(format!(
-            "the embedded WebView2 security-floor review expired after {}; update Zephium before browsing",
-            zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY
         ));
     }
     if let Some(name) = zephium_core::webview2::first_present_environment_override(|name| {
@@ -92,15 +88,16 @@ pub fn enforce_runtime_security_floor() -> Result<(), String> {
     }
     let reported = tauri::webview_version()
         .map_err(|error| format!("cannot query the selected WebView2 runtime: {error}"))?;
-    zephium_core::webview2::admit_runtime(&reported).map_err(|error| {
-        format!(
-            "WebView2 runtime admission rejected {reported:?}: {error}; required >= {} (security release {}, source: {}). Update the Evergreen WebView2 Runtime before starting Zephium",
-            zephium_core::webview2::SECURITY_FLOOR_TEXT,
-            zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_ON,
-            zephium_core::webview2::SECURITY_FLOOR_SOURCE_URL,
-        )
-    })?;
-    Ok(())
+    let (_, advisory) =
+        zephium_core::webview2::assess_runtime(&reported, now).map_err(|error| {
+            format!(
+                "WebView2 runtime admission rejected {reported:?}: {error}; required >= {} (security release {}, source: {}). Update the Evergreen WebView2 Runtime before starting Zephium",
+                zephium_core::webview2::SECURITY_FLOOR_TEXT,
+                zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_ON,
+                zephium_core::webview2::SECURITY_FLOOR_SOURCE_URL,
+            )
+        })?;
+    Ok(advisory)
 }
 
 #[path = "windows_log.rs"]

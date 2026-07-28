@@ -7,6 +7,7 @@
   import * as blocker from "../state/blocker.svelte";
   import * as layout from "../state/layout.svelte";
   import * as operations from "../state/operations";
+  import * as runtime from "../state/runtime.svelte";
   import * as tabs from "../state/tabs.svelte";
   import * as theme from "../state/theme";
   import * as ui from "../state/ui.svelte";
@@ -82,6 +83,9 @@
       };
     }
 
+    // Runtime status is emitted by the same actor-ordered bootstrap that
+    // supplies tabs, so its listener must exist before tabs starts bootstrap.
+    const runtimeReady = runtime.init();
     const tabsReady = tabs.init();
     const uiEventsReady = ui.init();
     void operations.init();
@@ -91,7 +95,7 @@
 
     void (async () => {
       try {
-        await Promise.all([themeReady, tabsReady, uiEventsReady]);
+        await Promise.all([themeReady, runtimeReady, tabsReady, uiEventsReady]);
         if (disposed) return;
 
         // A hidden native window can suspend animation frames indefinitely.
@@ -113,6 +117,7 @@
       theme.dispose();
       operations.dispose();
       blocker.dispose();
+      runtime.dispose();
       tabs.dispose();
       ui.dispose();
       if (!isMac) layout.dispose();

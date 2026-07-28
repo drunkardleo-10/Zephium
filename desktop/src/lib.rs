@@ -2463,30 +2463,42 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "macos")]
-    if let Err(error) = platform::imp::enforce_runtime_security_floor() {
-        // WebKit is dynamically supplied by macOS. Reject stale, mismatched,
-        // or unreviewed OS/Safari/WebKit combinations before Builder creates
-        // even the privileged blank bootstrap WKWebView.
-        eprintln!("security: {error}");
-        std::process::exit(78);
-    }
+    let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
+        Ok(advisory) => advisory,
+        Err(error) => {
+            // WebKit is dynamically supplied by macOS. Reject a known
+            // obsolete floor, malformed provenance, or build mismatch
+            // before Builder creates even the privileged blank bootstrap
+            // WKWebView. Review age and newer stable releases are
+            // projected as non-blocking advisories instead.
+            eprintln!("security: {error}");
+            std::process::exit(78);
+        }
+    };
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    if let Err(error) = zephium_engine::enforce_runtime_security_floor() {
-        // WebKitGTK is dynamically supplied by the OS. Reject it before
-        // Builder constructs even the privileged blank bootstrap WebView.
-        eprintln!("security: {error}");
-        std::process::exit(78);
-    }
+    let runtime_security_advisories = match zephium_engine::enforce_runtime_security_floor() {
+        Ok(advisory) => advisory,
+        Err(error) => {
+            // WebKitGTK is dynamically supplied by the OS. Reject known
+            // obsolete/development runtimes and security overrides before
+            // Builder constructs even the privileged blank bootstrap WebView.
+            eprintln!("security: {error}");
+            std::process::exit(78);
+        }
+    };
 
     #[cfg(target_os = "windows")]
-    if let Err(error) = platform::imp::enforce_runtime_security_floor() {
-        // This runs before Builder creates either privileged chrome or raw
-        // content. A non-zero status is intentional: continuing on a stale or
-        // unparseable runtime would turn the security floor into a paper claim.
-        eprintln!("security: {error}");
-        std::process::exit(78);
-    }
+    let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
+        Ok(advisory) => advisory,
+        Err(error) => {
+            // This runs before Builder creates either privileged chrome
+            // or raw content. Obsolete, preview, overridden, or
+            // unparseable runtimes remain hard failures.
+            eprintln!("security: {error}");
+            std::process::exit(78);
+        }
+    };
 
     let specta = specta_builder();
     #[cfg(target_os = "windows")]
@@ -2723,6 +2735,7 @@ pub fn run() {
                 parent,
                 dispatch.clone(),
                 data_dir.join("web-content"),
+                runtime_security_advisories,
                 move |event| {
                     if let zephium_core::ports::engine::EngineEvent::ShortcutPressed {
                         command,
@@ -3432,6 +3445,29 @@ mod tests {
         assert!(sidebar.contains(r#"command.id === "split.choose""#));
         assert!(sidebar.contains("splitting = true"));
         assert!(!sidebar.contains("onclick={tabs.open}"));
+    }
+
+    #[test]
+    fn runtime_advisory_listener_precedes_bootstrap_and_stays_in_the_sidebar() {
+        let app = include_str!("../../frame/src/app/App.svelte");
+        let footer = include_str!("../../frame/src/features/sidebar/SidebarFooter.svelte");
+        let runtime_listener = app
+            .find("const runtimeReady = runtime.init()")
+            .expect("runtime projection listener");
+        let tab_bootstrap = app
+            .find("const tabsReady = tabs.init()")
+            .expect("tab bootstrap");
+
+        assert!(runtime_listener < tab_bootstrap);
+        assert!(footer.contains("runtimeNotifications(runtime.status())"));
+        assert!(footer.contains(r#"haspopup="dialog""#));
+        assert!(footer.contains(r#"id="runtime-notifications""#));
+        assert!(footer.contains(r#"aria-modal="true""#));
+        assert!(footer.contains(r#"event.key === "Tab""#));
+        assert!(footer.contains("closeNotifications(true)"));
+        assert!(footer.contains(r#"label="New tab and split options""#));
+        assert!(!footer.contains("http://"));
+        assert!(!footer.contains("https://"));
     }
 
     #[test]

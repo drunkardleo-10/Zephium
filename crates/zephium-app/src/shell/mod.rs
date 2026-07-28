@@ -91,8 +91,9 @@ use zephium_ipc::{
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ItemsState, LayoutState,
     OperationDisposition, OperationOutcome, OperationReason, ProfileKindView, ProfileView,
-    Projection, RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView,
-    SidebarNodeView, SidebarSectionView, SpaceView, SplitGroupView, TabView,
+    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
+    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
+    SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled

@@ -300,6 +300,24 @@ export type ProfileView = {
 	kind: ProfileKindView,
 };
 
+/**  Sanitized advisory delivered only to privileged main chrome. */
+export type RuntimeSecurityAdvisory = {
+	kind: RuntimeSecurityAdvisoryKind,
+	update_target: RuntimeSecurityUpdateTarget,
+};
+
+/**
+ *  Non-fatal, process-local classification produced before native WebView
+ *  construction. Hard admission failures never reach privileged chrome.
+ */
+export type RuntimeSecurityAdvisoryKind = "review_overdue" | "update_recommended" | "unreviewed_runtime";
+
+/**
+ *  Fixed destination of the recommended maintenance action. No page or
+ *  network response can select this value.
+ */
+export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "browser_runtime";
+
 /**
  *  Process-lifetime browser-runtime state. Once `restart_required` becomes
  *  true it remains true until the whole application exits; it is not cleared
@@ -307,6 +325,11 @@ export type ProfileView = {
  */
 export type RuntimeStatus = {
 	restart_required: boolean,
+	/**
+	 *  Canonically ordered closed-vocabulary set. Rust emits at most five
+	 *  entries and privileged chrome must replace, never append, projections.
+	 */
+	security_advisories: RuntimeSecurityAdvisory[],
 };
 
 export type RuntimeStatusChanged = RuntimeStatus;

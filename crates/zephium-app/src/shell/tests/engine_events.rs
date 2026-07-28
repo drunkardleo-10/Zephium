@@ -54,6 +54,50 @@ fn runtime_restart_requirement_is_sticky_deduplicated_and_replayed_on_bootstrap(
 }
 
 #[test]
+fn bootstrap_projects_every_sanitized_runtime_security_advisory() {
+    let engine = Arc::new(FakeEngine::default());
+    let mut advisories = zephium_core::runtime_security::RuntimeSecurityAdvisories::new();
+    advisories.insert(
+        zephium_core::runtime_security::RuntimeSecurityAdvisory::update_recommended(
+            zephium_core::runtime_security::RuntimeSecurityUpdateTarget::OperatingSystem,
+        ),
+    );
+    advisories.insert(zephium_core::runtime_security::RuntimeSecurityAdvisory::review_overdue());
+    *engine.runtime_security_advisories.lock().unwrap() = advisories;
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let sink = statuses.clone();
+    let mut shell = Shell::new(
+        engine,
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RuntimeStatus(status) = projection {
+                sink.lock().unwrap().push(status);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+
+    assert_eq!(
+        statuses.lock().unwrap().as_slice(),
+        &[RuntimeStatus {
+            restart_required: false,
+            security_advisories: vec![
+                RuntimeSecurityAdvisory {
+                    kind: RuntimeSecurityAdvisoryKind::ReviewOverdue,
+                    update_target: RuntimeSecurityUpdateTarget::Zephium,
+                },
+                RuntimeSecurityAdvisory {
+                    kind: RuntimeSecurityAdvisoryKind::UpdateRecommended,
+                    update_target: RuntimeSecurityUpdateTarget::OperatingSystem,
+                },
+            ],
+        }]
+    );
+}
+
+#[test]
 fn maintenance_reconciles_a_runtime_event_lost_before_shell_admission() {
     let engine = Arc::new(FakeEngine::default());
     let statuses = Arc::new(Mutex::new(Vec::new()));

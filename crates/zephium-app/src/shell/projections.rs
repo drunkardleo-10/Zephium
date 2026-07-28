@@ -16,6 +16,12 @@ impl Shell {
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
+            security_advisories: self
+                .engine
+                .runtime_security_advisories()
+                .iter()
+                .map(runtime_security_advisory_view)
+                .collect(),
         }));
     }
 
@@ -275,6 +281,35 @@ impl Shell {
     pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
         let parsed = url::Url::parse(url).ok()?;
         self.favicon_key_for(profile, &origin_of(&parsed)?)
+    }
+}
+
+fn runtime_security_advisory_view(
+    advisory: zephium_core::runtime_security::RuntimeSecurityAdvisory,
+) -> RuntimeSecurityAdvisory {
+    RuntimeSecurityAdvisory {
+        kind: match advisory.kind() {
+            zephium_core::runtime_security::RuntimeSecurityAdvisoryKind::ReviewOverdue => {
+                RuntimeSecurityAdvisoryKind::ReviewOverdue
+            }
+            zephium_core::runtime_security::RuntimeSecurityAdvisoryKind::UpdateRecommended => {
+                RuntimeSecurityAdvisoryKind::UpdateRecommended
+            }
+            zephium_core::runtime_security::RuntimeSecurityAdvisoryKind::UnreviewedRuntime => {
+                RuntimeSecurityAdvisoryKind::UnreviewedRuntime
+            }
+        },
+        update_target: match advisory.update_target() {
+            zephium_core::runtime_security::RuntimeSecurityUpdateTarget::Zephium => {
+                RuntimeSecurityUpdateTarget::Zephium
+            }
+            zephium_core::runtime_security::RuntimeSecurityUpdateTarget::OperatingSystem => {
+                RuntimeSecurityUpdateTarget::OperatingSystem
+            }
+            zephium_core::runtime_security::RuntimeSecurityUpdateTarget::BrowserRuntime => {
+                RuntimeSecurityUpdateTarget::BrowserRuntime
+            }
+        },
     }
 }
 

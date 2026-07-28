@@ -89,10 +89,14 @@ pub fn install_container(fixed: gtk::Fixed) -> Result<(), String> {
 // machine will actually load. The pure version/deadline policy lives in core
 // so CI and runtime cannot silently drift.
 
-pub fn enforce_runtime_security_floor() -> Result<(), String> {
+pub fn enforce_runtime_security_floor(
+) -> Result<zephium_core::runtime_security::RuntimeSecurityAdvisories, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "system clock is before the Unix epoch; cannot enforce the WebKitGTK security review deadline".to_owned())?
+        .map_err(|_| {
+            "system clock is before the Unix epoch; cannot assess WebKitGTK runtime security"
+                .to_owned()
+        })?
         .as_secs();
     enforce_runtime_preconditions(now, || {
         std::env::vars_os().find_map(|(name, _)| {
@@ -110,7 +114,7 @@ pub fn enforce_runtime_security_floor() -> Result<(), String> {
             webkit2gtk::ffi::webkit_get_micro_version(),
         )
     };
-    enforce_runtime_version(version)
+    enforce_runtime_version(version, now)
 }
 
 fn enforce_runtime_preconditions(
@@ -128,19 +132,22 @@ fn enforce_runtime_preconditions(
             zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_ON,
         ));
     }
-    if !zephium_core::webkitgtk::security_floor_review_is_current(unix_seconds) {
-        return Err(format!(
-            "the embedded WebKitGTK security-floor review expired after {}; update Zephium before browsing",
-            zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_BY,
-        ));
-    }
     Ok(())
 }
 
-fn enforce_runtime_version(version: (u32, u32, u32)) -> Result<(), String> {
-    zephium_core::webkitgtk::admit_runtime(version.0, version.1, version.2).map_err(|error| {
+fn enforce_runtime_version(
+    version: (u32, u32, u32),
+    unix_seconds: u64,
+) -> Result<zephium_core::runtime_security::RuntimeSecurityAdvisories, String> {
+    zephium_core::webkitgtk::assess_runtime(
+        version.0,
+        version.1,
+        version.2,
+        unix_seconds,
+    )
+    .map_err(|error| {
         format!(
-            "{error}; latest stable {} was reviewed on {} (security floor source: {}; latest release source: {}). Install a supported, reviewed WebKitGTK runtime before starting Zephium",
+            "{error}; latest stable {} was reviewed on {} (security floor source: {}; latest release source: {}). Install a supported stable WebKitGTK runtime before starting Zephium",
             zephium_core::webkitgtk::LATEST_REVIEWED_TEXT,
             zephium_core::webkitgtk::LATEST_REVIEWED_PUBLISHED_ON,
             zephium_core::webkitgtk::SECURITY_FLOOR_SOURCE_URL,
@@ -875,16 +882,27 @@ mod tests {
 
     #[test]
     fn webkitgtk_floor_matches_the_reviewed_security_advisory() {
-        assert!(enforce_runtime_version((2, 52, 3)).is_err());
-        assert!(enforce_runtime_version((2, 52, 4)).is_err());
-        assert!(enforce_runtime_version((2, 52, 5)).is_ok());
-        assert!(enforce_runtime_version((2, 53, 0)).is_err());
-        assert!(enforce_runtime_version((2, 54, 0)).is_err());
-        assert!(enforce_runtime_version((3, 0, 0)).is_err());
+        let reviewed_at = zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS;
+        assert!(enforce_runtime_version((2, 52, 3), reviewed_at).is_err());
+        assert!(enforce_runtime_version((2, 52, 4), reviewed_at).is_err());
+        assert_eq!(
+            enforce_runtime_version((2, 52, 5), reviewed_at),
+            Ok(zephium_core::runtime_security::RuntimeSecurityAdvisories::new())
+        );
+        assert!(enforce_runtime_version((2, 53, 0), reviewed_at).is_err());
+        assert_eq!(
+            enforce_runtime_version((2, 54, 0), reviewed_at),
+            Ok(
+                zephium_core::runtime_security::RuntimeSecurityAdvisories::from_advisory(
+                    zephium_core::runtime_security::RuntimeSecurityAdvisory::unreviewed_runtime(),
+                ),
+            )
+        );
+        assert!(enforce_runtime_version((3, 0, 0), reviewed_at).is_err());
     }
 
     #[test]
-    fn runtime_preconditions_reject_sandbox_override_and_expired_review() {
+    fn runtime_preconditions_reject_clock_rollback_and_sandbox_overrides() {
         assert!(enforce_runtime_preconditions(
             zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1,
             || None,
@@ -918,8 +936,18 @@ mod tests {
             zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
             || None,
         )
-        .unwrap_err()
-        .contains("review expired"));
+        .is_ok());
+        assert_eq!(
+            enforce_runtime_version(
+                (2, 52, 5),
+                zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+            ),
+            Ok(
+                zephium_core::runtime_security::RuntimeSecurityAdvisories::from_advisory(
+                    zephium_core::runtime_security::RuntimeSecurityAdvisory::review_overdue(),
+                ),
+            )
+        );
     }
 
     #[test]

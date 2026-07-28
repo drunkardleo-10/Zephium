@@ -229,9 +229,39 @@ pub enum OperationStatus {
 /// Process-lifetime browser-runtime state. Once `restart_required` becomes
 /// true it remains true until the whole application exits; it is not cleared
 /// by rebuilding a content WebView or profile environment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// Canonically ordered closed-vocabulary set. Rust emits at most five
+    /// entries and privileged chrome must replace, never append, projections.
+    pub security_advisories: Vec<RuntimeSecurityAdvisory>,
+}
+
+/// Non-fatal, process-local classification produced before native WebView
+/// construction. Hard admission failures never reach privileged chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSecurityAdvisoryKind {
+    ReviewOverdue,
+    UpdateRecommended,
+    UnreviewedRuntime,
+}
+
+/// Fixed destination of the recommended maintenance action. No page or
+/// network response can select this value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSecurityUpdateTarget {
+    Zephium,
+    OperatingSystem,
+    BrowserRuntime,
+}
+
+/// Sanitized advisory delivered only to privileged main chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct RuntimeSecurityAdvisory {
+    pub kind: RuntimeSecurityAdvisoryKind,
+    pub update_target: RuntimeSecurityUpdateTarget,
 }
 
 /// Effective protection for the focused profile's exact native policy.

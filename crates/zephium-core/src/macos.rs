@@ -3,33 +3,52 @@
 //! Apple ships current WebKit security fixes as a Safari update on Sonoma and
 //! Sequoia, but as a macOS update on Tahoe. Admission therefore checks both
 //! product versions and requires the installed Safari build to match the
-//! WebKit framework build that actually owns `WKWebView`. The review deadline
-//! prevents these point-release floors from becoming a permanent claim.
+//! WebKit framework build that actually owns `WKWebView`. The hard floor and
+//! latest reviewed recommendation are separate: an overdue maintenance review
+//! is visible to privileged chrome and blocks releases, but does not become a
+//! wall-clock runtime kill switch.
 
 use std::fmt;
 use std::str::FromStr;
+
+use crate::runtime_security::{
+    overdue_review_advisory, RuntimeSecurityAdvisories, RuntimeSecurityAdvisory,
+    RuntimeSecurityUpdateTarget,
+};
 
 pub const SONOMA_SECURITY_FLOOR: ProductVersion = ProductVersion::new(14, 8, 7);
 pub const SEQUOIA_SECURITY_FLOOR: ProductVersion = ProductVersion::new(15, 7, 7);
 pub const TAHOE_SECURITY_FLOOR: ProductVersion = ProductVersion::new(26, 5, 2);
 pub const SAFARI_SECURITY_FLOOR: ProductVersion = ProductVersion::new(26, 5, 2);
 
+pub const SONOMA_RECOMMENDED: ProductVersion = ProductVersion::new(14, 8, 8);
+pub const SEQUOIA_RECOMMENDED: ProductVersion = ProductVersion::new(15, 7, 8);
+pub const TAHOE_RECOMMENDED: ProductVersion = ProductVersion::new(26, 6, 0);
+pub const SAFARI_RECOMMENDED: ProductVersion = ProductVersion::new(26, 6, 0);
+
 pub const SONOMA_SECURITY_FLOOR_TEXT: &str = "14.8.7";
 pub const SEQUOIA_SECURITY_FLOOR_TEXT: &str = "15.7.7";
 pub const TAHOE_SECURITY_FLOOR_TEXT: &str = "26.5.2";
 pub const SAFARI_SECURITY_FLOOR_TEXT: &str = "26.5.2";
+pub const SONOMA_RECOMMENDED_TEXT: &str = "14.8.8";
+pub const SEQUOIA_RECOMMENDED_TEXT: &str = "15.7.8";
+pub const TAHOE_RECOMMENDED_TEXT: &str = "26.6";
+pub const SAFARI_RECOMMENDED_TEXT: &str = "26.6";
 pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-06-29";
 /// 2026-06-29T00:00:00Z. A wall clock before the reviewed Apple security
 /// release cannot establish that this floor was published and must fail closed.
 pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_782_691_200;
+pub const RECOMMENDED_RELEASE_PUBLISHED_ON: &str = "2026-07-27";
+/// 2026-07-27T00:00:00Z.
+pub const RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS: u64 = 1_785_110_400;
 pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://support.apple.com/en-us/100100";
-pub const SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/127685";
-pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/127595";
+pub const SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/128073";
+pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/128067";
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-07-27";
-/// 2026-07-28T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_785_196_800;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-27";
+/// 2026-08-28T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_787_875_200;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProductVersion([u32; 3]);
@@ -262,18 +281,20 @@ impl fmt::Display for AdmissionError {
 
 impl std::error::Error for AdmissionError {}
 
-/// Admit only an Apple-supported, reviewed macOS/WebKit combination.
+/// Assess one Apple-supplied macOS/WebKit combination without performing I/O.
 ///
 /// `safari_build` must come from the protected system Safari bundle and
 /// `webkit_build` from the bundle owning the loaded `WKWebView` class. Their
 /// equality is what connects Safari's marketing version to the shared WebKit
-/// framework used by the embedder.
-pub fn admit_runtime(
+/// framework used by the embedder. Known-obsolete versions remain hard
+/// failures; maintenance age and newer stable releases are bounded advisories.
+pub fn assess_runtime(
     operating_system: &str,
     safari: &str,
     safari_build: &str,
     webkit_build: &str,
-) -> Result<(), AdmissionError> {
+    unix_seconds: u64,
+) -> Result<RuntimeSecurityAdvisories, AdmissionError> {
     let operating_system = operating_system
         .parse::<ProductVersion>()
         .map_err(AdmissionError::InvalidOperatingSystemVersion)?;
@@ -284,24 +305,42 @@ pub fn admit_runtime(
         return Err(AdmissionError::SafariWebKitBuildMismatch);
     }
 
-    let required_os = match operating_system.major() {
-        14 => SONOMA_SECURITY_FLOOR,
-        15 => SEQUOIA_SECURITY_FLOOR,
-        26 => TAHOE_SECURITY_FLOOR,
+    let mut advisories = RuntimeSecurityAdvisories::new().with_optional(overdue_review_advisory(
+        unix_seconds,
+        SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+    ));
+    let versions = match operating_system.major() {
+        14 => Some((SONOMA_SECURITY_FLOOR, SONOMA_RECOMMENDED)),
+        15 => Some((SEQUOIA_SECURITY_FLOOR, SEQUOIA_RECOMMENDED)),
+        26 => Some((TAHOE_SECURITY_FLOOR, TAHOE_RECOMMENDED)),
+        major if major >= 27 => {
+            advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
+            None
+        }
         major => return Err(AdmissionError::UnsupportedOperatingSystemMajor(major)),
     };
-    if operating_system < required_os {
-        return Err(AdmissionError::BelowOperatingSystemFloor {
-            found: operating_system,
-            required: required_os,
-        });
+    if let Some((required, recommended)) = versions {
+        if operating_system < required {
+            return Err(AdmissionError::BelowOperatingSystemFloor {
+                found: operating_system,
+                required,
+            });
+        }
+        if operating_system < recommended {
+            advisories.insert(RuntimeSecurityAdvisory::update_recommended(
+                RuntimeSecurityUpdateTarget::OperatingSystem,
+            ));
+        }
     }
 
-    // The reviewed Safari/WebKit release line is 26. Tahoe receives the same
-    // WebKit fixes in its OS update, so only Sonoma and Sequoia independently
-    // require the 26.5.2 Safari point release.
-    if safari.major() != SAFARI_SECURITY_FLOOR.major() {
+    // Tahoe receives WebKit fixes in its OS update. Sonoma and Sequoia receive
+    // them through Safari, so their point release participates in both the
+    // hard floor and latest recommendation.
+    if safari.major() < SAFARI_SECURITY_FLOOR.major() {
         return Err(AdmissionError::UnsupportedSafariMajor(safari.major()));
+    }
+    if safari.major() > SAFARI_SECURITY_FLOOR.major() {
+        advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
     }
     if matches!(operating_system.major(), 14 | 15) && safari < SAFARI_SECURITY_FLOOR {
         return Err(AdmissionError::BelowSafariFloor {
@@ -309,11 +348,16 @@ pub fn admit_runtime(
             required: SAFARI_SECURITY_FLOOR,
         });
     }
-    Ok(())
+    if matches!(operating_system.major(), 14 | 15) && safari < SAFARI_RECOMMENDED {
+        advisories.insert(RuntimeSecurityAdvisory::update_recommended(
+            RuntimeSecurityUpdateTarget::OperatingSystem,
+        ));
+    }
+    Ok(advisories)
 }
 
 pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
-    unix_seconds >= SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+    unix_seconds >= RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS
         && unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
 }
 
@@ -322,6 +366,21 @@ mod tests {
     use super::*;
 
     const BUILD: &str = "21624.3.4.5.6";
+
+    fn assess_at_review(
+        operating_system: &str,
+        safari: &str,
+        safari_build: &str,
+        webkit_build: &str,
+    ) -> Result<RuntimeSecurityAdvisories, AdmissionError> {
+        assess_runtime(
+            operating_system,
+            safari,
+            safari_build,
+            webkit_build,
+            RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS,
+        )
+    }
 
     #[test]
     fn strict_product_version_parser_rejects_ambiguous_input() {
@@ -383,12 +442,12 @@ mod tests {
             ("26.5.2", "26.5"),
             ("26.5.3", "26.5.2"),
         ] {
-            assert_eq!(admit_runtime(os, safari, BUILD, BUILD), Ok(()));
+            assert!(assess_at_review(os, safari, BUILD, BUILD).is_ok());
         }
     }
 
     #[test]
-    fn rejects_old_and_unknown_os_or_safari_lines() {
+    fn rejects_old_and_unsupported_os_or_safari_lines() {
         for (os, safari, expected) in [
             ("14.8.6", "26.5.2", "os"),
             ("15.7.6", "26.5.2", "os"),
@@ -397,10 +456,8 @@ mod tests {
             ("15.7.7", "26.5.1", "safari"),
             ("13.9.9", "26.5.2", "major"),
             ("16.0.0", "26.5.2", "major"),
-            ("27.0.0", "26.5.2", "major"),
-            ("26.5.2", "27.0.0", "safari-major"),
         ] {
-            let error = admit_runtime(os, safari, BUILD, BUILD).unwrap_err();
+            let error = assess_at_review(os, safari, BUILD, BUILD).unwrap_err();
             match expected {
                 "os" => assert!(matches!(
                     error,
@@ -411,18 +468,78 @@ mod tests {
                     error,
                     AdmissionError::UnsupportedOperatingSystemMajor(_)
                 )),
-                "safari-major" => {
-                    assert!(matches!(error, AdmissionError::UnsupportedSafariMajor(_)))
-                }
                 _ => unreachable!(),
             }
         }
     }
 
     #[test]
+    fn separates_hard_floor_recommendation_and_future_runtime_advisories() {
+        assert_eq!(
+            assess_runtime(
+                "26.5.2",
+                "26.5.2",
+                BUILD,
+                BUILD,
+                RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS,
+            ),
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::update_recommended(
+                    RuntimeSecurityUpdateTarget::OperatingSystem,
+                ),
+            ))
+        );
+        assert_eq!(
+            assess_runtime(
+                "26.6.0",
+                "26.6",
+                BUILD,
+                BUILD,
+                RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS,
+            ),
+            Ok(RuntimeSecurityAdvisories::new())
+        );
+        assert_eq!(
+            assess_runtime(
+                "27.0.0",
+                "27.0",
+                BUILD,
+                BUILD,
+                RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS,
+            ),
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::unreviewed_runtime(),
+            ))
+        );
+        assert_eq!(
+            assess_runtime(
+                "26.6.0",
+                "26.6",
+                BUILD,
+                BUILD,
+                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+            ),
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::review_overdue(),
+            ))
+        );
+
+        let combined = assess_runtime(
+            "27.0.0",
+            "27.0",
+            BUILD,
+            BUILD,
+            SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+        )
+        .unwrap();
+        assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
+        assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
+    }
+
+    #[test]
     fn rejects_unmatched_or_malformed_bundle_builds() {
         assert_eq!(
-            admit_runtime("26.5.2", "26.5.2", "21624.1", "21624.2"),
+            assess_at_review("26.5.2", "26.5.2", "21624.1", "21624.2"),
             Err(AdmissionError::SafariWebKitBuildMismatch)
         );
         for malformed in [
@@ -435,8 +552,8 @@ mod tests {
             "21624-1",
             "1.2.3.4.5.6.7.8.9",
         ] {
-            assert!(admit_runtime("26.5.2", "26.5.2", malformed, BUILD).is_err());
-            assert!(admit_runtime("26.5.2", "26.5.2", BUILD, malformed).is_err());
+            assert!(assess_at_review("26.5.2", "26.5.2", malformed, BUILD).is_err());
+            assert!(assess_at_review("26.5.2", "26.5.2", BUILD, malformed).is_err());
         }
     }
 
@@ -446,8 +563,11 @@ mod tests {
         assert!(!security_floor_review_is_current(
             SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
         ));
+        assert!(!security_floor_review_is_current(
+            RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS - 1
+        ));
         assert!(security_floor_review_is_current(
-            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+            RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS
         ));
         assert!(security_floor_review_is_current(
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1

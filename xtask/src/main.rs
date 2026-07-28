@@ -436,16 +436,18 @@ fn check_engine_floors() {
         .as_secs();
     if !zephium_core::webview2::security_floor_review_is_current(now) {
         eprintln!(
-            "WebView2 security floor {} expired after {}. Review {} and update the version, publication date, and review deadline together.",
+            "WebView2 security review (hard floor {}, latest reviewed {}) expired after {}. Review {} and update the versions, publication dates, and review deadline together.",
             zephium_core::webview2::SECURITY_FLOOR_TEXT,
+            zephium_core::webview2::LATEST_REVIEWED_TEXT,
             zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY,
             zephium_core::webview2::SECURITY_FLOOR_SOURCE_URL,
         );
         exit(1);
     }
     eprintln!(
-        "WebView2 security floor {} is reviewed through {}",
+        "WebView2 hard floor {} and latest reviewed Stable {} are reviewed through {}",
         zephium_core::webview2::SECURITY_FLOOR_TEXT,
+        zephium_core::webview2::LATEST_REVIEWED_TEXT,
         zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY,
     );
 
@@ -460,12 +462,16 @@ fn check_engine_floors() {
         exit(1);
     }
     eprintln!(
-        "macOS/WebKit floors Sonoma {} + Safari {}, Sequoia {} + Safari {}, and Tahoe {} are reviewed through {}",
+        "macOS/WebKit hard floors Sonoma {} + Safari {}, Sequoia {} + Safari {}, and Tahoe {}; latest recommendations Sonoma {}, Sequoia {}, Tahoe {}, and Safari {}; reviewed through {}",
         zephium_core::macos::SONOMA_SECURITY_FLOOR_TEXT,
         zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
         zephium_core::macos::SEQUOIA_SECURITY_FLOOR_TEXT,
         zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
         zephium_core::macos::TAHOE_SECURITY_FLOOR_TEXT,
+        zephium_core::macos::SONOMA_RECOMMENDED_TEXT,
+        zephium_core::macos::SEQUOIA_RECOMMENDED_TEXT,
+        zephium_core::macos::TAHOE_RECOMMENDED_TEXT,
+        zephium_core::macos::SAFARI_RECOMMENDED_TEXT,
         zephium_core::macos::SECURITY_FLOOR_REVIEW_BY,
     );
 

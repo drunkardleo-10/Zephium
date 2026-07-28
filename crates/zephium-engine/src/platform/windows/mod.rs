@@ -321,16 +321,6 @@ pub(crate) fn attest_environment(
             ),
         ));
     }
-    if !zephium_core::webview2::security_floor_review_is_current(now) {
-        return Err(windows_core::Error::new(
-            windows::Win32::Foundation::E_ACCESSDENIED,
-            format!(
-                "the embedded WebView2 security-floor review expired after {}; update Zephium before browsing",
-                zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY
-            ),
-        ));
-    }
-
     let environment7 = environment.cast::<ICoreWebView2Environment7>()?;
     // Wry's upstream fallback silently ignores InPrivate/profile options.
     // The reviewed runtime floor supports Environment10, so absence is a

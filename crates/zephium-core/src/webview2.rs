@@ -3,13 +3,19 @@
 //! This is deliberately a reviewed security floor, not an API-compatibility
 //! floor. Microsoft says the Evergreen WebView2 Runtime receives the same
 //! Stable security updates listed in its Edge security release notes. The
-//! policy therefore expires quickly so a once-current floor cannot silently
-//! become a permanent security claim.
+//! CI/release review therefore expires quickly so a once-current floor cannot
+//! silently become a permanent security claim. Runtime review age is advisory;
+//! known-obsolete or non-Stable engines still fail closed.
 
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+use crate::runtime_security::{
+    overdue_review_advisory, RuntimeSecurityAdvisories, RuntimeSecurityAdvisory,
+    RuntimeSecurityUpdateTarget,
+};
 
 #[cfg(target_os = "windows")]
 #[path = "webview2_runtime.rs"]
@@ -28,12 +34,23 @@ pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_784_764_800;
 pub const SECURITY_FLOOR_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes-security";
 
+/// Newest Stable security release included in this review. It is intentionally
+/// separate from the hard floor: falling behind by one serviced patch produces
+/// an actionable advisory rather than a wall-clock or latest-version kill
+/// switch.
+pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(150, 0, 4078, 99);
+pub const LATEST_REVIEWED_TEXT: &str = "150.0.4078.99";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-07-24";
+/// 2026-07-24T00:00:00Z.
+pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_784_851_200;
+pub const REVIEWED_STABLE_MAJOR: u32 = 150;
+
 /// Microsoft reported a pending Chromium security update on 2026-07-14 and
 /// subsequently published fixed Stable releases beginning with 150.0.4078.80
-/// on 2026-07-16. The current floor is the later 150.0.4078.96 security release
-/// from 2026-07-23, so the historical release blocker is resolved. Keep the
-/// notice date and post-notice floor check: clearing the flag alone must never
-/// turn an older runtime into release evidence.
+/// on 2026-07-16. The hard floor is the later 150.0.4078.96 security release
+/// and the newest recommendation is 150.0.4078.99, so the historical release
+/// blocker is resolved. Keep the notice date and post-notice review check:
+/// clearing the flag alone must never turn older evidence into release proof.
 pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
@@ -42,9 +59,9 @@ pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-07-24";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-07-30";
-/// 2026-07-31T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_785_456_000;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-04";
+/// 2026-08-05T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_785_888_000;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -268,6 +285,27 @@ pub fn admit_runtime(reported: &str) -> Result<WebView2Version, AdmissionError> 
     Ok(version)
 }
 
+/// Apply the hard Stable-channel floor and independently report maintenance
+/// state as a non-fatal advisory.
+pub fn assess_runtime(
+    reported: &str,
+    unix_seconds: u64,
+) -> Result<(WebView2Version, RuntimeSecurityAdvisories), AdmissionError> {
+    let version = admit_runtime(reported)?;
+    let mut advisories = RuntimeSecurityAdvisories::new().with_optional(overdue_review_advisory(
+        unix_seconds,
+        SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+    ));
+    if version.components()[0] > REVIEWED_STABLE_MAJOR {
+        advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
+    } else if !version.is_at_least(LATEST_REVIEWED) {
+        advisories.insert(RuntimeSecurityAdvisory::update_recommended(
+            RuntimeSecurityUpdateTarget::BrowserRuntime,
+        ));
+    }
+    Ok((version, advisories))
+}
+
 /// Resolve a WebView2 user-data directory to the filesystem object used for
 /// security comparisons. A symlink is never an acceptable boundary, even if
 /// it currently resolves inside the expected root: another process could
@@ -326,7 +364,7 @@ pub fn user_data_directory_matches(expected: &Path, actual: &Path) -> io::Result
 }
 
 pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
-    unix_seconds >= SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+    unix_seconds >= LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS
         && unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
 }
 
@@ -337,7 +375,7 @@ pub const fn production_release_security_is_current(unix_seconds: u64) -> bool {
         && !PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX
         // Merely flipping the blocker is insufficient: the admitted floor
         // must name a Stable release published after the vendor's notice.
-        && SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS > OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS
+        && LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS > OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS
 }
 
 #[cfg(test)]
@@ -422,7 +460,7 @@ mod tests {
     #[test]
     fn admission_rejects_old_invalid_and_preview_runtimes() {
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
-        assert!(admit_runtime("150.0.4078.97").is_ok());
+        assert!(admit_runtime(LATEST_REVIEWED_TEXT).is_ok());
         assert!(matches!(
             admit_runtime("150.0.4078.95"),
             Err(AdmissionError::BelowSecurityFloor { .. })
@@ -441,10 +479,10 @@ mod tests {
     fn maintenance_deadline_is_an_exclusive_utc_boundary() {
         assert!(!security_floor_review_is_current(0));
         assert!(!security_floor_review_is_current(
-            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
+            LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS - 1
         ));
         assert!(security_floor_review_is_current(
-            SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
+            LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS
         ));
         assert!(security_floor_review_is_current(
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1
@@ -456,17 +494,63 @@ mod tests {
     }
 
     #[test]
+    fn assessment_separates_hard_floor_recommendation_and_future_stable_line() {
+        assert_eq!(
+            assess_runtime(SECURITY_FLOOR_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            Ok((
+                SECURITY_FLOOR,
+                RuntimeSecurityAdvisories::from_advisory(
+                    RuntimeSecurityAdvisory::update_recommended(
+                        RuntimeSecurityUpdateTarget::BrowserRuntime,
+                    ),
+                )
+            ))
+        );
+        assert_eq!(
+            assess_runtime(LATEST_REVIEWED_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            Ok((LATEST_REVIEWED, RuntimeSecurityAdvisories::new()))
+        );
+        assert_eq!(
+            assess_runtime("151.0.4129.15", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            Ok((
+                WebView2Version::stable(151, 0, 4129, 15),
+                RuntimeSecurityAdvisories::from_advisory(
+                    RuntimeSecurityAdvisory::unreviewed_runtime(),
+                )
+            ))
+        );
+        assert_eq!(
+            assess_runtime(
+                LATEST_REVIEWED_TEXT,
+                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+            ),
+            Ok((
+                LATEST_REVIEWED,
+                RuntimeSecurityAdvisories::from_advisory(RuntimeSecurityAdvisory::review_overdue(),)
+            ))
+        );
+
+        let (_, combined) = assess_runtime(
+            "151.0.4129.15",
+            SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+        )
+        .unwrap();
+        assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
+        assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
+    }
+
+    #[test]
     fn post_notice_stable_floor_resolves_the_vendor_release_blocker() {
         let production_release_blocked =
             std::hint::black_box(PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX);
-        let floor_published = std::hint::black_box(SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS);
+        let latest_published = std::hint::black_box(LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS);
         let vendor_notice = std::hint::black_box(OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS);
 
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
-        assert!(security_floor_review_is_current(floor_published));
+        assert!(security_floor_review_is_current(latest_published));
         assert!(!production_release_blocked);
-        assert!(floor_published > vendor_notice);
-        assert!(production_release_security_is_current(floor_published));
+        assert!(latest_published > vendor_notice);
+        assert!(production_release_security_is_current(latest_published));
     }
 
     #[test]

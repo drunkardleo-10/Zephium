@@ -27,6 +27,7 @@ use zephium_core::ports::engine::{
     NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
     ZoomRequestId,
 };
+use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_core::split::Pane;
 
 /// Runs a closure on the main thread (where the webviews live). Provided by the
@@ -732,6 +733,7 @@ pub struct WebviewEngine {
     retirement: Arc<Mutex<RetirementGate>>,
     event_delivery: Arc<EventDeliveryGate>,
     fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
+    runtime_security_advisories: RuntimeSecurityAdvisories,
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
 }
 
@@ -760,6 +762,7 @@ pub fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     dispatch: MainThreadDispatch,
     data_root: PathBuf,
+    runtime_security_advisories: RuntimeSecurityAdvisories,
     sink: impl Fn(EngineEvent) + Send + Sync + 'static,
     fatal_security_failure: impl Fn(&'static str) + Send + Sync + 'static,
 ) -> Result<WebviewEngine, String> {
@@ -790,6 +793,7 @@ pub fn install(
         retirement,
         event_delivery,
         fatal_security_failure,
+        runtime_security_advisories,
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
     })
 }
@@ -804,7 +808,7 @@ pub fn install_container(fixed: gtk::Fixed) -> Result<(), String> {
 /// Reject an obsolete dynamically supplied WebKitGTK before any privileged
 /// or untrusted WebView is constructed.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn enforce_runtime_security_floor() -> Result<(), String> {
+pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, String> {
     platform::imp::enforce_runtime_security_floor()
 }
 
@@ -860,6 +864,10 @@ impl WebviewEngine {
 impl Engine for WebviewEngine {
     fn runtime_restart_required(&self) -> bool {
         lock_retirement_gate(&self.retirement).runtime_restart_required
+    }
+
+    fn runtime_security_advisories(&self) -> RuntimeSecurityAdvisories {
+        self.runtime_security_advisories
     }
 
     fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool {
@@ -1498,6 +1506,7 @@ mod tests {
             retirement,
             event_delivery: Arc::new(EventDeliveryGate::default()),
             fatal_security_failure: Arc::new(|_| {}),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 
@@ -1577,6 +1586,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
         let profile = ProfileId::from(88);
@@ -1608,6 +1618,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 fatal_tx.send(()).unwrap();
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 
@@ -1688,6 +1699,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
         let profile = ProfileId::from(91);
@@ -2042,6 +2054,7 @@ mod tests {
             retirement,
             event_delivery,
             fatal_security_failure: Arc::new(|_| {}),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
         let (tx, rx) = mpsc::channel();
@@ -2335,6 +2348,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 
@@ -2364,6 +2378,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 
@@ -2428,6 +2443,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 
@@ -2473,6 +2489,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 
@@ -2533,6 +2550,7 @@ mod tests {
             fatal_security_failure: Arc::new(move |_| {
                 counted_fatal.fetch_add(1, Ordering::Relaxed);
             }),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
         };
 

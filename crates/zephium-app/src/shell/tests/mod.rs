@@ -140,6 +140,7 @@ struct FakeEngine {
     reject_native_dispatch: std::sync::atomic::AtomicBool,
     unsupported_presentation: std::sync::atomic::AtomicBool,
     runtime_restart_required: std::sync::atomic::AtomicBool,
+    runtime_security_advisories: Mutex<zephium_core::runtime_security::RuntimeSecurityAdvisories>,
     erasure_outcomes: Mutex<VecDeque<ProfileDataErasureOutcome>>,
     held_erasures: Mutex<Vec<HeldErasure>>,
     hold_erasures: std::sync::atomic::AtomicBool,
@@ -215,6 +216,12 @@ impl Engine for FakeEngine {
     fn runtime_restart_required(&self) -> bool {
         self.runtime_restart_required
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn runtime_security_advisories(
+        &self,
+    ) -> zephium_core::runtime_security::RuntimeSecurityAdvisories {
+        *self.runtime_security_advisories.lock().unwrap()
     }
 
     fn create_view(&self, id: ItemId, partition: Partition, url: &str, _bounds: Rect) -> bool {

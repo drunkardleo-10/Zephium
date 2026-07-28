@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::geometry::Rect;
 use crate::ids::{ItemId, ProfileId, WindowId};
+use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
 /// Which engine data partition a view lives in. Every persistent profile gets
@@ -232,6 +233,14 @@ pub trait Engine {
     /// chrome, before clearing this state.
     fn runtime_restart_required(&self) -> bool {
         false
+    }
+    /// Non-fatal result of the process-start native runtime assessment.
+    ///
+    /// This is immutable for the current native process generation. It is
+    /// computed locally before WebView construction and performs no network,
+    /// filesystem, actor, or page-derived work.
+    fn runtime_security_advisories(&self) -> RuntimeSecurityAdvisories {
+        RuntimeSecurityAdvisories::new()
     }
     /// Permanently tombstones `profile` at the synchronous call boundary,
     /// rejects all future native access to it except cleanup, and schedules

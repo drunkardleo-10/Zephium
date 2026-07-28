@@ -10,6 +10,8 @@
     active = false,
     disabled = false,
     haspopup = false,
+    expanded,
+    controls,
     class: className = "",
     onclick,
   }: {
@@ -19,7 +21,9 @@
     buttonSize?: number;
     active?: boolean;
     disabled?: boolean;
-    haspopup?: boolean;
+    haspopup?: boolean | "menu" | "dialog";
+    expanded?: boolean;
+    controls?: string;
     class?: string;
     onclick?: (event: MouseEvent) => void;
   } = $props();
@@ -30,7 +34,9 @@
   aria-label={label}
   title={label}
   aria-pressed={active || undefined}
-  aria-haspopup={haspopup ? "menu" : undefined}
+  aria-haspopup={haspopup === true ? "menu" : haspopup || undefined}
+  aria-expanded={haspopup ? expanded : undefined}
+  aria-controls={controls}
   {disabled}
   {onclick}
   class={["icon-button", active && "icon-button-active", className]}

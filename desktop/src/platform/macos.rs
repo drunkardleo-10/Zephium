@@ -113,12 +113,13 @@ thread_local! {
 /// bundle and the WebKit framework loaded for `WKWebView` must report the same
 /// canonical build. On Sonoma and Sequoia that binds Apple's Safari security
 /// release to the embedder; Tahoe's WebKit floor comes from the OS update.
-pub fn enforce_runtime_security_floor() -> Result<(), String> {
+pub fn enforce_runtime_security_floor(
+) -> Result<zephium_core::runtime_security::RuntimeSecurityAdvisories, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system UTC clock predates the Unix epoch: {error}"))?
         .as_secs();
-    enforce_security_review_time(now)?;
+    enforce_security_clock(now)?;
 
     let reported_os = NSProcessInfo::processInfo().operatingSystemVersion();
     let major = u32::try_from(reported_os.majorVersion)
@@ -146,11 +147,12 @@ pub fn enforce_runtime_security_floor() -> Result<(), String> {
     require_bundle_identifier(&webkit, "com.apple.WebKit", "WKWebView")?;
     let webkit_build = bundle_string(&webkit, ns_string!("CFBundleVersion"))?;
 
-    zephium_core::macos::admit_runtime(
+    zephium_core::macos::assess_runtime(
         &operating_system,
         &safari_version,
         &safari_build,
         &webkit_build,
+        now,
     )
     .map_err(|error| {
         format!(
@@ -168,22 +170,14 @@ pub fn enforce_runtime_security_floor() -> Result<(), String> {
     })
 }
 
-fn enforce_security_review_time(now: u64) -> Result<(), String> {
-    // A clock older than the review cannot prove that this short-lived
-    // admission policy has not expired; reject rollback as well as expiry.
+fn enforce_security_clock(now: u64) -> Result<(), String> {
+    // A clock older than the hard floor cannot prove that the reviewed
+    // release existed. Review expiry is advisory at runtime and remains a
+    // strict CI/release gate.
     if now < zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
         return Err(format!(
             "system UTC clock predates the macOS/WebKit security review published on {}; correct the clock before starting Zephium",
             zephium_core::macos::SECURITY_FLOOR_PUBLISHED_ON,
-        ));
-    }
-    if !zephium_core::macos::security_floor_review_is_current(now) {
-        return Err(format!(
-            "macOS/WebKit security-floor review expired after {}; review {}, {}, and {} and ship updated floors before starting Zephium",
-            zephium_core::macos::SECURITY_FLOOR_REVIEW_BY,
-            zephium_core::macos::SECURITY_FLOOR_SOURCE_URL,
-            zephium_core::macos::SAFARI_SECURITY_SOURCE_URL,
-            zephium_core::macos::TAHOE_SECURITY_SOURCE_URL,
         ));
     }
     Ok(())
@@ -725,23 +719,24 @@ mod tests {
     }
 
     #[test]
-    fn runtime_security_review_window_rejects_clock_rollback_and_expiry() {
-        assert!(enforce_security_review_time(
-            zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS
-        )
-        .is_ok());
-        assert!(enforce_security_review_time(
+    fn runtime_security_clock_rejects_only_rollback_before_the_hard_floor() {
+        assert!(
+            enforce_security_clock(zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS)
+                .is_ok()
+        );
+        assert!(enforce_security_clock(
             zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
         )
         .is_err());
-        assert!(enforce_security_review_time(
+        assert!(enforce_security_clock(
             zephium_core::macos::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1,
         )
         .is_ok());
-        assert!(enforce_security_review_time(
+        assert!(enforce_security_clock(
             zephium_core::macos::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
         )
-        .is_err());
+        .is_ok());
+        assert!(enforce_security_clock(u64::MAX).is_ok());
     }
 
     #[test]
