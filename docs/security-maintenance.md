@@ -42,6 +42,26 @@ Calendar alerts should be set for seven days before every encoded deadline.
 The alerts are operational backup only; CI remains the authoritative
 fail-closed control.
 
+These calendar gates are deliberately stricter than installed-runtime
+behavior. An overdue review blocks CI and release publication, but does not
+make time alone terminate an already installed browser. Runtime still rejects
+known-obsolete or malformed engines, preview/development channels, provenance
+failures, security overrides, and missing mandatory native capabilities.
+Falling behind the newest reviewed recommendation, crossing the review SLA,
+or encountering a newer stable release line is projected as a typed,
+non-fatal privileged-chrome advisory. Independent facts are retained
+together: no severity ranking may discard review age, a patch recommendation,
+or a newer unreviewed release line.
+
+Runtime startup never downloads this policy and never scrapes Apple,
+Microsoft, or WebKitGTK pages. Those pages are unstable, unsigned inputs from
+the client's perspective and would add latency, failure modes, and an
+unnecessary first-party network observation. The embedded reviewed policy is
+authoritative for startup. If Zephium later refreshes policy independently of
+an application release, it must do so asynchronously through Zephium-signed,
+rollback-resistant update metadata, persist only an authenticated newer
+policy, and retain the embedded hard floor as the offline fallback.
+
 ## Native-engine floor review
 
 For each platform:
@@ -49,19 +69,28 @@ For each platform:
 1. Read the vendor's current security advisory and release-note source, not a
    search result or version aggregator.
 2. Identify every vendor-supported operating-system or stable runtime line
-   Zephium claims to support. Do not admit preview, development, or newly
-   numbered release lines by numeric comparison alone.
-3. Record the minimum fixed version, publication date, immutable source URL,
-   newest reviewed version, and next review deadline together.
+   Zephium claims to support. Preview and development channels remain hard
+   failures. Decide explicitly whether a newer stable line preserves the
+   mandatory native capabilities and can run with an unreviewed-runtime
+   advisory; never infer that from an arbitrary numeric version alone.
+3. Record the hard minimum fixed version, newest recommended version, their
+   publication dates and source URLs, and the next review deadline together.
 4. Confirm startup admission, CI packages, packaged-artifact checks, and the
    documentation all describe the same boundary.
-5. Add or update boundary tests for the exact version below the floor, the
-   floor itself, the latest reviewed version, an unknown release line, a clock
-   before publication, and the first instant after review expiry.
+5. Add or update boundary tests for the exact version below the hard floor,
+   the floor itself, the newest recommendation, a newer stable line, a
+   preview/development line, a clock before hard-floor publication, and the
+   first instant after review expiry. Prove that only the hard failures reject
+   runtime admission and that recommendation/review states map to the correct
+   sanitized advisory.
 6. Run the platform's packaged hostile/native suite. A source-level version
    check is not renderer-confinement or process-mitigation evidence.
 7. Preserve links, command output, package metadata, and test artifacts with
    the reviewed release commit.
+8. When the admitted hard floor is older than the newest recommended security
+   release, name that deliberate compatibility gap in release notes. Do not
+   imply that every admitted installation is fully patched merely because the
+   candidate passed its release gate.
 
 If the vendor has disclosed fixes but has not yet published a supported stable
 runtime, the release remains blocked. Do not extend the review date merely to

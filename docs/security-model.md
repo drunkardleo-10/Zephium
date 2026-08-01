@@ -108,10 +108,12 @@ Any change that breaks one of these invariants must fail review and release:
    pass after the exact document reaches load completion. Rust accepts only an exact,
    canonical 32-by-32 RGBA raster for the current navigation epoch and origin; chrome
    paints that fixed raster without parsing a page-controlled image container.
-10. On Linux, browsing admits only the reviewed stable WebKitGTK 2.52 release line at
-    patch 2.52.5 or newer. Older builds, odd-minor development builds, and other
-    unreviewed major/minor release lines fail closed. Every Wry context, persistent or
-    ephemeral, is constructed with top-level cross-site process swapping enabled. The
+10. On Linux, browsing requires WebKitGTK 2.52.5 or newer. Older builds,
+    odd-minor development builds, and unrelated major lines fail closed. A
+    newer stable even-minor WebKitGTK 2.x line is admitted with a visible
+    unreviewed-runtime advisory rather than a numeric-version kill switch.
+    Every Wry context, persistent or ephemeral, is constructed with top-level
+    cross-site process swapping enabled. The
     requested Web-process sandbox flag and the construct-only swap policy are read back
     and asserted before the context can own a WebView. Those properties alone are
     configuration invariants, not confinement attestation. CI separately starts a real
@@ -127,11 +129,14 @@ Any change that breaks one of these invariants must fail review and release:
     satisfy the currently reviewed security floor. Startup aborts if privileged hardening
     cannot install; an individual raw view is rejected before its first load if any
     mandatory setting, navigation, external-URI, or process-failure handler cannot install.
-12. On macOS, startup occurs before any WebView construction and admits only the reviewed
-    Sonoma, Sequoia, or Tahoe security-release lines. The canonical system Safari bundle
+12. On macOS, startup occurs before any WebView construction and enforces
+    hard minimums for the supported Sonoma, Sequoia, and Tahoe lines. The
+    canonical system Safari bundle
     and the framework actually supplying `WKWebView` must have the expected identifiers
-    and exactly matching build versions. Malformed, stale, mismatched, and unreviewed
-    future OS/Safari release lines fail closed.
+    and exactly matching build versions. Malformed, known-obsolete, and
+    mismatched combinations fail closed. A newer stable OS/Safari major is
+    admitted with an unreviewed-runtime advisory until the maintenance review
+    catches up.
 13. The content-policy lifecycle never treats absence as allow-all. Every profile must
     install an exact process-local generation—an explicit allow-all artifact while
     disabled, or a validated blocking artifact—before its first raw view/navigation is
@@ -612,13 +617,24 @@ These inherited properties must not be overstated:
   platform-by-platform traffic audit.
 - A sandbox limits impact; it does not make engine vulnerabilities impossible. Native
   engine security updates are part of the product's security boundary.
-- The dated engine-floor review is also a deliberate build expiry. Passing the minimum
-  version is insufficient after the review deadline, even when no new vulnerability has
-  been demonstrated; the advisories and policy must be refreshed first. This prevents an
-  abandoned build from running indefinitely, but it is not yet a complete production
-  update mechanism. Zephium still needs an operational release SLA, an update-required
-  user path, and a client-side updater trust root so daily users receive a refreshed
-  binary before each deadline.
+- Hard runtime admission, recommended maintenance, and review age are separate
+  states. A known-obsolete engine, preview/development channel, provenance
+  mismatch, security-relevant environment override, or missing native
+  capability still fails before WebView construction. Falling behind the
+  newest reviewed patch, running a newer stable release line, or crossing the
+  review SLA produces an independent sanitized warning in privileged chrome
+  instead of turning the wall clock into an installed-build kill switch. Rust
+  carries the closed vocabulary as a canonical allocation-free set, so a
+  newer runtime cannot hide an overdue review or update recommendation. CI
+  and every release remain fail-closed on an overdue review.
+- Runtime assessment is local and bounded. Startup reads only the native
+  versions/provenance/capabilities it already needs and performs no vendor or
+  Zephium network request, timer, or background task. Vendor HTML and release
+  pages are human/build-review evidence, never client policy inputs. A future
+  remotely refreshed policy must arrive through Zephium-signed,
+  rollback-resistant update metadata and may update advisories
+  asynchronously; it must not delay first paint or weaken the embedded hard
+  floor.
 
 ## Platform-specific posture
 
@@ -673,18 +689,21 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version and meet the reviewed Microsoft Stable security floor. The current
-  floor is `150.0.4078.96`, published July 23, 2026. Preview-channel and malformed strings
+  hard floor is `150.0.4078.96`, published July 23, 2026; the latest reviewed
+  recommendation is `150.0.4078.99`, published July 24. A runtime between
+  those versions receives an update recommendation, and a newer stable major
+  receives an unreviewed-runtime advisory. Preview-channel and malformed strings
   fail closed. The process also rejects documented WebView2 environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
-  another channel, or attach script debuggers. CI, startup, and per-environment
-  attestation expire this review after July 30; a clock before the reviewed release or
-  after the deadline fails closed. This forces the version, source date, and next
-  deadline to be reviewed together. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
+  another channel, or attach script debuggers. CI and release publication
+  expire this review after August 4; runtime reports an overdue-review
+  advisory instead. A clock before the hard-floor publication still fails
+  closed. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
   incorporated the update on July 16, and the reviewed floor now names the
-  later July 23 security release above. The release gate preserves the
+  later July 24 security release above. The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
   release evidence.
@@ -760,8 +779,12 @@ These inherited properties must not be overstated:
 - Before Tauri constructs any WebView, runtime admission requires Sonoma 14.8.7 or
   newer with Safari 26.5.2 or newer, Sequoia 15.7.7 or newer with Safari 26.5.2 or
   newer, or Tahoe 26.5.2 or newer. The canonical Safari bundle build must exactly match
-  the loaded `com.apple.WebKit` framework build. Unknown major lines fail closed, and
-  the floor review expires after July 27, 2026.
+  the loaded `com.apple.WebKit` framework build. Sonoma 14.8.8, Sequoia
+  15.7.8, Tahoe 26.6, and Safari 26.6 are the July 27 recommendations; older
+  admitted floors remain usable with an operating-system update advisory.
+  Newer stable major lines receive an unreviewed-runtime advisory. The review
+  expires for CI/release after August 27, while runtime keeps the hard floor
+  and reports review age to privileged chrome.
 - Overlay configuration keeps Tao's allocated `TaoWindow` class and instance layout
   intact. Zephium does not use `object_setClass` to turn that live object into an
   unrelated `NSPanel`; true non-activating panel behavior remains deferred until an
@@ -798,16 +821,18 @@ These inherited properties must not be overstated:
 
 ### Linux / WebKitGTK
 
-- The loaded library must be on the reviewed stable WebKitGTK 2.52 release line at patch
-  2.52.5 or newer. Odd-minor development builds and every other unreviewed major/minor
-  release line, including numerically newer lines, are rejected until an explicit
-  security review updates the allowlist and deadline. The raw content WebContext sandbox
+- The loaded library must be WebKitGTK 2.52.5 or newer. Odd-minor
+  development builds, older versions, and unrelated major lines are rejected.
+  Newer stable even-minor WebKitGTK 2.x lines are admitted with an
+  unreviewed-runtime advisory until the review catches up. The raw content WebContext sandbox
   flag and top-level cross-site process-swap policy are enabled and read back during
   context construction, before any WebView can launch a Web process. A rejected or
   disabled configuration therefore fails closed, but the public property is not an
   attestation of the confinement actually applied to a spawned process. The newest
   stable release reviewed in this pass is 2.52.5; the enforced 2.52.5 boundary is the
-  first release fixed for WSA-2026-0004, and the review expires after August 9, 2026.
+  first release fixed for WSA-2026-0004. CI/release review expires after
+  August 9, 2026; runtime reports that expiry without disabling an otherwise
+  admitted engine.
 - Both privileged WebViews request non-persistent contexts. Their native permission and
   file-chooser denial handlers must install successfully, and the native context is
   checked to be ephemeral, or startup aborts. The vendored Wry adapter separately
@@ -832,7 +857,8 @@ These inherited properties must not be overstated:
   It explicitly installs and integrity-verifies those Fedora sandbox packages, embeds no WebKit/GStreamer
   runtime, and rewrites then verifies an install-time dependency of
   `webkit2gtk4.1 >= 2.52.5`. RPM dependency syntax here cannot encode the reviewed-line
-  upper boundary, so runtime admission remains the final fail-closed gate. AppImage and
+  development-channel exclusion, so runtime admission remains the final
+  fail-closed gate. AppImage and
   DEB artifacts are blocked because the supported Ubuntu/Debian build packages are below
   the floor and a Fedora-built AppImage would silently raise its glibc baseline without
   Tauri's supported complete media bundling. This package-chain proof is not runtime

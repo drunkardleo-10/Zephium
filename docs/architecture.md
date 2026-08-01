@@ -1,6 +1,6 @@
 # Zephium Architecture
 
-FOSS browser on the OS-native webview (Tauri + Wry), Rust-heavy, with a SolidJS
+FOSS browser on the OS-native webview (Tauri + Wry), Rust-heavy, with a Svelte 5
 UI and no application-owned telemetry. This document is the single source of
 truth for structure and boundaries. Revised 2026-07 during the foundation
 review; it reflects both what is built and the agreed target. Security
@@ -251,7 +251,7 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │                                overlay backends, platform wiring. ONLY crate
 │                                that touches tauri.
 │
-├── frame/                       SolidJS app (Vite, Tailwind v4). One app,
+├── frame/                       Svelte 5 app (Vite, Tailwind v4). One app,
 │                                entry-routed: chrome | overlay | internal
 │                                pages | onboarding.
 │
@@ -565,7 +565,8 @@ the one deliberate provision.
 
 ## 11. Frontend (frame)
 
-SolidJS + TypeScript + Vite. A pure projection; only transient view state.
+Svelte 5 runes + TypeScript + Vite. A pure projection; only transient view
+state.
 
 - **One app, entry-routed by surface**: chrome (sidebar/topbar), overlay
   (launcher, palette, find, floating panels), internal pages (history,
@@ -574,7 +575,8 @@ SolidJS + TypeScript + Vite. A pure projection; only transient view state.
 - **Styling:** Tailwind v4, token-first. Design tokens are CSS custom
   properties and the single source of truth; runtime theming (Vivaldi-grade
   customization) = swapping variable values, driven by the Themes domain.
-  Kobalte for headless accessible primitives; the look is ours.
+  Bits UI for narrowly adopted headless accessible primitives; the look is
+  ours. Native HTML and platform-native surfaces remain the default.
 - **State:** store-per-domain, updated by granular domain events (§5).
 - **Command mirror:** the frontend consumes the Commands registry; palette,
   launcher, menus and keybindings all dispatch the same stable command ids.
@@ -595,9 +597,10 @@ checkpoint.
 Mutating commands return an `OperationAdmission` and later emit a correlated
 `OperationDisposition`; IPC must not discard either admission failure or a
 backend/store rejection. `Deferred` means the actor queued native/store work,
-not that navigation, reload, or rendering completed. Native-runtime update state uses the stable typed
-`zephium:runtime-status` event so UI presentation can be added without changing
-the backend contract.
+not that navigation, reload, or rendering completed. Native-runtime update
+state uses the stable typed `zephium:runtime-status` event. Its security facts
+are a bounded canonical set rather than one lossy highest-priority message, so
+UI presentation can evolve without changing the native admission boundary.
 
 ---
 
