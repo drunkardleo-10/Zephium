@@ -40,6 +40,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         group: Group::File,
     },
     CommandSpec {
+        id: "sidebar.toggleCompact",
+        title: "Compact Mode",
+        accelerator: Some("CmdOrCtrl+Shift+S"),
+        group: Group::View,
+    },
+    CommandSpec {
         id: "nav.reload",
         title: "Reload Page",
         accelerator: Some("CmdOrCtrl+R"),
@@ -186,6 +192,13 @@ mod tests {
             Some("CmdOrCtrl+R")
         );
         assert!(!resolved.iter().any(|c| c.id == "bogus.id"));
+    }
+
+    #[test]
+    fn compact_sidebar_is_a_registered_view_command() {
+        let command = get("sidebar.toggleCompact").expect("compact sidebar command");
+        assert_eq!(command.title, "Compact Mode");
+        assert_eq!(command.group, Group::View);
     }
 
     #[test]

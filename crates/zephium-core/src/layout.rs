@@ -25,6 +25,23 @@ impl Default for Metrics {
     }
 }
 
+/// The sidebar's admitted width range, spanning the compact rail through the
+/// widest expanded column.
+///
+/// This is the single authority. It used to be restated in the shell actor and
+/// again in the privileged IPC guard, which let the rail pass the boundary
+/// check and then get silently widened back by the actor, so the chrome and
+/// the content region disagreed about where the sidebar ended.
+pub const MIN_SIDEBAR_WIDTH: f64 = 56.0;
+pub const MAX_SIDEBAR_WIDTH: f64 = 420.0;
+
+pub fn clamp_sidebar_width(width: f64) -> f64 {
+    if !width.is_finite() {
+        return MIN_SIDEBAR_WIDTH;
+    }
+    width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub chrome: Rect,
@@ -61,6 +78,16 @@ fn sidebar(win: Size, m: Metrics, content_present: bool) -> Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sidebar_clamp_admits_the_rail_and_rejects_nonsense() {
+        assert_eq!(clamp_sidebar_width(MIN_SIDEBAR_WIDTH), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(MAX_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(0.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(10_000.0), MAX_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(f64::NAN), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(240.0), 240.0);
+    }
 
     const M: Metrics = Metrics {
         sidebar_width: 240.0,

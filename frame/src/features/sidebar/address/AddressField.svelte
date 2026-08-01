@@ -2,9 +2,12 @@
   import { Alert02Icon, LockIcon, Search01Icon } from "@hugeicons/core-free-icons";
   import * as tabs from "../../../domain/tabs/tabs.svelte";
   import * as ui from "../../../domain/ui-commands/ui-commands.svelte";
+  import { commands } from "../../../shared/ipc/bindings";
   import Icon from "../../../shared/ui/Icon.svelte";
   import { addressSecurity, editingAddress, restingAddress } from "./address-model";
-  import BlockerStatus from "../shield/BlockerShield.svelte";
+  import BlockerShield from "../shield/BlockerShield.svelte";
+
+  let { compact = false }: { compact?: boolean } = $props();
 
   let input: HTMLInputElement;
   let editing = $state(false);
@@ -50,20 +53,52 @@
   }
 </script>
 
-<form class="shrink-0 px-1.5 pb-2" onsubmit={submit} role="search">
+<!--
+  The input stays mounted in both shapes. Rust's synchronous presentation
+  barrier commits and verifies the authoritative host through this exact
+  element before revealing page content, so unmounting it at rail width would
+  reject every presentation and leave page content permanently concealed. In
+  compact mode it is present and correct but unpainted, and the launcher is the
+  visible way to reach it.
+-->
+<form
+  class="shrink-0"
+  class:px-1.5={!compact}
+  class:pb-2={!compact}
+  onsubmit={submit}
+  role="search"
+>
+  {#if compact}
+    <div class="flex justify-center pb-1">
+      <button
+        type="button"
+        class="chrome-button"
+        aria-label="Search or enter an address"
+        title="Search or enter an address"
+        onclick={() => void commands.runCommand("launcher.toggle")}
+      >
+        <Icon icon={Search01Icon} size={16} />
+      </button>
+    </div>
+  {/if}
+
   <div
-    class="flex h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-2 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] focus-within:bg-fill-hover focus-within:shadow-focus hover:bg-fill-hover"
+    class:sr-only={compact}
+    class:flex={!compact}
+    class="h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-2 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] focus-within:bg-fill-hover focus-within:shadow-focus hover:bg-fill-hover"
   >
-    <span
-      class="flex h-4 w-4 shrink-0 items-center justify-center"
-      class:text-faint={!leading.danger}
-      class:text-danger={leading.danger}
-      title={leading.label}
-      role="img"
-      aria-label={leading.label}
-    >
-      <Icon icon={leading.icon} size={14} />
-    </span>
+    {#if !compact}
+      <span
+        class="flex h-4 w-4 shrink-0 items-center justify-center"
+        class:text-faint={!leading.danger}
+        class:text-danger={leading.danger}
+        title={leading.label}
+        role="img"
+        aria-label={leading.label}
+      >
+        <Icon icon={leading.icon} size={14} />
+      </span>
+    {/if}
 
     <input
       bind:this={input}
@@ -82,6 +117,8 @@
       class="min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-faint"
     />
 
-    <BlockerStatus />
+    {#if !compact}
+      <BlockerShield />
+    {/if}
   </div>
 </form>

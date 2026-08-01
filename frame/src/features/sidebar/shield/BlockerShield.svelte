@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Shield01Icon, ShieldBanIcon } from "@hugeicons/core-free-icons";
+  import { Shield01Icon } from "@hugeicons/core-free-icons";
   import * as blocker from "../../../domain/blocker/blocker.svelte";
   import { shieldPresentation } from "../../../domain/blocker/blocker-model";
   import Icon from "../../../shared/ui/Icon.svelte";
@@ -16,11 +16,12 @@
   <span
     class="flex h-5 w-5 shrink-0 items-center justify-center"
     class:text-faint={shield.tone === "quiet"}
+    class:opacity-40={shield.blocked}
     class:text-warning={shield.tone === "warning"}
     title={shield.label}
     role="img"
     aria-label={shield.label}
   >
-    <Icon icon={shield.blocked ? ShieldBanIcon : Shield01Icon} size={14} />
+    <Icon icon={Shield01Icon} size={14} />
   </span>
 {/if}

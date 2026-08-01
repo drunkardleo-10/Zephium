@@ -842,6 +842,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             add_menu_popup,
             tab_menu_popup,
             profile_menu_popup,
+            sidebar_menu_popup,
             launcher_search,
             launcher_run,
             sidebar_set_width,
@@ -1138,8 +1139,7 @@ const MAX_NAVIGATION_INPUT_BYTES: usize = 8 * 1024;
 const MAX_LAUNCHER_QUERY_BYTES: usize = 2 * 1024;
 const MAX_COMMAND_ID_BYTES: usize = 128;
 const MAX_WINDOW_COORDINATE: f64 = 1_000_000.0;
-const MIN_SIDEBAR_WIDTH: f64 = 180.0;
-const MAX_SIDEBAR_WIDTH: f64 = 420.0;
+use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
 /// The tab a native context menu was opened for.
 ///
@@ -1242,7 +1242,11 @@ fn sidebar_width_in_bounds(width: f64) -> bool {
 }
 
 fn setting_value_allowed(key: &str, value: &str) -> bool {
-    key == "appearance" && matches!(value, "system" | "light" | "dark")
+    match key {
+        "appearance" => matches!(value, "system" | "light" | "dark"),
+        "sidebar.mode" => matches!(value, "default" | "compact"),
+        _ => false,
+    }
 }
 
 fn search_action_in_bounds(action: &zephium_ipc::SearchAction) -> bool {
@@ -1609,7 +1613,7 @@ fn operation_acknowledge(
         .is_some_and(|ledger| ledger.acknowledge(&operation_id))
 }
 
-const SETTING_KEYS: &[&str] = &["appearance"];
+const SETTING_KEYS: &[&str] = &["appearance", "sidebar.mode"];
 
 // "CmdOrCtrl+T" style accelerators become native VK shortcuts for platforms
 // where the engine intercepts keys itself (Windows content webviews).
@@ -1756,6 +1760,16 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     }
     if let Some(action) = id.strip_prefix("tabmenu.") {
         return execute_tab_menu_action(app, action);
+    }
+    // Sidebar presentation is privileged-chrome state persisted through the
+    // settings allowlist, not an actor mutation. Deliver the intent and let
+    // the frame own it.
+    if id == SIDEBAR_COMPACT_COMMAND {
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
     }
     if let Some(mode) = id.strip_prefix("theme.") {
         if matches!(mode, "system" | "light" | "dark") {
@@ -2069,6 +2083,36 @@ fn tab_menu_popup(
 
 #[tauri::command]
 #[specta::specta]
+fn sidebar_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "sidebar_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let keymap = load_keymap();
+    let Ok(menu) = build_sidebar_menu(&app, &keymap) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
 fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "profile_menu_popup") {
         return false;
@@ -2335,12 +2379,64 @@ fn build_add_menu(
 /// armed tab. Native code never handles page-derived text for the clipboard.
 const TAB_MENU_COPY_LINK_COMMAND: &str = "tab.copyLink";
 
+/// Registry command delivered to the frame, which owns sidebar presentation.
+const SIDEBAR_COMPACT_COMMAND: &str = "sidebar.toggleCompact";
+
+/// The rail cannot show a navigation cluster, so the collapsed menu carries
+/// the whole one rather than a subset of it.
+const SIDEBAR_MENU_COMMAND_IDS: [&str; 4] = [
+    "nav.back",
+    "nav.forward",
+    "nav.reload",
+    SIDEBAR_COMPACT_COMMAND,
+];
+
 const TAB_MENU_ACTION_IDS: [&str; 4] = [
     "tabmenu.reload",
     "tabmenu.copyLink",
     "tabmenu.split",
     "tabmenu.close",
 ];
+
+fn build_sidebar_menu(
+    handle: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, PredefinedMenuItem};
+
+    let resolved = zephium_core::commands::resolve(overrides);
+    let back = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[0])?;
+    let forward = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[1])?;
+    let reload = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[2])?;
+    let compact = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[3])?;
+    let separator = PredefinedMenuItem::separator(handle)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        Menu::with_items(handle, &[&back, &forward, &reload, &separator, &compact])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window_separator = PredefinedMenuItem::separator(handle)?;
+        let minimize = PredefinedMenuItem::minimize(handle, None)?;
+        let maximize = PredefinedMenuItem::maximize(handle, None)?;
+        let close = PredefinedMenuItem::close_window(handle, None)?;
+        Menu::with_items(
+            handle,
+            &[
+                &back,
+                &forward,
+                &reload,
+                &separator,
+                &compact,
+                &window_separator,
+                &minimize,
+                &maximize,
+                &close,
+            ],
+        )
+    }
+}
 
 fn build_tab_menu(
     handle: &tauri::AppHandle,
@@ -3468,6 +3564,74 @@ mod tests {
         assert!(footer.contains(r#"label="New tab and split options""#));
         assert!(!footer.contains("http://"));
         assert!(!footer.contains("https://"));
+    }
+
+    #[test]
+    fn the_compact_sidebar_keeps_the_presentation_barrier_reachable() {
+        let address = include_str!("../../frame/src/features/sidebar/address/AddressField.svelte");
+        let rail = include_str!("../../frame/src/features/sidebar/tabs/TabRail.svelte");
+        let essentials =
+            include_str!("../../frame/src/features/sidebar/essentials/EssentialsRail.svelte");
+
+        // The barrier commits and verifies the authoritative host through the
+        // address input whenever the active tab presents. Rail width must hide
+        // it presentationally; unmounting it would conceal page content for as
+        // long as the sidebar stays compact.
+        assert!(address.contains("class:sr-only={compact}"));
+        assert_eq!(address.matches("data-zephium-address").count(), 1);
+
+        for (name, source) in [("tab rail", rail), ("essentials rail", essentials)] {
+            for sentinel in [
+                "data-zephium-tab-id",
+                "data-zephium-tab-url",
+                "data-zephium-projection-revision",
+                "data-zephium-tab-label",
+            ] {
+                assert_eq!(
+                    source.matches(sentinel).count(),
+                    1,
+                    "{name} must own exactly one {sentinel} binding"
+                );
+            }
+            let label = source
+                .split("<span data-zephium-tab-label")
+                .nth(1)
+                .and_then(|rest| rest.split("</span>").next())
+                .expect("bounded exact title sentinel");
+            assert_eq!(label.matches("{tab.title}").count(), 1);
+            assert!(
+                label.trim_end().ends_with("{tab.title}"),
+                "{name} title must be the sentinel's sole child"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sidebar_shape_is_a_bounded_allowlisted_preference() {
+        assert!(super::SETTING_KEYS.contains(&"sidebar.mode"));
+        assert!(super::setting_value_allowed("sidebar.mode", "default"));
+        assert!(super::setting_value_allowed("sidebar.mode", "compact"));
+        assert!(!super::setting_value_allowed("sidebar.mode", "collapsed"));
+        assert!(!super::setting_value_allowed("sidebar.width", "56"));
+
+        // Compact is a real sidebar width, so the native floor has to admit
+        // the rail rather than reject it as out of bounds.
+        assert!(super::sidebar_width_in_bounds(56.0));
+        assert_eq!(
+            super::SIDEBAR_MENU_COMMAND_IDS,
+            [
+                "nav.back",
+                "nav.forward",
+                "nav.reload",
+                super::SIDEBAR_COMPACT_COMMAND
+            ]
+        );
+        for id in super::SIDEBAR_MENU_COMMAND_IDS {
+            assert!(
+                zephium_core::commands::get(id).is_some(),
+                "collapsed sidebar menu references an unregistered command: {id}"
+            );
+        }
     }
 
     #[test]

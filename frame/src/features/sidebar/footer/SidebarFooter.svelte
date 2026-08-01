@@ -13,6 +13,8 @@
   import Icon from "../../../shared/ui/Icon.svelte";
   import IconButton from "../../../shared/ui/IconButton.svelte";
 
+  let { compact = false }: { compact?: boolean } = $props();
+
   let profile = $derived(tabs.profile());
   let name = $derived(profile?.name ?? "Personal");
   let incognito = $derived(profile?.kind === "incognito");
@@ -136,13 +138,23 @@
     </div>
   {/if}
 
-  <div class="flex h-8 items-center gap-1">
+  <div
+    class="flex gap-1"
+    class:h-8={!compact}
+    class:items-center={!compact}
+    class:flex-col-reverse={compact}
+    class:items-center-safe={compact}
+  >
     <button
       type="button"
       aria-label={`Profile: ${name}`}
       aria-haspopup="menu"
       title={name}
-      class="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-start text-[13.5px] text-muted transition-[background-color,color] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill-hover hover:text-text"
+      class="flex h-[34px] min-w-0 items-center gap-2 rounded-md text-start text-[13.5px] text-muted transition-[background-color,color] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill hover:text-text"
+      class:flex-1={!compact}
+      class:px-2={!compact}
+      class:w-9={compact}
+      class:justify-center={compact}
       onclick={openProfileMenu}
     >
       <span
@@ -151,10 +163,12 @@
       >
         <Icon icon={incognito ? IncognitoIcon : UserCircleIcon} size={15} />
       </span>
-      <span class="min-w-0 flex-1 truncate">{name}</span>
+      {#if !compact}
+        <span class="min-w-0 flex-1 truncate">{name}</span>
+      {/if}
     </button>
 
-    {#if notifications.length > 0}
+    {#if notifications.length > 0 && !compact}
       <span bind:this={bellAnchor} class="relative flex shrink-0">
         <IconButton
           icon={BellIcon}

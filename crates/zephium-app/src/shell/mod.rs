@@ -346,7 +346,7 @@ impl Shell {
             }
             Command::SetSidebarWidth(width) => {
                 if let Some(win) = self.windows.focused_mut() {
-                    win.metrics.sidebar_width = width.clamp(180.0, 420.0);
+                    win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
                 let _ = self.relayout();
             }

@@ -1,16 +1,15 @@
 <script lang="ts">
-  import * as tabs from "../../domain/tabs/tabs.svelte";
+  import {
+    applyDragWidth,
+    COMPACT_WIDTH,
+    MAX_EXPANDED_WIDTH,
+    MIN_EXPANDED_WIDTH,
+  } from "./sidebar-mode.svelte";
 
-  const minimum = 180;
-  const maximum = 420;
+  const minimum = COMPACT_WIDTH;
+  const maximum = MAX_EXPANDED_WIDTH;
 
-  let {
-    width,
-    onWidthChange,
-  }: {
-    width: number;
-    onWidthChange: (width: number) => void;
-  } = $props();
+  let { width }: { width: number } = $props();
 
   let resizing = false;
   let startX = 0;
@@ -18,32 +17,23 @@
   let frame = 0;
   let pendingWidth = 0;
 
-  function clamp(value: number) {
-    return Math.max(minimum, Math.min(maximum, Math.round(value)));
-  }
-
-  function scheduleNativeWidth(next: number) {
+  // The sidebar has two designed shapes and nothing in between, so a drag
+  // resolves to one of them rather than to a raw pixel width.
+  function update(next: number, commit: boolean) {
     pendingWidth = next;
+    if (commit) {
+      if (frame !== 0) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      applyDragWidth(next);
+      return;
+    }
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      tabs.setSidebarWidth(pendingWidth);
+      applyDragWidth(pendingWidth);
     });
-  }
-
-  function update(next: number, commit: boolean) {
-    const clamped = clamp(next);
-    onWidthChange(clamped);
-    if (!commit) {
-      scheduleNativeWidth(clamped);
-      return;
-    }
-
-    if (frame !== 0) {
-      cancelAnimationFrame(frame);
-      frame = 0;
-    }
-    tabs.setSidebarWidth(clamped);
   }
 
   function handlePointerDown(event: PointerEvent) {
@@ -90,7 +80,7 @@
       update(width + delta, true);
     } else if (event.key === "Home") {
       event.preventDefault();
-      update(minimum, true);
+      update(MIN_EXPANDED_WIDTH, true);
     } else if (event.key === "End") {
       event.preventDefault();
       update(maximum, true);

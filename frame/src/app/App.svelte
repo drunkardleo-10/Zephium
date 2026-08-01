@@ -2,6 +2,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import Launcher from "../features/launcher/Launcher.svelte";
+  import * as sidebar from "../features/sidebar/sidebar-mode.svelte";
   import Dividers from "../features/split/Dividers.svelte";
   import { commands } from "../shared/ipc/bindings";
   import { IS_MAC } from "../shared/platform";
@@ -87,6 +88,7 @@
     // supplies tabs, so its listener must exist before tabs starts bootstrap.
     const runtimeReady = runtime.init();
     const tabsReady = tabs.init();
+    const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
     void operations.init();
     void blocker.init();
@@ -95,7 +97,7 @@
 
     void (async () => {
       try {
-        await Promise.all([themeReady, runtimeReady, tabsReady, uiEventsReady]);
+        await Promise.all([themeReady, runtimeReady, tabsReady, uiEventsReady, sidebarReady]);
         if (disposed) return;
 
         // A hidden native window can suspend animation frames indefinitely.

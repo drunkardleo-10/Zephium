@@ -46,6 +46,12 @@
      live page occupy the same shape. Changing one requires changing both. */
   --content-radius: 12px;
 
+  /* Traffic lights sit at window (7, 22) and the chrome WebView starts at the
+     8px window padding, so within the chrome they span y 14..28 and end near
+     x 53. The header centres on that band and clears that extent. */
+  --titlebar-height: 42px;
+  --traffic-light-inset: 60px;
+
   --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.22);
   --shadow-field: inset 0 1px 0 rgb(255 255 255 / 0.03);
   --shadow-focus: 0 0 0 2px var(--color-accent-soft);
