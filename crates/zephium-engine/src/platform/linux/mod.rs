@@ -23,23 +23,26 @@ use std::time::Duration;
 
 use gtk::glib::prelude::{ObjectExt, ObjectType};
 use gtk::glib::signal::{connect_raw, SignalHandlerId};
+#[cfg(any(test, feature = "native-isolation-probes"))]
 use gtk::glib::translate::FromGlibPtrFull;
 use gtk::prelude::WidgetExt as _;
+#[cfg(any(test, feature = "native-isolation-probes"))]
+use webkit2gtk::UserContentManager;
 use webkit2gtk::{
-    DownloadExt, UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserScript,
+    DownloadExt, UserContentInjectedFrames, UserContentManagerExt, UserScript,
     UserScriptInjectionTime, WebContextExt, WebViewExt, WebsiteDataManagerExt,
 };
 use wry::WebViewExtUnix;
 use zephium_core::ports::engine::{Partition, ScriptPrincipal};
 
-// Phase 0a exposes the native bridge primitive before Phase 1 owns and retains
-// registrations in the host. Keep its dormant pieces warning-clean until that
-// integration seam is connected.
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 const PRINCIPAL_MESSAGE_UTF16_LIMIT: usize = 64 * 1_024;
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 const PRINCIPAL_MESSAGE_UTF8_LIMIT: usize = 64 * 1_024;
 const PRINCIPAL_WORLD_PREFIX: &str = "zephium-principal-";
+#[cfg(any(test, feature = "native-isolation-probes"))]
 const PRINCIPAL_HANDLER_PREFIX: &str = "zephiumPrincipal_";
 const PRINCIPAL_TOKEN_MAX_BYTES: usize = "userscript-".len() + 32;
 
@@ -47,6 +50,7 @@ const PRINCIPAL_TOKEN_MAX_BYTES: usize = "userscript-".len() + 32;
 pub(crate) struct PrincipalContentIdentity {
     principal: ScriptPrincipal,
     world_name: Box<str>,
+    #[cfg(any(test, feature = "native-isolation-probes"))]
     handler_name: Box<str>,
 }
 
@@ -56,10 +60,12 @@ impl PrincipalContentIdentity {
         Self {
             principal,
             world_name: format!("{PRINCIPAL_WORLD_PREFIX}{token}").into(),
+            #[cfg(any(test, feature = "native-isolation-probes"))]
             handler_name: format!("{PRINCIPAL_HANDLER_PREFIX}{token}").into(),
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn principal(&self) -> ScriptPrincipal {
         self.principal
     }
@@ -68,6 +74,7 @@ impl PrincipalContentIdentity {
         &self.world_name
     }
 
+    #[cfg(any(test, feature = "native-isolation-probes"))]
     #[allow(dead_code)]
     pub(crate) fn handler_name(&self) -> &str {
         &self.handler_name
@@ -89,6 +96,13 @@ fn principal_token(principal: ScriptPrincipal) -> String {
     token
 }
 
+// Product builds intentionally do not compile the principal messaging bridge.
+// JavaScriptCore converts and allocates the complete string before Rust can
+// enforce either byte limit, and untrusted code in the principal world can
+// otherwise invoke the raw native handler directly. Keep messaging unavailable
+// until the native boundary can enforce a pre-allocation limit and expose a
+// non-bypassable API.
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
 pub(crate) struct PrincipalContentMessage {
@@ -96,6 +110,7 @@ pub(crate) struct PrincipalContentMessage {
     body: String,
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 impl PrincipalContentMessage {
     pub(crate) fn identity(&self) -> &PrincipalContentIdentity {
@@ -110,12 +125,14 @@ impl PrincipalContentMessage {
 // javascriptcore-rs is a private implementation dependency of Wry, not a
 // Zephium API dependency. Use the stable JSC C ABI to perform the two bounded
 // string operations needed at this native trust boundary.
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 unsafe extern "C" {
     fn jsc_value_is_string(value: *mut c_void) -> i32;
     fn jsc_value_to_string_as_bytes(value: *mut c_void) -> *mut gtk::glib::ffi::GBytes;
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 fn bounded_principal_message(result: &webkit2gtk::JavascriptResult) -> Option<String> {
     let value = result.js_value()?;
@@ -133,6 +150,7 @@ fn bounded_principal_message(result: &webkit2gtk::JavascriptResult) -> Option<St
     bounded_principal_message_bytes(bytes.as_ref())
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 fn bounded_principal_message_bytes(bytes: &[u8]) -> Option<String> {
     if bytes.len() > PRINCIPAL_MESSAGE_UTF8_LIMIT {
@@ -145,6 +163,7 @@ fn bounded_principal_message_bytes(bytes: &[u8]) -> Option<String> {
     Some(body.to_owned())
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 fn dispatch_principal_message(
     identity: &PrincipalContentIdentity,
@@ -162,6 +181,7 @@ fn dispatch_principal_message(
 /// Owns one world-scoped native message registration. A unique handler name
 /// is derived from the typed principal, so the detailed GLib signal itself is
 /// the authority; no identity supplied by JavaScript is consulted.
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 pub(crate) struct PrincipalMessageHandlerRegistration {
     identity: PrincipalContentIdentity,
@@ -169,6 +189,7 @@ pub(crate) struct PrincipalMessageHandlerRegistration {
     signal: Option<SignalHandlerId>,
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 impl PrincipalMessageHandlerRegistration {
     pub(crate) fn identity(&self) -> &PrincipalContentIdentity {
@@ -176,6 +197,7 @@ impl PrincipalMessageHandlerRegistration {
     }
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 impl Drop for PrincipalMessageHandlerRegistration {
     fn drop(&mut self) {
         self.manager.unregister_script_message_handler_in_world(
@@ -188,6 +210,7 @@ impl Drop for PrincipalMessageHandlerRegistration {
     }
 }
 
+#[cfg(any(test, feature = "native-isolation-probes"))]
 #[allow(dead_code)]
 pub(crate) fn register_principal_message_handler(
     view: &wry::WebView,
