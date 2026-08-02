@@ -581,6 +581,93 @@ enum PatternKind {
     },
 }
 
+/// Canonical scheme semantics for one parsed match pattern.
+///
+/// This is intentionally not a string. Native adapters can translate a
+/// validated pattern without reparsing [`MatchPattern::as_str`] and without
+/// accidentally treating `*` as a wildcard for non-web schemes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchPatternScheme {
+    Http,
+    Https,
+    File,
+    HttpAndHttps,
+}
+
+impl MatchPatternScheme {
+    pub const fn includes_http_or_https(self) -> bool {
+        matches!(self, Self::Http | Self::Https | Self::HttpAndHttps)
+    }
+
+    pub const fn includes_file(self) -> bool {
+        matches!(self, Self::File)
+    }
+}
+
+/// Canonical host semantics for one parsed non-file pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchPatternHost<'a> {
+    Any,
+    ExactDomain(&'a str),
+    ExactIpv4(Ipv4Addr),
+    ExactIpv6(Ipv6Addr),
+    /// Matches both the named domain and all of its label-boundary
+    /// subdomains, matching Chrome's leading `*.` behavior.
+    DomainAndSubdomains(&'a str),
+}
+
+/// Canonical port semantics for one parsed non-file pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchPatternPort {
+    Any,
+    Exact(u16),
+}
+
+/// Borrowed, canonical path-and-query glob.
+///
+/// The only metacharacter is `*`; all Unicode, spaces, backslashes, and dot
+/// segments have already been normalized by the parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatchPatternPath<'a>(&'a str);
+
+impl<'a> MatchPatternPath<'a> {
+    pub const fn as_str(self) -> &'a str {
+        self.0
+    }
+}
+
+/// Typed, canonical components retained by a parsed match pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchPatternComponents<'a> {
+    /// Chrome's `<all_urls>` token. Its current generic matcher covers HTTP,
+    /// HTTPS, and file; capability-specific callers must still apply their
+    /// own scheme grants.
+    AllUrls,
+    Standard {
+        scheme: MatchPatternScheme,
+        /// File patterns have no host. Every other scheme has one.
+        host: Option<MatchPatternHost<'a>>,
+        port: MatchPatternPort,
+        path: MatchPatternPath<'a>,
+    },
+}
+
+impl MatchPatternComponents<'_> {
+    pub const fn includes_http_or_https(self) -> bool {
+        match self {
+            Self::AllUrls => true,
+            Self::Standard { scheme, .. } => scheme.includes_http_or_https(),
+        }
+    }
+
+    pub const fn includes_file(self) -> bool {
+        match self {
+            Self::AllUrls => true,
+            Self::Standard { scheme, .. } => scheme.includes_file(),
+        }
+    }
+}
+
 /// One bounded, precompiled Chrome-style content-script match pattern.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MatchPattern {
@@ -681,6 +768,49 @@ impl MatchPattern {
     /// Returns the canonical form retained by the matcher.
     pub fn as_str(&self) -> &str {
         &self.inner.canonical
+    }
+
+    /// Returns the already parsed canonical components.
+    ///
+    /// Consumers must prefer this over splitting or reparsing [`Self::as_str`].
+    /// The returned values borrow this pattern and allocate nothing.
+    pub fn components(&self) -> MatchPatternComponents<'_> {
+        let PatternKind::Standard {
+            scheme,
+            host,
+            port,
+            path,
+        } = &self.inner.kind
+        else {
+            return MatchPatternComponents::AllUrls;
+        };
+
+        MatchPatternComponents::Standard {
+            scheme: match scheme {
+                PatternScheme::Http => MatchPatternScheme::Http,
+                PatternScheme::Https => MatchPatternScheme::Https,
+                PatternScheme::File => MatchPatternScheme::File,
+                PatternScheme::WebWildcard => MatchPatternScheme::HttpAndHttps,
+            },
+            host: host.as_ref().map(|host| match host {
+                HostPattern::Any => MatchPatternHost::Any,
+                HostPattern::Exact(CanonicalHost::Domain(domain)) => {
+                    MatchPatternHost::ExactDomain(domain)
+                }
+                HostPattern::Exact(CanonicalHost::Ipv4(address)) => {
+                    MatchPatternHost::ExactIpv4(*address)
+                }
+                HostPattern::Exact(CanonicalHost::Ipv6(address)) => {
+                    MatchPatternHost::ExactIpv6(*address)
+                }
+                HostPattern::Subdomains(domain) => MatchPatternHost::DomainAndSubdomains(domain),
+            }),
+            port: match port {
+                PortPattern::Any => MatchPatternPort::Any,
+                PortPattern::Exact(port) => MatchPatternPort::Exact(*port),
+            },
+            path: MatchPatternPath(&path.pattern),
+        }
     }
 
     /// Returns whether this pattern accepts every path on its matched origins.
@@ -913,6 +1043,24 @@ impl MatchSet {
                     .saturating_add(pattern.as_str().len().saturating_mul(16))
             },
         )
+    }
+
+    /// Exact number of canonical UTF-8 pattern bytes retained by this set.
+    ///
+    /// This deliberately excludes compiled tables and container overhead;
+    /// callers that need conservative admission accounting must use
+    /// [`Self::retained_budget_bytes`] as well.
+    pub fn canonical_pattern_bytes(&self) -> usize {
+        self.matches
+            .iter()
+            .chain(&self.exclude_matches)
+            .map(|pattern| pattern.as_str().len())
+            .sum()
+    }
+
+    /// Exact number of positive and excluded registrations in this set.
+    pub fn pattern_count(&self) -> usize {
+        self.matches.len() + self.exclude_matches.len()
     }
 
     /// Matches a directly addressable document URL.
@@ -1161,6 +1309,37 @@ mod tests {
         let ipv6 = pattern("http://[::1]:8080/*");
         assert!(ipv6.matches_url(&url("http://[::1]:8080/a")));
         assert!(!ipv6.matches_url(&url("http://[::1]:8081/a")));
+    }
+
+    #[test]
+    fn typed_components_expose_canonical_semantics_without_reparsing() {
+        let international = pattern("*://*.BÜCHER.example:8443/a/../🐱*?q=*");
+        assert_eq!(
+            international.components(),
+            MatchPatternComponents::Standard {
+                scheme: MatchPatternScheme::HttpAndHttps,
+                host: Some(MatchPatternHost::DomainAndSubdomains(
+                    "xn--bcher-kva.example"
+                )),
+                port: MatchPatternPort::Exact(8443),
+                path: MatchPatternPath("/%F0%9F%90%B1*?q=*"),
+            }
+        );
+
+        let file = pattern("file:///tmp/*");
+        assert_eq!(
+            file.components(),
+            MatchPatternComponents::Standard {
+                scheme: MatchPatternScheme::File,
+                host: None,
+                port: MatchPatternPort::Any,
+                path: MatchPatternPath("/tmp/*"),
+            }
+        );
+        assert_eq!(
+            pattern("<all_urls>").components(),
+            MatchPatternComponents::AllUrls
+        );
     }
 
     #[test]

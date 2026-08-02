@@ -8,6 +8,7 @@
 mod catalog;
 mod compatibility;
 mod metadata;
+mod runtime;
 
 pub use catalog::{
     Userscript, UserscriptCatalog, UserscriptCatalogError, UserscriptCatalogMutation,
@@ -15,7 +16,8 @@ pub use catalog::{
     MAX_USERSCRIPTS_PER_PROFILE, MAX_USERSCRIPT_CATALOG_SOURCE_BYTES,
 };
 pub use compatibility::{
-    assess_userscript_compatibility, UserscriptCompatibility, UserscriptCompatibilityIssue,
+    assess_userscript_compatibility, assess_userscript_runtime_eligibility,
+    UserscriptCompatibility, UserscriptCompatibilityIssue, UserscriptRuntimeEligibility,
 };
 pub use metadata::{
     parse_userscript_metadata, DeclaredGrant, DeclaredRunAt, ParsedUserscriptMetadata,
@@ -24,4 +26,9 @@ pub use metadata::{
     MAX_USERSCRIPT_METADATA_BYTES, MAX_USERSCRIPT_METADATA_LINES,
     MAX_USERSCRIPT_METADATA_LINE_BYTES, MAX_USERSCRIPT_NAMESPACE_BYTES, MAX_USERSCRIPT_NAME_BYTES,
     MAX_USERSCRIPT_VERSION_BYTES,
+};
+pub use runtime::{
+    prepare_userscript_runtime, PreparedUserscriptAccounting, PreparedUserscriptEnvironment,
+    PreparedUserscriptFrameScope, PreparedUserscriptRunAt, PreparedUserscriptRuntime,
+    UserscriptRuntimePreparationError, MAX_PREPARED_USERSCRIPT_RETAINED_BYTES,
 };
