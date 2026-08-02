@@ -577,6 +577,7 @@ impl EngineHost {
         // WebKit compilation callback. Per-view exact registrations remain
         // owned until the controllers are closed below.
         self.retire_content_policy(profile);
+        self.user_content.remove_profile(profile);
 
         #[cfg(target_os = "macos")]
         let ephemeral_stores = self

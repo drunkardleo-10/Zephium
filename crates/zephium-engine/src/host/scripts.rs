@@ -1,5 +1,11 @@
+use std::collections::HashMap;
+
+use zephium_core::ids::ScriptId;
+use zephium_core::injection::MatchSet;
 use zephium_core::ports::engine::{
-    ContentScope, Partition, Shortcut, UserContent, UserScript, World,
+    ContentScope, EngineEvent, Partition, RunAt, ScriptOwner, Shortcut, UserContent,
+    UserContentApplyFailure, UserContentGeneration, UserContentSettlement, UserScript,
+    UserScriptRefusal, UserScriptRefusalReason, UserStyle, World,
 };
 
 use super::EngineHost;
@@ -517,39 +523,383 @@ pub(super) fn decode_favicon_eval_result(result: &str) -> Option<Vec<u8>> {
     zephium_core::icon::decode_rgba32(&encoded)
 }
 
-fn style_script(css: &str) -> UserScript {
+fn style_script(style: &UserStyle) -> UserScript {
     // WebView2 runs document-start scripts before <html> exists; WebKit does
     // not. The observer path injects the instant the root appears.
     let source = format!(
         "(function(){{var css={};function add(){{var s=document.createElement('style');s.textContent=css;(document.head||document.documentElement).appendChild(s)}}if(document.head||document.documentElement){{add()}}else{{new MutationObserver(function(_,o){{if(document.documentElement){{o.disconnect();add()}}}}).observe(document,{{childList:true}})}}}})()",
-        serde_json::to_string(css).unwrap_or_default()
+        // Serializing a valid Rust string as one JSON string has no semantic
+        // failure mode. Treat an impossible formatter failure as an empty
+        // literal rather than interpolating unquoted source.
+        serde_json::to_string(style.css.as_ref()).unwrap_or_else(|_| "\"\"".to_string())
     );
+    let world = match style.owner {
+        ScriptOwner::Builtin => World::Page,
+        ScriptOwner::Principal(principal) => World::Isolated(principal),
+    };
     UserScript {
-        source,
-        world: World::Page,
-        at_start: true,
+        id: style.id,
+        owner: style.owner,
+        source: source.into(),
+        world,
+        matches: style.matches.clone(),
+        run_at: RunAt::DocumentStart,
+        all_frames: style.all_frames,
     }
 }
 
-impl EngineHost {
-    pub(super) fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
-        let mut out = Vec::new();
+fn builtin_script(id: u128, source: &str, all_frames: bool) -> UserScript {
+    UserScript {
+        id: ScriptId::from(id),
+        owner: ScriptOwner::Builtin,
+        source: source.into(),
+        world: World::Page,
+        matches: MatchSet::all_urls(),
+        run_at: RunAt::DocumentStart,
+        all_frames,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProtectedScriptSpec {
+    id: u128,
+    source: &'static str,
+    all_frames: bool,
+}
+
+const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
+    ProtectedScriptSpec {
+        id: 1,
+        source: DISCARD_SAFETY_BOOTSTRAP_JS,
+        all_frames: false,
+    },
+    ProtectedScriptSpec {
+        id: 2,
+        source: EXTRACT_HTML_BOOTSTRAP_JS,
+        all_frames: false,
+    },
+    ProtectedScriptSpec {
+        id: 3,
+        source: crate::PAGE_PRINT_DENY_SCRIPT,
+        all_frames: true,
+    },
+];
+
+fn protected_scripts() -> [UserScript; PROTECTED_SCRIPT_SPECS.len()] {
+    PROTECTED_SCRIPT_SPECS.map(|spec| builtin_script(spec.id, spec.source, spec.all_frames))
+}
+
+fn is_protected_builtin_id(id: ScriptId) -> bool {
+    PROTECTED_SCRIPT_SPECS
+        .iter()
+        .any(|spec| id == ScriptId::from(spec.id))
+}
+
+struct ScopedUserContent {
+    generation: UserContentGeneration,
+    scripts: Vec<UserScript>,
+    retained_budget_bytes: usize,
+}
+
+#[derive(Default)]
+pub(super) struct UserContentRegistry {
+    scopes: HashMap<ContentScope, ScopedUserContent>,
+    high_water: HashMap<ContentScope, UserContentGeneration>,
+}
+
+impl UserContentRegistry {
+    fn generation(&self, scope: ContentScope) -> Option<UserContentGeneration> {
+        self.scopes.get(&scope).map(|entry| entry.generation)
+    }
+
+    fn admit_generation(
+        &mut self,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+    ) -> Result<(), UserContentApplyFailure> {
+        if scope == ContentScope::Global {
+            // Global injected content is a host bootstrap authority, not an
+            // extension/userscript scope. Keeping it out of the runtime port
+            // prevents one profile-mapping bug from crossing profile and
+            // private-browsing boundaries.
+            return Err(UserContentApplyFailure::ReservedScope);
+        }
+        if self
+            .high_water
+            .get(&scope)
+            .copied()
+            .is_some_and(|current| generation <= current)
+        {
+            return Err(UserContentApplyFailure::StaleGeneration);
+        }
+        if !self.high_water.contains_key(&scope)
+            && self
+                .high_water
+                .keys()
+                .filter(|scope| matches!(scope, ContentScope::Profile(_)))
+                .count()
+                >= zephium_core::session::MAX_SESSION_PROFILES
+        {
+            return Err(UserContentApplyFailure::TooManyScopes);
+        }
+        self.high_water.insert(scope, generation);
+        Ok(())
+    }
+
+    fn validate_replacement(
+        &self,
+        scope: ContentScope,
+        content: &UserContent,
+    ) -> Result<(), UserContentApplyFailure> {
+        content.validate()?;
+        let candidate_budget = content
+            .retained_budget_bytes()
+            .ok_or(UserContentApplyFailure::TotalRetainedTooLarge)?;
+        let current_budget = self
+            .scopes
+            .values()
+            .try_fold(0_usize, |total, entry| {
+                total.checked_add(entry.retained_budget_bytes)
+            })
+            .ok_or(UserContentApplyFailure::ProcessBudgetExceeded)?;
+        let replaced_budget = self
+            .scopes
+            .get(&scope)
+            .map_or(0, |entry| entry.retained_budget_bytes);
+        if current_budget
+            .checked_sub(replaced_budget)
+            .and_then(|bytes| bytes.checked_add(candidate_budget))
+            .is_none_or(|bytes| {
+                bytes > zephium_core::ports::engine::MAX_USER_CONTENT_RETAINED_BYTES_PROCESS
+            })
+        {
+            return Err(UserContentApplyFailure::ProcessBudgetExceeded);
+        }
+        let host_only_refusals = content
+            .scripts
+            .iter()
+            .filter(|script| script.owner == ScriptOwner::Builtin)
+            .map(|script| UserScriptRefusal {
+                registration: script.key(),
+                reason: UserScriptRefusalReason::HostOnlyOwner,
+            })
+            .chain(
+                content
+                    .styles
+                    .iter()
+                    .filter(|style| style.owner == ScriptOwner::Builtin)
+                    .map(|style| UserScriptRefusal {
+                        registration: style.key(),
+                        reason: UserScriptRefusalReason::HostOnlyOwner,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        if !host_only_refusals.is_empty() {
+            return Err(UserContentApplyFailure::Scripts(host_only_refusals));
+        }
+        validate_reserved_ids(content)?;
+        Ok(())
+    }
+
+    fn validate_initial_global(content: &UserContent) -> Result<(), UserContentApplyFailure> {
+        content.validate()?;
+        let invalid_scope_refusals = content
+            .scripts
+            .iter()
+            .filter(|script| script.owner != ScriptOwner::Builtin)
+            .map(|script| UserScriptRefusal {
+                registration: script.key(),
+                reason: UserScriptRefusalReason::InvalidScope,
+            })
+            .chain(
+                content
+                    .styles
+                    .iter()
+                    .filter(|style| style.owner != ScriptOwner::Builtin)
+                    .map(|style| UserScriptRefusal {
+                        registration: style.key(),
+                        reason: UserScriptRefusalReason::InvalidScope,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        if !invalid_scope_refusals.is_empty() {
+            return Err(UserContentApplyFailure::Scripts(invalid_scope_refusals));
+        }
+        validate_reserved_ids(content)?;
+        let refusals = platform_refusals(content);
+        if refusals.is_empty() {
+            Ok(())
+        } else {
+            Err(UserContentApplyFailure::Scripts(refusals))
+        }
+    }
+
+    pub(super) fn remove_profile(&mut self, profile: zephium_core::ids::ProfileId) {
+        self.scopes.remove(&ContentScope::Profile(profile));
+        self.high_water.remove(&ContentScope::Profile(profile));
+    }
+
+    fn commit(
+        &mut self,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+        content: UserContent,
+    ) {
+        let retained_budget_bytes = content
+            .retained_budget_bytes()
+            .expect("validated user content has a bounded retained-memory charge");
+        let mut scripts = content.scripts;
+        scripts.extend(content.styles.iter().map(style_script));
+        self.scopes.insert(
+            scope,
+            ScopedUserContent {
+                generation,
+                scripts,
+                retained_budget_bytes,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    fn replace(
+        &mut self,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+        content: UserContent,
+    ) -> Result<(), UserContentApplyFailure> {
+        self.admit_generation(scope, generation)?;
+        self.validate_replacement(scope, &content)?;
+        self.commit(scope, generation, content);
+        Ok(())
+    }
+
+    pub(super) fn with_initial_global(
+        generation: UserContentGeneration,
+        content: UserContent,
+    ) -> Result<Self, UserContentApplyFailure> {
+        Self::validate_initial_global(&content)?;
+        let mut registry = Self::default();
+        registry.high_water.insert(ContentScope::Global, generation);
+        registry.commit(ContentScope::Global, generation, content);
+        Ok(registry)
+    }
+
+    fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
+        let mut out = Vec::with_capacity(PROTECTED_SCRIPT_SPECS.len());
+        out.extend(protected_scripts());
         for scope in [
             ContentScope::Global,
             ContentScope::Profile(partition.profile()),
         ] {
-            if let Some(content) = self.user_content.get(&scope) {
-                out.extend(content.scripts.iter().cloned());
-                out.extend(content.styles.iter().map(|css| style_script(css)));
+            if let Some(entry) = self.scopes.get(&scope) {
+                out.extend(entry.scripts.iter().cloned());
             }
         }
         out
     }
+}
 
-    pub(crate) fn set_user_content(&mut self, scope: ContentScope, content: UserContent) {
-        self.user_content.insert(scope, content);
-        // scripts and shortcuts are baked in at build; a stale spare lies
-        self.spare = None;
+fn validate_reserved_ids(content: &UserContent) -> Result<(), UserContentApplyFailure> {
+    let reserved_refusals: Vec<_> = content
+        .scripts
+        .iter()
+        .map(UserScript::key)
+        .chain(content.styles.iter().map(UserStyle::key))
+        .filter(|key| key.owner == ScriptOwner::Builtin && is_protected_builtin_id(key.id))
+        .map(|registration| UserScriptRefusal {
+            registration,
+            reason: UserScriptRefusalReason::ProtectedRegistration,
+        })
+        .collect();
+    if !reserved_refusals.is_empty() {
+        return Err(UserContentApplyFailure::Scripts(reserved_refusals));
+    }
+    Ok(())
+}
+
+fn platform_refusals(content: &UserContent) -> Vec<UserScriptRefusal> {
+    content
+        .scripts
+        .iter()
+        .filter_map(|script| {
+            crate::platform::imp::user_script_refusal(script).map(|reason| UserScriptRefusal {
+                registration: script.key(),
+                reason,
+            })
+        })
+        .chain(content.styles.iter().filter_map(|style| {
+            crate::platform::imp::user_style_refusal(style).map(|reason| UserScriptRefusal {
+                registration: style.key(),
+                reason,
+            })
+        }))
+        .collect()
+}
+
+impl EngineHost {
+    pub(super) fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
+        self.user_content.scripts_for(partition)
+    }
+
+    pub(crate) fn set_user_content(
+        &mut self,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+        content: UserContent,
+    ) {
+        let previous = self.user_content.generation(scope);
+        let affects_live_view = self
+            .partitions
+            .values()
+            .copied()
+            .any(|partition| match scope {
+                ContentScope::Global => true,
+                ContentScope::Profile(profile) => partition.profile() == profile,
+            });
+        let result = self
+            .user_content
+            .admit_generation(scope, generation)
+            .and_then(|()| self.user_content.validate_replacement(scope, &content))
+            .and_then(|()| {
+                let refusals = platform_refusals(&content);
+                if !refusals.is_empty() {
+                    return Err(UserContentApplyFailure::Scripts(refusals));
+                }
+                if affects_live_view {
+                    // Phase 1's platform mutation adapters replace this typed
+                    // refusal. Retaining is the only truthful result until
+                    // every affected live controller can be changed atomically
+                    // without losing protected registrations.
+                    return Err(UserContentApplyFailure::UnsupportedPlatform);
+                }
+                // A matching spare is disposable and cannot retain the prior
+                // registration set. An unrelated profile's spare is unaffected
+                // by a profile-scoped replacement and need not be churned.
+                let spare_is_affected = self.spare.as_ref().is_some_and(|spare| match scope {
+                    ContentScope::Global => true,
+                    ContentScope::Profile(profile) => spare.partition.profile() == profile,
+                });
+                if spare_is_affected {
+                    self.spare = None;
+                }
+                self.user_content.commit(scope, generation, content);
+                Ok(())
+            });
+        let settlement = match result {
+            Ok(()) => UserContentSettlement::Applied { generation },
+            Err(failure) => match previous {
+                Some(generation) => UserContentSettlement::Retained {
+                    generation,
+                    failure,
+                },
+                None => UserContentSettlement::Unavailable { failure },
+            },
+        };
+        self.sink.emit(EngineEvent::UserContentSettled {
+            scope,
+            requested: generation,
+            settlement,
+        });
     }
 
     pub(crate) fn set_shortcuts(&mut self, shortcuts: Vec<Shortcut>) {
@@ -561,6 +911,395 @@ impl EngineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zephium_core::ids::{ProfileId, ScriptPrincipalId};
+    use zephium_core::ports::engine::{ScriptPrincipal, UserScriptRefusalReason};
+
+    fn generation(value: u64) -> UserContentGeneration {
+        UserContentGeneration::new(value).unwrap()
+    }
+
+    fn test_script(id: u128) -> UserScript {
+        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(id + 100));
+        UserScript {
+            id: ScriptId::from(id),
+            owner: ScriptOwner::Principal(principal),
+            source: "globalThis.__zephium_test__ = true".into(),
+            world: World::Isolated(principal),
+            matches: MatchSet::all_urls(),
+            run_at: RunAt::DocumentStart,
+            all_frames: false,
+        }
+    }
+
+    #[test]
+    fn protected_registrations_survive_every_registry_transition() {
+        let profile = ProfileId::from(17);
+        let partition = Partition::Persistent(profile);
+        let mut registry = UserContentRegistry::default();
+
+        for (generation, scripts) in [
+            (1, vec![test_script(10)]),
+            (2, vec![test_script(11), test_script(12)]),
+            (3, Vec::new()),
+        ] {
+            registry
+                .replace(
+                    ContentScope::Profile(profile),
+                    self::generation(generation),
+                    UserContent {
+                        scripts,
+                        styles: Vec::new(),
+                    },
+                )
+                .unwrap();
+            let resolved = registry.scripts_for(partition);
+            let expected = PROTECTED_SCRIPT_SPECS
+                .iter()
+                .map(|spec| ScriptId::from(spec.id))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                resolved
+                    .iter()
+                    .take(PROTECTED_SCRIPT_SPECS.len())
+                    .map(|script| script.id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for (index, spec) in PROTECTED_SCRIPT_SPECS.iter().enumerate() {
+                assert_eq!(resolved[index].run_at, RunAt::DocumentStart);
+                assert_eq!(resolved[index].world, World::Page);
+                assert_eq!(resolved[index].all_frames, spec.all_frames);
+                assert_eq!(
+                    resolved
+                        .iter()
+                        .filter(|script| script.id == ScriptId::from(spec.id))
+                        .map(|script| script.source.as_ref())
+                        .collect::<Vec<_>>(),
+                    vec![spec.source]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_protected_descriptor_reserves_its_builtin_registration_id() {
+        for spec in PROTECTED_SCRIPT_SPECS {
+            let mut protected = test_script(spec.id);
+            protected.owner = ScriptOwner::Builtin;
+            protected.world = World::Page;
+            let protected_key = protected.key();
+            let failure = UserContentRegistry::with_initial_global(
+                generation(1),
+                UserContent {
+                    scripts: vec![protected],
+                    styles: Vec::new(),
+                },
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                failure,
+                UserContentApplyFailure::Scripts(refusals)
+                    if refusals.iter().any(|refusal| refusal.registration == protected_key
+                        && refusal.reason == UserScriptRefusalReason::ProtectedRegistration)
+            ));
+        }
+    }
+
+    #[test]
+    fn protected_numeric_ids_remain_available_to_distinct_principals() {
+        let profile = ProfileId::from(18);
+        let mut registry = UserContentRegistry::default();
+        let scripts = PROTECTED_SCRIPT_SPECS
+            .iter()
+            .map(|spec| test_script(spec.id))
+            .collect();
+        registry
+            .replace(
+                ContentScope::Profile(profile),
+                generation(1),
+                UserContent {
+                    scripts,
+                    styles: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let resolved = registry.scripts_for(Partition::Persistent(profile));
+        for spec in PROTECTED_SCRIPT_SPECS {
+            assert_eq!(
+                resolved
+                    .iter()
+                    .filter(|script| script.id == ScriptId::from(spec.id))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn stale_or_invalid_replacement_retains_the_prior_generation() {
+        let profile = ProfileId::from(19);
+        let mut registry = UserContentRegistry::default();
+        registry
+            .replace(
+                ContentScope::Profile(profile),
+                generation(2),
+                UserContent {
+                    scripts: vec![test_script(20)],
+                    styles: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            registry.replace(
+                ContentScope::Profile(profile),
+                generation(2),
+                UserContent::default(),
+            ),
+            Err(UserContentApplyFailure::StaleGeneration)
+        );
+        assert_eq!(
+            registry.generation(ContentScope::Profile(profile)),
+            Some(generation(2))
+        );
+        assert!(registry
+            .scripts_for(Partition::Persistent(profile))
+            .iter()
+            .any(|script| script.id == ScriptId::from(20)));
+    }
+
+    #[test]
+    fn runtime_scope_and_owner_authority_are_fail_closed() {
+        let profile = ProfileId::from(20);
+        let mut registry = UserContentRegistry::default();
+        assert_eq!(
+            registry.replace(ContentScope::Global, generation(1), UserContent::default()),
+            Err(UserContentApplyFailure::ReservedScope)
+        );
+
+        let host_script = builtin_script(100, "globalThis.hostOnly = true", false);
+        let host_key = host_script.key();
+        let failure = registry
+            .replace(
+                ContentScope::Profile(profile),
+                generation(1),
+                UserContent {
+                    scripts: vec![host_script],
+                    styles: Vec::new(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            UserContentApplyFailure::Scripts(refusals)
+                if refusals == vec![UserScriptRefusal {
+                    registration: host_key,
+                    reason: UserScriptRefusalReason::HostOnlyOwner,
+                }]
+        ));
+    }
+
+    #[test]
+    fn initial_global_rejects_principal_content() {
+        let principal = test_script(101);
+        let key = principal.key();
+        let failure = UserContentRegistry::with_initial_global(
+            generation(1),
+            UserContent {
+                scripts: vec![principal],
+                styles: Vec::new(),
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            failure,
+            UserContentApplyFailure::Scripts(refusals)
+                if refusals == vec![UserScriptRefusal {
+                    registration: key,
+                    reason: UserScriptRefusalReason::InvalidScope,
+                }]
+        ));
+    }
+
+    #[test]
+    fn profile_scope_capacity_is_bounded_and_removal_releases_it() {
+        let mut registry = UserContentRegistry::default();
+        for value in 1..=zephium_core::session::MAX_SESSION_PROFILES as u128 {
+            registry
+                .replace(
+                    ContentScope::Profile(ProfileId::from(value)),
+                    generation(1),
+                    UserContent::default(),
+                )
+                .unwrap();
+        }
+        let extra = ProfileId::from(10_000);
+        assert_eq!(
+            registry.replace(
+                ContentScope::Profile(extra),
+                generation(1),
+                UserContent::default(),
+            ),
+            Err(UserContentApplyFailure::TooManyScopes)
+        );
+
+        let released = ProfileId::from(1);
+        registry.remove_profile(released);
+        assert_eq!(registry.generation(ContentScope::Profile(released)), None);
+        registry
+            .replace(
+                ContentScope::Profile(extra),
+                generation(2),
+                UserContent::default(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_newer_candidate_advances_the_generation_high_water_mark() {
+        let profile = ProfileId::from(21);
+        let mut registry = UserContentRegistry::default();
+        registry
+            .replace(
+                ContentScope::Profile(profile),
+                generation(2),
+                UserContent {
+                    scripts: vec![test_script(200)],
+                    styles: Vec::new(),
+                },
+            )
+            .unwrap();
+        let failure = registry
+            .replace(
+                ContentScope::Profile(profile),
+                generation(4),
+                UserContent {
+                    scripts: vec![builtin_script(201, "void 0", false)],
+                    styles: Vec::new(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(failure, UserContentApplyFailure::Scripts(_)));
+        assert_eq!(
+            registry.replace(
+                ContentScope::Profile(profile),
+                generation(3),
+                UserContent::default(),
+            ),
+            Err(UserContentApplyFailure::StaleGeneration)
+        );
+        assert_eq!(
+            registry.generation(ContentScope::Profile(profile)),
+            Some(generation(2))
+        );
+    }
+
+    #[test]
+    fn cached_style_wrapper_is_shared_across_view_snapshots() {
+        let registry = UserContentRegistry::with_initial_global(
+            generation(1),
+            UserContent {
+                scripts: Vec::new(),
+                styles: vec![UserStyle {
+                    id: ScriptId::from(4),
+                    owner: ScriptOwner::Builtin,
+                    css: "html { color: black; }".into(),
+                    matches: MatchSet::all_urls(),
+                    all_frames: true,
+                }],
+            },
+        )
+        .unwrap();
+        let partition = Partition::Persistent(ProfileId::from(22));
+        let first = registry.scripts_for(partition);
+        let second = registry.scripts_for(partition);
+        let first_style = first
+            .iter()
+            .find(|script| script.id == ScriptId::from(4))
+            .unwrap();
+        let second_style = second
+            .iter()
+            .find(|script| script.id == ScriptId::from(4))
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &first_style.source,
+            &second_style.source
+        ));
+    }
+
+    #[test]
+    fn retained_registry_has_a_hard_process_budget() {
+        use zephium_core::ids::ScriptPrincipalId;
+        use zephium_core::ports::engine::{
+            ScriptPrincipal, MAX_USER_CONTENT_RETAINED_BYTES_PROCESS, MAX_USER_SCRIPT_BYTES,
+        };
+
+        let source: std::sync::Arc<str> = "x".repeat(MAX_USER_SCRIPT_BYTES).into();
+        let make_content = |seed: u128| {
+            let mut scripts = Vec::new();
+            for owner_index in 0..4_u128 {
+                let principal = ScriptPrincipal::Extension(ScriptPrincipalId::from(
+                    seed * 100 + owner_index + 1,
+                ));
+                for script_index in 0..2_u128 {
+                    scripts.push(UserScript {
+                        id: ScriptId::from(owner_index * 10 + script_index + 1),
+                        owner: ScriptOwner::Principal(principal),
+                        source: source.clone(),
+                        world: World::Isolated(principal),
+                        matches: MatchSet::all_urls(),
+                        run_at: RunAt::DocumentStart,
+                        all_frames: false,
+                    });
+                }
+            }
+            UserContent {
+                scripts,
+                styles: Vec::new(),
+            }
+        };
+
+        let sample = make_content(1);
+        sample.validate().unwrap();
+        let per_scope = sample.retained_budget_bytes().unwrap();
+        let admitted = MAX_USER_CONTENT_RETAINED_BYTES_PROCESS / per_scope;
+        assert!(admitted > 0);
+        let mut registry = UserContentRegistry::default();
+        for index in 0..admitted {
+            registry
+                .replace(
+                    ContentScope::Profile(ProfileId::from(index as u128 + 1)),
+                    generation(1),
+                    make_content(index as u128 + 1),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            registry.replace(
+                ContentScope::Profile(ProfileId::from(admitted as u128 + 1)),
+                generation(1),
+                make_content(admitted as u128 + 1),
+            ),
+            Err(UserContentApplyFailure::ProcessBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn principal_content_is_refused_until_exact_pre_source_match_enforcement_exists() {
+        let content = UserContent {
+            scripts: vec![test_script(300)],
+            styles: Vec::new(),
+        };
+        assert_eq!(
+            platform_refusals(&content),
+            vec![UserScriptRefusal {
+                registration: content.scripts[0].key(),
+                reason: UserScriptRefusalReason::UnsupportedMatchSet,
+            }]
+        );
+    }
 
     #[test]
     fn discard_bootstrap_bounds_and_attests_shadow_root_observation() {

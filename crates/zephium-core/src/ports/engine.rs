@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::geometry::Rect;
-use crate::ids::{ItemId, ProfileId, WindowId};
+use crate::ids::{ItemId, ProfileId, ScriptId, ScriptPrincipalId, WindowId};
+use crate::injection::MatchSet;
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
@@ -32,10 +34,62 @@ pub enum ContentScope {
     Profile(ProfileId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Native security principal for one isolated script world.
+///
+/// The variant is part of the identity: a userscript and extension can never
+/// alias merely because their persistent ids happen to contain equal bytes.
+/// Native adapters derive world and handler names from this value and must
+/// never accept a principal supplied by page JavaScript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ScriptPrincipal {
+    Userscript(ScriptPrincipalId),
+    Extension(ScriptPrincipalId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScriptOwner {
+    Builtin,
+    Principal(ScriptPrincipal),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum World {
     Page,
-    Isolated,
+    Isolated(ScriptPrincipal),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RunAt {
+    DocumentStart,
+    DocumentEnd,
+    DocumentIdle,
+}
+
+/// Exact process-local identity for one desired user-content generation.
+/// Values never wrap: exhausted owners must restart instead of risking a late
+/// native callback being accepted as a newer replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UserContentGeneration(u64);
+
+impl UserContentGeneration {
+    pub const fn new(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
 }
 
 /// What the engine can truthfully establish at its synchronous call boundary.
@@ -116,17 +170,291 @@ pub enum ProfileDataErasureOutcome {
 
 /// One pipeline for everything injected into content: cosmetic CSS, Boosts,
 /// userscripts, adblock cosmetics and a future extensions layer.
-#[derive(Clone, Debug, Default)]
+pub const MAX_USER_SCRIPTS_PER_SCOPE: usize = 256;
+pub const MAX_USER_STYLES_PER_SCOPE: usize = 256;
+pub const MAX_USER_SCRIPTS_PER_OWNER: usize = 64;
+pub const MAX_USER_STYLES_PER_OWNER: usize = 64;
+pub const MAX_USER_SCRIPT_BYTES: usize = 2 * 1024 * 1024;
+// JSON escaping can expand one CSS byte to six source bytes before the
+// document-start wrapper is installed. Keep the worst-case generated script
+// below MAX_USER_SCRIPT_BYTES without needing an unbounded second pass.
+pub const MAX_USER_STYLE_BYTES: usize = 256 * 1024;
+pub const MAX_USER_CONTENT_BYTES_PER_SCOPE: usize = 16 * 1024 * 1024;
+pub const MAX_USER_CONTENT_BYTES_PER_OWNER: usize = 4 * 1024 * 1024;
+pub const MAX_USER_CONTENT_RETAINED_BYTES_PER_OWNER: usize = 16 * 1024 * 1024;
+pub const MAX_USER_CONTENT_RETAINED_BYTES_PER_SCOPE: usize = 32 * 1024 * 1024;
+pub const MAX_USER_CONTENT_RETAINED_BYTES_PROCESS: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserContent {
     pub scripts: Vec<UserScript>,
-    pub styles: Vec<String>,
+    pub styles: Vec<UserStyle>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserScript {
-    pub source: String,
+    pub id: ScriptId,
+    pub owner: ScriptOwner,
+    pub source: Arc<str>,
     pub world: World,
-    pub at_start: bool,
+    pub matches: MatchSet,
+    pub run_at: RunAt,
+    pub all_frames: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserStyle {
+    pub id: ScriptId,
+    pub owner: ScriptOwner,
+    pub css: Arc<str>,
+    pub matches: MatchSet,
+    pub all_frames: bool,
+}
+
+/// Stable registration identity. Script ids are owner-local, so native diff
+/// maps must retain both fields when global/profile sets are composed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UserScriptKey {
+    pub owner: ScriptOwner,
+    pub id: ScriptId,
+}
+
+impl UserScript {
+    pub const fn key(&self) -> UserScriptKey {
+        UserScriptKey {
+            owner: self.owner,
+            id: self.id,
+        }
+    }
+}
+
+impl UserStyle {
+    pub const fn key(&self) -> UserScriptKey {
+        UserScriptKey {
+            owner: self.owner,
+            id: self.id,
+        }
+    }
+}
+
+fn user_script_retained_budget_bytes(script: &UserScript) -> Option<usize> {
+    script
+        .source
+        .len()
+        .checked_add(script.matches.retained_budget_bytes())?
+        .checked_add(256)
+}
+
+fn user_style_retained_budget_bytes(style: &UserStyle) -> Option<usize> {
+    // JSON string escaping is at most six ASCII bytes per UTF-8 input byte
+    // for the control characters that expand the most. Charge the cached
+    // wrapper before it is materialized in the host.
+    style
+        .css
+        .len()
+        .checked_mul(6)?
+        .checked_add(512)?
+        .checked_add(style.matches.retained_budget_bytes())?
+        .checked_add(256)
+}
+
+impl UserContent {
+    /// Conservative process-memory charge used by both synchronous dispatch
+    /// admission and the host's retained-registry budget.
+    pub fn retained_budget_bytes(&self) -> Option<usize> {
+        self.scripts
+            .iter()
+            .map(user_script_retained_budget_bytes)
+            .chain(self.styles.iter().map(user_style_retained_budget_bytes))
+            .try_fold(0_usize, |total, bytes| total.checked_add(bytes?))
+    }
+
+    /// Validates allocation and principal invariants before content reaches a
+    /// native adapter. The returned refusal list is bounded by the already
+    /// checked script/style count limits.
+    pub fn validate(&self) -> Result<(), UserContentApplyFailure> {
+        if self.scripts.len() > MAX_USER_SCRIPTS_PER_SCOPE {
+            return Err(UserContentApplyFailure::TooManyScripts);
+        }
+        if self.styles.len() > MAX_USER_STYLES_PER_SCOPE {
+            return Err(UserContentApplyFailure::TooManyStyles);
+        }
+
+        #[derive(Default)]
+        struct OwnerUsage {
+            scripts: usize,
+            styles: usize,
+            source_bytes: usize,
+            retained_bytes: usize,
+        }
+
+        let mut total_bytes = 0_usize;
+        let mut retained_bytes = 0_usize;
+        let mut owner_usage = HashMap::<ScriptOwner, OwnerUsage>::new();
+        let mut ids = HashSet::with_capacity(self.scripts.len() + self.styles.len());
+        let mut refusals = Vec::new();
+        for script in &self.scripts {
+            total_bytes = total_bytes
+                .checked_add(script.source.len())
+                .ok_or(UserContentApplyFailure::TotalSourceTooLarge)?;
+            let registration_bytes = user_script_retained_budget_bytes(script)
+                .ok_or(UserContentApplyFailure::TotalRetainedTooLarge)?;
+            retained_bytes = retained_bytes
+                .checked_add(registration_bytes)
+                .ok_or(UserContentApplyFailure::TotalRetainedTooLarge)?;
+            let usage = owner_usage.entry(script.owner).or_default();
+            usage.scripts = usage.scripts.saturating_add(1);
+            usage.source_bytes = usage
+                .source_bytes
+                .checked_add(script.source.len())
+                .ok_or(UserContentApplyFailure::OwnerBudgetExceeded)?;
+            usage.retained_bytes = usage
+                .retained_bytes
+                .checked_add(registration_bytes)
+                .ok_or(UserContentApplyFailure::OwnerBudgetExceeded)?;
+            if script.source.is_empty() {
+                refusals.push(UserScriptRefusal {
+                    registration: script.key(),
+                    reason: UserScriptRefusalReason::EmptySource,
+                });
+            } else if script.source.len() > MAX_USER_SCRIPT_BYTES {
+                refusals.push(UserScriptRefusal {
+                    registration: script.key(),
+                    reason: UserScriptRefusalReason::SourceTooLarge,
+                });
+            }
+            let owner_matches_world = matches!(
+                (script.owner, script.world),
+                (ScriptOwner::Builtin, World::Page)
+            ) || matches!(
+                (script.owner, script.world),
+                (ScriptOwner::Principal(owner), World::Isolated(world)) if owner == world
+            );
+            if !owner_matches_world {
+                refusals.push(UserScriptRefusal {
+                    registration: script.key(),
+                    reason: UserScriptRefusalReason::OwnerWorldMismatch,
+                });
+            }
+            if !ids.insert(script.key()) {
+                refusals.push(UserScriptRefusal {
+                    registration: script.key(),
+                    reason: UserScriptRefusalReason::DuplicateId,
+                });
+            }
+        }
+        for style in &self.styles {
+            total_bytes = total_bytes
+                .checked_add(style.css.len())
+                .ok_or(UserContentApplyFailure::TotalSourceTooLarge)?;
+            let registration_bytes = user_style_retained_budget_bytes(style)
+                .ok_or(UserContentApplyFailure::TotalRetainedTooLarge)?;
+            retained_bytes = retained_bytes
+                .checked_add(registration_bytes)
+                .ok_or(UserContentApplyFailure::TotalRetainedTooLarge)?;
+            let usage = owner_usage.entry(style.owner).or_default();
+            usage.styles = usage.styles.saturating_add(1);
+            usage.source_bytes = usage
+                .source_bytes
+                .checked_add(style.css.len())
+                .ok_or(UserContentApplyFailure::OwnerBudgetExceeded)?;
+            usage.retained_bytes = usage
+                .retained_bytes
+                .checked_add(registration_bytes)
+                .ok_or(UserContentApplyFailure::OwnerBudgetExceeded)?;
+            if style.css.is_empty() {
+                refusals.push(UserScriptRefusal {
+                    registration: style.key(),
+                    reason: UserScriptRefusalReason::EmptySource,
+                });
+            } else if style.css.len() > MAX_USER_STYLE_BYTES {
+                refusals.push(UserScriptRefusal {
+                    registration: style.key(),
+                    reason: UserScriptRefusalReason::SourceTooLarge,
+                });
+            }
+            if !ids.insert(style.key()) {
+                refusals.push(UserScriptRefusal {
+                    registration: style.key(),
+                    reason: UserScriptRefusalReason::DuplicateId,
+                });
+            }
+        }
+        if total_bytes > MAX_USER_CONTENT_BYTES_PER_SCOPE {
+            return Err(UserContentApplyFailure::TotalSourceTooLarge);
+        }
+        if retained_bytes > MAX_USER_CONTENT_RETAINED_BYTES_PER_SCOPE {
+            return Err(UserContentApplyFailure::TotalRetainedTooLarge);
+        }
+        if owner_usage.values().any(|usage| {
+            usage.scripts > MAX_USER_SCRIPTS_PER_OWNER
+                || usage.styles > MAX_USER_STYLES_PER_OWNER
+                || usage.source_bytes > MAX_USER_CONTENT_BYTES_PER_OWNER
+                || usage.retained_bytes > MAX_USER_CONTENT_RETAINED_BYTES_PER_OWNER
+        }) {
+            return Err(UserContentApplyFailure::OwnerBudgetExceeded);
+        }
+        if refusals.is_empty() {
+            Ok(())
+        } else {
+            Err(UserContentApplyFailure::Scripts(refusals))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UserScriptRefusalReason {
+    EmptySource,
+    SourceTooLarge,
+    OwnerWorldMismatch,
+    DuplicateId,
+    UnsupportedWorld,
+    UnsupportedRunAt,
+    UnsupportedFrameTarget,
+    UnsupportedMatchSet,
+    HostOnlyOwner,
+    InvalidScope,
+    ProtectedRegistration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UserScriptRefusal {
+    pub registration: UserScriptKey,
+    pub reason: UserScriptRefusalReason,
+}
+
+/// Stable, bounded failure classes for one atomic user-content replacement.
+/// Native/parser strings and injected source are intentionally absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserContentApplyFailure {
+    StaleGeneration,
+    TooManyScripts,
+    TooManyStyles,
+    TooManyScopes,
+    ReservedScope,
+    TotalSourceTooLarge,
+    TotalRetainedTooLarge,
+    OwnerBudgetExceeded,
+    ProcessBudgetExceeded,
+    Scripts(Vec<UserScriptRefusal>),
+    NativeInstallation,
+    NativeCleanup,
+    UnsupportedPlatform,
+}
+
+/// Terminal native state for one desired user-content generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserContentSettlement {
+    Applied {
+        generation: UserContentGeneration,
+    },
+    Retained {
+        generation: UserContentGeneration,
+        failure: UserContentApplyFailure,
+    },
+    Unavailable {
+        failure: UserContentApplyFailure,
+    },
 }
 
 /// A resolved keyboard shortcut for platforms where the engine must
@@ -203,7 +531,18 @@ pub trait Engine {
     /// settled, allowing lazy recreation without racing an asynchronous close.
     fn discard_view(&self, id: ItemId, probe: DiscardProbeId) -> bool;
     fn print(&self, id: ItemId) -> NativeDispatch;
-    fn set_user_content(&self, scope: ContentScope, content: UserContent);
+    /// Atomically replaces one ownership scope's desired injected content.
+    /// Queue admission is not native application; the terminal outcome is
+    /// reported as [`EngineEvent::UserContentSettled`]. `Rejected` is a
+    /// synchronous terminal result for malformed/over-budget candidates,
+    /// reserved host scope, lifecycle retirement, or bounded in-flight
+    /// backpressure; no settlement follows a rejected dispatch.
+    fn set_user_content(
+        &self,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+        content: UserContent,
+    ) -> NativeDispatch;
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>);
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
@@ -354,6 +693,16 @@ pub enum EngineEvent {
         requested: ContentPolicyGeneration,
         settlement: ContentRuleSettlement,
     },
+    /// One exact user-content replacement settled. A retained result means
+    /// the prior generation remains the only authoritative native set. The
+    /// shell's bounded mailbox may retain only the newest settlement per
+    /// scope, so owners reconcile by monotonic `requested` generation rather
+    /// than waiting independently on every superseded intermediate event.
+    UserContentSettled {
+        scope: ContentScope,
+        requested: UserContentGeneration,
+        settlement: UserContentSettlement,
+    },
     TitleChanged {
         id: ItemId,
         title: String,
@@ -478,4 +827,140 @@ pub enum EngineEvent {
         item: ItemId,
         command: String,
     },
+}
+
+#[cfg(test)]
+mod user_content_tests {
+    use super::*;
+
+    fn script(id: u128) -> UserScript {
+        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(id + 1_000));
+        UserScript {
+            id: ScriptId::from(id),
+            owner: ScriptOwner::Principal(principal),
+            source: "document.documentElement.dataset.zephium = '1'".into(),
+            world: World::Isolated(principal),
+            matches: MatchSet::all_urls(),
+            run_at: RunAt::DocumentStart,
+            all_frames: false,
+        }
+    }
+
+    #[test]
+    fn user_content_rejects_cross_principal_worlds() {
+        let mut candidate = script(1);
+        candidate.world =
+            World::Isolated(ScriptPrincipal::Userscript(ScriptPrincipalId::from(9_999)));
+        let failure = UserContent {
+            scripts: vec![candidate],
+            styles: Vec::new(),
+        }
+        .validate()
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            UserContentApplyFailure::Scripts(refusals)
+                if refusals == vec![UserScriptRefusal {
+                    registration: script(1).key(),
+                    reason: UserScriptRefusalReason::OwnerWorldMismatch,
+                }]
+        ));
+    }
+
+    #[test]
+    fn user_content_rejects_duplicate_ids_across_scripts_and_styles() {
+        let script = script(2);
+        let failure = UserContent {
+            scripts: vec![script.clone()],
+            styles: vec![UserStyle {
+                id: ScriptId::from(2),
+                owner: script.owner,
+                css: "html { color: black; }".into(),
+                matches: MatchSet::all_urls(),
+                all_frames: false,
+            }],
+        }
+        .validate()
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            UserContentApplyFailure::Scripts(refusals)
+                if refusals.iter().any(|refusal| refusal.registration == script.key()
+                    && refusal.reason == UserScriptRefusalReason::DuplicateId)
+        ));
+    }
+
+    #[test]
+    fn user_content_checks_count_before_walking_untrusted_entries() {
+        let content = UserContent {
+            scripts: (0..=MAX_USER_SCRIPTS_PER_SCOPE)
+                .map(|index| script(index as u128 + 10))
+                .collect(),
+            styles: Vec::new(),
+        };
+        assert_eq!(
+            content.validate(),
+            Err(UserContentApplyFailure::TooManyScripts)
+        );
+    }
+
+    #[test]
+    fn script_identity_is_owner_qualified() {
+        let first = script(50);
+        let mut second = script(50);
+        let second_principal = ScriptPrincipal::Extension(ScriptPrincipalId::from(99_999));
+        second.owner = ScriptOwner::Principal(second_principal);
+        second.world = World::Isolated(second_principal);
+        assert_ne!(first.key(), second.key());
+        assert!(UserContent {
+            scripts: vec![first, second],
+            styles: Vec::new(),
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn per_owner_script_count_is_bounded_below_scope_count() {
+        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(50_000));
+        let content = UserContent {
+            scripts: (0..=MAX_USER_SCRIPTS_PER_OWNER)
+                .map(|index| {
+                    let mut script = script(index as u128 + 1_000);
+                    script.owner = ScriptOwner::Principal(principal);
+                    script.world = World::Isolated(principal);
+                    script
+                })
+                .collect(),
+            styles: Vec::new(),
+        };
+        assert_eq!(
+            content.validate(),
+            Err(UserContentApplyFailure::OwnerBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn retained_budget_counts_compiled_patterns_and_css_expansion() {
+        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(123));
+        let styles = (0..12)
+            .map(|index| UserStyle {
+                id: ScriptId::from(index + 10_000),
+                owner: ScriptOwner::Principal(principal),
+                css: std::iter::repeat_n('\u{1f}', MAX_USER_STYLE_BYTES)
+                    .collect::<String>()
+                    .into(),
+                matches: MatchSet::all_urls(),
+                all_frames: false,
+            })
+            .collect();
+        let content = UserContent {
+            scripts: Vec::new(),
+            styles,
+        };
+        assert_eq!(
+            content.validate(),
+            Err(UserContentApplyFailure::OwnerBudgetExceeded)
+        );
+    }
 }

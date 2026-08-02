@@ -23,10 +23,207 @@ use std::time::Duration;
 
 use gtk::glib::prelude::{ObjectExt, ObjectType};
 use gtk::glib::signal::{connect_raw, SignalHandlerId};
+use gtk::glib::translate::FromGlibPtrFull;
 use gtk::prelude::WidgetExt as _;
-use webkit2gtk::{DownloadExt, WebContextExt, WebViewExt, WebsiteDataManagerExt};
+use webkit2gtk::{
+    DownloadExt, UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserScript,
+    UserScriptInjectionTime, WebContextExt, WebViewExt, WebsiteDataManagerExt,
+};
 use wry::WebViewExtUnix;
-use zephium_core::ports::engine::Partition;
+use zephium_core::ports::engine::{Partition, ScriptPrincipal};
+
+// Phase 0a exposes the native bridge primitive before Phase 1 owns and retains
+// registrations in the host. Keep its dormant pieces warning-clean until that
+// integration seam is connected.
+#[allow(dead_code)]
+const PRINCIPAL_MESSAGE_UTF16_LIMIT: usize = 64 * 1_024;
+#[allow(dead_code)]
+const PRINCIPAL_MESSAGE_UTF8_LIMIT: usize = 64 * 1_024;
+const PRINCIPAL_WORLD_PREFIX: &str = "zephium-principal-";
+const PRINCIPAL_HANDLER_PREFIX: &str = "zephiumPrincipal_";
+const PRINCIPAL_TOKEN_MAX_BYTES: usize = "userscript-".len() + 32;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct PrincipalContentIdentity {
+    principal: ScriptPrincipal,
+    world_name: Box<str>,
+    handler_name: Box<str>,
+}
+
+impl PrincipalContentIdentity {
+    pub(crate) fn new(principal: ScriptPrincipal) -> Self {
+        let token = principal_token(principal);
+        Self {
+            principal,
+            world_name: format!("{PRINCIPAL_WORLD_PREFIX}{token}").into(),
+            handler_name: format!("{PRINCIPAL_HANDLER_PREFIX}{token}").into(),
+        }
+    }
+
+    pub(crate) fn principal(&self) -> ScriptPrincipal {
+        self.principal
+    }
+
+    pub(crate) fn world_name(&self) -> &str {
+        &self.world_name
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn handler_name(&self) -> &str {
+        &self.handler_name
+    }
+}
+
+fn principal_token(principal: ScriptPrincipal) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let (prefix, bytes) = match principal {
+        ScriptPrincipal::Userscript(id) => ("userscript-", id.bytes()),
+        ScriptPrincipal::Extension(id) => ("extension-", id.bytes()),
+    };
+    let mut token = String::with_capacity(PRINCIPAL_TOKEN_MAX_BYTES);
+    token.push_str(prefix);
+    for byte in bytes {
+        token.push(char::from(HEX[usize::from(byte >> 4)]));
+        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    token
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct PrincipalContentMessage {
+    identity: PrincipalContentIdentity,
+    body: String,
+}
+
+#[allow(dead_code)]
+impl PrincipalContentMessage {
+    pub(crate) fn identity(&self) -> &PrincipalContentIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+// javascriptcore-rs is a private implementation dependency of Wry, not a
+// Zephium API dependency. Use the stable JSC C ABI to perform the two bounded
+// string operations needed at this native trust boundary.
+#[allow(dead_code)]
+unsafe extern "C" {
+    fn jsc_value_is_string(value: *mut c_void) -> i32;
+    fn jsc_value_to_string_as_bytes(value: *mut c_void) -> *mut gtk::glib::ffi::GBytes;
+}
+
+#[allow(dead_code)]
+fn bounded_principal_message(result: &webkit2gtk::JavascriptResult) -> Option<String> {
+    let value = result.js_value()?;
+    let value = value.as_ptr().cast::<c_void>();
+    if unsafe { jsc_value_is_string(value) } == 0 {
+        return None;
+    }
+    let raw = unsafe { jsc_value_to_string_as_bytes(value) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: jsc_value_to_string_as_bytes transfers one owned GBytes
+    // reference. FromGlibPtrFull consumes exactly that reference.
+    let bytes = unsafe { gtk::glib::Bytes::from_glib_full(raw) };
+    bounded_principal_message_bytes(bytes.as_ref())
+}
+
+#[allow(dead_code)]
+fn bounded_principal_message_bytes(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > PRINCIPAL_MESSAGE_UTF8_LIMIT {
+        return None;
+    }
+    let body = std::str::from_utf8(bytes).ok()?;
+    if body.encode_utf16().count() > PRINCIPAL_MESSAGE_UTF16_LIMIT {
+        return None;
+    }
+    Some(body.to_owned())
+}
+
+#[allow(dead_code)]
+fn dispatch_principal_message(
+    identity: &PrincipalContentIdentity,
+    body: String,
+    on_message: &dyn Fn(PrincipalContentMessage),
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        on_message(PrincipalContentMessage {
+            identity: identity.clone(),
+            body,
+        });
+    }));
+}
+
+/// Owns one world-scoped native message registration. A unique handler name
+/// is derived from the typed principal, so the detailed GLib signal itself is
+/// the authority; no identity supplied by JavaScript is consulted.
+#[allow(dead_code)]
+pub(crate) struct PrincipalMessageHandlerRegistration {
+    identity: PrincipalContentIdentity,
+    manager: UserContentManager,
+    signal: Option<SignalHandlerId>,
+}
+
+#[allow(dead_code)]
+impl PrincipalMessageHandlerRegistration {
+    pub(crate) fn identity(&self) -> &PrincipalContentIdentity {
+        &self.identity
+    }
+}
+
+impl Drop for PrincipalMessageHandlerRegistration {
+    fn drop(&mut self) {
+        self.manager.unregister_script_message_handler_in_world(
+            self.identity.handler_name(),
+            self.identity.world_name(),
+        );
+        if let Some(signal) = self.signal.take() {
+            self.manager.disconnect(signal);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn register_principal_message_handler(
+    view: &wry::WebView,
+    principal: ScriptPrincipal,
+    on_message: impl Fn(PrincipalContentMessage) + 'static,
+) -> Result<PrincipalMessageHandlerRegistration, String> {
+    let identity = PrincipalContentIdentity::new(principal);
+    let manager = view
+        .webview()
+        .user_content_manager()
+        .ok_or_else(|| "content WebKitGTK view has no UserContentManager".to_owned())?;
+    let callback_identity = identity.clone();
+    let signal = manager.connect_script_message_received(
+        Some(identity.handler_name()),
+        move |_manager, result| {
+            let Some(body) = bounded_principal_message(result) else {
+                return;
+            };
+            dispatch_principal_message(&callback_identity, body, &on_message);
+        },
+    );
+    if !manager
+        .register_script_message_handler_in_world(identity.handler_name(), identity.world_name())
+    {
+        manager.disconnect(signal);
+        return Err(format!(
+            "cannot register isolated handler for principal {:?}",
+            identity.principal()
+        ));
+    }
+    Ok(PrincipalMessageHandlerRegistration {
+        identity,
+        manager,
+        signal: Some(signal),
+    })
+}
 
 thread_local! {
     static CONTAINER: RefCell<Option<gtk::Fixed>> = const { RefCell::new(None) };
@@ -205,6 +402,150 @@ pub fn configure(
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
     }
 
+    Ok(())
+}
+
+pub fn add_user_script(
+    view: &wry::WebView,
+    script: &zephium_core::ports::engine::UserScript,
+) -> Result<(), String> {
+    use zephium_core::ports::engine::World;
+
+    if let Some(reason) = user_script_refusal(script) {
+        return Err(format!("unsupported user-script semantics: {reason:?}"));
+    }
+
+    match script.world {
+        World::Page => add_page_user_script(view, script),
+        World::Isolated(_) => add_user_script_in_principal_world(view, script),
+    }
+}
+
+pub fn user_script_refusal(
+    script: &zephium_core::ports::engine::UserScript,
+) -> Option<zephium_core::ports::engine::UserScriptRefusalReason> {
+    use zephium_core::ports::engine::{RunAt, ScriptOwner, UserScriptRefusalReason};
+
+    if matches!(script.owner, ScriptOwner::Principal(_))
+        || !script.matches.is_unconditional_all_urls()
+    {
+        return Some(UserScriptRefusalReason::UnsupportedMatchSet);
+    }
+    (script.run_at == RunAt::DocumentIdle).then_some(UserScriptRefusalReason::UnsupportedRunAt)
+}
+
+pub fn user_style_refusal(
+    style: &zephium_core::ports::engine::UserStyle,
+) -> Option<zephium_core::ports::engine::UserScriptRefusalReason> {
+    use zephium_core::ports::engine::{ScriptOwner, UserScriptRefusalReason};
+
+    (matches!(style.owner, ScriptOwner::Principal(_)) || !style.matches.is_unconditional_all_urls())
+        .then_some(UserScriptRefusalReason::UnsupportedMatchSet)
+}
+
+fn native_injection_time(
+    run_at: zephium_core::ports::engine::RunAt,
+) -> Result<UserScriptInjectionTime, String> {
+    use zephium_core::ports::engine::RunAt;
+
+    match run_at {
+        RunAt::DocumentStart => Ok(UserScriptInjectionTime::Start),
+        RunAt::DocumentEnd => Ok(UserScriptInjectionTime::End),
+        RunAt::DocumentIdle => Err("document_idle scheduling is not implemented on Linux".into()),
+    }
+}
+
+fn validated_native_injection_time(
+    script: &zephium_core::ports::engine::UserScript,
+) -> Result<UserScriptInjectionTime, String> {
+    use zephium_core::ports::engine::{ScriptOwner, World, MAX_USER_SCRIPT_BYTES};
+
+    if script.source.is_empty() {
+        return Err("user script source is empty".into());
+    }
+    if script.source.len() > MAX_USER_SCRIPT_BYTES {
+        return Err(format!(
+            "user script source exceeds {MAX_USER_SCRIPT_BYTES} bytes"
+        ));
+    }
+    if !script.matches.is_unconditional_all_urls() {
+        return Err(
+            "pre-source per-frame match-set enforcement is not implemented on Linux".into(),
+        );
+    }
+    let owner_matches_world = matches!(
+        (script.owner, script.world),
+        (ScriptOwner::Builtin, World::Page)
+    ) || matches!(
+        (script.owner, script.world),
+        (ScriptOwner::Principal(owner), World::Isolated(world)) if owner == world
+    );
+    if !owner_matches_world {
+        return Err("user script owner does not match its native world principal".into());
+    }
+    native_injection_time(script.run_at)
+}
+
+fn injected_frames(all_frames: bool) -> UserContentInjectedFrames {
+    if all_frames {
+        UserContentInjectedFrames::AllFrames
+    } else {
+        UserContentInjectedFrames::TopFrame
+    }
+}
+
+fn add_page_user_script(
+    view: &wry::WebView,
+    script: &zephium_core::ports::engine::UserScript,
+) -> Result<(), String> {
+    use zephium_core::ports::engine::{ScriptOwner, World};
+
+    if script.owner != ScriptOwner::Builtin || script.world != World::Page {
+        return Err("page-world scripts must be owned by the builtin principal".into());
+    }
+    let time = validated_native_injection_time(script)?;
+    let manager = view
+        .webview()
+        .user_content_manager()
+        .ok_or_else(|| "content WebKitGTK view has no UserContentManager".to_owned())?;
+    let native = UserScript::new(
+        script.source.as_ref(),
+        injected_frames(script.all_frames),
+        time,
+        &[],
+        &[],
+    );
+    manager.add_script(&native);
+    Ok(())
+}
+
+pub(crate) fn add_user_script_in_principal_world(
+    view: &wry::WebView,
+    script: &zephium_core::ports::engine::UserScript,
+) -> Result<(), String> {
+    use zephium_core::ports::engine::{ScriptOwner, World};
+
+    let World::Isolated(principal) = script.world else {
+        return Err("principal-world installer accepts only isolated scripts".into());
+    };
+    if script.owner != ScriptOwner::Principal(principal) {
+        return Err("isolated script owner does not match its native world principal".into());
+    }
+    let time = validated_native_injection_time(script)?;
+    let identity = PrincipalContentIdentity::new(principal);
+    let manager = view
+        .webview()
+        .user_content_manager()
+        .ok_or_else(|| "content WebKitGTK view has no UserContentManager".to_owned())?;
+    let native = UserScript::for_world(
+        script.source.as_ref(),
+        injected_frames(script.all_frames),
+        time,
+        identity.world_name(),
+        &[],
+        &[],
+    );
+    manager.add_script(&native);
     Ok(())
 }
 
@@ -605,7 +946,7 @@ fn remove_linux_profile_directories_async(
 #[cfg(test)]
 mod tests {
     use gtk::prelude::{ContainerExt, WidgetExt};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -614,7 +955,133 @@ mod tests {
     use std::time::{Duration, Instant};
     use webkit2gtk::{WebContextExt, WebViewExt};
     use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
-    use zephium_core::ids::ProfileId;
+    use zephium_core::ids::{ProfileId, ScriptId, ScriptPrincipalId};
+    use zephium_core::injection::{MatchOptions, MatchSet};
+    use zephium_core::ports::engine::{
+        RunAt, ScriptOwner, ScriptPrincipal, UserScript as EngineUserScript, World,
+    };
+
+    fn test_principals() -> [ScriptPrincipal; 3] {
+        [
+            ScriptPrincipal::Userscript(ScriptPrincipalId::from(1)),
+            ScriptPrincipal::Userscript(ScriptPrincipalId::from(2)),
+            ScriptPrincipal::Extension(ScriptPrincipalId::from(1)),
+        ]
+    }
+
+    #[test]
+    fn three_principals_have_distinct_world_and_handler_identities() {
+        let identities = test_principals().map(PrincipalContentIdentity::new);
+        let worlds = identities
+            .iter()
+            .map(PrincipalContentIdentity::world_name)
+            .collect::<HashSet<_>>();
+        let handlers = identities
+            .iter()
+            .map(PrincipalContentIdentity::handler_name)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(worlds.len(), identities.len());
+        assert_eq!(handlers.len(), identities.len());
+        assert!(worlds
+            .iter()
+            .all(|name| name.starts_with(PRINCIPAL_WORLD_PREFIX)
+                && name.len() <= PRINCIPAL_WORLD_PREFIX.len() + PRINCIPAL_TOKEN_MAX_BYTES
+                && name.is_ascii()));
+        assert!(handlers
+            .iter()
+            .all(|name| name.starts_with(PRINCIPAL_HANDLER_PREFIX)
+                && name.len() <= PRINCIPAL_HANDLER_PREFIX.len() + PRINCIPAL_TOKEN_MAX_BYTES
+                && name.is_ascii()));
+        assert!(!worlds.contains("page"));
+        assert_ne!(identities[0].world_name(), identities[2].world_name());
+        assert_ne!(identities[0].handler_name(), identities[2].handler_name());
+    }
+
+    #[test]
+    fn message_payload_cannot_relabel_its_native_principal() {
+        let delivered = RefCell::new(Vec::new());
+        for principal in test_principals() {
+            let identity = PrincipalContentIdentity::new(principal);
+            dispatch_principal_message(
+                &identity,
+                r#"{"principal":"extension-controlled-lie"}"#.into(),
+                &|message| {
+                    delivered
+                        .borrow_mut()
+                        .push((message.identity().principal(), message.body().to_owned()));
+                },
+            );
+        }
+
+        let delivered = delivered.into_inner();
+        assert_eq!(delivered.len(), 3);
+        for ((native, body), expected) in delivered.into_iter().zip(test_principals()) {
+            assert_eq!(native, expected);
+            assert!(body.contains("extension-controlled-lie"));
+        }
+    }
+
+    #[test]
+    fn principal_message_limits_are_inclusive_and_check_both_encodings() {
+        let exact = vec![b'a'; PRINCIPAL_MESSAGE_UTF8_LIMIT];
+        assert_eq!(
+            bounded_principal_message_bytes(&exact).as_deref(),
+            std::str::from_utf8(&exact).ok()
+        );
+        let mut over = exact;
+        over.push(b'a');
+        assert!(bounded_principal_message_bytes(&over).is_none());
+        assert!(bounded_principal_message_bytes(&[0xff]).is_none());
+
+        let utf8_over = "🙂".repeat(PRINCIPAL_MESSAGE_UTF8_LIMIT / 4 + 1);
+        assert!(utf8_over.encode_utf16().count() < PRINCIPAL_MESSAGE_UTF16_LIMIT);
+        assert!(bounded_principal_message_bytes(utf8_over.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn native_install_validation_refuses_unenforced_semantics() {
+        let principal = test_principals()[0];
+        let baseline = EngineUserScript {
+            id: ScriptId::from(1),
+            owner: ScriptOwner::Principal(principal),
+            source: "globalThis.__zephiumProbe = true;".into(),
+            world: World::Isolated(principal),
+            matches: MatchSet::all_urls(),
+            run_at: RunAt::DocumentStart,
+            all_frames: true,
+        };
+        assert!(validated_native_injection_time(&baseline).is_ok());
+
+        let mut script = baseline.clone();
+        script.matches = MatchSet::parse(
+            ["https://example.com/*"],
+            std::iter::empty::<&str>(),
+            MatchOptions::default(),
+        )
+        .unwrap();
+        assert!(validated_native_injection_time(&script)
+            .unwrap_err()
+            .contains("match-set"));
+
+        let mut script = baseline.clone();
+        script.run_at = RunAt::DocumentIdle;
+        assert!(validated_native_injection_time(&script)
+            .unwrap_err()
+            .contains("document_idle"));
+
+        let mut script = baseline.clone();
+        script.owner = ScriptOwner::Builtin;
+        assert!(validated_native_injection_time(&script)
+            .unwrap_err()
+            .contains("owner"));
+
+        let mut script = baseline;
+        script.source = "".into();
+        assert!(validated_native_injection_time(&script)
+            .unwrap_err()
+            .contains("empty"));
+    }
 
     #[test]
     fn content_policy_watchdog_is_owner_context_local_and_cancelable() {
@@ -975,6 +1442,123 @@ mod tests {
                 b"must-not-delete"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and WebKitGTK at the supported security floor; CI runs this explicitly"]
+    fn principal_world_handlers_are_mutually_isolated_from_three_peers_and_page_world() {
+        enforce_runtime_security_floor().expect("test runner must use supported WebKitGTK");
+        gtk::init().expect("GTK requires an Xvfb/Wayland display for native WebView tests");
+
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let container = gtk::Fixed::new();
+        window.add(&container);
+        window.realize();
+        let view = WebViewBuilder::new()
+            .build_gtk(&container)
+            .expect("principal-isolation Wry WebView");
+        let manager = view
+            .webview()
+            .user_content_manager()
+            .expect("principal-isolation UserContentManager");
+        let identities = test_principals().map(PrincipalContentIdentity::new);
+        let handler_names = identities
+            .iter()
+            .map(|identity| format!("\"{}\"", identity.handler_name()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (tx, rx) = mpsc::channel();
+        let mut registrations = Vec::new();
+
+        for identity in &identities {
+            let tx = tx.clone();
+            registrations.push(
+                register_principal_message_handler(&view, identity.principal(), move |message| {
+                    let _ = tx.send(message);
+                })
+                .expect("register a distinct world-scoped principal handler"),
+            );
+            let source = format!(
+                r#"(() => {{
+                    const names = [{handler_names}];
+                    const visible = names.filter(
+                        name => !!globalThis.webkit?.messageHandlers?.[name]
+                    );
+                    const inherited = typeof globalThis.__zephiumPrincipalProbe;
+                    globalThis.__zephiumPrincipalProbe = {world:?};
+                    globalThis.webkit.messageHandlers[{handler:?}].postMessage(
+                        JSON.stringify({{ visible, inherited, claimed: "another-principal" }})
+                    );
+                }})()"#,
+                world = identity.world_name(),
+                handler = identity.handler_name(),
+            );
+            manager.add_script(&UserScript::for_world(
+                &source,
+                UserContentInjectedFrames::AllFrames,
+                UserScriptInjectionTime::Start,
+                identity.world_name(),
+                &[],
+                &[],
+            ));
+        }
+        drop(tx);
+
+        let page_handler_checks = identities
+            .iter()
+            .map(|identity| {
+                format!(
+                    "!globalThis.webkit?.messageHandlers?.[{:?}]",
+                    identity.handler_name()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&&");
+        window.show_all();
+        view.load_url(&format!(
+            "data:text/html,<title>loading</title><script>\
+             globalThis.__zephiumPrincipalProbe='page';\
+             document.title=({page_handler_checks})?'page-isolated':'page-handler-leak';\
+             </script>"
+        ))
+        .expect("load hostile page-world principal probe");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = HashMap::new();
+        while received.len() < identities.len() && Instant::now() < deadline {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            match rx.try_recv() {
+                Ok(message) => {
+                    received.insert(message.identity().principal(), message.body().to_owned());
+                }
+                Err(mpsc::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => panic!("principal handler channel failed: {error}"),
+            }
+        }
+        assert_eq!(received.len(), identities.len());
+        for identity in &identities {
+            let body = &received[&identity.principal()];
+            assert!(body.contains(&format!("\"{}\"", identity.handler_name())));
+            assert!(body.contains(r#""inherited":"undefined""#));
+            assert!(body.contains(r#""claimed":"another-principal""#));
+            for peer in identities
+                .iter()
+                .filter(|peer| peer.principal() != identity.principal())
+            {
+                assert!(!body.contains(&format!("\"{}\"", peer.handler_name())));
+            }
+        }
+
+        while view.webview().title().as_deref() == Some("loading") && Instant::now() < deadline {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(view.webview().title().as_deref(), Some("page-isolated"));
+        drop(registrations);
     }
 
     #[test]

@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn wry_document_start_selection_preserves_protected_order_and_frame_policy() {
+    use zephium_core::ids::ScriptId;
+    use zephium_core::injection::MatchSet;
+    use zephium_core::ports::engine::ScriptOwner;
+
+    let script = |id, run_at, all_frames| UserScript {
+        id: ScriptId::from(id),
+        owner: ScriptOwner::Builtin,
+        source: format!("/* {id} */").into(),
+        world: World::Page,
+        matches: MatchSet::all_urls(),
+        run_at,
+        all_frames,
+    };
+    let scripts = vec![
+        script(1, RunAt::DocumentStart, false),
+        script(2, RunAt::DocumentStart, false),
+        script(3, RunAt::DocumentStart, true),
+        script(4, RunAt::DocumentEnd, false),
+    ];
+
+    let selected = wry_document_start_scripts(&scripts).collect::<Vec<_>>();
+    assert_eq!(
+        selected.iter().map(|script| script.id).collect::<Vec<_>>(),
+        vec![ScriptId::from(1), ScriptId::from(2), ScriptId::from(3)]
+    );
+    assert!(!selected[0].all_frames);
+    assert!(!selected[1].all_frames);
+    assert!(selected[2].all_frames);
+}
+
+#[test]
 fn native_resource_ceiling_counts_spare_and_every_cleanup_debt() {
     assert_eq!(owned_native_view_resources(32, false, 0), Some(32));
     assert_eq!(owned_native_view_resources(32, true, 0), Some(33));

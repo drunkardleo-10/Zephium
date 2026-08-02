@@ -4,6 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Builds native, main-thread probe executables used only by platform CI. These
+# binaries are excluded from ordinary desktop builds unless explicitly enabled.
+native-isolation-probes = []
+# Compiles the intentionally non-product Windows CDP feasibility harness. The
+# default product must not contain this path until Phase 0a's live gates pass.
+windows-cdp-spike = []
+
+[[bin]]
+name = "macos-principal-isolation-probe"
+path = "src/bin/macos_principal_isolation_probe.rs"
+required-features = ["native-isolation-probes"]
+
 [dependencies]
 zephium-core.workspace = true
 wry.workspace = true

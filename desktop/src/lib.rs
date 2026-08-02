@@ -33,12 +33,16 @@ use zephium_app::{
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::geometry::Size;
+use zephium_core::ids::ScriptId;
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::injection::MatchSet;
 use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome};
-use zephium_core::ports::engine::{ContentScope, Engine as _, UserContent};
+use zephium_core::ports::engine::{
+    Engine as _, ScriptOwner, UserContent, UserContentGeneration, UserStyle,
+};
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
-use zephium_engine::{MainThreadDispatch, WebviewEngine};
+use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
 
@@ -2832,6 +2836,20 @@ pub fn run() {
                 dispatch.clone(),
                 data_dir.join("web-content"),
                 runtime_security_advisories,
+                InitialUserContent::new(
+                    UserContentGeneration::new(1)
+                        .expect("initial user-content generation is nonzero"),
+                    UserContent {
+                        scripts: Vec::new(),
+                        styles: vec![UserStyle {
+                            id: ScriptId::from(4),
+                            owner: ScriptOwner::Builtin,
+                            css: SCROLLBAR_CSS.into(),
+                            matches: MatchSet::all_urls(),
+                            all_frames: true,
+                        }],
+                    },
+                ),
                 move |event| {
                     if let zephium_core::ports::engine::EngineEvent::ShortcutPressed {
                         command,
@@ -2865,14 +2883,6 @@ pub fn run() {
             runtime_engine_slot
                 .set(engine.clone())
                 .map_err(|_| std::io::Error::other("runtime engine callback slot already set"))?;
-            engine.set_user_content(
-                ContentScope::Global,
-                UserContent {
-                    scripts: Vec::new(),
-                    styles: vec![SCROLLBAR_CSS.to_string()],
-                },
-            );
-
             let operation_ledger = OperationLedger::default();
             app.manage(operation_ledger.clone());
             app.manage(TabMenuTarget::default());

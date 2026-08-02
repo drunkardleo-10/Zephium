@@ -8,7 +8,9 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::ids::{ItemId, ProfileId};
-use zephium_core::ports::engine::{DiscardProbeId, EngineEvent, NavigationPresentationId};
+use zephium_core::ports::engine::{
+    ContentScope, DiscardProbeId, EngineEvent, NavigationPresentationId,
+};
 
 use crate::{Command, StoreReadResult};
 
@@ -28,6 +30,10 @@ enum CoalescedKey {
     BlockerPreferenceRetry(ProfileId),
     BlockerCatalogPoll,
     ContentRules(ProfileId, ContentPolicyGeneration),
+    // Generations are monotonic and the newest settlement is authoritative;
+    // scope-only coalescing prevents a rapid sequence from defeating the
+    // one-slot-per-scope lifecycle-capacity proof.
+    UserContent(ContentScope),
     ProfileDeletionReady(ProfileId),
     ProfileDeletionRetry(ProfileId),
     StoreHistory,
@@ -63,6 +69,7 @@ impl CoalescedKey {
             EngineEvent::ContentRulesSettled {
                 profile, requested, ..
             } => Self::ContentRules(*profile, *requested),
+            EngineEvent::UserContentSettled { scope, .. } => Self::UserContent(*scope),
             _ => return None,
         })
     }
@@ -83,8 +90,8 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 // one sticky runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
-    + zephium_core::session::MAX_SESSION_PROFILES * 5
-    + 2;
+    + zephium_core::session::MAX_SESSION_PROFILES * 6
+    + 3;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
 // During a failed store barrier, keep at most the bounded set of lifecycle
@@ -185,6 +192,7 @@ enum RecoveryKey {
     BlockerCompile(ProfileId),
     BlockerStore(ProfileId),
     ContentRules(ProfileId, ContentPolicyGeneration),
+    UserContent(ContentScope),
     ProfileDeletion(ProfileId),
     Split(zephium_core::ids::WindowId),
 }
@@ -217,6 +225,9 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
         Command::Engine(EngineEvent::ContentRulesSettled {
             profile, requested, ..
         }) => Some(RecoveryKey::ContentRules(*profile, *requested)),
+        Command::Engine(EngineEvent::UserContentSettled { scope, .. }) => {
+            Some(RecoveryKey::UserContent(*scope))
+        }
         Command::ProfileDeletionReady(profile) => Some(RecoveryKey::ProfileDeletion(*profile)),
         Command::Engine(EngineEvent::SplitChanged { window, .. }) => {
             Some(RecoveryKey::Split(*window))
@@ -910,6 +921,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::PresentationReady { .. }
                     | EngineEvent::RuntimeRestartRequired
                     | EngineEvent::ContentRulesSettled { .. }
+                    | EngineEvent::UserContentSettled { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }

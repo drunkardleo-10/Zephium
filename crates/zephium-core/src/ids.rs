@@ -68,5 +68,7 @@ macro_rules! ulid_id {
 ulid_id!(ItemId);
 ulid_id!(SpaceId);
 ulid_id!(ProfileId);
+ulid_id!(ScriptId);
+ulid_id!(ScriptPrincipalId);
 
 pub type WindowId = u64;

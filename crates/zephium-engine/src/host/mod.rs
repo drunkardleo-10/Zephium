@@ -41,7 +41,7 @@ use wry::WebView;
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
-use zephium_core::ports::engine::{ContentScope, Partition, Shortcut, UserContent};
+use zephium_core::ports::engine::{Partition, Shortcut};
 #[cfg(target_os = "macos")]
 use {crate::platform::imp::ContentStage, objc2::rc::Retained};
 
@@ -302,7 +302,7 @@ pub(crate) struct EngineHost {
     #[cfg(not(target_os = "windows"))]
     content_rule_cache_gc_removed_in_cycle: bool,
     spare: Option<Spare>,
-    user_content: HashMap<ContentScope, UserContent>,
+    user_content: scripts::UserContentRegistry,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     shortcuts: Vec<Shortcut>,
     #[cfg(target_os = "macos")]

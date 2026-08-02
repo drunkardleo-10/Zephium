@@ -56,6 +56,34 @@ const WINDOWS_PATH_UTF8_LIMIT: usize = 4 * WINDOWS_PATH_UTF16_LIMIT;
 const VERSION_UTF16_LIMIT: usize = 256;
 const VERSION_UTF8_LIMIT: usize = 256;
 
+pub fn user_script_refusal(
+    script: &zephium_core::ports::engine::UserScript,
+) -> Option<zephium_core::ports::engine::UserScriptRefusalReason> {
+    use zephium_core::ports::engine::{RunAt, ScriptOwner, UserScriptRefusalReason, World};
+
+    if matches!(script.world, World::Isolated(_)) {
+        return Some(UserScriptRefusalReason::UnsupportedWorld);
+    }
+    if matches!(script.owner, ScriptOwner::Principal(_))
+        || !script.matches.is_unconditional_all_urls()
+    {
+        return Some(UserScriptRefusalReason::UnsupportedMatchSet);
+    }
+    (script.run_at != RunAt::DocumentStart).then_some(UserScriptRefusalReason::UnsupportedRunAt)
+}
+
+pub fn user_style_refusal(
+    style: &zephium_core::ports::engine::UserStyle,
+) -> Option<zephium_core::ports::engine::UserScriptRefusalReason> {
+    use zephium_core::ports::engine::{ScriptOwner, UserScriptRefusalReason};
+
+    if matches!(style.owner, ScriptOwner::Principal(_)) {
+        return Some(UserScriptRefusalReason::UnsupportedWorld);
+    }
+    (!style.matches.is_unconditional_all_urls())
+        .then_some(UserScriptRefusalReason::UnsupportedMatchSet)
+}
+
 fn take_pwstr_bounded(
     source: PWSTR,
     max_utf16_units: usize,

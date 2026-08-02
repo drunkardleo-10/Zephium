@@ -16,7 +16,12 @@ use std::time::Duration;
 
 use dispatch2::DispatchObject as _;
 
-pub use native::{add_user_script, configure, query_document_activity, stop_loading};
+#[cfg(feature = "native-isolation-probes")]
+pub(crate) use native::run_principal_isolation_probe;
+pub use native::{
+    add_user_script, configure, query_document_activity, stop_loading, user_script_refusal,
+    user_style_refusal,
+};
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};

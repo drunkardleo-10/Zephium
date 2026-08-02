@@ -12,7 +12,6 @@ use super::profiles::MAX_NATIVE_PROFILE_PROCESS_GROUPS;
 use super::profiles::{
     profile_scoped_value, profile_value_is_isolated, MAX_PROFILE_PERSISTENCE_BINDINGS,
 };
-use super::scripts::{DISCARD_SAFETY_BOOTSTRAP_JS, EXTRACT_HTML_BOOTSTRAP_JS};
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 use super::Spare;
 use super::{EngineHost, ObservedView};
@@ -31,7 +30,7 @@ use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::navigation as navigation_policy;
-use zephium_core::ports::engine::{EngineEvent, Partition, World};
+use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -701,18 +700,14 @@ impl EngineHost {
         // observably equivalent but would retain attacker-controlled COM
         // state and enqueue one UI closure for every popup request.
 
-        // This host-owned guard must precede page/user content so its captured
-        // platform intrinsics and event registrations cannot be replaced
-        // before observation starts.
-        builder = builder.with_initialization_script(DISCARD_SAFETY_BOOTSTRAP_JS);
-        builder = builder.with_initialization_script(EXTRACT_HTML_BOOTSTRAP_JS);
-        builder =
-            builder.with_initialization_script_for_main_only(crate::PAGE_PRINT_DENY_SCRIPT, false);
-        for script in scripts
-            .iter()
-            .filter(|s| s.world == World::Page && s.at_start)
-        {
-            builder = builder.with_initialization_script(&script.source);
+        // `scripts_for` prepends the protected host-owned registrations. Keep
+        // that exact ordering so their captured intrinsics and observers are
+        // installed before any caller-owned page content.
+        for script in wry_document_start_scripts(&scripts) {
+            builder = builder.with_initialization_script_for_main_only(
+                script.source.as_ref(),
+                !script.all_frames,
+            );
         }
 
         #[cfg(target_os = "windows")]
@@ -1159,12 +1154,21 @@ impl EngineHost {
                 return None;
             }
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
         for script in scripts
             .iter()
-            .filter(|s| !(s.world == World::Page && s.at_start))
+            .filter(|s| !(s.world == World::Page && s.run_at == RunAt::DocumentStart))
         {
-            crate::platform::imp::add_user_script(&view, script);
+            if let Err(error) = crate::platform::imp::add_user_script(&view, script) {
+                eprintln!(
+                    "engine: required user script {} was refused: {error}",
+                    script.id
+                );
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
         }
 
         let observation_id = id.clone();
@@ -1250,6 +1254,12 @@ impl EngineHost {
             view,
         })
     }
+}
+
+fn wry_document_start_scripts(scripts: &[UserScript]) -> impl Iterator<Item = &UserScript> {
+    scripts
+        .iter()
+        .filter(|script| script.world == World::Page && script.run_at == RunAt::DocumentStart)
 }
 
 fn to_wry(r: Rect) -> wry::Rect {

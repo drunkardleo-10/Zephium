@@ -11,7 +11,9 @@ use zephium_core::ports::blocker::{
     BlockerCompileOutcome, BlockerCompiler, BlockerDispatch, BlockerRetirementDispatch,
     BlockerShutdownOutcome,
 };
-use zephium_core::ports::engine::{ContentScope, NavigationRequestId, UserContent, ZoomRequestId};
+use zephium_core::ports::engine::{
+    ContentScope, NavigationRequestId, UserContent, UserContentGeneration, ZoomRequestId,
+};
 use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome};
 use zephium_core::session::{
     PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
@@ -341,7 +343,14 @@ impl Engine for FakeEngine {
     fn print(&self, _id: ItemId) -> NativeDispatch {
         self.native_admission()
     }
-    fn set_user_content(&self, _scope: ContentScope, _content: UserContent) {}
+    fn set_user_content(
+        &self,
+        _scope: ContentScope,
+        _generation: UserContentGeneration,
+        _content: UserContent,
+    ) -> NativeDispatch {
+        self.native_admission()
+    }
     fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
     fn install_content_rules(
         &self,

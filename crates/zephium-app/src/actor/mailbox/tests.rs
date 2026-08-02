@@ -2,11 +2,37 @@ use super::*;
 use crate::actor::Handle;
 use std::sync::mpsc::sync_channel;
 use zephium_core::ids::WindowId;
-use zephium_core::ports::engine::{NativeAction, ZoomRequestId};
+use zephium_core::ports::engine::{
+    ContentScope, NativeAction, UserContentApplyFailure, UserContentGeneration,
+    UserContentSettlement, ZoomRequestId,
+};
 use zephium_core::split::Pane;
 
 fn test_shutdown_deadline() -> std::time::Instant {
     std::time::Instant::now() + crate::shell::END_TO_END_SHUTDOWN_TIMEOUT
+}
+
+#[test]
+fn user_content_settlements_coalesce_by_scope_not_generation() {
+    let scope = ContentScope::Profile(ProfileId::from(60));
+    let event = |generation| EngineEvent::UserContentSettled {
+        scope,
+        requested: UserContentGeneration::new(generation).unwrap(),
+        settlement: UserContentSettlement::Unavailable {
+            failure: UserContentApplyFailure::UnsupportedPlatform,
+        },
+    };
+    assert_eq!(CoalescedKey::of(&event(1)), CoalescedKey::of(&event(2)));
+    assert_ne!(
+        CoalescedKey::of(&event(1)),
+        CoalescedKey::of(&EngineEvent::UserContentSettled {
+            scope: ContentScope::Profile(ProfileId::from(61)),
+            requested: UserContentGeneration::new(1).unwrap(),
+            settlement: UserContentSettlement::Unavailable {
+                failure: UserContentApplyFailure::UnsupportedPlatform,
+            },
+        })
+    );
 }
 
 #[test]

@@ -1,18 +1,18 @@
 #[test]
-fn raw_page_print_guard_is_installed_for_subframes_before_user_scripts() {
+fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/construction.rs"
     ));
-    let all_frames_call = [
-        "builder.with_initialization_script_for_main_only(",
-        "crate::PAGE_PRINT_DENY_SCRIPT, false)",
-    ]
-    .concat();
-    assert_eq!(source.matches(&all_frames_call).count(), 1);
-    let guard = source.find(&all_frames_call).unwrap();
-    let user_scripts = source.find("for script in scripts").unwrap();
-    assert!(guard < user_scripts);
+    assert_eq!(
+        source
+            .matches("for script in wry_document_start_scripts(&scripts)")
+            .count(),
+        1
+    );
+    assert!(source.contains("builder.with_initialization_script_for_main_only("));
+    assert!(source.contains("script.source.as_ref(),"));
+    assert!(source.contains("!script.all_frames,"));
 }
 
 #[test]

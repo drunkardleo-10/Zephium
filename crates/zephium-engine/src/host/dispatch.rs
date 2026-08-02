@@ -9,6 +9,7 @@ use raw_window_handle::RawWindowHandle;
 use zephium_core::ids::ItemId;
 #[cfg(target_os = "windows")]
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::engine::{UserContent, UserContentGeneration};
 
 use super::construction::{NativeViewReservations, MAX_NATIVE_VIEW_RESOURCES};
 use super::permits::Sink;
@@ -163,10 +164,17 @@ static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     data_root: PathBuf,
+    initial_user_content_generation: UserContentGeneration,
+    initial_user_content: UserContent,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
     let _install_claim = HostInstallClaim::acquire()?;
+    let user_content = super::scripts::UserContentRegistry::with_initial_global(
+        initial_user_content_generation,
+        initial_user_content,
+    )
+    .map_err(|failure| format!("invalid initial user-content generation: {failure:?}"))?;
     // WebView2 needs a user-data folder even for InPrivate controllers. It
     // must never be the privileged Tauri chrome's folder, and stale runtime
     // metadata must not accumulate across browser sessions.
@@ -235,7 +243,7 @@ pub(crate) fn install(
             #[cfg(not(target_os = "windows"))]
             content_rule_cache_gc_removed_in_cycle: false,
             spare: None,
-            user_content: HashMap::new(),
+            user_content,
             shortcuts: Vec::new(),
             stages: HashMap::new(),
             native_terminal_failure,

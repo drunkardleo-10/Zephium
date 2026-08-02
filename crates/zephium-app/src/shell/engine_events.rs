@@ -38,6 +38,22 @@ impl Shell {
                 requested,
                 settlement,
             } => self.on_content_rules_settled(profile, requested, settlement),
+            EngineEvent::UserContentSettled {
+                scope,
+                requested,
+                settlement,
+            } => {
+                if !matches!(
+                    settlement,
+                    zephium_core::ports::engine::UserContentSettlement::Applied { generation }
+                        if generation == requested
+                ) {
+                    eprintln!(
+                        "engine: user-content generation {} for {scope:?} was not applied: {settlement:?}",
+                        requested.get()
+                    );
+                }
+            }
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
                 // stale or malformed callback mutate topology, swap tabs, or

@@ -11,6 +11,16 @@ pub use platform::windows::{
     install_privileged_environment_registration,
 };
 
+/// Runs the isolated-principal native WebKit probe on the process main thread.
+///
+/// This is exposed only to the feature-gated CI executable; it is absent from
+/// ordinary product builds and is not an extension capability.
+#[cfg(all(target_os = "macos", feature = "native-isolation-probes"))]
+#[doc(hidden)]
+pub fn run_macos_principal_isolation_probe() -> Result<(), String> {
+    platform::macos::run_principal_isolation_probe()
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -25,7 +35,7 @@ use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
     NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
-    ZoomRequestId,
+    UserContentGeneration, ZoomRequestId,
 };
 use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_core::split::Pane;
@@ -414,7 +424,7 @@ impl RetirementGate {
 
     fn allows_scope(&self, scope: ContentScope) -> bool {
         match scope {
-            ContentScope::Global => true,
+            ContentScope::Global => !self.retire_all_profiles,
             ContentScope::Profile(profile) => self.profile_is_active(profile),
         }
     }
@@ -481,6 +491,9 @@ impl RetirementGate {
             }
             event @ EngineEvent::ContentRulesSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
+            }
+            event @ EngineEvent::UserContentSettled { scope, .. } => {
+                self.allows_scope(scope).then_some(event)
             }
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
@@ -735,6 +748,119 @@ pub struct WebviewEngine {
     fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     runtime_security_advisories: RuntimeSecurityAdvisories,
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+    user_content_dispatch: Arc<UserContentDispatchGate>,
+}
+
+const MAX_IN_FLIGHT_USER_CONTENT_REQUESTS: usize = 4;
+const MAX_IN_FLIGHT_USER_CONTENT_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct UserContentDispatchState {
+    active: HashMap<ContentScope, (UserContentGeneration, usize)>,
+    // Persistent admission bounds every scope that can later produce a
+    // settlement key. The host keeps its independent cap as defense in depth.
+    known_profile_scopes: HashSet<ProfileId>,
+    retained_bytes: usize,
+    sealed: bool,
+}
+
+#[derive(Default)]
+struct UserContentDispatchGate {
+    state: Mutex<UserContentDispatchState>,
+}
+
+impl UserContentDispatchGate {
+    fn reserve(
+        self: &Arc<Self>,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+        retained_bytes: usize,
+    ) -> Option<UserContentDispatchPermit> {
+        let ContentScope::Profile(profile) = scope else {
+            return None;
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let new_profile_scope = !state.known_profile_scopes.contains(&profile);
+        if state.sealed
+            || state.active.contains_key(&scope)
+            || state.active.len() >= MAX_IN_FLIGHT_USER_CONTENT_REQUESTS
+            || (new_profile_scope
+                && state.known_profile_scopes.len() >= zephium_core::session::MAX_SESSION_PROFILES)
+            || retained_bytes > MAX_IN_FLIGHT_USER_CONTENT_BYTES
+            || state
+                .retained_bytes
+                .checked_add(retained_bytes)
+                .is_none_or(|bytes| bytes > MAX_IN_FLIGHT_USER_CONTENT_BYTES)
+        {
+            return None;
+        }
+        if new_profile_scope {
+            state.known_profile_scopes.insert(profile);
+        }
+        state.retained_bytes += retained_bytes;
+        state.active.insert(scope, (generation, retained_bytes));
+        Some(UserContentDispatchPermit {
+            gate: self.clone(),
+            scope,
+            generation,
+            provisional_profile: new_profile_scope.then_some(profile),
+            scope_committed: false,
+        })
+    }
+
+    fn retire_profile(&self, profile: ProfileId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.known_profile_scopes.remove(&profile);
+    }
+}
+
+struct UserContentDispatchPermit {
+    gate: Arc<UserContentDispatchGate>,
+    scope: ContentScope,
+    generation: UserContentGeneration,
+    provisional_profile: Option<ProfileId>,
+    scope_committed: bool,
+}
+
+impl UserContentDispatchPermit {
+    fn commit_scope(&mut self) {
+        self.scope_committed = true;
+    }
+}
+
+impl Drop for UserContentDispatchPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some((generation, bytes)) = state.active.get(&self.scope).copied() else {
+            state.sealed = true;
+            return;
+        };
+        if generation != self.generation {
+            state.sealed = true;
+            return;
+        }
+        state.active.remove(&self.scope);
+        let Some(retained_bytes) = state.retained_bytes.checked_sub(bytes) else {
+            state.sealed = true;
+            return;
+        };
+        state.retained_bytes = retained_bytes;
+        if !self.scope_committed {
+            if let Some(profile) = self.provisional_profile {
+                state.known_profile_scopes.remove(&profile);
+            }
+        }
+    }
 }
 
 // Layout is a replaceable native fact, not an ordered user mutation. Keep at
@@ -758,11 +884,26 @@ struct PendingLayout {
 /// Install on the main thread at startup. macOS and Windows attach child
 /// content views to `parent`; Linux uses the previously installed GTK
 /// composition container and deliberately has no raw-window-handle input.
+pub struct InitialUserContent {
+    generation: UserContentGeneration,
+    content: UserContent,
+}
+
+impl InitialUserContent {
+    pub fn new(generation: UserContentGeneration, content: UserContent) -> Self {
+        Self {
+            generation,
+            content,
+        }
+    }
+}
+
 pub fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     dispatch: MainThreadDispatch,
     data_root: PathBuf,
     runtime_security_advisories: RuntimeSecurityAdvisories,
+    initial_user_content: InitialUserContent,
     sink: impl Fn(EngineEvent) + Send + Sync + 'static,
     fatal_security_failure: impl Fn(&'static str) + Send + Sync + 'static,
 ) -> Result<WebviewEngine, String> {
@@ -784,6 +925,8 @@ pub fn install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
+        initial_user_content.generation,
+        initial_user_content.content,
         sink.clone(),
         native_terminal_failure,
     )?;
@@ -795,6 +938,7 @@ pub fn install(
         fatal_security_failure,
         runtime_security_advisories,
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
+        user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
     })
 }
 
@@ -1238,21 +1382,40 @@ impl Engine for WebviewEngine {
         self.run_for_active_item(id, move |h| h.print(id))
     }
 
-    fn set_user_content(&self, scope: ContentScope, content: UserContent) {
-        if !lock_retirement_gate(&self.retirement).allows_scope(scope) {
-            return;
+    fn set_user_content(
+        &self,
+        scope: ContentScope,
+        generation: UserContentGeneration,
+        content: UserContent,
+    ) -> NativeDispatch {
+        if scope == ContentScope::Global
+            || content.validate().is_err()
+            || !lock_retirement_gate(&self.retirement).allows_scope(scope)
+        {
+            return NativeDispatch::Rejected;
         }
+        let Some(retained_bytes) = content.retained_budget_bytes() else {
+            return NativeDispatch::Rejected;
+        };
+        let Some(permit) = self
+            .user_content_dispatch
+            .reserve(scope, generation, retained_bytes)
+        else {
+            return NativeDispatch::Rejected;
+        };
         let queued_retirement = self.retirement.clone();
         let queued_delivery = self.event_delivery.clone();
         let queued_fatal = self.fatal_security_failure.clone();
-        let dispatched_retirement = queued_retirement.clone();
-        let dispatched_delivery = queued_delivery.clone();
-        let dispatched_fatal = queued_fatal.clone();
-        if !self.run(move || {
-            if lock_retirement_gate(&queued_retirement).allows_scope(scope)
-                && !host::try_with(move |h| h.set_user_content(scope, content))
-                && lock_retirement_gate(&queued_retirement).allows_scope(scope)
-            {
+        let dispatched = self.run(move || {
+            if !lock_retirement_gate(&queued_retirement).allows_scope(scope) {
+                return;
+            }
+            let admitted = host::try_with(move |host| {
+                let mut permit = permit;
+                permit.commit_scope();
+                host.set_user_content(scope, generation, content);
+            });
+            if !admitted && lock_retirement_gate(&queued_retirement).allows_scope(scope) {
                 fail_native_host_admission(
                     &queued_delivery,
                     &queued_retirement,
@@ -1260,14 +1423,11 @@ impl Engine for WebviewEngine {
                     "user-content policy was not admitted by the engine host",
                 );
             }
-        }) {
-            fail_native_host_admission(
-                &dispatched_delivery,
-                &dispatched_retirement,
-                &dispatched_fatal,
-                "user-content policy was not admitted by the main event loop",
-            );
-        }
+        });
+        // On main-loop refusal the boxed task, candidate, and permit are
+        // dropped. No logical/native state changed, and this synchronous
+        // return is therefore authoritative rather than a fatal split.
+        NativeDispatch::from_scheduled(dispatched)
     }
 
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {
@@ -1362,6 +1522,10 @@ impl Engine for WebviewEngine {
             );
             return;
         };
+        // The public tombstone above prevents any later request for this
+        // profile. Release its persistent settlement-key admission before
+        // asynchronous native erasure; late events are retirement-filtered.
+        self.user_content_dispatch.retire_profile(profile);
         let attempt = match admission {
             ErasureAdmission::Admitted(attempt) => attempt,
             ErasureAdmission::Duplicate => {
@@ -1488,6 +1652,130 @@ mod tests {
     }
 
     #[test]
+    fn user_content_dispatch_gate_bounds_scope_count_and_retained_bytes() {
+        let gate = Arc::new(UserContentDispatchGate::default());
+        let generation = UserContentGeneration::new(1).unwrap();
+        let first_scope = ContentScope::Profile(ProfileId::from(1));
+        let first = gate.reserve(first_scope, generation, 1).unwrap();
+        assert!(gate.reserve(first_scope, generation, 1).is_none());
+
+        let mut permits = vec![first];
+        for profile in 2..=MAX_IN_FLIGHT_USER_CONTENT_REQUESTS as u128 {
+            permits.push(
+                gate.reserve(
+                    ContentScope::Profile(ProfileId::from(profile)),
+                    generation,
+                    1,
+                )
+                .unwrap(),
+            );
+        }
+        assert!(gate
+            .reserve(ContentScope::Profile(ProfileId::from(99)), generation, 1,)
+            .is_none());
+        drop(permits);
+
+        assert!(gate
+            .reserve(
+                first_scope,
+                generation,
+                MAX_IN_FLIGHT_USER_CONTENT_BYTES + 1,
+            )
+            .is_none());
+        let full = gate
+            .reserve(first_scope, generation, MAX_IN_FLIGHT_USER_CONTENT_BYTES)
+            .unwrap();
+        assert!(gate
+            .reserve(ContentScope::Profile(ProfileId::from(2)), generation, 1,)
+            .is_none());
+        drop(full);
+        assert!(gate.reserve(first_scope, generation, 1).is_some());
+    }
+
+    #[test]
+    fn user_content_dispatch_gate_bounds_persistent_settlement_scopes() {
+        let gate = Arc::new(UserContentDispatchGate::default());
+        let generation = UserContentGeneration::new(1).unwrap();
+
+        for value in 1..=zephium_core::session::MAX_SESSION_PROFILES as u128 {
+            let mut permit = gate
+                .reserve(ContentScope::Profile(ProfileId::from(value)), generation, 1)
+                .unwrap();
+            permit.commit_scope();
+        }
+
+        let overflow = ProfileId::from(10_000);
+        assert!(gate
+            .reserve(ContentScope::Profile(overflow), generation, 1)
+            .is_none());
+
+        let known = ProfileId::from(1);
+        let mut retry = gate
+            .reserve(ContentScope::Profile(known), generation, 1)
+            .unwrap();
+        retry.commit_scope();
+
+        gate.retire_profile(known);
+        let mut replacement = gate
+            .reserve(ContentScope::Profile(overflow), generation, 1)
+            .unwrap();
+        replacement.commit_scope();
+    }
+
+    #[test]
+    fn uncommitted_user_content_scope_admission_rolls_back() {
+        let gate = Arc::new(UserContentDispatchGate::default());
+        let generation = UserContentGeneration::new(1).unwrap();
+        let profile = ProfileId::from(1);
+
+        drop(
+            gate.reserve(ContentScope::Profile(profile), generation, 1)
+                .unwrap(),
+        );
+
+        let state = gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!state.known_profile_scopes.contains(&profile));
+        assert!(state.active.is_empty());
+        assert_eq!(state.retained_bytes, 0);
+    }
+
+    #[test]
+    fn rejected_main_loop_user_content_dispatch_releases_new_scope() {
+        let gate = Arc::new(UserContentDispatchGate::default());
+        let engine = WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: Arc::new(|_| {}),
+            retirement: Arc::new(Mutex::new(RetirementGate::default())),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(|_| {}),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
+            layout_updates: test_layout_updates(),
+            user_content_dispatch: gate.clone(),
+        };
+        let profile = ProfileId::from(1);
+
+        assert_eq!(
+            engine.set_user_content(
+                ContentScope::Profile(profile),
+                UserContentGeneration::new(1).unwrap(),
+                UserContent::default(),
+            ),
+            NativeDispatch::Rejected
+        );
+
+        let state = gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!state.known_profile_scopes.contains(&profile));
+        assert!(state.active.is_empty());
+        assert_eq!(state.retained_bytes, 0);
+    }
+
+    #[test]
     fn zoom_boundary_rejects_nonfinite_and_unsupported_scales_before_dispatch() {
         let id = ItemId::from(1);
         let profile = ProfileId::from(1);
@@ -1508,6 +1796,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         for scale in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.29, 3.01] {
@@ -1588,6 +1877,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
@@ -1620,6 +1910,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         engine.erase_profile_data(
@@ -1701,6 +1992,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
         let profile = ProfileId::from(91);
         let id = ItemId::from(1);
@@ -1765,7 +2057,14 @@ mod tests {
             NativeDispatch::Rejected
         );
         engine.set_dormant(vec![id]);
-        engine.set_user_content(ContentScope::Profile(profile), UserContent::default());
+        assert_eq!(
+            engine.set_user_content(
+                ContentScope::Profile(profile),
+                UserContentGeneration::new(1).unwrap(),
+                UserContent::default(),
+            ),
+            NativeDispatch::Rejected
+        );
         let rules = zephium_core::blocker::ContentRules::allow_all(
             zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
         );
@@ -2056,6 +2355,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
         let (tx, rx) = mpsc::channel();
         engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
@@ -2350,6 +2650,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         assert_eq!(engine.close(id), NativeDispatch::Rejected);
@@ -2380,6 +2681,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         assert_eq!(
@@ -2445,6 +2747,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         assert_eq!(
@@ -2491,6 +2794,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         for window in 0..MAX_PENDING_LAYOUT_WINDOWS as u64 {
@@ -2552,6 +2856,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         };
 
         assert_eq!(engine.reload(id), NativeDispatch::Scheduled);
