@@ -113,6 +113,8 @@ pub enum ExtensionGrantDenial {
     FileAccessNotGranted,
     ApiNotDeclared,
     ApiNotGranted,
+    HostNotDeclared,
+    HostNotGranted,
     UrlNotGranted,
 }
 
@@ -453,6 +455,46 @@ impl ExtensionGrantAuthority {
             ExtensionApiGrantDecision::Granted
         } else {
             ExtensionApiGrantDecision::Denied(ExtensionGrantDenial::ApiNotGranted)
+        }
+    }
+
+    /// Decides whether one exact canonical manifest host declaration is
+    /// granted in an explicit browsing partition.
+    ///
+    /// This performs no URL matching and allocates nothing. Activation uses
+    /// it to prove required declaration coverage, while operation brokers must
+    /// still call [`Self::decide_url_scope`] for the concrete target URL and
+    /// validate the purpose-specific API capability independently. The
+    /// independent file toggle is deliberately not applied here:
+    /// `<all_urls>` remains granted for its web subset when file access is
+    /// off, while concrete `file:` targets remain denied by
+    /// [`Self::decide_url_scope`].
+    pub fn decide_declared_host(
+        &self,
+        manifest: &ExtensionManifestDescriptor,
+        pattern: &MatchPattern,
+        context: ExtensionGrantBrowsingContext,
+    ) -> ExtensionUrlScopeDecision {
+        if &self.package != manifest.package() {
+            return ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::ManifestMismatch);
+        }
+        let declarations = manifest.declarations();
+        let declared = declarations.is_required_host_authority(pattern.as_str())
+            || declarations
+                .optional_hosts()
+                .is_some_and(|set| set.contains_canonical(pattern.as_str()));
+        if !declared {
+            return ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::HostNotDeclared);
+        }
+        if context == ExtensionGrantBrowsingContext::Private && !self.private_access {
+            return ExtensionUrlScopeDecision::OutOfScope(
+                ExtensionGrantDenial::PrivateAccessNotGranted,
+            );
+        }
+        if self.contains_host_internal(pattern.as_str()) {
+            ExtensionUrlScopeDecision::InScope
+        } else {
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::HostNotGranted)
         }
     }
 
@@ -877,8 +919,17 @@ fn validate_install_manifest(
 fn manifest_declares_file_access(manifest: &ExtensionManifestDescriptor) -> bool {
     manifest
         .declarations()
-        .required_host_authorities()
+        .required_hosts()
         .into_iter()
+        .flat_map(|set| set.patterns())
+        .chain(
+            manifest
+                .declarations()
+                .execution()
+                .content_scripts()
+                .iter()
+                .flat_map(|script| script.matches().includes()),
+        )
         .any(|pattern| pattern.components().includes_file())
         || manifest
             .declarations()
@@ -1472,6 +1523,117 @@ mod tests {
             .unwrap()
             .into_authority();
         assert!(authority.persistence_projection().persisted_file_access());
+    }
+
+    #[test]
+    fn declared_host_decision_is_exact_partitioned_and_file_gated() {
+        let manifest = manifest_for(
+            package(1, 1),
+            &[],
+            &[],
+            &["https://required.example/*"],
+            &["file:///*"],
+        );
+        let mut authority =
+            ExtensionGrantAuthority::new(&install(manifest.package().clone()), &manifest).unwrap();
+        let required = MatchPattern::parse("https://required.example/*").unwrap();
+        let file = MatchPattern::parse("file:///*").unwrap();
+        let undeclared = MatchPattern::parse("https://undeclared.example/*").unwrap();
+
+        assert_eq!(
+            authority.decide_declared_host(
+                &manifest,
+                &required,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::HostNotGranted)
+        );
+        assert_eq!(
+            authority.decide_declared_host(
+                &manifest,
+                &undeclared,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::HostNotDeclared)
+        );
+
+        authority = grant_host(authority, &manifest, "https://required.example/*");
+        authority = grant_host(authority, &manifest, "file:///*");
+        assert_eq!(
+            authority.decide_declared_host(
+                &manifest,
+                &required,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionUrlScopeDecision::InScope
+        );
+        assert_eq!(
+            authority.decide_declared_host(
+                &manifest,
+                &required,
+                ExtensionGrantBrowsingContext::Private,
+            ),
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::PrivateAccessNotGranted)
+        );
+        assert_eq!(
+            authority.decide_declared_host(
+                &manifest,
+                &file,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionUrlScopeDecision::InScope
+        );
+        assert_eq!(
+            authority.decide_url_scope(
+                &manifest,
+                &Url::parse("file:///tmp/secret.txt").unwrap(),
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::FileAccessNotGranted)
+        );
+
+        let revision = authority.revision();
+        authority = authority
+            .apply(
+                revision,
+                &manifest,
+                ExtensionGrantMutation::SetFileAccess { granted: true },
+            )
+            .unwrap()
+            .into_authority();
+        let revision = authority.revision();
+        authority = authority
+            .apply(
+                revision,
+                &manifest,
+                ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            )
+            .unwrap()
+            .into_authority();
+        assert_eq!(
+            authority.decide_declared_host(
+                &manifest,
+                &file,
+                ExtensionGrantBrowsingContext::Private,
+            ),
+            ExtensionUrlScopeDecision::InScope
+        );
+
+        let mismatched = manifest_for(
+            package(2, 2),
+            &[],
+            &[],
+            &["https://required.example/*"],
+            &[],
+        );
+        assert_eq!(
+            authority.decide_declared_host(
+                &mismatched,
+                &required,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::ManifestMismatch)
+        );
     }
 
     #[test]

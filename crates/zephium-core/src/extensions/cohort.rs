@@ -7,9 +7,10 @@ use std::sync::Arc;
 use crate::ids::{ExtensionInstallId, ProfileId};
 
 use super::{
-    ExtensionGrantAuthority, ExtensionInstallCatalog, ExtensionManifestDescriptor,
-    MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
-    MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ExtensionGrantAuthority, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionManifestDescriptor, MAX_EXTENSION_GRANT_RETAINED_BYTES,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE, MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES,
+    MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 
 const BINDINGS_FIXED_BYTES: usize = 256;
@@ -51,6 +52,17 @@ impl ExtensionGrantManifestBinding {
     }
 
     pub fn manifest(&self) -> &ExtensionManifestDescriptor {
+        &self.manifest
+    }
+
+    /// Borrows the shared descriptor owner without cloning its retained
+    /// manifest or compiled matchers.
+    ///
+    /// Runtime projections that pin the complete cohort normally only need
+    /// [`Self::manifest`]. A coordinator which must extend the descriptor's
+    /// lifetime independently may shallow-clone this exact `Arc`; it must not
+    /// rebuild or deep-clone the descriptor from persistence fields.
+    pub const fn manifest_arc(&self) -> &Arc<ExtensionManifestDescriptor> {
         &self.manifest
     }
 }
@@ -139,6 +151,57 @@ pub enum ExtensionGrantInitializationState {
     /// projection pins this `Arc` instead of deep-cloning compiled host
     /// matchers and permission sets for every activation candidate.
     Initialized(Arc<ExtensionGrantAuthority>),
+}
+
+impl ExtensionGrantInitializationState {
+    /// Borrows the exact initialized authority owner, or returns `None` for
+    /// the explicit fail-closed uninitialized state.
+    pub const fn authority_arc(&self) -> Option<&Arc<ExtensionGrantAuthority>> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Initialized(authority) => Some(authority),
+        }
+    }
+}
+
+/// Borrowed exact install authority from one atomic profile cohort.
+///
+/// This view cannot be constructed by callers, so its install, admitted
+/// manifest, and grant state always share one validated profile snapshot.
+/// The `Arc` owners are borrowed rather than cloned; pinning the parent cohort
+/// pins every value exposed here.
+#[derive(Clone, Copy, Debug)]
+pub struct ExtensionGrantCohortEntry<'a> {
+    profile: ProfileId,
+    install: &'a ExtensionInstall,
+    binding: &'a ExtensionGrantManifestBinding,
+    state: &'a ExtensionGrantInitializationState,
+}
+
+impl<'a> ExtensionGrantCohortEntry<'a> {
+    pub const fn profile(self) -> ProfileId {
+        self.profile
+    }
+
+    pub const fn install(self) -> &'a ExtensionInstall {
+        self.install
+    }
+
+    pub fn manifest(self) -> &'a ExtensionManifestDescriptor {
+        self.binding.manifest()
+    }
+
+    pub const fn manifest_arc(self) -> &'a Arc<ExtensionManifestDescriptor> {
+        self.binding.manifest_arc()
+    }
+
+    pub const fn grant_state(self) -> &'a ExtensionGrantInitializationState {
+        self.state
+    }
+
+    pub const fn authority_arc(self) -> Option<&'a Arc<ExtensionGrantAuthority>> {
+        self.state.authority_arc()
+    }
 }
 
 /// One complete atomic install catalog plus one state for every install.
@@ -287,6 +350,27 @@ impl ExtensionGrantCohort {
             .binary_search_by_key(&id, ExtensionGrantManifestBinding::install_id)
             .ok()
             .map(|index| &self.states[index])
+    }
+
+    /// Resolves one install, admitted manifest owner, and grant state from the
+    /// same atomic profile snapshot.
+    ///
+    /// The returned references are index-aligned by construction and cannot
+    /// outlive this cohort. This is the activation boundary: callers must not
+    /// combine an install from one catalog snapshot with a manifest or grant
+    /// obtained through an independent lookup.
+    pub fn resolve_entry(&self, id: ExtensionInstallId) -> Option<ExtensionGrantCohortEntry<'_>> {
+        let index = self
+            .bindings
+            .bindings
+            .binary_search_by_key(&id, ExtensionGrantManifestBinding::install_id)
+            .ok()?;
+        Some(ExtensionGrantCohortEntry {
+            profile: self.profile,
+            install: self.install_catalog.get(id)?,
+            binding: self.bindings.bindings.get(index)?,
+            state: self.states.get(index)?,
+        })
     }
 
     pub const fn retained_bytes(&self) -> usize {
@@ -466,6 +550,77 @@ mod tests {
             Some(ExtensionGrantInitializationState::Initialized(_))
         ));
         assert!(initialized.retained_bytes() <= MAX_EXTENSION_GRANT_COHORT_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn exact_entry_resolution_borrows_one_atomic_arc_backed_binding() {
+        let first_package = package();
+        let first_manifest = manifest_for(first_package.clone(), "test.cohort.first.v1");
+        let first_install =
+            ExtensionInstall::new(ExtensionInstallId::from(7), first_package.clone());
+
+        let second_package = ExtensionPackageIdentity::new(
+            ExtensionAuthorityId::from_bytes([8; 32]),
+            ExtensionPackageKey::from_bytes([9; 32]),
+            ExtensionPackageRevision::INITIAL,
+            ExtensionArchiveDigest::from_bytes([10; 32]),
+            ExtensionManifestDigest::from_bytes([11; 32]),
+            ExtensionTreeDigest::from_bytes([12; 32]),
+        );
+        let second_manifest = manifest_for(second_package.clone(), "test.cohort.second.v1");
+        let second_install =
+            ExtensionInstall::new(ExtensionInstallId::from(9), second_package.clone());
+        let second_authority =
+            ExtensionGrantAuthority::new(&second_install, &second_manifest).unwrap();
+
+        let catalog = ExtensionInstallCatalog::new(
+            ExtensionInstallCatalogRevision::INITIAL,
+            vec![second_install.clone(), first_install.clone()],
+        )
+        .unwrap();
+        // Deliberately reverse the bindings. Canonicalization must keep the
+        // manifest and state aligned with the matching install, not input
+        // position.
+        let bindings = ExtensionGrantManifestBindings::new(vec![
+            ExtensionGrantManifestBinding::new(second_install.id(), second_manifest.clone()),
+            ExtensionGrantManifestBinding::new(first_install.id(), first_manifest.clone()),
+        ])
+        .unwrap();
+        let cohort = ExtensionGrantCohort::from_persisted(
+            ProfileId::from(42),
+            catalog,
+            bindings,
+            vec![second_authority],
+        )
+        .unwrap();
+
+        let resolved = cohort.resolve_entry(second_install.id()).unwrap();
+        assert_eq!(resolved.profile(), ProfileId::from(42));
+        assert_eq!(resolved.install(), &second_install);
+        assert_eq!(resolved.manifest(), second_manifest.as_ref());
+        assert!(Arc::ptr_eq(resolved.manifest_arc(), &second_manifest));
+        assert!(std::ptr::eq(
+            resolved.grant_state(),
+            cohort.get(second_install.id()).unwrap()
+        ));
+        let resolved_authority = resolved.authority_arc().unwrap();
+        assert_eq!(resolved_authority.install_id(), second_install.id());
+        assert_eq!(resolved_authority.package(), &second_package);
+        assert!(std::ptr::eq(
+            resolved_authority.as_ref(),
+            cohort
+                .resolve_entry(second_install.id())
+                .unwrap()
+                .authority_arc()
+                .unwrap()
+                .as_ref()
+        ));
+
+        let first = cohort.resolve_entry(first_install.id()).unwrap();
+        assert_eq!(first.profile(), ProfileId::from(42));
+        assert!(Arc::ptr_eq(first.manifest_arc(), &first_manifest));
+        assert!(first.authority_arc().is_none());
+        assert!(cohort.resolve_entry(ExtensionInstallId::from(8)).is_none());
     }
 
     #[test]
