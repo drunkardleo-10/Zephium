@@ -570,7 +570,31 @@ fn ci() {
     for (manifest, features) in NATIVE_ADAPTERS {
         run_native_adapter_tests(manifest, features);
     }
+    #[cfg(target_os = "macos")]
+    run_macos_principal_isolation_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_principal_isolation_probe() {
+    const COMMON: [&str; 7] = [
+        "--locked",
+        "-p",
+        "zephium-engine",
+        "--features",
+        "native-isolation-probes",
+        "--bin",
+        "macos-principal-isolation-probe",
+    ];
+
+    let mut clippy = vec!["clippy"];
+    clippy.extend(COMMON);
+    clippy.extend(["--", "-D", "warnings"]);
+    run("cargo", &clippy);
+
+    let mut execute = vec!["run"];
+    execute.extend(COMMON);
+    run("cargo", &execute);
 }
 
 fn check_blocker_security_fork() {

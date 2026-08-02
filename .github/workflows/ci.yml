@@ -309,7 +309,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        # GitHub's 20260720 macos-26 image still ships macOS/Safari 26.4,
+        # below Zephium's 26.5.2 Tahoe floor. The macos-15 image ships the
+        # admitted Sequoia 15.7.7 / Safari 26.5.2 floor. The probe below still
+        # reads and admits the exact loaded runtime, so image drift fails
+        # closed rather than trusting this label or comment.
+        os: [windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TARGET_DIR: target
@@ -338,6 +343,12 @@ jobs:
 
       - name: Clippy production workspace libraries
         run: cargo clippy --workspace --lib --locked -- -D warnings
+
+      - name: Keep the gated Windows CDP feature graph warning-clean
+        if: runner.os == 'Windows'
+        run: |
+          cargo check --locked -p zephium-engine --lib --features windows-cdp-spike
+          cargo clippy --locked -p zephium-engine --lib --features windows-cdp-spike -- -D warnings
 
       - name: Check vendored Wry security adapter directly
         run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
@@ -413,6 +424,22 @@ jobs:
       - name: cargo nextest (macOS)
         if: runner.os == 'macOS'
         run: cargo nextest run --locked --retries 2 --workspace
+
+      # libtest always runs tests on worker threads, including with
+      # --test-threads=1, so an ordinary ignored test cannot construct AppKit
+      # or WKWebView safely. This feature-gated executable owns process main
+      # and exercises Zephium's real Rust world/handler adapter against a
+      # hostile page plus three mutually untrusted principals.
+      - name: Prove macOS principal worlds and handlers are mutually isolated
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          cargo clippy --locked -p zephium-engine \
+            --features native-isolation-probes \
+            --bin macos-principal-isolation-probe -- -D warnings
+          cargo run --locked -p zephium-engine \
+            --features native-isolation-probes \
+            --bin macos-principal-isolation-probe
 
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
@@ -562,6 +589,24 @@ jobs:
           xvfb-run -a cargo test --locked -p zephium-engine --lib
           platform::linux::tests::wry_contexts_enable_sandbox_and_cross_site_process_swap
           -- --ignored --exact
+
+      - name: Prove Linux principal worlds and handlers are mutually isolated
+        run: |
+          set -euo pipefail
+          probe_log="$(mktemp)"
+          cleanup() {
+            rm -f "${probe_log}"
+          }
+          trap cleanup EXIT
+          timeout --signal=TERM --kill-after=10s 120s \
+            dbus-run-session -- xvfb-run -a \
+            cargo test --locked -p zephium-engine --lib \
+            platform::linux::tests::principal_world_handlers_are_mutually_isolated_from_three_peers_and_page_world \
+            -- --ignored --exact --test-threads=1 2>&1 | tee "${probe_log}"
+          if ! grep -F "test result: ok. 1 passed; 0 failed; 0 ignored" "${probe_log}" >/dev/null; then
+            echo "::error title=Linux principal probe missing::The exact native test did not execute once."
+            exit 1
+          fi
 
       - name: Prove native Wry GTK invariants
         run: >-
