@@ -2225,7 +2225,7 @@ mod tests {
     use super::*;
     use crate::extensions::{
         ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionManifestDigest, ExtensionPackageKey,
-        ExtensionPackageRevision, ExtensionTreeDigest,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
     };
     use proptest::prelude::*;
 
@@ -2234,7 +2234,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([1; 32]),
             ExtensionPackageKey::from_bytes([2; 32]),
             ExtensionPackageRevision::new(revision).unwrap(),
-            ExtensionArchiveDigest::from_bytes([3; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                3,
+                ExtensionArchiveDigest::from_bytes([3; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([manifest; 32]),
             ExtensionTreeDigest::from_bytes([5; 32]),
         )
@@ -3309,7 +3313,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([1; 32]),
             ExtensionPackageKey::from_bytes([9; 32]),
             ExtensionPackageRevision::INITIAL,
-            ExtensionArchiveDigest::from_bytes([3; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                3,
+                ExtensionArchiveDigest::from_bytes([3; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([1; 32]),
             ExtensionTreeDigest::from_bytes([5; 32]),
         );
@@ -3389,7 +3397,11 @@ mod tests {
                 ExtensionAuthorityId::from_bytes(authority),
                 ExtensionPackageKey::from_bytes(key),
                 ExtensionPackageRevision::new(revision).unwrap(),
-                ExtensionArchiveDigest::from_bytes([3; 32]),
+                ExtensionPackagePayloadIdentity::acquired_zip(
+                    3,
+                    ExtensionArchiveDigest::from_bytes([3; 32]),
+                )
+                .unwrap(),
                 ExtensionManifestDigest::from_bytes([4; 32]),
                 ExtensionTreeDigest::from_bytes([5; 32]),
             );

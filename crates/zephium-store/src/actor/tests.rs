@@ -10,8 +10,9 @@ use zephium_core::extensions::{
     ExtensionHostPermissionSet, ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
     ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
     ExtensionManifestDigest, ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
-    EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
 use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
@@ -283,7 +284,24 @@ fn extension_package(authority: u8, key: u8, revision: u64) -> ExtensionPackageI
         ExtensionAuthorityId::from_bytes([authority; EXTENSION_SHA256_BYTES]),
         ExtensionPackageKey::from_bytes([key; EXTENSION_SHA256_BYTES]),
         ExtensionPackageRevision::new(revision).unwrap(),
-        ExtensionArchiveDigest::from_bytes([revision as u8; EXTENSION_SHA256_BYTES]),
+        ExtensionPackagePayloadIdentity::acquired_zip(
+            revision,
+            ExtensionArchiveDigest::from_bytes([revision as u8; EXTENSION_SHA256_BYTES]),
+        )
+        .unwrap(),
+        ExtensionManifestDigest::from_bytes(
+            [revision.wrapping_add(1) as u8; EXTENSION_SHA256_BYTES],
+        ),
+        ExtensionTreeDigest::from_bytes([revision.wrapping_add(2) as u8; EXTENSION_SHA256_BYTES]),
+    )
+}
+
+fn bundled_extension_package(authority: u8, key: u8, revision: u64) -> ExtensionPackageIdentity {
+    ExtensionPackageIdentity::new(
+        ExtensionAuthorityId::from_bytes([authority; EXTENSION_SHA256_BYTES]),
+        ExtensionPackageKey::from_bytes([key; EXTENSION_SHA256_BYTES]),
+        ExtensionPackageRevision::new(revision).unwrap(),
+        ExtensionPackagePayloadIdentity::BundledTree,
         ExtensionManifestDigest::from_bytes(
             [revision.wrapping_add(1) as u8; EXTENSION_SHA256_BYTES],
         ),
@@ -1294,6 +1312,174 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
 }
 
 #[test]
+fn bundled_tree_install_and_grant_authority_round_trip_without_archive_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(751);
+    let package = bundled_extension_package(21, 22, 3);
+    let manifest = extension_manifest(package.clone());
+
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let ExtensionInstallCatalogLoadOutcome::Loaded(empty) =
+            load_extension_installs(&store, profile)
+        else {
+            panic!("new extension catalog did not load");
+        };
+        let ExtensionInstallCatalogMutationOutcome::Applied(applied) = mutate_extension_installs(
+            &store,
+            profile,
+            empty.revision(),
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: package.clone(),
+            },
+        ) else {
+            panic!("bundled tree install was refused");
+        };
+        let install = applied.install.unwrap();
+        let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+        assert!(matches!(
+            mutate_extension_grants(
+                &store,
+                profile,
+                applied.catalog_revision,
+                install.revision(),
+                id,
+                manifest.clone(),
+                ExtensionGrantWrite::Initialize {
+                    authority: Box::new(authority),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Applied(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let conn = Connection::open(&path).unwrap();
+    for table in ["extension_installs", "extension_grants"] {
+        let shape: (i64, bool, bool) = conn
+            .query_row(
+                &format!(
+                    "SELECT payload_kind,
+                            archive_length IS NULL,
+                            archive_sha256 IS NULL
+                     FROM {table}"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(shape, (1, true, true), "{table} invented ZIP evidence");
+    }
+    drop(conn);
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(&store, profile)
+    else {
+        panic!("bundled tree catalog did not reopen");
+    };
+    assert_eq!(catalog.get(id).unwrap().package(), &package);
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) =
+        load_extension_grants(&store, profile, extension_grant_bindings(&[(id, manifest)]))
+    else {
+        panic!("bundled tree grant cohort did not reopen");
+    };
+    assert!(matches!(
+        cohort.get(id),
+        Some(ExtensionGrantInitializationState::Initialized(_))
+    ));
+}
+
+#[test]
+fn v12_disk_reopen_invalidates_legacy_rows_and_retains_install_id_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let legacy_id = ExtensionInstallId::from(801);
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        assert!(matches!(
+            load_extension_installs(&store, profile),
+            ExtensionInstallCatalogLoadOutcome::Loaded(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let path = dir.path().join(format!("profile-{profile}.sqlite"));
+    std::fs::remove_file(&path).unwrap();
+    let mut conn = Connection::open(&path).unwrap();
+    migrations::apply(&mut conn, &migrations::PROFILE[..11]).unwrap();
+    conn.execute(
+        "UPDATE extension_install_catalog SET revision = 7 WHERE id = 1",
+        [],
+    )
+    .unwrap();
+    let id = legacy_id.bytes();
+    conn.execute(
+        "INSERT INTO extension_installs(
+             id, revision, authority, package_key, package_revision,
+             archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+         ) VALUES (?1, 3, ?2, ?3, 4, ?4, ?5, ?6, 1)",
+        params![
+            &id[..],
+            vec![2_u8; 32],
+            vec![3_u8; 32],
+            vec![4_u8; 32],
+            vec![5_u8; 32],
+            vec![6_u8; 32],
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(&store, profile)
+    else {
+        panic!("v12-migrated catalog did not reopen");
+    };
+    assert_eq!(catalog.revision().get(), 7);
+    assert!(catalog.installs().is_empty());
+    assert_eq!(catalog.install_id_high_water(), Some(legacy_id));
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            catalog.revision(),
+            ExtensionInstallCatalogMutation::Install {
+                id: legacy_id,
+                package: bundled_extension_package(31, 32, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Invalid
+    );
+    assert!(matches!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            catalog.revision(),
+            ExtensionInstallCatalogMutation::Install {
+                id: ExtensionInstallId::from(802),
+                package: bundled_extension_package(31, 32, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Applied(_)
+    ));
+}
+
+#[test]
 fn extension_install_limit_and_revision_exhaustion_are_definite_refusals() {
     let dir = tempfile::tempdir().unwrap();
     let profile = ProfileId::from(1);
@@ -2022,7 +2208,7 @@ fn extension_grant_commit_ambiguity_requires_atomic_cohort_reconciliation() {
 }
 
 #[test]
-fn extension_grant_codec_rejects_digest_corruption_and_child_overflow_after_restart() {
+fn extension_grant_codec_rejects_payload_digest_and_child_corruption_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let profile = ProfileId::from(1);
     let id = ExtensionInstallId::from(701);
@@ -2094,9 +2280,37 @@ fn extension_grant_codec_rejects_digest_corruption_and_child_overflow_after_rest
     }
 
     let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "ignore_check_constraints", true)
+        .unwrap();
     conn.execute(
-        "UPDATE extension_grants SET grant_sha256 = ?2 WHERE install_id = ?1",
+        "UPDATE extension_grants
+         SET grant_sha256 = ?2, archive_length = 0
+         WHERE install_id = ?1",
         params![&id_bytes[..], &expected_digest[..]],
+    )
+    .unwrap();
+    drop(conn);
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        assert_eq!(
+            load_extension_grants(
+                &store,
+                profile,
+                extension_grant_bindings(&[(id, manifest.clone())]),
+            ),
+            ExtensionGrantCohortLoadOutcome::Failed,
+            "malformed redundant payload evidence was accepted"
+        );
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE extension_grants SET archive_length = 1 WHERE install_id = ?1",
+        [&id_bytes[..]],
     )
     .unwrap();
     for index in 0..=zephium_core::extensions::MAX_EXTENSION_API_PERMISSIONS {
@@ -2162,7 +2376,7 @@ fn extension_grant_codec_rejects_digest_corruption_and_child_overflow_after_rest
 }
 
 #[test]
-fn legacy_enabled_intent_reopens_but_cannot_be_reaffirmed_without_grants() {
+fn externally_enabled_intent_reopens_but_cannot_be_reaffirmed_without_grants() {
     let dir = tempfile::tempdir().unwrap();
     let profile = ProfileId::from(1);
     let id = ExtensionInstallId::from(801);
@@ -2204,14 +2418,14 @@ fn legacy_enabled_intent_reopens_but_cannot_be_reaffirmed_without_grants() {
     let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
         load_extension_installs(&store, profile)
     else {
-        panic!("legacy enabled row did not remain representable");
+        panic!("externally enabled row did not remain representable");
     };
     let install = catalog.get(id).unwrap();
     assert!(install.desired_enabled());
     let ExtensionGrantCohortLoadOutcome::Loaded(cohort) =
         load_extension_grants(&store, profile, extension_grant_bindings(&[(id, manifest)]))
     else {
-        panic!("legacy grant absence did not load explicitly");
+        panic!("absent grant authority did not load explicitly");
     };
     assert!(matches!(
         cohort.get(id),
@@ -2270,19 +2484,22 @@ fn stale_orphan_grant_rows_cannot_attach_to_a_reused_install_id() {
     let id_bytes = id.bytes();
     let authority = package.authority().bytes();
     let key = package.key().bytes();
-    let archive = package.archive_sha256().bytes();
+    let (archive_length, archive) = package.payload().acquired_zip_evidence().unwrap();
+    let archive = archive.bytes();
     let manifest = package.manifest_sha256().bytes();
     let tree = package.tree_sha256().bytes();
     conn.execute(
         "INSERT INTO extension_grants(
              install_id, revision, authority, package_key, package_revision,
-             archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+             payload_kind, archive_length, archive_sha256,
+             manifest_sha256, tree_sha256, grant_sha256,
              file_access, private_access
-         ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 0, 0)",
+         ) VALUES (?1, 1, ?2, ?3, 1, 2, ?4, ?5, ?6, ?7, ?8, 0, 0)",
         params![
             &id_bytes[..],
             &authority[..],
             &key[..],
+            i64::try_from(archive_length.get()).unwrap(),
             &archive[..],
             &manifest[..],
             &tree[..],

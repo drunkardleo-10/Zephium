@@ -410,7 +410,7 @@ mod tests {
         ExtensionInstall, ExtensionInstallCatalogRevision, ExtensionManifestDeclarations,
         ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
         ExtensionManifestResourceDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-        ExtensionPackageRevision, ExtensionTreeDigest,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
     };
 
     fn package() -> ExtensionPackageIdentity {
@@ -418,7 +418,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([1; 32]),
             ExtensionPackageKey::from_bytes([2; 32]),
             ExtensionPackageRevision::INITIAL,
-            ExtensionArchiveDigest::from_bytes([3; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                3,
+                ExtensionArchiveDigest::from_bytes([3; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([4; 32]),
             ExtensionTreeDigest::from_bytes([5; 32]),
         )
@@ -563,7 +567,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([8; 32]),
             ExtensionPackageKey::from_bytes([9; 32]),
             ExtensionPackageRevision::INITIAL,
-            ExtensionArchiveDigest::from_bytes([10; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                10,
+                ExtensionArchiveDigest::from_bytes([10; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([11; 32]),
             ExtensionTreeDigest::from_bytes([12; 32]),
         );
@@ -643,7 +651,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([9; 32]),
             ExtensionPackageKey::from_bytes([2; 32]),
             ExtensionPackageRevision::INITIAL,
-            ExtensionArchiveDigest::from_bytes([3; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                3,
+                ExtensionArchiveDigest::from_bytes([3; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([4; 32]),
             ExtensionTreeDigest::from_bytes([5; 32]),
         );
@@ -687,7 +699,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([8; 32]),
             ExtensionPackageKey::from_bytes([9; 32]),
             ExtensionPackageRevision::INITIAL,
-            ExtensionArchiveDigest::from_bytes([10; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                10,
+                ExtensionArchiveDigest::from_bytes([10; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([11; 32]),
             ExtensionTreeDigest::from_bytes([12; 32]),
         );

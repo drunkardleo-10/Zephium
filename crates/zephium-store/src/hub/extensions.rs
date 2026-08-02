@@ -11,9 +11,67 @@ use zephium_core::extensions::{
     ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionInstall, ExtensionInstallCatalog,
     ExtensionInstallCatalogApplyError, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
-    EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+    MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
+
+pub(super) const DURABLE_PAYLOAD_BUNDLED_TREE: i64 = 1;
+pub(super) const DURABLE_PAYLOAD_ACQUIRED_ZIP: i64 = 2;
+
+// PROFILE v12 embeds this byte ceiling in immutable CHECK constraints.
+const _: () = assert!(MAX_EXTENSION_ARCHIVE_BYTES == 67_108_864);
+
+pub(super) struct DurablePackagePayload {
+    pub(super) kind: i64,
+    pub(super) archive_length: Option<i64>,
+    pub(super) archive_sha256: Option<[u8; EXTENSION_SHA256_BYTES]>,
+}
+
+pub(super) fn encode_package_payload(
+    payload: ExtensionPackagePayloadIdentity,
+) -> rusqlite::Result<DurablePackagePayload> {
+    match payload {
+        ExtensionPackagePayloadIdentity::BundledTree => Ok(DurablePackagePayload {
+            kind: DURABLE_PAYLOAD_BUNDLED_TREE,
+            archive_length: None,
+            archive_sha256: None,
+        }),
+        ExtensionPackagePayloadIdentity::AcquiredZip { length, sha256 } => {
+            Ok(DurablePackagePayload {
+                kind: DURABLE_PAYLOAD_ACQUIRED_ZIP,
+                archive_length: Some(
+                    i64::try_from(length.get())
+                        .map_err(|_| invalid_data("extension acquired-ZIP length overflow"))?,
+                ),
+                archive_sha256: Some(sha256.bytes()),
+            })
+        }
+    }
+}
+
+pub(super) fn decode_package_payload(
+    kind: Option<i64>,
+    archive_length: Option<i64>,
+    archive_sha256: Option<Vec<u8>>,
+    message: &'static str,
+) -> rusqlite::Result<ExtensionPackagePayloadIdentity> {
+    match (kind, archive_length, archive_sha256) {
+        (Some(DURABLE_PAYLOAD_BUNDLED_TREE), None, None) => {
+            Ok(ExtensionPackagePayloadIdentity::BundledTree)
+        }
+        (Some(DURABLE_PAYLOAD_ACQUIRED_ZIP), Some(length), Some(sha256)) => {
+            let length = u64::try_from(length).map_err(|_| invalid_data(message))?;
+            let sha256 = ExtensionArchiveDigest::from_bytes(exact_blob::<EXTENSION_SHA256_BYTES>(
+                Some(sha256),
+                message,
+            )?);
+            ExtensionPackagePayloadIdentity::acquired_zip(length, sha256)
+                .ok_or_else(|| invalid_data(message))
+        }
+        _ => Err(invalid_data(message)),
+    }
+}
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
     ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationApplied,
@@ -102,9 +160,7 @@ impl Hub {
                 .install()
                 .ok_or_else(|| invalid_data("enabled extension transition has no install row"))?;
             if !super::extension_grants::has_exact_grant_root(&tx, install)? {
-                // Existing v9 rows with enabled intent remain representable
-                // after migration, but this adapter never newly affirms or
-                // persists enabled intent without an exact package-bound
+                // Intent is never affirmed without an exact package-bound
                 // grant root. Activation still requires a freshly validated
                 // atomic grant cohort; this intent is not authority evidence.
                 return Ok(ExtensionInstallCatalogMutationOutcome::Invalid);
@@ -217,21 +273,24 @@ fn insert_install(conn: &Connection, install: &ExtensionInstall) -> rusqlite::Re
     let package = install.package();
     let authority = package.authority().bytes();
     let key = package.key().bytes();
-    let archive = package.archive_sha256().bytes();
+    let payload = encode_package_payload(package.payload())?;
     let manifest = package.manifest_sha256().bytes();
     let tree = package.tree_sha256().bytes();
     let inserted = conn.execute(
         "INSERT INTO extension_installs(
              id, revision, authority, package_key, package_revision,
-             archive_sha256, manifest_sha256, tree_sha256, desired_enabled
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             payload_kind, archive_length, archive_sha256,
+             manifest_sha256, tree_sha256, desired_enabled
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             &id[..],
             revision_i64(install.revision().get())?,
             &authority[..],
             &key[..],
             revision_i64(package.revision().get())?,
-            &archive[..],
+            payload.kind,
+            payload.archive_length,
+            payload.archive_sha256.as_ref().map(|digest| &digest[..]),
             &manifest[..],
             &tree[..],
             i64::from(install.desired_enabled()),
@@ -303,7 +362,20 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
              CASE WHEN typeof(authority) = 'blob' AND length(authority) = 32 THEN authority END,
              CASE WHEN typeof(package_key) = 'blob' AND length(package_key) = 32 THEN package_key END,
              package_revision,
-             CASE WHEN typeof(archive_sha256) = 'blob' AND length(archive_sha256) = 32 THEN archive_sha256 END,
+             CASE WHEN
+                 (payload_kind = 1 AND archive_length IS NULL AND archive_sha256 IS NULL)
+                 OR
+                 (payload_kind = 2
+                  AND typeof(archive_length) = 'integer'
+                  AND archive_length BETWEEN 1 AND 67108864
+                  AND typeof(archive_sha256) = 'blob'
+                  AND length(archive_sha256) = 32)
+             THEN payload_kind END,
+             CASE WHEN payload_kind = 2 THEN archive_length END,
+             CASE WHEN payload_kind = 2
+                        AND typeof(archive_sha256) = 'blob'
+                        AND length(archive_sha256) = 32
+                  THEN archive_sha256 END,
              CASE WHEN typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32 THEN manifest_sha256 END,
              CASE WHEN typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32 THEN tree_sha256 END,
              desired_enabled
@@ -316,10 +388,12 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
             row.get::<_, Option<Vec<u8>>>(2)?,
             row.get::<_, Option<Vec<u8>>>(3)?,
             row.get::<_, i64>(4)?,
-            row.get::<_, Option<Vec<u8>>>(5)?,
-            row.get::<_, Option<Vec<u8>>>(6)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<Vec<u8>>>(7)?,
-            row.get::<_, i64>(8)?,
+            row.get::<_, Option<Vec<u8>>>(8)?,
+            row.get::<_, Option<Vec<u8>>>(9)?,
+            row.get::<_, i64>(10)?,
         ))
     })?;
     let mut installs = Vec::with_capacity(count as usize);
@@ -330,7 +404,9 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
             authority,
             key,
             package_revision,
-            archive,
+            payload_kind,
+            archive_length,
+            archive_sha256,
             manifest,
             tree,
             desired_enabled,
@@ -351,10 +427,12 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
         let package_revision = revision_u64(package_revision)
             .and_then(ExtensionPackageRevision::new)
             .ok_or_else(|| invalid_data("extension package revision is invalid"))?;
-        let archive = ExtensionArchiveDigest::from_bytes(exact_blob::<EXTENSION_SHA256_BYTES>(
-            archive,
-            "extension archive digest is invalid",
-        )?);
+        let payload = decode_package_payload(
+            payload_kind,
+            archive_length,
+            archive_sha256,
+            "extension package payload identity is invalid",
+        )?;
         let manifest = ExtensionManifestDigest::from_bytes(exact_blob::<EXTENSION_SHA256_BYTES>(
             manifest,
             "extension manifest digest is invalid",
@@ -372,7 +450,7 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
             authority,
             key,
             package_revision,
-            archive,
+            payload,
             manifest,
             tree,
         );
@@ -427,7 +505,9 @@ mod tests {
         authority: Vec<u8>,
         key: Vec<u8>,
         package_revision: i64,
-        archive: Vec<u8>,
+        payload_kind: i64,
+        archive_length: Option<i64>,
+        archive: Option<Vec<u8>>,
         manifest: Vec<u8>,
         tree: Vec<u8>,
         desired_enabled: i64,
@@ -441,7 +521,9 @@ mod tests {
                 authority: vec![authority; EXTENSION_SHA256_BYTES],
                 key: vec![key; EXTENSION_SHA256_BYTES],
                 package_revision: 1,
-                archive: vec![2; EXTENSION_SHA256_BYTES],
+                payload_kind: DURABLE_PAYLOAD_ACQUIRED_ZIP,
+                archive_length: Some(17),
+                archive: Some(vec![2; EXTENSION_SHA256_BYTES]),
                 manifest: vec![3; EXTENSION_SHA256_BYTES],
                 tree: vec![4; EXTENSION_SHA256_BYTES],
                 desired_enabled: 0,
@@ -460,14 +542,17 @@ mod tests {
         conn.execute(
             "INSERT INTO extension_installs(
                  id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 payload_kind, archive_length, archive_sha256,
+                 manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 row.id,
                 row.install_revision,
                 row.authority,
                 row.key,
                 row.package_revision,
+                row.payload_kind,
+                row.archive_length,
                 row.archive,
                 row.manifest,
                 row.tree,
@@ -486,6 +571,8 @@ mod tests {
             Authority,
             Key,
             PackageRevision,
+            PayloadKind,
+            ArchiveLength,
             Archive,
             Manifest,
             Tree,
@@ -498,6 +585,8 @@ mod tests {
             Corruption::Authority,
             Corruption::Key,
             Corruption::PackageRevision,
+            Corruption::PayloadKind,
+            Corruption::ArchiveLength,
             Corruption::Archive,
             Corruption::Manifest,
             Corruption::Tree,
@@ -513,7 +602,9 @@ mod tests {
                 Corruption::Authority => row.authority.truncate(31),
                 Corruption::Key => row.key.push(3),
                 Corruption::PackageRevision => row.package_revision = 0,
-                Corruption::Archive => row.archive.truncate(31),
+                Corruption::PayloadKind => row.payload_kind = 9,
+                Corruption::ArchiveLength => row.archive_length = Some(0),
+                Corruption::Archive => row.archive.as_mut().unwrap().truncate(31),
                 Corruption::Manifest => row.manifest.push(5),
                 Corruption::Tree => row.tree.truncate(31),
                 Corruption::DesiredEnabled => row.desired_enabled = 2,

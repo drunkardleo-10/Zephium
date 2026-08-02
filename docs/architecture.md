@@ -583,6 +583,17 @@ authenticated content-addressed packages, monotonic candidate/current/previous
 state, staged activation, rollback, and crash recovery—without coupling
 extensions to blocker compilation.
 
+Durable package identity is representation-exact. A bundled authenticated tree
+is tagged `BundledTree` and carries no synthetic archive evidence; a future
+acquired ZIP is tagged separately and binds both a non-zero bounded byte length
+and its SHA-256 before materialization. The profile schema stores the same tag
+and nullable/exact ZIP evidence redundantly in install and grant rows, and the
+bounded codecs reject any disagreement. Profile schema v12 is a deliberate
+fail-closed epoch: the unreleased v9-v11 shape recorded only an archive digest,
+so migration preserves the catalog revision and monotonic install-ID floor but
+invalidates those inexact install/grant rows. They must be reinstalled through
+the exact package authority and their old identities can never be reused.
+
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,
 native messaging in the initial target, and an open catalog. Unsupported or
@@ -799,10 +810,10 @@ FTS5; a test guards it).
 - The current schema contains the shared registry/settings/session snapshot
   and blocker preferences, plus per-profile history/favicons with FTS5,
   source-authoritative userscripts, remembered page permissions, and bounded
-  structural extension-install intent. Those ancillary catalogs are durable
-  input only: they do not prove native activation, package authentication, or
-  live permission enforcement. Extension grants and the conservative native
-  reconciliation journal remain separate future authorities.
+  structural extension install/grant authority. Those ancillary catalogs are
+  durable input only: they do not prove native activation, package
+  authentication, or live permission enforcement. The conservative native
+  reconciliation journal remains a separate future authority.
 
 ---
 

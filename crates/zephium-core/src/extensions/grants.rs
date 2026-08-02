@@ -21,7 +21,7 @@ use super::{
 
 const MAX_DURABLE_EXTENSION_GRANT_REVISION: u64 = i64::MAX as u64;
 const GRANT_ACCOUNTING_FIXED_BYTES: usize = 1024;
-const GRANT_DIGEST_DOMAIN: &[u8] = b"zephium.extension.grant-authority.v1\0";
+const GRANT_DIGEST_DOMAIN: &[u8] = b"zephium.extension.grant-authority.v2\0";
 pub const MAX_EXTENSION_HOST_GRANTS: usize =
     MAX_EXTENSION_HOST_PERMISSION_PATTERNS + MAX_EXTENSION_CONTENT_SCRIPT_PATTERNS;
 pub const MAX_EXTENSION_GRANT_RETAINED_BYTES: usize = GRANT_ACCOUNTING_FIXED_BYTES
@@ -956,7 +956,7 @@ fn digest_grant_authority(
     digest.update(package.authority().as_bytes());
     digest.update(package.key().as_bytes());
     digest.update(package.revision().get().to_be_bytes());
-    digest.update(package.archive_sha256().as_bytes());
+    package.payload().update_sha256(&mut digest);
     digest.update(package.manifest_sha256().as_bytes());
     digest.update(package.tree_sha256().as_bytes());
 
@@ -1073,7 +1073,7 @@ mod tests {
         ExtensionContentSecurityPolicyDeclaration, ExtensionHostPermissionSet,
         ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDigest,
         ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest, ExtensionPackageKey,
-        ExtensionPackageRevision, ExtensionTreeDigest,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
     };
     use crate::injection::{
         MatchOptions, MatchSet, MAX_MATCH_PATTERN_BYTES, MAX_MATCH_PATTERN_WILDCARDS,
@@ -1085,7 +1085,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([1; 32]),
             ExtensionPackageKey::from_bytes([2; 32]),
             ExtensionPackageRevision::new(revision).unwrap(),
-            ExtensionArchiveDigest::from_bytes([revision as u8; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                revision,
+                ExtensionArchiveDigest::from_bytes([revision as u8; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([manifest_byte; 32]),
             ExtensionTreeDigest::from_bytes([revision as u8 + 1; 32]),
         )
@@ -1369,11 +1373,11 @@ mod tests {
         assert_eq!(
             first.digest().bytes(),
             [
-                0xde, 0x61, 0xff, 0xc3, 0x8b, 0x36, 0x13, 0x4c, 0x24, 0x89, 0x48, 0xd2, 0x0a, 0x68,
-                0x86, 0x82, 0xc2, 0x1b, 0xa6, 0x7a, 0x4c, 0xbf, 0x4a, 0xa7, 0xa6, 0xc8, 0xfd, 0x98,
-                0x8a, 0xd8, 0x01, 0xc6,
+                0xbc, 0x9b, 0xa0, 0xa1, 0x01, 0xb7, 0xcd, 0xa6, 0x7c, 0xef, 0xa4, 0x68, 0x76, 0xf4,
+                0x1c, 0xee, 0xaa, 0x52, 0xcc, 0x02, 0x22, 0xb0, 0x15, 0x78, 0xb8, 0x61, 0x42, 0xeb,
+                0x17, 0x09, 0x46, 0x99,
             ],
-            "grant-authority v1 canonical encoding changed"
+            "grant-authority v2 canonical encoding changed"
         );
     }
 
@@ -1409,7 +1413,7 @@ mod tests {
                 ExtensionAuthorityId::from_bytes([9; 32]),
                 base_package.key(),
                 base_package.revision(),
-                base_package.archive_sha256(),
+                base_package.payload(),
                 base_package.manifest_sha256(),
                 base_package.tree_sha256(),
             ),
@@ -1417,7 +1421,7 @@ mod tests {
                 base_package.authority(),
                 ExtensionPackageKey::from_bytes([9; 32]),
                 base_package.revision(),
-                base_package.archive_sha256(),
+                base_package.payload(),
                 base_package.manifest_sha256(),
                 base_package.tree_sha256(),
             ),
@@ -1425,7 +1429,7 @@ mod tests {
                 base_package.authority(),
                 base_package.key(),
                 ExtensionPackageRevision::new(2).unwrap(),
-                base_package.archive_sha256(),
+                base_package.payload(),
                 base_package.manifest_sha256(),
                 base_package.tree_sha256(),
             ),
@@ -1433,7 +1437,7 @@ mod tests {
                 base_package.authority(),
                 base_package.key(),
                 base_package.revision(),
-                ExtensionArchiveDigest::from_bytes([9; 32]),
+                ExtensionPackagePayloadIdentity::BundledTree,
                 base_package.manifest_sha256(),
                 base_package.tree_sha256(),
             ),
@@ -1441,7 +1445,35 @@ mod tests {
                 base_package.authority(),
                 base_package.key(),
                 base_package.revision(),
-                base_package.archive_sha256(),
+                ExtensionPackagePayloadIdentity::acquired_zip(
+                    2,
+                    base_package
+                        .payload()
+                        .acquired_zip_evidence()
+                        .unwrap()
+                        .1,
+                )
+                .unwrap(),
+                base_package.manifest_sha256(),
+                base_package.tree_sha256(),
+            ),
+            ExtensionPackageIdentity::new(
+                base_package.authority(),
+                base_package.key(),
+                base_package.revision(),
+                ExtensionPackagePayloadIdentity::acquired_zip(
+                    1,
+                    ExtensionArchiveDigest::from_bytes([9; 32]),
+                )
+                .unwrap(),
+                base_package.manifest_sha256(),
+                base_package.tree_sha256(),
+            ),
+            ExtensionPackageIdentity::new(
+                base_package.authority(),
+                base_package.key(),
+                base_package.revision(),
+                base_package.payload(),
                 ExtensionManifestDigest::from_bytes([9; 32]),
                 base_package.tree_sha256(),
             ),
@@ -1449,7 +1481,7 @@ mod tests {
                 base_package.authority(),
                 base_package.key(),
                 base_package.revision(),
-                base_package.archive_sha256(),
+                base_package.payload(),
                 base_package.manifest_sha256(),
                 ExtensionTreeDigest::from_bytes([9; 32]),
             ),
@@ -2078,7 +2110,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([9; 32]),
             ExtensionPackageKey::from_bytes([9; 32]),
             ExtensionPackageRevision::new(3).unwrap(),
-            ExtensionArchiveDigest::from_bytes([3; 32]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                3,
+                ExtensionArchiveDigest::from_bytes([3; 32]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes([3; 32]),
             ExtensionTreeDigest::from_bytes([3; 32]),
         );

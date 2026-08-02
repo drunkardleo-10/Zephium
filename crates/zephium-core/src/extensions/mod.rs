@@ -27,9 +27,10 @@ pub use grants::{
     MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_HOST_GRANTS,
 };
 pub use identity::{
-    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionManifestDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
-    EXTENSION_SHA256_BYTES,
+    ExtensionArchiveDigest, ExtensionArchiveLength, ExtensionAuthorityId, ExtensionManifestDigest,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+    MAX_EXTENSION_ARCHIVE_BYTES,
 };
 pub use install::{
     ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogApplication,

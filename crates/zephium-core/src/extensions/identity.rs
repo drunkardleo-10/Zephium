@@ -2,8 +2,16 @@
 
 use std::fmt;
 
+use sha2::{Digest, Sha256};
+
 /// Exact byte length of every SHA-256 value in an extension package identity.
 pub const EXTENSION_SHA256_BYTES: usize = 32;
+
+/// Largest acquired extension archive admitted by the package boundary.
+///
+/// This limit is part of the durable profile schema. Raising it requires a
+/// new migration and a matching package-admission review.
+pub const MAX_EXTENSION_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Largest revision representable by the durable SQLite adapters.
 const MAX_DURABLE_EXTENSION_REVISION: u64 = i64::MAX as u64;
@@ -61,7 +69,7 @@ sha256_identity!(
 );
 sha256_identity!(
     ExtensionArchiveDigest,
-    "SHA-256 of the exact acquired extension-package archive."
+    "SHA-256 of an exact acquired extension-package ZIP payload."
 );
 sha256_identity!(
     ExtensionManifestDigest,
@@ -108,19 +116,99 @@ impl ExtensionPackageRevision {
     }
 }
 
+/// Exact, bounded byte length of one acquired extension-package ZIP.
+///
+/// The length is part of payload identity rather than merely accounting
+/// metadata: it prevents a digest from being accepted with incomplete or
+/// ambiguously framed acquisition evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionArchiveLength(u64);
+
+impl ExtensionArchiveLength {
+    /// Constructs an acquired-ZIP length within the package admission bound.
+    pub const fn new(bytes: u64) -> Option<Self> {
+        if bytes == 0 || bytes > MAX_EXTENSION_ARCHIVE_BYTES {
+            None
+        } else {
+            Some(Self(bytes))
+        }
+    }
+
+    /// Returns the exact archive byte length.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Exact representation identity of one admitted package payload.
+///
+/// Bundled release trees have no acquired archive and must never carry
+/// synthetic archive evidence. A future network-acquired ZIP is bound by
+/// both its bounded byte length and SHA-256 digest. The variants' canonical
+/// digest encoding is centralized in [`Self::update_sha256`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ExtensionPackagePayloadIdentity {
+    /// An authenticated canonical tree shipped as part of Zephium's release.
+    BundledTree,
+    /// An exact acquired ZIP payload, before validated materialization.
+    AcquiredZip {
+        length: ExtensionArchiveLength,
+        sha256: ExtensionArchiveDigest,
+    },
+}
+
+impl ExtensionPackagePayloadIdentity {
+    const BUNDLED_TREE_DIGEST_TAG: u8 = 1;
+    const ACQUIRED_ZIP_DIGEST_TAG: u8 = 2;
+
+    /// Constructs exact acquired-ZIP identity after enforcing the byte bound.
+    pub const fn acquired_zip(length: u64, sha256: ExtensionArchiveDigest) -> Option<Self> {
+        match ExtensionArchiveLength::new(length) {
+            Some(length) => Some(Self::AcquiredZip { length, sha256 }),
+            None => None,
+        }
+    }
+
+    /// Returns exact ZIP evidence, or `None` for a bundled tree.
+    pub const fn acquired_zip_evidence(
+        self,
+    ) -> Option<(ExtensionArchiveLength, ExtensionArchiveDigest)> {
+        match self {
+            Self::BundledTree => None,
+            Self::AcquiredZip { length, sha256 } => Some((length, sha256)),
+        }
+    }
+
+    /// Appends the stable, unambiguous payload identity to a SHA-256 input.
+    ///
+    /// Encoding is one variant tag, followed for acquired ZIPs by an
+    /// eight-byte big-endian length and the exact 32-byte archive digest.
+    pub fn update_sha256(self, digest: &mut Sha256) {
+        match self {
+            Self::BundledTree => digest.update([Self::BUNDLED_TREE_DIGEST_TAG]),
+            Self::AcquiredZip { length, sha256 } => {
+                digest.update([Self::ACQUIRED_ZIP_DIGEST_TAG]);
+                digest.update(length.get().to_be_bytes());
+                digest.update(sha256.as_bytes());
+            }
+        }
+    }
+}
+
 /// Immutable structural identity of one exact extension package release.
 ///
 /// `authority` and `key` identify the update line. `revision` orders releases
-/// within that line. The three digests bind the acquired archive, admitted
-/// manifest, and canonical materialized resource tree independently so a
-/// native adapter can never treat a path or manifest version string as
-/// package authority.
+/// within that line. The tagged payload identity distinguishes bundled trees
+/// from acquired ZIPs without synthetic evidence. The manifest and tree
+/// digests independently bind admitted authority and canonical materialized
+/// resources so a native adapter can never treat a path or manifest version
+/// string as package authority.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExtensionPackageIdentity {
     authority: ExtensionAuthorityId,
     key: ExtensionPackageKey,
     revision: ExtensionPackageRevision,
-    archive_sha256: ExtensionArchiveDigest,
+    payload: ExtensionPackagePayloadIdentity,
     manifest_sha256: ExtensionManifestDigest,
     tree_sha256: ExtensionTreeDigest,
 }
@@ -135,7 +223,7 @@ impl ExtensionPackageIdentity {
         authority: ExtensionAuthorityId,
         key: ExtensionPackageKey,
         revision: ExtensionPackageRevision,
-        archive_sha256: ExtensionArchiveDigest,
+        payload: ExtensionPackagePayloadIdentity,
         manifest_sha256: ExtensionManifestDigest,
         tree_sha256: ExtensionTreeDigest,
     ) -> Self {
@@ -143,7 +231,7 @@ impl ExtensionPackageIdentity {
             authority,
             key,
             revision,
-            archive_sha256,
+            payload,
             manifest_sha256,
             tree_sha256,
         }
@@ -161,8 +249,8 @@ impl ExtensionPackageIdentity {
         self.revision
     }
 
-    pub const fn archive_sha256(&self) -> ExtensionArchiveDigest {
-        self.archive_sha256
+    pub const fn payload(&self) -> ExtensionPackagePayloadIdentity {
+        self.payload
     }
 
     pub const fn manifest_sha256(&self) -> ExtensionManifestDigest {
@@ -197,6 +285,11 @@ mod tests {
         ExtensionTreeDigest::from_bytes([byte; EXTENSION_SHA256_BYTES])
     }
 
+    fn acquired_zip(byte: u8) -> ExtensionPackagePayloadIdentity {
+        ExtensionPackagePayloadIdentity::acquired_zip(u64::from(byte) + 1, archive_digest(byte))
+            .expect("bounded archive fixture")
+    }
+
     #[test]
     fn durable_revision_rejects_zero_and_sqlite_overflow() {
         assert_eq!(ExtensionPackageRevision::new(0), None);
@@ -214,7 +307,7 @@ mod tests {
             ExtensionAuthorityId::from_bytes([1; 32]),
             ExtensionPackageKey::from_bytes([2; 32]),
             ExtensionPackageRevision::INITIAL,
-            archive_digest(3),
+            acquired_zip(3),
             manifest_digest(4),
             tree_digest(5),
         );
@@ -222,12 +315,59 @@ mod tests {
             base.authority(),
             base.key(),
             base.revision(),
-            base.archive_sha256(),
+            base.payload(),
             base.manifest_sha256(),
             tree_digest(6),
         );
         assert_ne!(base, changed_tree);
         assert_eq!(base.update_line(), changed_tree.update_line());
+    }
+
+    #[test]
+    fn archive_length_is_strictly_positive_and_bounded() {
+        assert_eq!(ExtensionArchiveLength::new(0), None);
+        assert_eq!(
+            ExtensionArchiveLength::new(MAX_EXTENSION_ARCHIVE_BYTES)
+                .map(ExtensionArchiveLength::get),
+            Some(MAX_EXTENSION_ARCHIVE_BYTES)
+        );
+        assert_eq!(
+            ExtensionArchiveLength::new(MAX_EXTENSION_ARCHIVE_BYTES + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn payload_identity_preserves_exact_zip_evidence() {
+        let digest = archive_digest(9);
+        let payload = ExtensionPackagePayloadIdentity::acquired_zip(17, digest)
+            .expect("bounded exact archive evidence");
+        assert_eq!(
+            payload.acquired_zip_evidence(),
+            Some((ExtensionArchiveLength::new(17).unwrap(), digest))
+        );
+        assert_eq!(
+            ExtensionPackagePayloadIdentity::BundledTree.acquired_zip_evidence(),
+            None
+        );
+    }
+
+    #[test]
+    fn payload_digest_encoding_is_tagged_and_length_bound() {
+        fn encoded(payload: ExtensionPackagePayloadIdentity) -> [u8; 32] {
+            let mut digest = Sha256::new();
+            payload.update_sha256(&mut digest);
+            digest.finalize().into()
+        }
+
+        let archive = archive_digest(3);
+        let first = ExtensionPackagePayloadIdentity::acquired_zip(1, archive).unwrap();
+        let second = ExtensionPackagePayloadIdentity::acquired_zip(2, archive).unwrap();
+        assert_ne!(
+            encoded(ExtensionPackagePayloadIdentity::BundledTree),
+            encoded(first)
+        );
+        assert_ne!(encoded(first), encoded(second));
     }
 
     proptest! {

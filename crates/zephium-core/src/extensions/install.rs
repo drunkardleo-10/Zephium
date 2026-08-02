@@ -620,8 +620,9 @@ impl Error for ExtensionInstallCatalogApplyError {
 mod tests {
     use super::*;
     use crate::extensions::{
-        ExtensionArchiveDigest, ExtensionManifestDigest, ExtensionPackageRevision,
-        ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+        ExtensionArchiveDigest, ExtensionManifestDigest, ExtensionPackagePayloadIdentity,
+        ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+        MAX_EXTENSION_ARCHIVE_BYTES,
     };
     use proptest::prelude::*;
 
@@ -630,7 +631,11 @@ mod tests {
             ExtensionAuthorityId::from_bytes([authority; EXTENSION_SHA256_BYTES]),
             ExtensionPackageKey::from_bytes([key; EXTENSION_SHA256_BYTES]),
             ExtensionPackageRevision::new(revision).unwrap(),
-            ExtensionArchiveDigest::from_bytes([revision as u8; EXTENSION_SHA256_BYTES]),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                revision,
+                ExtensionArchiveDigest::from_bytes([revision as u8; EXTENSION_SHA256_BYTES]),
+            )
+            .unwrap(),
             ExtensionManifestDigest::from_bytes(
                 [revision.wrapping_add(1) as u8; EXTENSION_SHA256_BYTES],
             ),
@@ -1268,6 +1273,7 @@ mod tests {
             authority in any::<[u8; 32]>(),
             key in any::<[u8; 32]>(),
             archive in any::<[u8; 32]>(),
+            archive_length in 1_u64..=MAX_EXTENSION_ARCHIVE_BYTES,
             manifest in any::<[u8; 32]>(),
             tree in any::<[u8; 32]>(),
         ) {
@@ -1275,7 +1281,10 @@ mod tests {
                 ExtensionAuthorityId::from_bytes(authority),
                 ExtensionPackageKey::from_bytes(key),
                 ExtensionPackageRevision::INITIAL,
-                ExtensionArchiveDigest::from_bytes(archive),
+                ExtensionPackagePayloadIdentity::acquired_zip(
+                    archive_length,
+                    ExtensionArchiveDigest::from_bytes(archive),
+                ).unwrap(),
                 ExtensionManifestDigest::from_bytes(manifest),
                 ExtensionTreeDigest::from_bytes(tree),
             );

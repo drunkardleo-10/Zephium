@@ -577,8 +577,9 @@ mod tests {
         conn.execute(
             "INSERT INTO extension_installs(
                  id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
-             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, 1)",
+                 payload_kind, archive_length, archive_sha256,
+                 manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, 1, ?2, ?3, 1, 2, 17, ?4, ?5, ?6, 1)",
             params![
                 vec![1_u8; 16],
                 vec![2_u8; 32],
@@ -598,9 +599,10 @@ mod tests {
         conn.execute(
             "INSERT INTO extension_grants(
                  install_id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+                 payload_kind, archive_length, archive_sha256,
+                 manifest_sha256, tree_sha256, grant_sha256,
                  file_access, private_access
-             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 1, 1)",
+             ) VALUES (?1, 1, ?2, ?3, 1, 2, 17, ?4, ?5, ?6, ?7, 1, 1)",
             params![
                 vec![1_u8; 16],
                 vec![2_u8; 32],

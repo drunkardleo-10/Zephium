@@ -10,13 +10,12 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use zephium_core::extensions::{
-    ApiPermissionName, ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionGrantApplyError,
-    ExtensionGrantAuthority, ExtensionGrantDigest, ExtensionGrantManifestBindings,
-    ExtensionGrantMutation, ExtensionGrantRevision, ExtensionInstall,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
-    ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
-    MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_API_PERMISSION_NAME_BYTES,
+    ApiPermissionName, ExtensionAuthorityId, ExtensionGrantApplyError, ExtensionGrantAuthority,
+    ExtensionGrantDigest, ExtensionGrantManifestBindings, ExtensionGrantMutation,
+    ExtensionGrantRevision, ExtensionInstall, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionManifestDigest,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
+    EXTENSION_SHA256_BYTES, MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_API_PERMISSION_NAME_BYTES,
     MAX_EXTENSION_HOST_GRANTS, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::ExtensionInstallId;
@@ -28,7 +27,7 @@ use zephium_core::ports::store::{
 
 use super::*;
 
-// PROFILE v10 embeds these byte ceilings in immutable CHECK constraints.
+// PROFILE v12 carries these byte ceilings forward in immutable CHECK constraints.
 const _: () = assert!(MAX_EXTENSION_API_PERMISSION_NAME_BYTES == 96);
 const _: () = assert!(MAX_MATCH_PATTERN_BYTES == 2048);
 
@@ -66,20 +65,28 @@ pub(super) fn has_exact_grant_root(
     let package = install.package();
     let authority = package.authority().bytes();
     let key = package.key().bytes();
-    let archive = package.archive_sha256().bytes();
+    let payload = super::extensions::encode_package_payload(package.payload())?;
     let manifest = package.manifest_sha256().bytes();
     let tree = package.tree_sha256().bytes();
     let count = conn.query_row(
         "SELECT count(*) FROM extension_grants
          WHERE install_id = ?1
            AND authority = ?2 AND package_key = ?3 AND package_revision = ?4
-           AND archive_sha256 = ?5 AND manifest_sha256 = ?6 AND tree_sha256 = ?7",
+           AND payload_kind = ?5
+           AND (
+               (?5 = 1 AND archive_length IS NULL AND archive_sha256 IS NULL)
+               OR
+               (?5 = 2 AND archive_length = ?6 AND archive_sha256 = ?7)
+           )
+           AND manifest_sha256 = ?8 AND tree_sha256 = ?9",
         params![
             &id[..],
             &authority[..],
             &key[..],
             super::extensions::revision_i64(package.revision().get())?,
-            &archive[..],
+            payload.kind,
+            payload.archive_length,
+            payload.archive_sha256.as_ref().map(|digest| &digest[..]),
             &manifest[..],
             &tree[..],
         ],
@@ -418,7 +425,20 @@ fn load_authority(
                  CASE WHEN typeof(authority) = 'blob' AND length(authority) = 32 THEN authority END,
                  CASE WHEN typeof(package_key) = 'blob' AND length(package_key) = 32 THEN package_key END,
                  package_revision,
-                 CASE WHEN typeof(archive_sha256) = 'blob' AND length(archive_sha256) = 32 THEN archive_sha256 END,
+                 CASE WHEN
+                     (payload_kind = 1 AND archive_length IS NULL AND archive_sha256 IS NULL)
+                     OR
+                     (payload_kind = 2
+                      AND typeof(archive_length) = 'integer'
+                      AND archive_length BETWEEN 1 AND 67108864
+                      AND typeof(archive_sha256) = 'blob'
+                      AND length(archive_sha256) = 32)
+                 THEN payload_kind END,
+                 CASE WHEN payload_kind = 2 THEN archive_length END,
+                 CASE WHEN payload_kind = 2
+                            AND typeof(archive_sha256) = 'blob'
+                            AND length(archive_sha256) = 32
+                      THEN archive_sha256 END,
                  CASE WHEN typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32 THEN manifest_sha256 END,
                  CASE WHEN typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32 THEN tree_sha256 END,
                  CASE WHEN typeof(grant_sha256) = 'blob' AND length(grant_sha256) = 32 THEN grant_sha256 END,
@@ -432,12 +452,14 @@ fn load_authority(
                     row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, Option<Vec<u8>>>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, Option<Vec<u8>>>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<Vec<u8>>>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
+                    row.get::<_, Option<Vec<u8>>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             },
         )
@@ -447,7 +469,9 @@ fn load_authority(
         authority,
         key,
         package_revision,
-        archive,
+        payload_kind,
+        archive_length,
+        archive_sha256,
         manifest_digest,
         tree,
         grant_digest,
@@ -461,14 +485,16 @@ fn load_authority(
     let revision = super::extensions::revision_u64(revision)
         .and_then(ExtensionGrantRevision::new)
         .ok_or_else(|| invalid_data("extension grant revision is invalid"))?;
-    let package = decode_package(
+    let package = decode_package(DurableGrantPackageRow {
         authority,
         key,
         package_revision,
-        archive,
+        payload_kind,
+        archive_length,
+        archive_sha256,
         manifest_digest,
         tree,
-    )?;
+    })?;
     if &package != install.package() || &package != manifest.package() {
         return Err(invalid_data(
             "extension grant package identity does not match install and manifest",
@@ -502,44 +528,50 @@ fn load_authority(
     Ok(Some(authority))
 }
 
-fn decode_package(
+struct DurableGrantPackageRow {
     authority: Option<Vec<u8>>,
     key: Option<Vec<u8>>,
     package_revision: i64,
-    archive: Option<Vec<u8>>,
-    manifest: Option<Vec<u8>>,
+    payload_kind: Option<i64>,
+    archive_length: Option<i64>,
+    archive_sha256: Option<Vec<u8>>,
+    manifest_digest: Option<Vec<u8>>,
     tree: Option<Vec<u8>>,
-) -> rusqlite::Result<ExtensionPackageIdentity> {
+}
+
+fn decode_package(row: DurableGrantPackageRow) -> rusqlite::Result<ExtensionPackageIdentity> {
     let authority =
         ExtensionAuthorityId::from_bytes(super::extensions::exact_blob::<EXTENSION_SHA256_BYTES>(
-            authority,
+            row.authority,
             "extension grant authority id is invalid",
         )?);
     let key = ExtensionPackageKey::from_bytes(super::extensions::exact_blob::<
         EXTENSION_SHA256_BYTES,
-    >(key, "extension grant package key is invalid")?);
-    let revision = super::extensions::revision_u64(package_revision)
+    >(
+        row.key, "extension grant package key is invalid"
+    )?);
+    let revision = super::extensions::revision_u64(row.package_revision)
         .and_then(ExtensionPackageRevision::new)
         .ok_or_else(|| invalid_data("extension grant package revision is invalid"))?;
-    let archive = ExtensionArchiveDigest::from_bytes(super::extensions::exact_blob::<
-        EXTENSION_SHA256_BYTES,
-    >(
-        archive,
-        "extension grant archive digest is invalid",
-    )?);
+    let payload = super::extensions::decode_package_payload(
+        row.payload_kind,
+        row.archive_length,
+        row.archive_sha256,
+        "extension grant package payload identity is invalid",
+    )?;
     let manifest = ExtensionManifestDigest::from_bytes(super::extensions::exact_blob::<
         EXTENSION_SHA256_BYTES,
     >(
-        manifest,
+        row.manifest_digest,
         "extension grant manifest digest is invalid",
     )?);
-    let tree = ExtensionTreeDigest::from_bytes(super::extensions::exact_blob::<
-        EXTENSION_SHA256_BYTES,
-    >(
-        tree, "extension grant tree digest is invalid"
-    )?);
+    let tree =
+        ExtensionTreeDigest::from_bytes(super::extensions::exact_blob::<EXTENSION_SHA256_BYTES>(
+            row.tree,
+            "extension grant tree digest is invalid",
+        )?);
     Ok(ExtensionPackageIdentity::new(
-        authority, key, revision, archive, manifest, tree,
+        authority, key, revision, payload, manifest, tree,
     ))
 }
 
@@ -651,23 +683,26 @@ fn insert_authority(
     let package = projection.package();
     let package_authority = package.authority().bytes();
     let key = package.key().bytes();
-    let archive = package.archive_sha256().bytes();
+    let payload = super::extensions::encode_package_payload(package.payload())?;
     let manifest = package.manifest_sha256().bytes();
     let tree = package.tree_sha256().bytes();
     let digest = projection.digest().bytes();
     let inserted = conn.execute(
         "INSERT INTO extension_grants(
              install_id, revision, authority, package_key, package_revision,
-             archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+             payload_kind, archive_length, archive_sha256,
+             manifest_sha256, tree_sha256, grant_sha256,
              file_access, private_access
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             &id[..],
             super::extensions::revision_i64(projection.revision().get())?,
             &package_authority[..],
             &key[..],
             super::extensions::revision_i64(package.revision().get())?,
-            &archive[..],
+            payload.kind,
+            payload.archive_length,
+            payload.archive_sha256.as_ref().map(|digest| &digest[..]),
             &manifest[..],
             &tree[..],
             &digest[..],

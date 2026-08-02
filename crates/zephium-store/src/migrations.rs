@@ -796,6 +796,131 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 12,
+        up: |tx| {
+            tx.execute_batch(
+                // Versions 9-11 were an unreleased structural foundation and
+                // stored only an archive digest. They cannot truthfully be
+                // upgraded to exact {length, digest} ZIP evidence, nor can an
+                // archive digest represent a bundled release tree. Preserve
+                // the catalog clock and monotonic install-id floor, but
+                // invalidate every legacy install and subordinate grant. A
+                // package must be reinstalled through the exact v12 authority
+                // before it can activate.
+                "UPDATE extension_install_catalog
+                 SET install_id_high_water = CASE
+                     WHEN (SELECT max(id) FROM extension_installs) IS NULL
+                         THEN install_id_high_water
+                     WHEN install_id_high_water IS NULL
+                          OR install_id_high_water < (SELECT max(id) FROM extension_installs)
+                         THEN (SELECT max(id) FROM extension_installs)
+                     ELSE install_id_high_water
+                 END
+                 WHERE id = 1;
+
+                 DELETE FROM extension_grant_api_permissions;
+                 DELETE FROM extension_grant_host_permissions;
+                 DELETE FROM extension_grants;
+                 DELETE FROM extension_installs;
+
+                 DROP TABLE extension_grant_api_permissions;
+                 DROP TABLE extension_grant_host_permissions;
+                 DROP TABLE extension_grants;
+                 DROP TABLE extension_installs;
+
+                 CREATE TABLE extension_installs (
+                     id BLOB PRIMARY KEY
+                         CHECK (typeof(id) = 'blob' AND length(id) = 16),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     authority BLOB NOT NULL
+                         CHECK (typeof(authority) = 'blob' AND length(authority) = 32),
+                     package_key BLOB NOT NULL
+                         CHECK (typeof(package_key) = 'blob' AND length(package_key) = 32),
+                     package_revision INTEGER NOT NULL
+                         CHECK (package_revision BETWEEN 1 AND 9223372036854775807),
+                     payload_kind INTEGER NOT NULL
+                         CHECK (payload_kind IN (1, 2)),
+                     archive_length INTEGER,
+                     archive_sha256 BLOB,
+                     manifest_sha256 BLOB NOT NULL
+                         CHECK (typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32),
+                     tree_sha256 BLOB NOT NULL
+                         CHECK (typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32),
+                     desired_enabled INTEGER NOT NULL
+                         CHECK (desired_enabled IN (0, 1)),
+                     CHECK (
+                         (payload_kind = 1
+                          AND archive_length IS NULL
+                          AND archive_sha256 IS NULL)
+                         OR
+                         (payload_kind = 2
+                          AND typeof(archive_length) = 'integer'
+                          AND archive_length BETWEEN 1 AND 67108864
+                          AND typeof(archive_sha256) = 'blob'
+                          AND length(archive_sha256) = 32)
+                     ),
+                     UNIQUE(authority, package_key)
+                 ) STRICT;
+
+                 CREATE TABLE extension_grants (
+                     install_id BLOB PRIMARY KEY
+                         REFERENCES extension_installs(id) ON DELETE CASCADE
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     authority BLOB NOT NULL
+                         CHECK (typeof(authority) = 'blob' AND length(authority) = 32),
+                     package_key BLOB NOT NULL
+                         CHECK (typeof(package_key) = 'blob' AND length(package_key) = 32),
+                     package_revision INTEGER NOT NULL
+                         CHECK (package_revision BETWEEN 1 AND 9223372036854775807),
+                     payload_kind INTEGER NOT NULL
+                         CHECK (payload_kind IN (1, 2)),
+                     archive_length INTEGER,
+                     archive_sha256 BLOB,
+                     manifest_sha256 BLOB NOT NULL
+                         CHECK (typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32),
+                     tree_sha256 BLOB NOT NULL
+                         CHECK (typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32),
+                     grant_sha256 BLOB NOT NULL
+                         CHECK (typeof(grant_sha256) = 'blob' AND length(grant_sha256) = 32),
+                     file_access INTEGER NOT NULL CHECK (file_access IN (0, 1)),
+                     private_access INTEGER NOT NULL CHECK (private_access IN (0, 1)),
+                     CHECK (
+                         (payload_kind = 1
+                          AND archive_length IS NULL
+                          AND archive_sha256 IS NULL)
+                         OR
+                         (payload_kind = 2
+                          AND typeof(archive_length) = 'integer'
+                          AND archive_length BETWEEN 1 AND 67108864
+                          AND typeof(archive_sha256) = 'blob'
+                          AND length(archive_sha256) = 32)
+                     )
+                 ) STRICT;
+                 CREATE TABLE extension_grant_api_permissions (
+                     install_id BLOB NOT NULL
+                         REFERENCES extension_grants(install_id) ON DELETE CASCADE
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     name TEXT NOT NULL
+                         CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 96
+                                AND instr(CAST(name AS BLOB), X'00') = 0),
+                     PRIMARY KEY (install_id, name)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE TABLE extension_grant_host_permissions (
+                     install_id BLOB NOT NULL
+                         REFERENCES extension_grants(install_id) ON DELETE CASCADE
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     pattern TEXT NOT NULL
+                         CHECK (length(CAST(pattern AS BLOB)) BETWEEN 1 AND 2048
+                                AND instr(CAST(pattern AS BLOB), X'00') = 0),
+                     PRIMARY KEY (install_id, pattern)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -834,7 +959,7 @@ mod tests {
         )
         .unwrap();
 
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..10]).unwrap();
         let roots: i64 = conn
             .query_row("SELECT count(*) FROM extension_grants", [], |row| {
                 row.get(0)
@@ -906,7 +1031,7 @@ mod tests {
         )
         .unwrap();
 
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..10]).unwrap();
         let desired_enabled: i64 = conn
             .query_row(
                 "SELECT desired_enabled FROM extension_installs",
@@ -946,7 +1071,7 @@ mod tests {
                 .unwrap();
             }
 
-            apply(&mut conn, PROFILE).unwrap();
+            apply(&mut conn, &PROFILE[..11]).unwrap();
             let high_water: Option<Vec<u8>> = conn
                 .query_row(
                     "SELECT install_id_high_water
@@ -969,7 +1094,7 @@ mod tests {
     #[test]
     fn profile_v11_rejects_malformed_install_id_high_water() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..11]).unwrap();
         for value in [vec![1_u8; 15], vec![2_u8; 17]] {
             assert!(conn
                 .execute(
@@ -989,10 +1114,178 @@ mod tests {
     }
 
     #[test]
+    fn profile_v12_invalidates_inexact_legacy_authority_and_preserves_nonreuse_floor() {
+        use zephium_core::extensions::{
+            ExtensionAuthorityId, ExtensionInstallCatalog, ExtensionInstallCatalogApplyError,
+            ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
+            ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
+            ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
+        };
+        use zephium_core::ids::ExtensionInstallId;
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &PROFILE[..11]).unwrap();
+        let legacy_id = 42_u128;
+        let id = legacy_id.to_be_bytes().to_vec();
+        conn.execute(
+            "UPDATE extension_install_catalog SET revision = 7 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_installs(
+                 id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, 3, ?2, ?3, 4, ?4, ?5, ?6, 1)",
+            rusqlite::params![
+                &id,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_grants(
+                 install_id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+                 file_access, private_access
+             ) VALUES (?1, 5, ?2, ?3, 4, ?4, ?5, ?6, ?7, 1, 1)",
+            rusqlite::params![
+                &id,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                vec![7_u8; 32],
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_grant_api_permissions(install_id, name)
+             VALUES (?1, 'storage')",
+            [&id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_grant_host_permissions(install_id, pattern)
+             VALUES (?1, 'https://example.com/*')",
+            [&id],
+        )
+        .unwrap();
+
+        apply(&mut conn, PROFILE).unwrap();
+
+        let (revision, high_water): (i64, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT revision, install_id_high_water
+                 FROM extension_install_catalog WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, 7);
+        assert_eq!(high_water, Some(id.clone()));
+        for table in [
+            "extension_installs",
+            "extension_grants",
+            "extension_grant_api_permissions",
+            "extension_grant_host_permissions",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "v12 retained legacy authority in {table}");
+        }
+
+        let revision = ExtensionInstallCatalogRevision::new(7).unwrap();
+        let catalog = ExtensionInstallCatalog::from_persisted(
+            revision,
+            Some(ExtensionInstallId::from(legacy_id)),
+            Vec::new(),
+        )
+        .unwrap();
+        let package = ExtensionPackageIdentity::new(
+            ExtensionAuthorityId::from_bytes([8; 32]),
+            ExtensionPackageKey::from_bytes([9; 32]),
+            ExtensionPackageRevision::INITIAL,
+            ExtensionPackagePayloadIdentity::BundledTree,
+            ExtensionManifestDigest::from_bytes([10; 32]),
+            ExtensionTreeDigest::from_bytes([11; 32]),
+        );
+        assert!(matches!(
+            catalog.apply(
+                revision,
+                ExtensionInstallCatalogMutation::Install {
+                    id: ExtensionInstallId::from(legacy_id),
+                    package,
+                },
+            ),
+            Err(ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater { .. })
+        ));
+    }
+
+    #[test]
+    fn profile_v12_requires_exact_payload_evidence_shape() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+
+        let insert = |id: u8,
+                      payload_kind: i64,
+                      archive_length: Option<i64>,
+                      archive_sha256: Option<Vec<u8>>| {
+            conn.execute(
+                "INSERT INTO extension_installs(
+                     id, revision, authority, package_key, package_revision,
+                     payload_kind, archive_length, archive_sha256,
+                     manifest_sha256, tree_sha256, desired_enabled
+                 ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, 0)",
+                rusqlite::params![
+                    vec![id; 16],
+                    vec![id; 32],
+                    vec![id.wrapping_add(1); 32],
+                    payload_kind,
+                    archive_length,
+                    archive_sha256,
+                    vec![id.wrapping_add(2); 32],
+                    vec![id.wrapping_add(3); 32],
+                ],
+            )
+        };
+
+        assert!(insert(1, 1, None, None).is_ok());
+        assert!(insert(2, 2, Some(1), Some(vec![2; 32])).is_ok());
+        assert!(insert(3, 2, Some(67_108_864), Some(vec![3; 32])).is_ok());
+        for (index, (kind, length, digest)) in [
+            (1, Some(1), None),
+            (1, None, Some(vec![3; 32])),
+            (2, None, Some(vec![4; 32])),
+            (2, Some(0), Some(vec![5; 32])),
+            (2, Some(67_108_865), Some(vec![6; 32])),
+            (2, Some(1), Some(vec![7; 31])),
+            (3, None, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                insert(index as u8 + 10, kind, length, digest).is_err(),
+                "accepted malformed payload evidence case {index}"
+            );
+        }
+    }
+
+    #[test]
     fn profile_v10_rejects_malformed_grant_roots_children_and_orphans() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..10]).unwrap();
         let id = vec![1_u8; 16];
         conn.execute(
             "INSERT INTO extension_installs(
@@ -1463,7 +1756,7 @@ mod tests {
     #[test]
     fn profile_v9_schema_rejects_malformed_structural_identity_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..9]).unwrap();
 
         let cases = [
             (
@@ -1626,7 +1919,7 @@ mod tests {
     #[test]
     fn profile_v9_enforces_one_update_line_per_profile() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..9]).unwrap();
         for id in [vec![1_u8; 16], vec![2_u8; 16]] {
             let result = conn.execute(
                 "INSERT INTO extension_installs(
