@@ -551,7 +551,7 @@ mod principal_isolation_probe {
         AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
     };
     use serde_json::Value;
-    use zephium_core::ids::{ScriptId, ScriptPrincipalId};
+    use zephium_core::ids::{ExtensionInstallId, ScriptId, UserscriptId};
     use zephium_core::injection::MatchSet;
     use zephium_core::ports::engine::{RunAt, ScriptOwner, UserScript, World};
 
@@ -592,9 +592,9 @@ mod principal_isolation_probe {
 
     fn principals() -> [ScriptPrincipal; 3] {
         [
-            ScriptPrincipal::Userscript(ScriptPrincipalId::from(1)),
-            ScriptPrincipal::Userscript(ScriptPrincipalId::from(2)),
-            ScriptPrincipal::Extension(ScriptPrincipalId::from(1)),
+            ScriptPrincipal::Userscript(UserscriptId::from(1)),
+            ScriptPrincipal::Userscript(UserscriptId::from(2)),
+            ScriptPrincipal::Extension(ExtensionInstallId::from(1)),
         ]
     }
 
@@ -1003,15 +1003,15 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
 
-    use zephium_core::ids::{ProfileId, ScriptId, ScriptPrincipalId};
+    use zephium_core::ids::{ExtensionInstallId, ProfileId, ScriptId, UserscriptId};
     use zephium_core::injection::{MatchOptions, MatchSet};
     use zephium_core::ports::engine::{RunAt, ScriptOwner, UserScript, World};
 
     fn test_principals() -> [ScriptPrincipal; 3] {
         [
-            ScriptPrincipal::Userscript(ScriptPrincipalId::from(1)),
-            ScriptPrincipal::Userscript(ScriptPrincipalId::from(2)),
-            ScriptPrincipal::Extension(ScriptPrincipalId::from(1)),
+            ScriptPrincipal::Userscript(UserscriptId::from(1)),
+            ScriptPrincipal::Userscript(UserscriptId::from(2)),
+            ScriptPrincipal::Extension(ExtensionInstallId::from(1)),
         ]
     }
 

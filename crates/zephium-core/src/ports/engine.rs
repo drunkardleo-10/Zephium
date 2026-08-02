@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::geometry::Rect;
-use crate::ids::{ItemId, ProfileId, ScriptId, ScriptPrincipalId, WindowId};
+use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
 pub use crate::permissions::PagePermissionKind as PermissionKind;
 use crate::runtime_security::RuntimeSecurityAdvisories;
@@ -39,12 +39,17 @@ pub enum ContentScope {
 ///
 /// The variant is part of the identity: a userscript and extension can never
 /// alias merely because their persistent ids happen to contain equal bytes.
+/// `UserscriptId` is the durable catalog-row identity and
+/// `ExtensionInstallId` is the durable per-profile installation identity;
+/// source/package updates retain those ids, while delete-and-reinstall must
+/// mint a new domain id. [`ScriptId`] remains owner-local registration state
+/// and must never be promoted into a security principal.
 /// Native adapters derive world and handler names from this value and must
 /// never accept a principal supplied by page JavaScript.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ScriptPrincipal {
-    Userscript(ScriptPrincipalId),
-    Extension(ScriptPrincipalId),
+    Userscript(UserscriptId),
+    Extension(ExtensionInstallId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -841,7 +846,7 @@ mod user_content_tests {
     use super::*;
 
     fn script(id: u128) -> UserScript {
-        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(id + 1_000));
+        let principal = ScriptPrincipal::Userscript(UserscriptId::from(id + 1_000));
         UserScript {
             id: ScriptId::from(id),
             owner: ScriptOwner::Principal(principal),
@@ -856,8 +861,7 @@ mod user_content_tests {
     #[test]
     fn user_content_rejects_cross_principal_worlds() {
         let mut candidate = script(1);
-        candidate.world =
-            World::Isolated(ScriptPrincipal::Userscript(ScriptPrincipalId::from(9_999)));
+        candidate.world = World::Isolated(ScriptPrincipal::Userscript(UserscriptId::from(9_999)));
         let failure = UserContent {
             scripts: vec![candidate],
             styles: Vec::new(),
@@ -947,7 +951,7 @@ mod user_content_tests {
     fn script_identity_is_owner_qualified() {
         let first = script(50);
         let mut second = script(50);
-        let second_principal = ScriptPrincipal::Extension(ScriptPrincipalId::from(99_999));
+        let second_principal = ScriptPrincipal::Extension(ExtensionInstallId::from(99_999));
         second.owner = ScriptOwner::Principal(second_principal);
         second.world = World::Isolated(second_principal);
         assert_ne!(first.key(), second.key());
@@ -960,8 +964,24 @@ mod user_content_tests {
     }
 
     #[test]
+    fn durable_principal_survives_edits_but_not_delete_and_reinstall() {
+        let original = script(60);
+        let mut edited = original.clone();
+        edited.source = "globalThis.edited = true".into();
+        assert_eq!(original.key(), edited.key());
+
+        let reinstalled_principal = ScriptPrincipal::Userscript(UserscriptId::from(61_001));
+        let mut reinstalled = edited;
+        reinstalled.owner = ScriptOwner::Principal(reinstalled_principal);
+        reinstalled.world = World::Isolated(reinstalled_principal);
+
+        assert_eq!(original.id, reinstalled.id);
+        assert_ne!(original.key(), reinstalled.key());
+    }
+
+    #[test]
     fn per_owner_script_count_is_bounded_below_scope_count() {
-        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(50_000));
+        let principal = ScriptPrincipal::Userscript(UserscriptId::from(50_000));
         let content = UserContent {
             scripts: (0..=MAX_USER_SCRIPTS_PER_OWNER)
                 .map(|index| {
@@ -981,7 +1001,7 @@ mod user_content_tests {
 
     #[test]
     fn retained_budget_counts_compiled_patterns_and_css_expansion() {
-        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(123));
+        let principal = ScriptPrincipal::Userscript(UserscriptId::from(123));
         let styles = (0..12)
             .map(|index| UserStyle {
                 id: ScriptId::from(index + 10_000),

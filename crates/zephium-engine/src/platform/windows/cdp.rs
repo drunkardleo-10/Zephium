@@ -1510,14 +1510,14 @@ fn validation_error(rejection: CdpRejection) -> windows_core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zephium_core::ids::ScriptPrincipalId;
+    use zephium_core::ids::{ExtensionInstallId, UserscriptId};
 
     fn userscript(value: u128) -> ScriptPrincipal {
-        ScriptPrincipal::Userscript(ScriptPrincipalId::from(value))
+        ScriptPrincipal::Userscript(UserscriptId::from(value))
     }
 
     fn extension(value: u128) -> ScriptPrincipal {
-        ScriptPrincipal::Extension(ScriptPrincipalId::from(value))
+        ScriptPrincipal::Extension(ExtensionInstallId::from(value))
     }
 
     fn spec(principal: ScriptPrincipal) -> CdpPrincipalSpec {

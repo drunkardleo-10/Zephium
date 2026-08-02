@@ -978,7 +978,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use webkit2gtk::{WebContextExt, WebViewExt};
     use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
-    use zephium_core::ids::{ProfileId, ScriptId, ScriptPrincipalId};
+    use zephium_core::ids::{ExtensionInstallId, ProfileId, ScriptId, UserscriptId};
     use zephium_core::injection::{MatchOptions, MatchSet};
     use zephium_core::ports::engine::{
         RunAt, ScriptOwner, ScriptPrincipal, UserScript as EngineUserScript, World,
@@ -986,9 +986,9 @@ mod tests {
 
     fn test_principals() -> [ScriptPrincipal; 3] {
         [
-            ScriptPrincipal::Userscript(ScriptPrincipalId::from(1)),
-            ScriptPrincipal::Userscript(ScriptPrincipalId::from(2)),
-            ScriptPrincipal::Extension(ScriptPrincipalId::from(1)),
+            ScriptPrincipal::Userscript(UserscriptId::from(1)),
+            ScriptPrincipal::Userscript(UserscriptId::from(2)),
+            ScriptPrincipal::Extension(ExtensionInstallId::from(1)),
         ]
     }
 

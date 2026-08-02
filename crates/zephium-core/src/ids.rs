@@ -71,7 +71,6 @@ ulid_id!(ProfileId);
 ulid_id!(ExtensionInstallId);
 ulid_id!(PagePermissionGrantId);
 ulid_id!(ScriptId);
-ulid_id!(ScriptPrincipalId);
 ulid_id!(UserscriptId);
 
 pub type WindowId = u64;

@@ -922,7 +922,7 @@ impl EngineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zephium_core::ids::{ProfileId, ScriptPrincipalId};
+    use zephium_core::ids::{ExtensionInstallId, ProfileId, UserscriptId};
     use zephium_core::ports::engine::{ScriptPrincipal, UserScriptRefusalReason};
 
     fn generation(value: u64) -> UserContentGeneration {
@@ -930,7 +930,7 @@ mod tests {
     }
 
     fn test_script(id: u128) -> UserScript {
-        let principal = ScriptPrincipal::Userscript(ScriptPrincipalId::from(id + 100));
+        let principal = ScriptPrincipal::Userscript(UserscriptId::from(id + 100));
         UserScript {
             id: ScriptId::from(id),
             owner: ScriptOwner::Principal(principal),
@@ -1242,7 +1242,6 @@ mod tests {
 
     #[test]
     fn retained_registry_has_a_hard_process_budget() {
-        use zephium_core::ids::ScriptPrincipalId;
         use zephium_core::ports::engine::{
             ScriptPrincipal, MAX_USER_CONTENT_RETAINED_BYTES_PROCESS, MAX_USER_SCRIPT_BYTES,
         };
@@ -1251,7 +1250,7 @@ mod tests {
         let make_content = |seed: u128| {
             let mut scripts = Vec::new();
             for owner_index in 0..4_u128 {
-                let principal = ScriptPrincipal::Extension(ScriptPrincipalId::from(
+                let principal = ScriptPrincipal::Extension(ExtensionInstallId::from(
                     seed * 100 + owner_index + 1,
                 ));
                 for script_index in 0..2_u128 {
