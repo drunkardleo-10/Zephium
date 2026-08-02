@@ -769,6 +769,33 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 11,
+        up: |tx| {
+            tx.execute_batch(
+                // A single monotonic identity floor prevents identities
+                // deleted after this migration from ever being reused without
+                // retaining an unbounded tombstone set. Profile schemas 9 and
+                // 10 predate every native-extension reconciliation journal,
+                // so they cannot leave durable native work for an already
+                // deleted row. Big-endian ULID bytes preserve numeric order,
+                // making max(id) the exact recoverable upgrade floor.
+                "ALTER TABLE extension_install_catalog
+                 ADD COLUMN install_id_high_water BLOB
+                     CHECK (
+                         install_id_high_water IS NULL OR (
+                             typeof(install_id_high_water) = 'blob'
+                             AND length(install_id_high_water) = 16
+                         )
+                     );
+                 UPDATE extension_install_catalog
+                 SET install_id_high_water = (
+                     SELECT max(id) FROM extension_installs
+                 )
+                 WHERE id = 1;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -894,6 +921,71 @@ mod tests {
             .unwrap();
         assert_eq!(desired_enabled, 1);
         assert_eq!(grants, 0, "migration must never backfill grant authority");
+    }
+
+    #[test]
+    fn profile_v11_derives_exact_install_id_high_water_from_legacy_rows() {
+        for ids in [Vec::new(), vec![5_u128, 10, 7]] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            apply(&mut conn, &PROFILE[..10]).unwrap();
+            for (index, id) in ids.iter().copied().enumerate() {
+                conn.execute(
+                    "INSERT INTO extension_installs(
+                         id, revision, authority, package_key, package_revision,
+                         archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+                     ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, 0)",
+                    rusqlite::params![
+                        id.to_be_bytes().to_vec(),
+                        vec![index as u8 + 1; 32],
+                        vec![index as u8 + 11; 32],
+                        vec![index as u8 + 21; 32],
+                        vec![index as u8 + 31; 32],
+                        vec![index as u8 + 41; 32],
+                    ],
+                )
+                .unwrap();
+            }
+
+            apply(&mut conn, PROFILE).unwrap();
+            let high_water: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT install_id_high_water
+                     FROM extension_install_catalog WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                high_water,
+                ids.iter().max().map(|id| id.to_be_bytes().to_vec())
+            );
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 11);
+        }
+    }
+
+    #[test]
+    fn profile_v11_rejects_malformed_install_id_high_water() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        for value in [vec![1_u8; 15], vec![2_u8; 17]] {
+            assert!(conn
+                .execute(
+                    "UPDATE extension_install_catalog
+                     SET install_id_high_water = ?1 WHERE id = 1",
+                    [value],
+                )
+                .is_err());
+        }
+        assert!(conn
+            .execute(
+                "UPDATE extension_install_catalog
+                 SET install_id_high_water = 1 WHERE id = 1",
+                [],
+            )
+            .is_err());
     }
 
     #[test]

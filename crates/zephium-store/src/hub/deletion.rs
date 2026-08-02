@@ -590,6 +590,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
+            "UPDATE extension_install_catalog
+             SET install_id_high_water = ?1 WHERE id = 1",
+            [vec![1_u8; 16]],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO extension_grants(
                  install_id, revision, authority, package_key, package_revision,
                  archive_sha256, manifest_sha256, tree_sha256, grant_sha256,

@@ -59,6 +59,7 @@ impl Hub {
         let tx = conn.transaction()?;
         let current = load_catalog(&tx)?;
         let current_revision = current.revision();
+        let current_high_water = current.install_id_high_water();
         let application = match current.apply(expected, mutation.clone()) {
             Ok(application) => application,
             Err(
@@ -78,6 +79,7 @@ impl Hub {
             ) => return Ok(ExtensionInstallCatalogMutationOutcome::RevisionExhausted),
             Err(
                 ExtensionInstallCatalogApplyError::InstallAlreadyExists(_)
+                | ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater { .. }
                 | ExtensionInstallCatalogApplyError::InstallNotFound(_)
                 | ExtensionInstallCatalogApplyError::PackageAlreadyInstalled { .. }
                 | ExtensionInstallCatalogApplyError::CatalogRejected(_),
@@ -86,6 +88,7 @@ impl Hub {
 
         let applied = ExtensionInstallCatalogMutationApplied {
             catalog_revision: application.catalog().revision(),
+            install_id_high_water: application.catalog().install_id_high_water(),
             install: application.install().cloned().map(Box::new),
         };
         if matches!(
@@ -163,12 +166,17 @@ impl Hub {
             }
         }
 
+        let current_high_water_bytes = current_high_water.map(ExtensionInstallId::bytes);
+        let next_high_water_bytes = applied.install_id_high_water.map(ExtensionInstallId::bytes);
         let catalog_updated = tx.execute(
-            "UPDATE extension_install_catalog SET revision = ?2
-             WHERE id = 1 AND revision = ?1",
+            "UPDATE extension_install_catalog
+             SET revision = ?2, install_id_high_water = ?3
+             WHERE id = 1 AND revision = ?1 AND install_id_high_water IS ?4",
             params![
                 revision_i64(current_revision.get())?,
                 revision_i64(applied.catalog_revision.get())?,
+                next_high_water_bytes.as_ref().map(|bytes| &bytes[..]),
+                current_high_water_bytes.as_ref().map(|bytes| &bytes[..]),
             ],
         )?;
         if catalog_updated != 1 {
@@ -238,11 +246,24 @@ fn insert_install(conn: &Connection, install: &ExtensionInstall) -> rusqlite::Re
 }
 
 pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInstallCatalog> {
-    let (state_rows, raw_revision): (i64, Option<i64>) = conn.query_row(
-        "SELECT count(*), CASE WHEN count(*) = 1 THEN max(revision) END
+    let (state_rows, raw_revision, high_water_is_null, raw_high_water): (
+        i64,
+        Option<i64>,
+        i64,
+        Option<Vec<u8>>,
+    ) = conn.query_row(
+        "SELECT
+             count(*),
+             CASE WHEN count(*) = 1 THEN max(revision) END,
+             CASE WHEN count(*) = 1 THEN max(install_id_high_water IS NULL) ELSE 0 END,
+             CASE WHEN count(*) = 1 THEN max(
+                 CASE WHEN typeof(install_id_high_water) = 'blob'
+                            AND length(install_id_high_water) = 16
+                      THEN install_id_high_water END
+             ) END
          FROM extension_install_catalog",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     if state_rows != 1 {
         return Err(invalid_data(
@@ -253,6 +274,16 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
         .and_then(revision_u64)
         .and_then(ExtensionInstallCatalogRevision::new)
         .ok_or_else(|| invalid_data("extension install catalog revision is invalid"))?;
+    let install_id_high_water = match (high_water_is_null, raw_high_water) {
+        (1, None) => None,
+        (0, Some(bytes)) => Some(ExtensionInstallId::from(u128::from_be_bytes(exact_blob::<
+            16,
+        >(
+            Some(bytes),
+            "extension install-id high-water is invalid",
+        )?))),
+        _ => return Err(invalid_data("extension install-id high-water is invalid")),
+    };
 
     let count = conn.query_row("SELECT count(*) FROM extension_installs", [], |row| {
         row.get::<_, i64>(0)
@@ -357,7 +388,7 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
             "extension install catalog changed while loading",
         ));
     }
-    ExtensionInstallCatalog::new(revision, installs)
+    ExtensionInstallCatalog::from_persisted(revision, install_id_high_water, installs)
         .map_err(|_| invalid_data("extension install catalog is invalid"))
 }
 
@@ -419,6 +450,13 @@ mod tests {
     }
 
     fn insert_raw(conn: &Connection, row: RawInstall) {
+        // Keep the catalog authority valid so each test isolates the exact
+        // row field it corrupts. The all-ones floor exceeds every fixture id.
+        conn.execute(
+            "UPDATE extension_install_catalog SET install_id_high_water = ?1 WHERE id = 1",
+            [vec![u8::MAX; 16]],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO extension_installs(
                  id, revision, authority, package_key, package_revision,
@@ -502,6 +540,41 @@ mod tests {
                     .unwrap();
             }
             assert!(load_catalog(&conn).is_err());
+        }
+    }
+
+    #[test]
+    fn load_rejects_malformed_or_regressed_install_id_high_water() {
+        for corruption in ["malformed", "missing", "lower"] {
+            let conn = database();
+            conn.pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            insert_raw(&conn, RawInstall::valid(10, 2, 3));
+            match corruption {
+                "malformed" => conn
+                    .execute(
+                        "UPDATE extension_install_catalog
+                         SET install_id_high_water = ?1 WHERE id = 1",
+                        [vec![1_u8; 15]],
+                    )
+                    .unwrap(),
+                "missing" => conn
+                    .execute(
+                        "UPDATE extension_install_catalog
+                         SET install_id_high_water = NULL WHERE id = 1",
+                        [],
+                    )
+                    .unwrap(),
+                "lower" => conn
+                    .execute(
+                        "UPDATE extension_install_catalog
+                         SET install_id_high_water = ?1 WHERE id = 1",
+                        [9_u128.to_be_bytes().to_vec()],
+                    )
+                    .unwrap(),
+                _ => unreachable!(),
+            };
+            assert!(load_catalog(&conn).is_err(), "accepted {corruption} floor");
         }
     }
 

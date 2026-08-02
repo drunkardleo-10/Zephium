@@ -1069,6 +1069,7 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
         };
         let personal_install = installed.install.unwrap();
         assert_eq!(installed.catalog_revision.get(), 2);
+        assert_eq!(installed.install_id_high_water, Some(personal_id));
         assert_eq!(personal_install.id(), personal_id);
         assert_eq!(personal_install.package(), &package);
         assert_eq!(
@@ -1224,6 +1225,7 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
         panic!("durable extension catalog could not be reopened");
     };
     assert_eq!(reopened.revision(), final_personal_revision);
+    assert_eq!(reopened.install_id_high_water(), Some(personal_id));
     assert_eq!(reopened.installs().len(), 1);
     let reopened_install = &reopened.installs()[0];
     assert_eq!(reopened_install.id(), personal_id);
@@ -1244,13 +1246,51 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
         panic!("extension deletion was not applied");
     };
     assert!(deleted.install.is_none());
+    assert_eq!(
+        store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+
+    let store = SqliteStore::open(dir.path()).unwrap();
     let ExtensionInstallCatalogLoadOutcome::Loaded(empty) =
         load_extension_installs(&store, personal)
     else {
-        panic!("deleted extension catalog could not be loaded");
+        panic!("deleted extension catalog could not be reopened");
     };
     assert_eq!(empty.revision(), deleted.catalog_revision);
     assert!(empty.installs().is_empty());
+    assert_eq!(empty.install_id_high_water(), Some(personal_id));
+    for refused in [ExtensionInstallId::from(70), personal_id] {
+        assert_eq!(
+            mutate_extension_installs(
+                &store,
+                personal,
+                empty.revision(),
+                ExtensionInstallCatalogMutation::Install {
+                    id: refused,
+                    package: extension_package(91, 92, 1),
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::Invalid,
+            "deleted or lower install identity was reusable after restart"
+        );
+    }
+    let next = mutate_extension_installs(
+        &store,
+        personal,
+        empty.revision(),
+        ExtensionInstallCatalogMutation::Install {
+            id: ExtensionInstallId::from(74),
+            package: extension_package(91, 92, 1),
+        },
+    );
+    let ExtensionInstallCatalogMutationOutcome::Applied(next) = next else {
+        panic!("strictly newer install identity was refused");
+    };
+    assert_eq!(
+        next.install_id_high_water,
+        Some(ExtensionInstallId::from(74))
+    );
 }
 
 #[test]
@@ -1412,9 +1452,23 @@ fn extension_install_commit_ambiguity_requires_exact_load_reconciliation() {
         panic!("ambiguous extension commit could not be reconciled");
     };
     assert_eq!(reconciled.revision().get(), 2);
+    assert_eq!(reconciled.install_id_high_water(), Some(id));
     assert_eq!(reconciled.installs().len(), 1);
     assert_eq!(reconciled.installs()[0].id(), id);
     assert_eq!(reconciled.installs()[0].package(), &package);
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            reconciled.revision(),
+            ExtensionInstallCatalogMutation::Install {
+                id: ExtensionInstallId::from(80),
+                package: extension_package(33, 34, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Invalid,
+        "ambiguous settlement lost its durable install-id floor"
+    );
 }
 
 #[test]

@@ -233,6 +233,9 @@ pub enum ExtensionInstallCatalogLoadOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionInstallCatalogMutationApplied {
     pub catalog_revision: ExtensionInstallCatalogRevision,
+    /// Greatest install id durably admitted by this profile, including rows
+    /// since deleted. Future install ids must compare strictly greater.
+    pub install_id_high_water: Option<ExtensionInstallId>,
     /// The exact durable row after install/enablement. Deletion returns
     /// `None`; callers retain the mutation's stable install id for
     /// reconciliation.
