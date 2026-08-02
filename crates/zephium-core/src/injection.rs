@@ -692,6 +692,27 @@ struct MatchPatternInner {
     kind: PatternKind,
 }
 
+const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * std::mem::size_of::<usize>();
+const RETAINED_ARC_COUNTER_BYTES: usize = 2 * std::mem::size_of::<usize>();
+const MAX_MATCH_PATTERN_LITERAL_SEGMENTS: usize = MAX_MATCH_PATTERN_WILDCARDS + 1;
+const MAX_MATCH_PATTERN_HEAP_ALLOCATIONS: usize = 6 + 2 * MAX_MATCH_PATTERN_LITERAL_SEGMENTS;
+const MATCH_PATTERN_FIXED_PADDING_BUDGET_BYTES: usize = 128;
+
+/// Conservative upper bound for one valid compiled [`MatchPattern`].
+///
+/// The bound covers the Arc handle/allocation, canonical string, worst-case
+/// domain and path copies, segment slice, every literal/failure-table
+/// allocation, Chrome directory-prefix copy, and fixed allocator/alignment
+/// padding. It intentionally charges shared Arc state to every owning policy
+/// snapshot so admission never depends on incidental sharing.
+pub const MAX_MATCH_PATTERN_RETAINED_BUDGET_BYTES: usize = std::mem::size_of::<MatchPattern>()
+    + std::mem::size_of::<MatchPatternInner>()
+    + RETAINED_ARC_COUNTER_BYTES
+    + MAX_MATCH_PATTERN_HEAP_ALLOCATIONS * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES
+    + MAX_MATCH_PATTERN_LITERAL_SEGMENTS * std::mem::size_of::<LiteralSegment>()
+    + 7 * MAX_MATCH_PATTERN_BYTES
+    + MATCH_PATTERN_FIXED_PADDING_BUDGET_BYTES;
+
 impl MatchPattern {
     /// Parses and precompiles one match pattern.
     pub fn parse(pattern: &str) -> Result<Self, MatchPatternError> {
@@ -768,6 +789,57 @@ impl MatchPattern {
     /// Returns the canonical form retained by the matcher.
     pub fn as_str(&self) -> &str {
         &self.inner.canonical
+    }
+
+    /// Conservative retained-memory charge for this compiled matcher.
+    ///
+    /// This is the canonical accounting API for every registry or authority
+    /// retaining a [`MatchPattern`]. It counts the inline Arc handle and
+    /// charges the complete shared allocation to this owner, including parsed
+    /// host/path state, literal segments, and `u16` KMP failure tables.
+    pub fn retained_budget_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+            .saturating_add(RETAINED_ARC_COUNTER_BYTES)
+            .saturating_add(std::mem::size_of::<MatchPatternInner>())
+            .saturating_add(retained_boxed_bytes(self.inner.canonical.len()));
+
+        if let PatternKind::Standard { host, path, .. } = &self.inner.kind {
+            if let Some(host) = host {
+                let domain_bytes = match host {
+                    HostPattern::Any => 0,
+                    HostPattern::Exact(CanonicalHost::Domain(domain)) => domain.len(),
+                    HostPattern::Exact(CanonicalHost::Ipv4(_) | CanonicalHost::Ipv6(_)) => 0,
+                    HostPattern::Subdomains(domain) => domain.len(),
+                };
+                if domain_bytes != 0 {
+                    bytes = bytes.saturating_add(retained_boxed_bytes(domain_bytes));
+                }
+            }
+            bytes = bytes
+                .saturating_add(retained_boxed_bytes(path.pattern.len()))
+                .saturating_add(retained_boxed_bytes(
+                    path.segments
+                        .len()
+                        .saturating_mul(std::mem::size_of::<LiteralSegment>()),
+                ));
+            for segment in &path.segments {
+                bytes = bytes
+                    .saturating_add(retained_boxed_bytes(segment.bytes.len()))
+                    .saturating_add(retained_boxed_bytes(
+                        segment
+                            .failure
+                            .len()
+                            .saturating_mul(std::mem::size_of::<u16>()),
+                    ));
+            }
+            if let Some(prefix) = &path.chrome_directory_prefix {
+                bytes = bytes.saturating_add(retained_boxed_bytes(prefix.len()));
+            }
+        }
+
+        debug_assert!(bytes <= MAX_MATCH_PATTERN_RETAINED_BUDGET_BYTES);
+        bytes
     }
 
     /// Returns the already parsed canonical components.
@@ -873,6 +945,10 @@ impl MatchPattern {
     }
 }
 
+const fn retained_boxed_bytes(payload_bytes: usize) -> usize {
+    RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES.saturating_add(payload_bytes)
+}
+
 impl TryFrom<&str> for MatchPattern {
     type Error = MatchPatternError;
 
@@ -933,8 +1009,8 @@ impl<'a> FrameMatchContext<'a> {
 /// every supported page must opt in with [`MatchSet::all_urls`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MatchSet {
-    matches: Vec<MatchPattern>,
-    exclude_matches: Vec<MatchPattern>,
+    matches: Box<[MatchPattern]>,
+    exclude_matches: Box<[MatchPattern]>,
     options: MatchOptions,
 }
 
@@ -965,8 +1041,8 @@ impl MatchSet {
         }
 
         Ok(Self {
-            matches,
-            exclude_matches,
+            matches: matches.into_boxed_slice(),
+            exclude_matches: exclude_matches.into_boxed_slice(),
             options,
         })
     }
@@ -996,8 +1072,8 @@ impl MatchSet {
     /// An explicit set matching every supported content URL.
     pub fn all_urls() -> Self {
         Self {
-            matches: vec![MatchPattern::all_urls()],
-            exclude_matches: Vec::new(),
+            matches: vec![MatchPattern::all_urls()].into_boxed_slice(),
+            exclude_matches: Box::default(),
             options: MatchOptions::default(),
         }
     }
@@ -1029,19 +1105,17 @@ impl MatchSet {
 
     /// Conservative retained-memory charge for admission control.
     ///
-    /// A compiled glob retains canonical text, literal segments, and KMP
-    /// failure tables (one `usize` per literal byte). Charging sixteen times
-    /// canonical input plus a fixed registration cost deliberately
-    /// overestimates those allocations on supported targets. This is a policy
-    /// budget, not an allocator measurement.
+    /// Each matcher is charged by [`MatchPattern::retained_budget_bytes`], the
+    /// single conservative accounting source for its canonical string, Arc
+    /// allocation, parsed host/path state, literal segments, and KMP tables.
+    /// The boxed collections retain no caller-controlled spare capacity.
     pub fn retained_budget_bytes(&self) -> usize {
+        let collection_bytes = usize::from(!self.matches.is_empty())
+            .saturating_add(usize::from(!self.exclude_matches.is_empty()))
+            .saturating_mul(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES);
         self.matches.iter().chain(&self.exclude_matches).fold(
-            std::mem::size_of::<Self>(),
-            |total, pattern| {
-                total
-                    .saturating_add(512)
-                    .saturating_add(pattern.as_str().len().saturating_mul(16))
-            },
+            std::mem::size_of::<Self>().saturating_add(collection_bytes),
+            |total, pattern| total.saturating_add(pattern.retained_budget_bytes()),
         )
     }
 
@@ -1439,6 +1513,54 @@ mod tests {
             "a".repeat(MAX_MATCH_URL_BYTES)
         ));
         assert!(!pattern("<all_urls>").matches_url(&oversized_url));
+    }
+
+    #[test]
+    fn worst_valid_compiled_pattern_stays_inside_the_conservative_bound() {
+        let prefix = "https://example.com/";
+        let wildcard_skeleton = format!("a{}", "*a".repeat(MAX_MATCH_PATTERN_WILDCARDS));
+        let fill = MAX_MATCH_PATTERN_BYTES - prefix.len() - wildcard_skeleton.len();
+        let source = format!("{prefix}{wildcard_skeleton}{}", "b".repeat(fill));
+        assert_eq!(source.len(), MAX_MATCH_PATTERN_BYTES);
+
+        let compiled = pattern(&source);
+        assert_eq!(compiled.as_str().len(), MAX_MATCH_PATTERN_BYTES);
+        assert!(compiled.retained_budget_bytes() <= MAX_MATCH_PATTERN_RETAINED_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn match_set_discards_caller_spare_capacity_before_accounting() {
+        let include = pattern("https://example.com/*");
+        let exclude = pattern("https://example.com/private/*");
+        let mut includes_with_spare = Vec::with_capacity(4_096);
+        includes_with_spare.push(include.clone());
+        let mut excludes_with_spare = Vec::with_capacity(4_096);
+        excludes_with_spare.push(exclude.clone());
+
+        let with_spare = MatchSet::new(
+            includes_with_spare,
+            excludes_with_spare,
+            MatchOptions::default(),
+        )
+        .unwrap();
+        let compact = MatchSet::new(
+            vec![include.clone()],
+            vec![exclude.clone()],
+            MatchOptions::default(),
+        )
+        .unwrap();
+        let expected = std::mem::size_of::<MatchSet>()
+            + 2 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES
+            + include.retained_budget_bytes()
+            + exclude.retained_budget_bytes();
+
+        assert_eq!(
+            with_spare.retained_budget_bytes(),
+            compact.retained_budget_bytes()
+        );
+        assert_eq!(with_spare.retained_budget_bytes(), expected);
+        assert_eq!(with_spare.includes().len(), 1);
+        assert_eq!(with_spare.excludes().len(), 1);
     }
 
     #[test]

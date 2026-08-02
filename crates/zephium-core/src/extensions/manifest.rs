@@ -1974,7 +1974,11 @@ impl Error for ExtensionManifestError {
 }
 
 fn compact_vec<T>(values: &mut Vec<T>) {
-    values.shrink_to_fit();
+    // `Vec::shrink_to_fit` is deliberately non-binding. Round-trip through a
+    // boxed slice so every admitted aggregate discards caller-controlled
+    // spare capacity before its retained-memory charge is recorded.
+    *values = std::mem::take(values).into_boxed_slice().into_vec();
+    debug_assert_eq!(values.len(), values.capacity());
 }
 
 fn checked_add(left: usize, right: usize) -> Result<usize, ExtensionManifestError> {
@@ -2562,6 +2566,20 @@ mod tests {
                 .as_str(),
             "webRequestAuthProvider"
         );
+    }
+
+    #[test]
+    fn api_permission_set_discards_caller_spare_capacity_before_accounting() {
+        let name = ApiPermissionName::parse_exact("storage").unwrap();
+        let mut names_with_spare = Vec::with_capacity(4_096);
+        names_with_spare.push(name.clone());
+
+        let with_spare = ExtensionApiPermissionSet::new(names_with_spare).unwrap();
+        let compact = ExtensionApiPermissionSet::new(vec![name]).unwrap();
+
+        assert_eq!(with_spare, compact);
+        assert_eq!(with_spare.names.capacity(), with_spare.names.len());
+        assert_eq!(with_spare.retained_bytes(), compact.retained_bytes());
     }
 
     #[test]
