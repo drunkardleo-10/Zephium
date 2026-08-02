@@ -20,6 +20,8 @@ pub(crate) use dispatch::{
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]
 pub(crate) use profiles::release_macos_erasure_obligation;
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+pub(crate) use scripts::protected_script_specs_for_native_probe;
 
 #[cfg(target_os = "windows")]
 use dispatch::queue_windows_cleanup_debt;

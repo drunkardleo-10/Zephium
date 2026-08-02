@@ -8,6 +8,22 @@ license.workspace = true
 # Builds native, main-thread probe executables used only by platform CI. These
 # binaries are excluded from ordinary desktop builds unless explicitly enabled.
 native-isolation-probes = []
+# Builds the public macOS 15.4+ WKWebExtension feasibility probe. This remains
+# separate from native-isolation-probes so ordinary product and test builds do
+# not link or expose an extension runtime before its admission gates pass.
+native-web-extension-probes = [
+    "dep:tempfile",
+    "objc2-web-kit/objc2-app-kit",
+    "objc2-web-kit/WKWebExtension",
+    "objc2-web-kit/WKWebExtensionContext",
+    "objc2-web-kit/WKWebExtensionController",
+    "objc2-web-kit/WKWebExtensionControllerConfiguration",
+    "objc2-web-kit/WKWebExtensionControllerDelegate",
+    "objc2-web-kit/WKWebExtensionMatchPattern",
+    "objc2-web-kit/WKWebExtensionTab",
+    "objc2-web-kit/WKWebExtensionWindow",
+    "objc2-web-kit/WKWebView",
+]
 # Compiles the intentionally non-product Windows CDP feasibility harness. The
 # default product must not contain this path until Phase 0a's live gates pass.
 windows-cdp-spike = []
@@ -17,10 +33,16 @@ name = "macos-principal-isolation-probe"
 path = "src/bin/macos_principal_isolation_probe.rs"
 required-features = ["native-isolation-probes"]
 
+[[bin]]
+name = "macos-web-extension-probe"
+path = "src/bin/macos_web_extension_probe.rs"
+required-features = ["native-web-extension-probes"]
+
 [dependencies]
 zephium-core.workspace = true
 wry.workspace = true
 serde_json.workspace = true
+tempfile = { workspace = true, optional = true }
 url.workspace = true
 
 [dev-dependencies]

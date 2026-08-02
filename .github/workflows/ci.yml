@@ -441,6 +441,20 @@ jobs:
             --features native-isolation-probes \
             --bin macos-principal-isolation-probe
 
+      # This is deliberately a feature-gated public-API proof, not product
+      # enablement. CI requires actual execution so an image regression below
+      # macOS 15.4 cannot turn the native extension gate into a green skip.
+      - name: Prove public macOS WKWebExtension admission and isolation
+        if: runner.os == 'macOS'
+        timeout-minutes: 4
+        run: |
+          cargo clippy --locked -p zephium-engine \
+            --features native-web-extension-probes \
+            --bin macos-web-extension-probe -- -D warnings
+          cargo run --locked -p zephium-engine \
+            --features native-web-extension-probes \
+            --bin macos-web-extension-probe -- --require-supported-runtime
+
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 

@@ -2,6 +2,8 @@ mod content_filter;
 mod native;
 mod navigation;
 mod stage;
+#[cfg(feature = "native-web-extension-probes")]
+mod web_extensions;
 
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
@@ -26,6 +28,8 @@ pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
 pub use stage::ContentStage;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_probe;
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 
 pub(crate) struct ContentPolicyTimeout {

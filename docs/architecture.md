@@ -554,10 +554,18 @@ Delivery is layered and measured:
   offscreen resources; WebView2-native extension workers are engine-managed and
   require separate count admission and measured process-resource gates.
 
-macOS and Linux use a Zephium compatibility runtime only after per-principal
-world/handler isolation, exact match enforcement, protected-script installed
-state, and native hostile tests pass. Windows has two separate candidates:
-curated MV3 packages through a production wrapper around
+On macOS 15.4 and newer, Apple's public `WKWebExtensionController` stack is the
+preferred native MV3 candidate. A feature-gated live probe proves controller
+attachment before view construction, explicit host/private-data grants,
+per-extension isolated worlds, frame matching, exact context unload/reload,
+and preservation of Zephium's protected scripts. It does not yet prove durable
+controller storage, background execution, extension UI, package admission, or
+product startup reconciliation, so ordinary builds still expose no extension
+runtime. Older admitted macOS versions and Linux require a Zephium
+compatibility runtime only after per-principal world/handler isolation, exact
+match enforcement, protected-script installed state, and native hostile tests
+pass. Windows has two separate candidates: curated MV3 packages through a
+production wrapper around
 `AddBrowserExtension`, whose environment-level enablement is a startup-time
 decision, and a CDP isolated-world probe for first-party userscripts. The CDP
 probe is excluded from normal product builds and has no page-world fallback;

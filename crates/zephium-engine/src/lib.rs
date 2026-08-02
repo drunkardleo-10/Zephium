@@ -21,6 +21,17 @@ pub fn run_macos_principal_isolation_probe() -> Result<(), String> {
     platform::macos::run_principal_isolation_probe()
 }
 
+/// Runs the public WKWebExtension feasibility probe on the process main thread.
+///
+/// `Ok(true)` means the live macOS 15.4+ probe executed and passed. `Ok(false)`
+/// is an explicit unsupported-runtime skip on older macOS versions. This API is
+/// absent from ordinary product builds and does not enable extension support.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_probe()
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
