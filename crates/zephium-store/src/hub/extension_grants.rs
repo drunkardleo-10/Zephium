@@ -113,6 +113,7 @@ impl Hub {
         }
         let authorities = load_all_authorities(&tx, &catalog, &bindings)?;
         let cohort = zephium_core::extensions::ExtensionGrantCohort::from_persisted(
+            profile,
             catalog,
             bindings,
             authorities,

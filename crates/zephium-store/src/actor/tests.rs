@@ -1810,6 +1810,7 @@ fn extension_grants_batch_initialize_are_durable_atomic_and_sibling_independent(
     else {
         panic!("durable grant cohort did not survive restart");
     };
+    assert_eq!(restarted.profile(), profile);
     let Some(ExtensionGrantInitializationState::Initialized(first)) = restarted.get(first_id)
     else {
         panic!("first durable authority is absent after restart");

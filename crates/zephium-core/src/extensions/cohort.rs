@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::ids::ExtensionInstallId;
+use crate::ids::{ExtensionInstallId, ProfileId};
 
 use super::{
     ExtensionGrantAuthority, ExtensionInstallCatalog, ExtensionManifestDescriptor,
@@ -135,12 +135,16 @@ impl ExtensionGrantManifestBindings {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExtensionGrantInitializationState {
     Uninitialized,
-    Initialized(Box<ExtensionGrantAuthority>),
+    /// Shared exact authority loaded once for the profile snapshot. Runtime
+    /// projection pins this `Arc` instead of deep-cloning compiled host
+    /// matchers and permission sets for every activation candidate.
+    Initialized(Arc<ExtensionGrantAuthority>),
 }
 
 /// One complete atomic install catalog plus one state for every install.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExtensionGrantCohort {
+    profile: ProfileId,
     install_catalog: ExtensionInstallCatalog,
     bindings: ExtensionGrantManifestBindings,
     states: Box<[ExtensionGrantInitializationState]>,
@@ -156,6 +160,7 @@ impl ExtensionGrantCohort {
     /// came from durable storage. Those guarantees remain the responsibility
     /// of the package authority and store adapter before this boundary.
     pub fn from_persisted(
+        profile: ProfileId,
         install_catalog: ExtensionInstallCatalog,
         bindings: ExtensionGrantManifestBindings,
         mut authorities: Vec<ExtensionGrantAuthority>,
@@ -210,7 +215,7 @@ impl ExtensionGrantCohort {
                     {
                         return Err(ExtensionGrantCohortError::AuthorityMismatch(install.id()));
                     }
-                    states.push(ExtensionGrantInitializationState::Initialized(Box::new(
+                    states.push(ExtensionGrantInitializationState::Initialized(Arc::new(
                         authority,
                     )));
                 }
@@ -248,11 +253,17 @@ impl ExtensionGrantCohort {
             });
         }
         Ok(Self {
+            profile,
             install_catalog,
             bindings,
             states,
             retained_bytes,
         })
+    }
+
+    /// Exact profile whose SQLite snapshot produced this cohort.
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
     }
 
     pub const fn install_catalog(&self) -> &ExtensionInstallCatalog {
@@ -389,7 +400,10 @@ mod tests {
         let catalog =
             ExtensionInstallCatalog::new(ExtensionInstallCatalogRevision::INITIAL, Vec::new())
                 .unwrap();
-        let cohort = ExtensionGrantCohort::from_persisted(catalog, bindings, authorities).unwrap();
+        let profile = ProfileId::from(1);
+        let cohort =
+            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, authorities).unwrap();
+        assert_eq!(cohort.profile(), profile);
         assert!(cohort.grants().next().is_none());
         assert!(cohort.retained_bytes() < 4096);
     }
@@ -427,17 +441,26 @@ mod tests {
                 manifest.clone(),
             )])
             .unwrap();
-        let absent =
-            ExtensionGrantCohort::from_persisted(catalog.clone(), bindings.clone(), Vec::new())
-                .unwrap();
+        let absent = ExtensionGrantCohort::from_persisted(
+            ProfileId::from(1),
+            catalog.clone(),
+            bindings.clone(),
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(
             absent.get(install.id()),
             Some(&ExtensionGrantInitializationState::Uninitialized)
         );
 
         let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
-        let initialized =
-            ExtensionGrantCohort::from_persisted(catalog, bindings, vec![authority]).unwrap();
+        let initialized = ExtensionGrantCohort::from_persisted(
+            ProfileId::from(1),
+            catalog,
+            bindings,
+            vec![authority],
+        )
+        .unwrap();
         assert!(matches!(
             initialized.get(install.id()),
             Some(ExtensionGrantInitializationState::Initialized(_))
@@ -482,7 +505,7 @@ mod tests {
             )])
             .unwrap();
         assert_eq!(
-            ExtensionGrantCohort::from_persisted(catalog, bindings, Vec::new()),
+            ExtensionGrantCohort::from_persisted(ProfileId::from(1), catalog, bindings, Vec::new(),),
             Err(ExtensionGrantCohortError::ManifestPackageMismatch(
                 install.id()
             ))
@@ -527,6 +550,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ExtensionGrantCohort::from_persisted(
+                ProfileId::from(1),
                 duplicate_catalog,
                 duplicate_bindings,
                 vec![authority.clone(), authority.clone()],
@@ -537,14 +561,19 @@ mod tests {
         let unknown_install = ExtensionInstall::new(ExtensionInstallId::from(8), package());
         let unknown = ExtensionGrantAuthority::new(&unknown_install, &manifest).unwrap();
         assert_eq!(
-            ExtensionGrantCohort::from_persisted(catalog.clone(), bindings.clone(), vec![unknown],),
+            ExtensionGrantCohort::from_persisted(
+                ProfileId::from(1),
+                catalog.clone(),
+                bindings.clone(),
+                vec![unknown],
+            ),
             Err(ExtensionGrantCohortError::UnknownAuthority)
         );
 
         let mut oversized = Vec::with_capacity(4096);
         oversized.resize(MAX_EXTENSION_INSTALLS_PER_PROFILE + 1, authority);
         assert_eq!(
-            ExtensionGrantCohort::from_persisted(catalog, bindings, oversized),
+            ExtensionGrantCohort::from_persisted(ProfileId::from(1), catalog, bindings, oversized,),
             Err(ExtensionGrantCohortError::TooManyAuthorities {
                 count: MAX_EXTENSION_INSTALLS_PER_PROFILE + 1,
                 max: MAX_EXTENSION_INSTALLS_PER_PROFILE,
