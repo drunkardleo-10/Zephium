@@ -431,26 +431,7 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     // physical secure erasure on copy-on-write filesystems or SSD media.
     let path = dir.join(format!("profile-{profile}.sqlite"));
     if regular_file_exists(&path)? {
-        let scrub = (|| {
-            let mut conn = open_database(&path)?;
-            configure(&conn)?;
-            migrations::apply(&mut conn, migrations::PROFILE)?;
-            let tx = conn.transaction()?;
-            tx.execute_batch(
-                "DELETE FROM history;
-                 DELETE FROM favicons;
-                 DELETE FROM settings;
-                 DELETE FROM items;
-                 DELETE FROM spaces;
-                 DELETE FROM focus;",
-            )?;
-            tx.commit()?;
-            conn.execute_batch(
-                "PRAGMA wal_checkpoint(TRUNCATE);
-                 VACUUM;
-                 PRAGMA journal_mode=DELETE;",
-            )
-        })();
+        let scrub = scrub_profile_database(&path);
         if let Err(error) = scrub {
             // A corrupt/unsupported database cannot be logically scrubbed
             // with SQLite, but it is still an exact journal-authorized file.
@@ -481,6 +462,40 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Logically removes every current profile-owned data and authority domain
+/// before the journal-authorized unlink. Keep this list in dependency order:
+/// future PROFILE migrations that add durable user data must extend this
+/// boundary and its direct inventory test in the same change.
+fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
+    let mut conn = open_database(path)?;
+    configure(&conn)?;
+    migrations::apply(&mut conn, migrations::PROFILE)?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
+         DELETE FROM extension_installs;
+         DELETE FROM extension_install_catalog;
+         DELETE FROM page_permission_grants;
+         DELETE FROM page_permission_catalog;
+         DELETE FROM userscripts;
+         DELETE FROM userscript_catalog;
+         DELETE FROM history;
+         DELETE FROM history_usage;
+         DELETE FROM favicons;
+         DELETE FROM settings;
+         DELETE FROM items;
+         DELETE FROM spaces;
+         DELETE FROM focus;
+         DELETE FROM sqlite_sequence WHERE name = 'history';",
+    )?;
+    tx.commit()?;
+    conn.execute_batch(
+        "PRAGMA wal_checkpoint(TRUNCATE);
+         VACUUM;
+         PRAGMA journal_mode=DELETE;",
+    )
+}
+
 fn remove_file_if_present(path: &Path) -> rusqlite::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -499,4 +514,181 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
         ));
     }
     std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    const PROFILE_SCRUB_MARKER: &str = "zephiumscrubmarker97613";
+
+    #[test]
+    fn profile_scrub_covers_every_current_user_data_and_authority_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("profile-test.sqlite");
+        let mut conn = open_database(&path).unwrap();
+        configure(&conn).unwrap();
+        migrations::apply(&mut conn, migrations::PROFILE).unwrap();
+        conn.execute_batch(
+            "INSERT INTO spaces(id, name, position) VALUES ('space', 'Personal', 0);
+             INSERT INTO items(
+                 id, parent_id, space_id, section, position, kind, name, url, title, zoom
+             ) VALUES (
+                 'item', NULL, 'space', 'today', 0, 'tab', NULL,
+                 'https://private.example/path', 'Private title', 1
+             );
+             INSERT INTO focus(id, active_space, active_item, splits)
+             VALUES (1, 'space', 'item', 'private-layout');
+             INSERT INTO favicons(origin, content_type, icon, fetched_at)
+             VALUES ('https://history.example', 'image/png', X'01020304', 1);
+             INSERT INTO settings(key, value) VALUES ('private-setting', 'private-value');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history(url, title, visited_at) VALUES (?1, ?2, 1)",
+            params![
+                format!("https://history.example/{PROFILE_SCRUB_MARKER}"),
+                PROFILE_SCRUB_MARKER
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO userscripts(
+                 id, revision, enabled, metadata_format, source, source_sha256_v1
+             ) VALUES (?1, 1, 1, 1, ?2, ?3)",
+            params![
+                "00000000000000000000000001",
+                "// ==UserScript==\n// @name Secret\n// @match https://private.example/*\n// ==/UserScript==\n",
+                vec![7_u8; 32]
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO page_permission_grants(
+                 id, revision, origin, kind, decision
+             ) VALUES (?1, 1, 'https://private.example', 'camera', 'allow')",
+            ["00000000000000000000000002"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_installs(
+                 id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, 1)",
+            params![
+                vec![1_u8; 16],
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32]
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        scrub_profile_database(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let actual_tables = conn
+            .prepare(
+                "SELECT name
+                 FROM sqlite_schema
+                 WHERE type = 'table'
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let expected_tables = [
+            "extension_install_catalog",
+            "extension_installs",
+            "favicons",
+            "focus",
+            "history",
+            "history_fts",
+            "history_fts_config",
+            "history_fts_data",
+            "history_fts_docsize",
+            "history_fts_idx",
+            "history_usage",
+            "items",
+            "page_permission_catalog",
+            "page_permission_grants",
+            "settings",
+            "spaces",
+            "sqlite_sequence",
+            "userscript_catalog",
+            "userscripts",
+        ];
+        assert_eq!(
+            actual_tables,
+            expected_tables.map(str::to_owned),
+            "a PROFILE migration changed the scrub-owned table inventory"
+        );
+
+        for table in [
+            "spaces",
+            "items",
+            "focus",
+            "history",
+            "history_usage",
+            "favicons",
+            "settings",
+            "userscript_catalog",
+            "userscripts",
+            "page_permission_catalog",
+            "page_permission_grants",
+            "extension_install_catalog",
+            "extension_installs",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "profile scrub retained rows in {table}");
+        }
+        let retained_fts_terms: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM history_fts WHERE history_fts MATCH ?1",
+                [PROFILE_SCRUB_MARKER],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained_fts_terms, 0, "profile scrub retained FTS terms");
+        let history_sequence: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_sequence WHERE name = 'history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_sequence, 0);
+        drop(conn);
+
+        for database_file in database_files(&path) {
+            if database_file.try_exists().unwrap() {
+                let bytes = std::fs::read(&database_file).unwrap();
+                assert!(
+                    !bytes
+                        .windows(PROFILE_SCRUB_MARKER.len())
+                        .any(|window| window == PROFILE_SCRUB_MARKER.as_bytes()),
+                    "profile scrub retained marker bytes in {}",
+                    database_file.display()
+                );
+            }
+        }
+    }
+
+    fn database_files(path: &Path) -> [PathBuf; 3] {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        let mut shm = path.as_os_str().to_owned();
+        shm.push("-shm");
+        [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
+    }
 }
