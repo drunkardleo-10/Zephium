@@ -2,6 +2,12 @@
 //! positioning, SetWindowRgn rounding, divider drags and the drop indicator
 //! all mirror the macOS ContentStage.
 
+// Phase 0a feasibility probe. Unit/cross-target test builds keep it compiling,
+// and an explicit feature admits a future native harness. Product builds do
+// not contain it until native Windows QA ratifies the live isolation gate.
+#[cfg(any(test, feature = "windows-cdp-spike"))]
+#[allow(dead_code)]
+mod cdp;
 mod content_filter;
 mod stage;
 
