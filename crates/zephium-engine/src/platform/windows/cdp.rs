@@ -13,11 +13,12 @@
 //!
 //! # Audited blockers
 //!
-//! This is not yet safe to wire even as an opt-in product path. Before a live
-//! harness can be admitted it must make failure terminal, unwind paused
-//! auto-attached targets, retain and remove native script/binding identities,
-//! generation-bind navigation and late session events, serialize setup around
-//! initial navigation, and bound source replication plus in-flight replies.
+//! This is not yet safe to wire even as an opt-in product path. Script authority
+//! is terminal after failure, but before a live harness can be admitted it must
+//! complete terminal native cleanup, unwind every paused auto-attached target,
+//! retain and remove native script/binding identities, generation-bind
+//! navigation and late session events, serialize setup around initial
+//! navigation, and bound source replication plus in-flight replies.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -79,6 +80,59 @@ pub(crate) enum CdpProbeStatus {
     Installing,
     ConfiguredAwaitingLiveProof,
     FailedClosed,
+}
+
+#[derive(Debug)]
+struct CdpProbeLifecycle {
+    status: Cell<CdpProbeStatus>,
+}
+
+impl CdpProbeLifecycle {
+    fn new() -> Self {
+        Self {
+            status: Cell::new(CdpProbeStatus::Installing),
+        }
+    }
+
+    fn status(&self) -> CdpProbeStatus {
+        self.status.get()
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.status() == CdpProbeStatus::FailedClosed
+    }
+
+    fn fail_closed(&self) {
+        self.status.set(CdpProbeStatus::FailedClosed);
+    }
+
+    fn mark_configured(&self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.status.set(CdpProbeStatus::ConfiguredAwaitingLiveProof);
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalSetupAction {
+    Continue,
+    Stop,
+    ResumeOnly,
+}
+
+fn terminal_setup_action(
+    lifecycle: &CdpProbeLifecycle,
+    resume_waiting_target: bool,
+) -> TerminalSetupAction {
+    if !lifecycle.is_terminal() {
+        TerminalSetupAction::Continue
+    } else if resume_waiting_target {
+        TerminalSetupAction::ResumeOnly
+    } else {
+        TerminalSetupAction::Stop
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -858,16 +912,30 @@ struct CdpProbeNative {
     core: ICoreWebView2,
     core11: ICoreWebView2_11,
     state: Rc<RefCell<CdpRuntimeState>>,
-    status: Rc<Cell<CdpProbeStatus>>,
+    lifecycle: Rc<CdpProbeLifecycle>,
     sink: Rc<dyn Fn(CdpInboundMessage)>,
 }
 
 impl CdpProbeNative {
     fn fail_closed(&self) {
-        self.status.set(CdpProbeStatus::FailedClosed);
+        self.lifecycle.fail_closed();
+    }
+
+    fn stop_terminal_setup(&self, route: &CdpRoute, resume_on_failure: bool) -> bool {
+        match terminal_setup_action(&self.lifecycle, resume_on_failure) {
+            TerminalSetupAction::Continue => false,
+            TerminalSetupAction::Stop => true,
+            TerminalSetupAction::ResumeOnly => {
+                self.best_effort_resume(route);
+                true
+            }
+        }
     }
 
     fn dispatch_setup(self: &Rc<Self>, permit: SessionPermit, resume_on_failure: bool) {
+        if self.stop_terminal_setup(&permit.route, resume_on_failure) {
+            return;
+        }
         let commands = match self
             .state
             .borrow()
@@ -896,17 +964,19 @@ impl CdpProbeNative {
         // process calls out of order. Send exactly one command at a time and
         // advance only from its successful completed handler; in particular,
         // a paused OOPIF is never resumed before its world and binding settle.
+        if self.stop_terminal_setup(&permit.route, resume_on_failure) {
+            return;
+        }
         if !self.state.borrow().session_is_current(&permit) {
             return;
         }
         let Some(command) = commands.pop_front() else {
             if self.state.borrow_mut().mark_session_configured(&permit)
                 && permit.route == CdpRoute::Root
-                && self.status.get() != CdpProbeStatus::FailedClosed
             {
                 // This is deliberately not `Supported`: it proves only that
                 // the runtime accepted setup calls, not the seven live gates.
-                self.status.set(CdpProbeStatus::ConfiguredAwaitingLiveProof);
+                let _ = self.lifecycle.mark_configured();
             }
             return;
         };
@@ -976,16 +1046,22 @@ impl CdpProbeNative {
         ticket: CdpReplyTicket,
         payload: &str,
     ) -> Result<(), CdpReplyDispatchError> {
+        if self.lifecycle.is_terminal() {
+            return Err(CdpReplyDispatchError::ProbeFailedClosed);
+        }
         let command = self
             .state
             .borrow_mut()
             .prepare_reply(ticket, payload, Instant::now())
             .map_err(CdpReplyDispatchError::Rejected)?;
-        let status = self.status.clone();
+        if self.lifecycle.is_terminal() {
+            return Err(CdpReplyDispatchError::ProbeFailedClosed);
+        }
+        let lifecycle = self.lifecycle.clone();
         let completion = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
             move |result, response| {
                 if !cdp_reply_succeeded(result, &response) {
-                    status.set(CdpProbeStatus::FailedClosed);
+                    lifecycle.fail_closed();
                 }
                 Ok(())
             },
@@ -998,6 +1074,9 @@ impl CdpProbeNative {
     }
 
     fn handle_binding_event(&self, args: &ICoreWebView2DevToolsProtocolEventReceivedEventArgs) {
+        if self.lifecycle.is_terminal() {
+            return;
+        }
         let Some((route, event_json)) = decode_event(args) else {
             self.fail_closed();
             return;
@@ -1014,6 +1093,9 @@ impl CdpProbeNative {
     }
 
     fn handle_context_created(&self, args: &ICoreWebView2DevToolsProtocolEventReceivedEventArgs) {
+        if self.lifecycle.is_terminal() {
+            return;
+        }
         let Some((route, event_json)) = decode_event(args) else {
             self.fail_closed();
             return;
@@ -1029,6 +1111,9 @@ impl CdpProbeNative {
     }
 
     fn handle_context_destroyed(&self, args: &ICoreWebView2DevToolsProtocolEventReceivedEventArgs) {
+        if self.lifecycle.is_terminal() {
+            return;
+        }
         let Some((route, event_json)) = decode_event(args) else {
             self.fail_closed();
             return;
@@ -1044,6 +1129,9 @@ impl CdpProbeNative {
     }
 
     fn handle_contexts_cleared(&self, args: &ICoreWebView2DevToolsProtocolEventReceivedEventArgs) {
+        if self.lifecycle.is_terminal() {
+            return;
+        }
         let Some((route, _)) = decode_event(args) else {
             self.fail_closed();
             return;
@@ -1061,25 +1149,33 @@ impl CdpProbeNative {
             self.fail_closed();
             return;
         };
-        let Some((session_id, target_type, waiting_for_debugger)) =
-            decode_attached_target(&event_json)
-        else {
+        let Some((route, event)) = decode_attached_session(&event_json) else {
             self.fail_closed();
             return;
         };
-        let route = match CdpRoute::from_session_id(&session_id) {
-            Ok(route) => route,
-            Err(_) => {
-                self.fail_closed();
-                return;
-            }
+        // Once failure is terminal, a newly reported paused child target must
+        // never receive bindings, worlds, or principal source. Decoding its
+        // bounded native route solely to release the debugger pause is the only
+        // post-failure setup action.
+        if self.lifecycle.is_terminal() {
+            self.best_effort_resume(&route);
+            return;
+        }
+        let Some((target_type, waiting_for_debugger)) = decode_attached_target(&event) else {
+            self.fail_closed();
+            self.best_effort_resume(&route);
+            return;
         };
         if target_type != "iframe" || !waiting_for_debugger {
             self.fail_closed();
             self.best_effort_resume(&route);
             return;
         }
-        let permit = match self.state.borrow_mut().register_session(&session_id) {
+        let Some(session_id) = route.session_id() else {
+            self.fail_closed();
+            return;
+        };
+        let permit = match self.state.borrow_mut().register_session(session_id) {
             Ok(permit) => permit,
             Err(_) => {
                 self.fail_closed();
@@ -1109,6 +1205,7 @@ impl CdpProbeNative {
 pub(crate) enum CdpReplyDispatchError {
     Rejected(CdpRejection),
     Native(windows_core::Error),
+    ProbeFailedClosed,
     ProbeRetired,
 }
 
@@ -1142,7 +1239,7 @@ pub(crate) struct CdpProbeRegistration {
 
 impl CdpProbeRegistration {
     pub(crate) fn status(&self) -> CdpProbeStatus {
-        self.native.status.get()
+        self.native.lifecycle.status()
     }
 
     pub(crate) fn reply_handle(&self) -> CdpReplyHandle {
@@ -1187,7 +1284,7 @@ pub(crate) fn install_unvalidated_probe(
         core: core.clone(),
         core11,
         state: Rc::new(RefCell::new(state)),
-        status: Rc::new(Cell::new(CdpProbeStatus::Installing)),
+        lifecycle: Rc::new(CdpProbeLifecycle::new()),
         sink,
     });
     let mut events = Vec::with_capacity(6);
@@ -1285,7 +1382,9 @@ pub(crate) fn install_unvalidated_probe(
     let weak = Rc::downgrade(&native);
     let navigation = NavigationStartingEventHandler::create(Box::new(move |_, _| {
         if let Some(native) = weak.upgrade() {
-            if native.state.borrow_mut().invalidate_navigation().is_err() {
+            if !native.lifecycle.is_terminal()
+                && native.state.borrow_mut().invalidate_navigation().is_err()
+            {
                 native.fail_closed();
             }
         }
@@ -1349,20 +1448,20 @@ fn bounded_event_object(event_json: &str) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
-fn decode_attached_target(event_json: &str) -> Option<(String, String, bool)> {
+fn decode_attached_session(event_json: &str) -> Option<(CdpRoute, Value)> {
     let event = bounded_event_object(event_json)?;
     let session_id = event.get("sessionId")?.as_str()?;
-    CdpRoute::from_session_id(session_id).ok()?;
+    let route = CdpRoute::from_session_id(session_id).ok()?;
+    (route != CdpRoute::Root).then_some((route, event))
+}
+
+fn decode_attached_target(event: &Value) -> Option<(String, bool)> {
     let target_type = event.get("targetInfo")?.get("type")?.as_str()?;
     if target_type.len() > 32 {
         return None;
     }
     let waiting_for_debugger = event.get("waitingForDebugger")?.as_bool()?;
-    Some((
-        session_id.to_owned(),
-        target_type.to_owned(),
-        waiting_for_debugger,
-    ))
+    Some((target_type.to_owned(), waiting_for_debugger))
 }
 
 fn cdp_completion_succeeded(result: windows_core::Result<()>, response: &str) -> bool {
@@ -1454,6 +1553,61 @@ mod tests {
             "executionContextId": context_id,
         })
         .to_string()
+    }
+
+    #[test]
+    fn failed_lifecycle_is_terminal_and_cannot_be_reconfigured() {
+        let lifecycle = CdpProbeLifecycle::new();
+        assert_eq!(lifecycle.status(), CdpProbeStatus::Installing);
+        assert!(!lifecycle.is_terminal());
+
+        lifecycle.fail_closed();
+        lifecycle.fail_closed();
+
+        assert!(lifecycle.is_terminal());
+        assert!(!lifecycle.mark_configured());
+        assert_eq!(lifecycle.status(), CdpProbeStatus::FailedClosed);
+    }
+
+    #[test]
+    fn late_setup_continuation_after_failure_is_resume_only_for_a_paused_child() {
+        let lifecycle = CdpProbeLifecycle::new();
+        assert_eq!(
+            terminal_setup_action(&lifecycle, true),
+            TerminalSetupAction::Continue
+        );
+
+        lifecycle.fail_closed();
+
+        assert_eq!(
+            terminal_setup_action(&lifecycle, false),
+            TerminalSetupAction::Stop
+        );
+        assert_eq!(
+            terminal_setup_action(&lifecycle, true),
+            TerminalSetupAction::ResumeOnly
+        );
+        assert!(!lifecycle.mark_configured());
+    }
+
+    #[test]
+    fn failed_attach_can_recover_its_resume_route_without_trusting_target_metadata() {
+        let event = json!({
+            "sessionId": "paused-child",
+            "targetInfo": { "type": 7 },
+            "waitingForDebugger": "not-a-boolean",
+        })
+        .to_string();
+        let (route, decoded) = decode_attached_session(&event).unwrap();
+        assert_eq!(route.session_id(), Some("paused-child"));
+        assert!(decode_attached_target(&decoded).is_none());
+
+        let lifecycle = CdpProbeLifecycle::new();
+        lifecycle.fail_closed();
+        assert_eq!(
+            terminal_setup_action(&lifecycle, true),
+            TerminalSetupAction::ResumeOnly
+        );
     }
 
     #[test]
