@@ -14,16 +14,17 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
+use zephium_core::extensions::{ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision};
 use zephium_core::ids::ProfileId;
 use zephium_core::item::sanitize_page_title;
 use zephium_core::navigation;
 use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPatch};
 use zephium_core::ports::store::{
-    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, HistoryHit,
-    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
-    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
-    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
-    UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
+    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionInstallCatalogLoadOutcome,
+    ExtensionInstallCatalogMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
+    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
+    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
+    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -51,6 +52,7 @@ const STORE_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
 const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
+const MAX_PENDING_EXTENSION_INSTALL_MUTATIONS: usize = 16;
 
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
@@ -60,6 +62,9 @@ type UserscriptCatalogMutationDone = Box<dyn FnOnce(UserscriptCatalogMutationOut
 type PagePermissionCatalogLoadDone = Box<dyn FnOnce(PagePermissionCatalogLoadOutcome) + Send>;
 type PagePermissionCatalogMutationDone =
     Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>;
+type ExtensionInstallCatalogLoadDone = Box<dyn FnOnce(ExtensionInstallCatalogLoadOutcome) + Send>;
+type ExtensionInstallCatalogMutationDone =
+    Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
 
 #[derive(Default)]
 struct UserscriptMutationAdmission {
@@ -152,6 +157,45 @@ impl Drop for PagePermissionMutationPermit {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(count) = state.count.checked_sub(1) else {
             // Close admission permanently on impossible accounting drift.
+            state.count = usize::MAX;
+            return;
+        };
+        state.count = count;
+    }
+}
+
+#[derive(Default)]
+struct ExtensionInstallMutationAdmission {
+    count: usize,
+}
+
+struct ExtensionInstallMutationPermit {
+    admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
+}
+
+impl ExtensionInstallMutationPermit {
+    fn acquire(admission: &Arc<Mutex<ExtensionInstallMutationAdmission>>) -> Option<Self> {
+        let mut state = admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next = state.count.checked_add(1)?;
+        if next > MAX_PENDING_EXTENSION_INSTALL_MUTATIONS {
+            return None;
+        }
+        state.count = next;
+        Some(Self {
+            admission: admission.clone(),
+        })
+    }
+}
+
+impl Drop for ExtensionInstallMutationPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = state.count.checked_sub(1) else {
             state.count = usize::MAX;
             return;
         };
@@ -274,6 +318,14 @@ enum Cmd {
         PagePermissionMutationPermit,
         PagePermissionCatalogMutationDone,
     ),
+    LoadExtensionInstallCatalog(ProfileId, ExtensionInstallCatalogLoadDone),
+    MutateExtensionInstallCatalog(
+        ProfileId,
+        ExtensionInstallCatalogRevision,
+        ExtensionInstallCatalogMutation,
+        ExtensionInstallMutationPermit,
+        ExtensionInstallCatalogMutationDone,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -305,6 +357,7 @@ pub struct SqliteStore {
     pending_settings: Arc<Mutex<PendingSettings>>,
     userscript_mutation_admission: Arc<Mutex<UserscriptMutationAdmission>>,
     page_permission_mutation_admission: Arc<Mutex<PagePermissionMutationAdmission>>,
+    extension_install_mutation_admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
 }
@@ -345,6 +398,8 @@ impl SqliteStore {
             Arc::new(Mutex::new(UserscriptMutationAdmission::default()));
         let page_permission_mutation_admission =
             Arc::new(Mutex::new(PagePermissionMutationAdmission::default()));
+        let extension_install_mutation_admission =
+            Arc::new(Mutex::new(ExtensionInstallMutationAdmission::default()));
         let (actor_exited, actor_exit) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("zephium-store".into())
@@ -380,6 +435,7 @@ impl SqliteStore {
             pending_settings,
             userscript_mutation_admission,
             page_permission_mutation_admission,
+            extension_install_mutation_admission,
             lifecycle: Mutex::new(ActorLifecycle {
                 join: Some(join),
                 exited: actor_exit,
@@ -654,6 +710,49 @@ impl Store for SqliteStore {
         self.tx
             .try_send(Cmd::MutatePagePermissionCatalog(
                 profile, expected, patch, permit, done,
+            ))
+            .is_ok()
+    }
+
+    fn load_extension_install_catalog(
+        &self,
+        profile: ProfileId,
+        done: ExtensionInstallCatalogLoadDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionInstallCatalog(profile, done))
+            .is_ok()
+    }
+
+    fn mutate_extension_install_catalog(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionInstallCatalogRevision,
+        mutation: ExtensionInstallCatalogMutation,
+        done: ExtensionInstallCatalogMutationDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(permit) =
+            ExtensionInstallMutationPermit::acquire(&self.extension_install_mutation_admission)
+        else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::MutateExtensionInstallCatalog(
+                profile, expected, mutation, permit, done,
             ))
             .is_ok()
     }
@@ -1144,6 +1243,38 @@ fn actor(
                             "store: profile {profile} page-permission catalog mutation failed: {error}"
                         );
                         PagePermissionCatalogMutationOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionInstallCatalog(profile, done)) => {
+                let outcome = match hub.load_extension_install_catalog(profile) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} extension-install catalog load failed: {error}"
+                        );
+                        ExtensionInstallCatalogLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::MutateExtensionInstallCatalog(
+                profile,
+                expected,
+                mutation,
+                _permit,
+                done,
+            )) => {
+                let outcome = match hub
+                    .mutate_extension_install_catalog(profile, expected, mutation)
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} extension-install catalog mutation failed: {error}"
+                        );
+                        ExtensionInstallCatalogMutationOutcome::Failed
                     }
                 };
                 done(outcome);

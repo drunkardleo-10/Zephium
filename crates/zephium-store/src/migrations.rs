@@ -678,6 +678,44 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 9,
+        up: |tx| {
+            tx.execute_batch(
+                // This catalog records per-profile installation intent only.
+                // Every package field is an exact structural identity value;
+                // neither presence here nor desired_enabled authenticates
+                // package bytes, grants permissions, or proves activation.
+                "CREATE TABLE extension_install_catalog (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807)
+                 ) STRICT;
+                 INSERT INTO extension_install_catalog(id, revision) VALUES (1, 1);
+                 CREATE TABLE extension_installs (
+                     id BLOB PRIMARY KEY
+                         CHECK (typeof(id) = 'blob' AND length(id) = 16),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     authority BLOB NOT NULL
+                         CHECK (typeof(authority) = 'blob' AND length(authority) = 32),
+                     package_key BLOB NOT NULL
+                         CHECK (typeof(package_key) = 'blob' AND length(package_key) = 32),
+                     package_revision INTEGER NOT NULL
+                         CHECK (package_revision BETWEEN 1 AND 9223372036854775807),
+                     archive_sha256 BLOB NOT NULL
+                         CHECK (typeof(archive_sha256) = 'blob' AND length(archive_sha256) = 32),
+                     manifest_sha256 BLOB NOT NULL
+                         CHECK (typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32),
+                     tree_sha256 BLOB NOT NULL
+                         CHECK (typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32),
+                     desired_enabled INTEGER NOT NULL
+                         CHECK (desired_enabled IN (0, 1)),
+                     UNIQUE(authority, package_key)
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -977,7 +1015,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &PROFILE[..7]).unwrap();
 
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..8]).unwrap();
 
         let state: (i64, i64) = conn
             .query_row(
@@ -1055,6 +1093,223 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn profile_v9_adds_an_exact_empty_extension_install_catalog() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..8]).unwrap();
+
+        apply(&mut conn, PROFILE).unwrap();
+
+        let state: (i64, i64) = conn
+            .query_row(
+                "SELECT id, revision FROM extension_install_catalog",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (1, 1));
+        let installs: i64 = conn
+            .query_row("SELECT count(*) FROM extension_installs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(installs, 0);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
+    }
+
+    #[test]
+    fn profile_v9_schema_rejects_malformed_structural_identity_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+
+        let cases = [
+            (
+                vec![1_u8; 15],
+                1_i64,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                1_i64,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                0_i64,
+            ),
+            (
+                vec![1_u8; 16],
+                0,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                1,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 31],
+                vec![3_u8; 32],
+                1,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 32],
+                vec![3_u8; 33],
+                1,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                0,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                1,
+                vec![4_u8; 31],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                1,
+                vec![4_u8; 32],
+                vec![5_u8; 33],
+                vec![6_u8; 32],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                1,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 31],
+                0,
+            ),
+            (
+                vec![1_u8; 16],
+                1,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                1,
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                2,
+            ),
+        ];
+        for (
+            id,
+            revision,
+            authority,
+            key,
+            package_revision,
+            archive,
+            manifest,
+            tree,
+            desired_enabled,
+        ) in cases
+        {
+            assert!(
+                conn.execute(
+                    "INSERT INTO extension_installs(
+                         id, revision, authority, package_key, package_revision,
+                         archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        id,
+                        revision,
+                        authority,
+                        key,
+                        package_revision,
+                        archive,
+                        manifest,
+                        tree,
+                        desired_enabled,
+                    ],
+                )
+                .is_err(),
+                "accepted malformed extension structural identity"
+            );
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO extension_installs(
+                     id, revision, authority, package_key, package_revision,
+                     archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+                 ) VALUES ('not-a-blob-id', 1, ?1, ?2, 1, ?3, ?4, ?5, 0)",
+                rusqlite::params![
+                    vec![2_u8; 32],
+                    vec![3_u8; 32],
+                    vec![4_u8; 32],
+                    vec![5_u8; 32],
+                    vec![6_u8; 32]
+                ],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_install_catalog SET revision = 0 WHERE id = 1",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn profile_v9_enforces_one_update_line_per_profile() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        for id in [vec![1_u8; 16], vec![2_u8; 16]] {
+            let result = conn.execute(
+                "INSERT INTO extension_installs(
+                     id, revision, authority, package_key, package_revision,
+                     archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+                 ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, 0)",
+                rusqlite::params![
+                    id,
+                    vec![7_u8; 32],
+                    vec![8_u8; 32],
+                    vec![9_u8; 32],
+                    vec![10_u8; 32],
+                    vec![11_u8; 32],
+                ],
+            );
+            if id == vec![1_u8; 16] {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+        }
     }
 
     #[test]

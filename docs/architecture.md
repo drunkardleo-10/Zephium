@@ -797,8 +797,12 @@ FTS5; a test guards it).
   Packaged tests of all engine storage types and crash boundaries remain a
   production gate.
 - The current schema contains the shared registry/settings/session snapshot
-  and per-profile history/favicons with FTS5. Additional browser stores remain
-  future work, not an architectural guarantee.
+  and blocker preferences, plus per-profile history/favicons with FTS5,
+  source-authoritative userscripts, remembered page permissions, and bounded
+  structural extension-install intent. Those ancillary catalogs are durable
+  input only: they do not prove native activation, package authentication, or
+  live permission enforcement. Extension grants and the conservative native
+  reconciliation journal remain separate future authorities.
 
 ---
 

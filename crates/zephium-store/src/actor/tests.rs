@@ -1,7 +1,13 @@
 use super::*;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
-use zephium_core::ids::{ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
+use zephium_core::extensions::{
+    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionInstallCatalogMutation,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
+    EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+};
+use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
 use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::permissions::{
     PageOrigin, PagePermissionCatalogRevision, PagePermissionChange, PagePermissionGrantRevision,
@@ -44,6 +50,9 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         userscript_mutation_admission: Arc::new(Mutex::new(UserscriptMutationAdmission::default())),
         page_permission_mutation_admission: Arc::new(Mutex::new(
             PagePermissionMutationAdmission::default(),
+        )),
+        extension_install_mutation_admission: Arc::new(Mutex::new(
+            ExtensionInstallMutationAdmission::default(),
         )),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
@@ -251,6 +260,51 @@ fn mutate_page_permissions(
         profile,
         expected,
         patch,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn extension_package(authority: u8, key: u8, revision: u64) -> ExtensionPackageIdentity {
+    ExtensionPackageIdentity::new(
+        ExtensionAuthorityId::from_bytes([authority; EXTENSION_SHA256_BYTES]),
+        ExtensionPackageKey::from_bytes([key; EXTENSION_SHA256_BYTES]),
+        ExtensionPackageRevision::new(revision).unwrap(),
+        ExtensionArchiveDigest::from_bytes([revision as u8; EXTENSION_SHA256_BYTES]),
+        ExtensionManifestDigest::from_bytes(
+            [revision.wrapping_add(1) as u8; EXTENSION_SHA256_BYTES],
+        ),
+        ExtensionTreeDigest::from_bytes([revision.wrapping_add(2) as u8; EXTENSION_SHA256_BYTES]),
+    )
+}
+
+fn load_extension_installs(
+    store: &impl Store,
+    profile: ProfileId,
+) -> ExtensionInstallCatalogLoadOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.load_extension_install_catalog(
+        profile,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn mutate_extension_installs(
+    store: &impl Store,
+    profile: ProfileId,
+    expected: ExtensionInstallCatalogRevision,
+    mutation: ExtensionInstallCatalogMutation,
+) -> ExtensionInstallCatalogMutationOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.mutate_extension_install_catalog(
+        profile,
+        expected,
+        mutation,
         Box::new(move |result| {
             let _ = reply.send(result);
         }),
@@ -846,6 +900,497 @@ fn page_permission_unknown_ephemeral_terminal_and_full_queue_paths_fail_closed()
         }),
     ));
     assert_eq!(completions.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
+    let dir = tempfile::tempdir().unwrap();
+    let personal = ProfileId::from(1);
+    let work = ProfileId::from(3);
+    let personal_id = ExtensionInstallId::from(71);
+    let work_id = ExtensionInstallId::from(72);
+    let package = extension_package(11, 12, 7);
+    let final_personal_revision;
+
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(two_profile_sample());
+        assert!(store.flush());
+
+        for profile in [personal, work] {
+            let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+                load_extension_installs(&store, profile)
+            else {
+                panic!("new profile did not expose an exact empty extension catalog");
+            };
+            assert_eq!(catalog.revision(), ExtensionInstallCatalogRevision::INITIAL);
+            assert!(catalog.installs().is_empty());
+        }
+
+        let installed = mutate_extension_installs(
+            &store,
+            personal,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: personal_id,
+                package: package.clone(),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(installed) = installed else {
+            panic!("valid extension install was not applied");
+        };
+        let personal_install = installed.install.unwrap();
+        assert_eq!(installed.catalog_revision.get(), 2);
+        assert_eq!(personal_install.id(), personal_id);
+        assert_eq!(personal_install.package(), &package);
+        assert_eq!(
+            personal_install.revision(),
+            ExtensionInstallRevision::INITIAL
+        );
+        assert!(!personal_install.desired_enabled());
+
+        let ExtensionInstallCatalogLoadOutcome::Loaded(work_still_empty) =
+            load_extension_installs(&store, work)
+        else {
+            panic!("second profile catalog could not be loaded");
+        };
+        assert!(work_still_empty.installs().is_empty());
+
+        // Package update lines are unique inside one profile, but the same
+        // authenticated package may be installed under a distinct stable id
+        // in another profile.
+        assert_eq!(
+            mutate_extension_installs(
+                &store,
+                personal,
+                installed.catalog_revision,
+                ExtensionInstallCatalogMutation::Install {
+                    id: ExtensionInstallId::from(73),
+                    package: package.clone(),
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::Invalid
+        );
+        assert!(matches!(
+            mutate_extension_installs(
+                &store,
+                work,
+                work_still_empty.revision(),
+                ExtensionInstallCatalogMutation::Install {
+                    id: work_id,
+                    package: package.clone(),
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::Applied(_)
+        ));
+
+        assert_eq!(
+            mutate_extension_installs(
+                &store,
+                personal,
+                ExtensionInstallCatalogRevision::INITIAL,
+                ExtensionInstallCatalogMutation::Delete {
+                    id: personal_id,
+                    expected: ExtensionInstallRevision::INITIAL,
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::Conflict {
+                current: installed.catalog_revision,
+            }
+        );
+        assert_eq!(
+            mutate_extension_installs(
+                &store,
+                personal,
+                installed.catalog_revision,
+                ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                    id: personal_id,
+                    expected: ExtensionInstallRevision::new(2).unwrap(),
+                    desired_enabled: true,
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::Conflict {
+                current: installed.catalog_revision,
+            }
+        );
+
+        let no_op = mutate_extension_installs(
+            &store,
+            personal,
+            installed.catalog_revision,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id: personal_id,
+                expected: personal_install.revision(),
+                desired_enabled: false,
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(no_op) = no_op else {
+            panic!("idempotent extension intent was not acknowledged");
+        };
+        assert_eq!(no_op.catalog_revision, installed.catalog_revision);
+        assert_eq!(
+            no_op.install.unwrap().revision(),
+            personal_install.revision()
+        );
+
+        let enabled = mutate_extension_installs(
+            &store,
+            personal,
+            installed.catalog_revision,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id: personal_id,
+                expected: personal_install.revision(),
+                desired_enabled: true,
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(enabled) = enabled else {
+            panic!("extension enablement intent was not applied");
+        };
+        let enabled_install = enabled.install.unwrap();
+        assert_eq!(enabled.catalog_revision.get(), 3);
+        assert_eq!(enabled_install.revision().get(), 2);
+        assert!(enabled_install.desired_enabled());
+        final_personal_revision = enabled.catalog_revision;
+
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let ExtensionInstallCatalogLoadOutcome::Loaded(reopened) =
+        load_extension_installs(&store, personal)
+    else {
+        panic!("durable extension catalog could not be reopened");
+    };
+    assert_eq!(reopened.revision(), final_personal_revision);
+    assert_eq!(reopened.installs().len(), 1);
+    let reopened_install = &reopened.installs()[0];
+    assert_eq!(reopened_install.id(), personal_id);
+    assert_eq!(reopened_install.package(), &package);
+    assert_eq!(reopened_install.revision().get(), 2);
+    assert!(reopened_install.desired_enabled());
+
+    let deleted = mutate_extension_installs(
+        &store,
+        personal,
+        reopened.revision(),
+        ExtensionInstallCatalogMutation::Delete {
+            id: personal_id,
+            expected: reopened_install.revision(),
+        },
+    );
+    let ExtensionInstallCatalogMutationOutcome::Applied(deleted) = deleted else {
+        panic!("extension deletion was not applied");
+    };
+    assert!(deleted.install.is_none());
+    let ExtensionInstallCatalogLoadOutcome::Loaded(empty) =
+        load_extension_installs(&store, personal)
+    else {
+        panic!("deleted extension catalog could not be loaded");
+    };
+    assert_eq!(empty.revision(), deleted.catalog_revision);
+    assert!(empty.installs().is_empty());
+}
+
+#[test]
+fn extension_install_limit_and_revision_exhaustion_are_definite_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let mut revision = ExtensionInstallCatalogRevision::INITIAL;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        for index in 0..MAX_EXTENSION_INSTALLS_PER_PROFILE {
+            let applied = mutate_extension_installs(
+                &store,
+                profile,
+                revision,
+                ExtensionInstallCatalogMutation::Install {
+                    id: ExtensionInstallId::from(index as u128 + 1),
+                    package: extension_package(index as u8 + 1, index as u8 + 21, 1),
+                },
+            );
+            let ExtensionInstallCatalogMutationOutcome::Applied(applied) = applied else {
+                panic!("bounded extension install {index} was rejected");
+            };
+            revision = applied.catalog_revision;
+        }
+        assert_eq!(
+            mutate_extension_installs(
+                &store,
+                profile,
+                revision,
+                ExtensionInstallCatalogMutation::Install {
+                    id: ExtensionInstallId::from(99),
+                    package: extension_package(99, 100, 1),
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::LimitReached
+        );
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let profile_path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let conn = Connection::open(profile_path).unwrap();
+    conn.execute(
+        "UPDATE extension_install_catalog SET revision = 9223372036854775807 WHERE id = 1",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let maximum = ExtensionInstallCatalogRevision::new(i64::MAX as u64).unwrap();
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            maximum,
+            ExtensionInstallCatalogMutation::Delete {
+                id: ExtensionInstallId::from(1),
+                expected: ExtensionInstallRevision::INITIAL,
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::RevisionExhausted
+    );
+}
+
+#[test]
+fn extension_install_row_revision_exhaustion_is_atomic_and_definite() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(61);
+    let catalog_revision;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let applied = mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: extension_package(61, 62, 1),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(applied) = applied else {
+            panic!("extension install setup was rejected");
+        };
+        catalog_revision = applied.catalog_revision;
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let profile_path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let conn = Connection::open(profile_path).unwrap();
+    conn.execute(
+        "UPDATE extension_installs SET revision = 9223372036854775807 WHERE id = ?1",
+        params![&id.bytes()[..]],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let maximum = ExtensionInstallRevision::new(i64::MAX as u64).unwrap();
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            catalog_revision,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id,
+                expected: maximum,
+                desired_enabled: true,
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::RevisionExhausted
+    );
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(&store, profile)
+    else {
+        panic!("extension catalog could not be reloaded after exhaustion");
+    };
+    assert_eq!(catalog.revision(), catalog_revision);
+    let install = catalog.get(id).unwrap();
+    assert_eq!(install.revision(), maximum);
+    assert!(!install.desired_enabled());
+}
+
+#[test]
+fn extension_install_commit_ambiguity_requires_exact_load_reconciliation() {
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(81);
+    let package = extension_package(31, 32, 1);
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    hub.make_next_extension_install_commit_ambiguous();
+    let store = SqliteStore::spawn(hub).unwrap();
+
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: package.clone(),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::OutcomeUnknown
+    );
+    let ExtensionInstallCatalogLoadOutcome::Loaded(reconciled) =
+        load_extension_installs(&store, profile)
+    else {
+        panic!("ambiguous extension commit could not be reconciled");
+    };
+    assert_eq!(reconciled.revision().get(), 2);
+    assert_eq!(reconciled.installs().len(), 1);
+    assert_eq!(reconciled.installs()[0].id(), id);
+    assert_eq!(reconciled.installs()[0].package(), &package);
+}
+
+#[test]
+fn extension_install_admission_and_callback_ownership_are_bounded() {
+    let (tx, rx) = mpsc::sync_channel(MAX_PENDING_EXTENSION_INSTALL_MUTATIONS + 1);
+    let store = test_store_with_sender(tx);
+    let profile = ProfileId::from(1);
+    let rejected_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    for id in 1..=MAX_PENDING_EXTENSION_INSTALL_MUTATIONS {
+        assert!(store.mutate_extension_install_catalog(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Delete {
+                id: ExtensionInstallId::from(id as u128),
+                expected: ExtensionInstallRevision::INITIAL,
+            },
+            Box::new(|_| {}),
+        ));
+    }
+    let rejected_callback = rejected_completions.clone();
+    assert!(!store.mutate_extension_install_catalog(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        ExtensionInstallCatalogMutation::Delete {
+            id: ExtensionInstallId::from(99),
+            expected: ExtensionInstallRevision::INITIAL,
+        },
+        Box::new(move |_| {
+            rejected_callback.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(rejected_completions.load(Ordering::Relaxed), 0);
+    drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
+    assert!(store.mutate_extension_install_catalog(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        ExtensionInstallCatalogMutation::Delete {
+            id: ExtensionInstallId::from(100),
+            expected: ExtensionInstallRevision::INITIAL,
+        },
+        Box::new(|_| {}),
+    ));
+    drop(rx);
+    assert_eq!(
+        store
+            .extension_install_mutation_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .count,
+        0
+    );
+
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let full = std::mem::ManuallyDrop::new(test_store_with_sender(tx));
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_completions = completions.clone();
+    assert!(!full.load_extension_install_catalog(
+        profile,
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+
+    let (terminal_tx, _terminal_rx) = mpsc::sync_channel(1);
+    let terminal = test_store_with_sender(terminal_tx);
+    terminal.lifecycle.lock().unwrap().terminal_admitted = true;
+    let terminal_callback = completions.clone();
+    assert!(!terminal.mutate_extension_install_catalog(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        ExtensionInstallCatalogMutation::Delete {
+            id: ExtensionInstallId::from(101),
+            expected: ExtensionInstallRevision::INITIAL,
+        },
+        Box::new(move |_| {
+            terminal_callback.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+
+    let (disconnected_tx, disconnected_rx) = mpsc::sync_channel(1);
+    drop(disconnected_rx);
+    let disconnected = std::mem::ManuallyDrop::new(test_store_with_sender(disconnected_tx));
+    let disconnected_callback = completions.clone();
+    assert!(!disconnected.mutate_extension_install_catalog(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        ExtensionInstallCatalogMutation::Delete {
+            id: ExtensionInstallId::from(102),
+            expected: ExtensionInstallRevision::INITIAL,
+        },
+        Box::new(move |_| {
+            disconnected_callback.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        disconnected
+            .extension_install_mutation_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .count,
+        0
+    );
+}
+
+#[test]
+fn extension_install_unknown_or_ephemeral_profile_is_never_materialized() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    store.save_session(sample());
+    assert!(store.flush());
+    let ephemeral = ProfileId::from(900);
+    assert_eq!(
+        load_extension_installs(&store, ephemeral),
+        ExtensionInstallCatalogLoadOutcome::NotRegistered
+    );
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            ephemeral,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: ExtensionInstallId::from(901),
+                package: extension_package(41, 42, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::NotRegistered
+    );
+    assert!(!dir
+        .path()
+        .join(format!("profile-{ephemeral}.sqlite"))
+        .exists());
 }
 
 #[test]
@@ -2081,6 +2626,22 @@ fn semantic_session_corruption_is_quarantined_exactly_and_store_becomes_read_onl
         ),
         PagePermissionCatalogMutationOutcome::Failed
     );
+    assert_eq!(
+        load_extension_installs(&store, ProfileId::from(1)),
+        ExtensionInstallCatalogLoadOutcome::Failed
+    );
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            ProfileId::from(1),
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: ExtensionInstallId::from(813),
+                package: extension_package(51, 52, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Failed
+    );
     assert!(store.set_app_setting("must-not-write".into(), "value".into()));
     store.save_session(sample());
     assert!(!store.flush());
@@ -2164,6 +2725,22 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
             }]),
         ),
         PagePermissionCatalogMutationOutcome::DegradedProfile
+    );
+    assert_eq!(
+        load_extension_installs(&store, degraded),
+        ExtensionInstallCatalogLoadOutcome::DegradedProfile
+    );
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            degraded,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: ExtensionInstallId::from(814),
+                package: extension_package(61, 62, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::DegradedProfile
     );
 
     // Degraded operations are terminal no-ops: they neither reopen the

@@ -1,4 +1,8 @@
 use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
+use crate::extensions::{
+    ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogMutation,
+    ExtensionInstallCatalogRevision,
+};
 use crate::ids::ProfileId;
 use crate::permissions::{
     PagePermissionCatalog, PagePermissionCatalogRevision, PagePermissionPatch,
@@ -213,6 +217,46 @@ pub enum PagePermissionCatalogMutationOutcome {
     Failed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionInstallCatalogLoadOutcome {
+    Loaded(ExtensionInstallCatalog),
+    NotRegistered,
+    /// The exact per-profile database was preserved but could not be safely
+    /// opened at the shipped schema. No subset of its installs is returned.
+    DegradedProfile,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionInstallCatalogMutationApplied {
+    pub catalog_revision: ExtensionInstallCatalogRevision,
+    /// The exact durable row after install/enablement. Deletion returns
+    /// `None`; callers retain the mutation's stable install id for
+    /// reconciliation.
+    pub install: Option<Box<ExtensionInstall>>,
+}
+
+/// Durable result of one profile extension-install catalog mutation.
+///
+/// The pure extension aggregate owns transition semantics. This port reports
+/// only persistence settlement: `OutcomeUnknown` requires an exact catalog
+/// reload before another mutation, while every definite refusal proves no
+/// durable commit was attempted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionInstallCatalogMutationOutcome {
+    Applied(ExtensionInstallCatalogMutationApplied),
+    Conflict {
+        current: ExtensionInstallCatalogRevision,
+    },
+    NotRegistered,
+    DegradedProfile,
+    Invalid,
+    LimitReached,
+    RevisionExhausted,
+    OutcomeUnknown,
+    Failed,
+}
+
 /// Result of the store's terminal process-boundary protocol.
 ///
 /// `RetryableFailure` proves the terminal command was not entered (normally
@@ -319,6 +363,32 @@ pub trait Store {
         _expected: PagePermissionCatalogRevision,
         _patch: PagePermissionPatch,
         _done: Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Loads one complete bounded extension-install catalog for a registered
+    /// durable profile. A malformed row fails the catalog as a whole; no
+    /// filtered subset may cross this boundary. `true` transfers exactly-once
+    /// callback ownership to the adapter; `false` proves non-admission and
+    /// guarantees that the callback will not run.
+    fn load_extension_install_catalog(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(ExtensionInstallCatalogLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Applies one fixed-size extension-install mutation after comparing the
+    /// complete catalog revision. Structural package identity is not package
+    /// authentication and does not authorize native activation. `true`
+    /// transfers exactly-once callback ownership; `false` proves that no
+    /// mutation was admitted and the callback will not run.
+    fn mutate_extension_install_catalog(
+        &self,
+        _profile: ProfileId,
+        _expected: ExtensionInstallCatalogRevision,
+        _mutation: ExtensionInstallCatalogMutation,
+        _done: Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>,
     ) -> bool {
         false
     }
