@@ -322,6 +322,15 @@ impl UserContent {
                     registration: script.key(),
                     reason: UserScriptRefusalReason::SourceTooLarge,
                 });
+            } else if script.source.as_bytes().contains(&0) {
+                // WebKitGTK consumes NUL-terminated UTF-8 and would otherwise
+                // install only the caller-controlled prefix. Keep the core
+                // contract identical on every platform instead of relying on
+                // an adapter-specific conversion failure.
+                refusals.push(UserScriptRefusal {
+                    registration: script.key(),
+                    reason: UserScriptRefusalReason::EmbeddedNul,
+                });
             }
             let owner_matches_world = matches!(
                 (script.owner, script.world),
@@ -372,6 +381,11 @@ impl UserContent {
                     registration: style.key(),
                     reason: UserScriptRefusalReason::SourceTooLarge,
                 });
+            } else if style.css.as_bytes().contains(&0) {
+                refusals.push(UserScriptRefusal {
+                    registration: style.key(),
+                    reason: UserScriptRefusalReason::EmbeddedNul,
+                });
             }
             if !ids.insert(style.key()) {
                 refusals.push(UserScriptRefusal {
@@ -406,6 +420,7 @@ impl UserContent {
 pub enum UserScriptRefusalReason {
     EmptySource,
     SourceTooLarge,
+    EmbeddedNul,
     OwnerWorldMismatch,
     DuplicateId,
     UnsupportedWorld,
@@ -888,6 +903,38 @@ mod user_content_tests {
                 if refusals.iter().any(|refusal| refusal.registration == script.key()
                     && refusal.reason == UserScriptRefusalReason::DuplicateId)
         ));
+    }
+
+    #[test]
+    fn user_content_rejects_embedded_nul_before_native_conversion() {
+        let mut script = script(3);
+        script.source = "prefix\0suffix".into();
+        let style = UserStyle {
+            id: ScriptId::from(4),
+            owner: script.owner,
+            css: "html { color: red; }\0html { color: green; }".into(),
+            matches: MatchSet::all_urls(),
+            all_frames: false,
+        };
+        let expected = vec![
+            UserScriptRefusal {
+                registration: script.key(),
+                reason: UserScriptRefusalReason::EmbeddedNul,
+            },
+            UserScriptRefusal {
+                registration: style.key(),
+                reason: UserScriptRefusalReason::EmbeddedNul,
+            },
+        ];
+
+        let failure = UserContent {
+            scripts: vec![script],
+            styles: vec![style],
+        }
+        .validate()
+        .unwrap_err();
+
+        assert_eq!(failure, UserContentApplyFailure::Scripts(expected));
     }
 
     #[test]
