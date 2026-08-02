@@ -12,6 +12,7 @@ mod filesystem;
 mod history;
 mod session;
 mod settings;
+mod userscripts;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

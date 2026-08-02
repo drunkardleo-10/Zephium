@@ -1,6 +1,9 @@
 use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use crate::ids::ProfileId;
 use crate::session::SessionState;
+use crate::userscripts::{
+    Userscript, UserscriptCatalog, UserscriptCatalogMutation, UserscriptCatalogRevision,
+};
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -130,6 +133,42 @@ pub enum BlockerConfigLoadOutcome {
     Failed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserscriptCatalogLoadOutcome {
+    Loaded(UserscriptCatalog),
+    NotRegistered,
+    /// The exact per-profile database was preserved but could not be safely
+    /// opened at the shipped schema. No subset of its scripts is returned.
+    DegradedProfile,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserscriptCatalogMutationApplied {
+    pub catalog_revision: UserscriptCatalogRevision,
+    /// The exact durable row after install/update/toggle. Deletion returns
+    /// `None`; callers retain the mutation's id for reconciliation.
+    pub script: Option<Box<Userscript>>,
+}
+
+/// Durable result of one profile-catalog compare-and-swap mutation.
+///
+/// Commit errors are `OutcomeUnknown`, never `Failed`, because a caller must
+/// reconcile the exact catalog before deciding whether another mutation is
+/// legal. `Invalid` means the adapter proved no durable write or commit was
+/// attempted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserscriptCatalogMutationOutcome {
+    Applied(UserscriptCatalogMutationApplied),
+    Conflict { current: UserscriptCatalogRevision },
+    NotRegistered,
+    DegradedProfile,
+    Invalid,
+    RevisionExhausted,
+    OutcomeUnknown,
+    Failed,
+}
+
 /// Result of the store's terminal process-boundary protocol.
 ///
 /// `RetryableFailure` proves the terminal command was not entered (normally
@@ -191,6 +230,29 @@ pub trait Store {
         &self,
         _profile: ProfileId,
         _done: Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Loads one complete bounded profile catalog. `true` transfers
+    /// exactly-once callback ownership; `false` proves the request was not
+    /// admitted. Implementations must never return a filtered valid subset of
+    /// a malformed catalog.
+    fn load_userscript_catalog(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(UserscriptCatalogLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Applies one exact durable catalog mutation after comparing the
+    /// collection revision. Source-carrying requests are independently byte-
+    /// and count-bounded before entering an actor mailbox.
+    fn mutate_userscript_catalog(
+        &self,
+        _profile: ProfileId,
+        _expected: UserscriptCatalogRevision,
+        _mutation: UserscriptCatalogMutation,
+        _done: Box<dyn FnOnce(UserscriptCatalogMutationOutcome) + Send>,
     ) -> bool {
         false
     }

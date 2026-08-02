@@ -20,7 +20,8 @@ use zephium_core::navigation;
 use zephium_core::ports::store::{
     BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, HistoryHit,
     ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
-    SessionLoad, Store, StoreShutdownOutcome, MAX_FAVICON_BATCH_ORIGINS,
+    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
+    UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -28,6 +29,7 @@ use zephium_core::session::{
     MAX_SESSION_SPACES, MAX_SPLIT_DEPTH,
 };
 use zephium_core::split::Pane;
+use zephium_core::userscripts::{UserscriptCatalogMutation, UserscriptCatalogRevision};
 
 use crate::hub::{
     self, Hub, MAX_HISTORY_QUERY_BYTES, MAX_HISTORY_RESULTS, MAX_SETTING_KEY_BYTES,
@@ -44,10 +46,72 @@ const MAX_PENDING_VISITS: usize = 2048;
 const MAX_PENDING_SETTINGS: usize = hub::MAX_APP_SETTINGS as usize;
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(8);
 const STORE_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
+const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
 type BlockerConfigLoadDone = Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>;
+type UserscriptCatalogLoadDone = Box<dyn FnOnce(UserscriptCatalogLoadOutcome) + Send>;
+type UserscriptCatalogMutationDone = Box<dyn FnOnce(UserscriptCatalogMutationOutcome) + Send>;
+
+#[derive(Default)]
+struct UserscriptMutationAdmission {
+    count: usize,
+    source_bytes: usize,
+}
+
+struct UserscriptMutationPermit {
+    admission: Arc<Mutex<UserscriptMutationAdmission>>,
+    source_bytes: usize,
+}
+
+impl UserscriptMutationPermit {
+    fn acquire(
+        admission: &Arc<Mutex<UserscriptMutationAdmission>>,
+        source_bytes: usize,
+    ) -> Option<Self> {
+        let mut state = admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next_count = state.count.checked_add(1)?;
+        let next_bytes = state.source_bytes.checked_add(source_bytes)?;
+        if next_count > MAX_PENDING_USERSCRIPT_MUTATIONS
+            || next_bytes > MAX_PENDING_USERSCRIPT_SOURCE_BYTES
+        {
+            return None;
+        }
+        state.count = next_count;
+        state.source_bytes = next_bytes;
+        Some(Self {
+            admission: admission.clone(),
+            source_bytes,
+        })
+    }
+}
+
+impl Drop for UserscriptMutationPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = state.count.checked_sub(1) else {
+            // An impossible accounting violation must close admission rather
+            // than reset it and accidentally admit an unbounded queue.
+            state.count = usize::MAX;
+            state.source_bytes = usize::MAX;
+            return;
+        };
+        let Some(source_bytes) = state.source_bytes.checked_sub(self.source_bytes) else {
+            state.count = usize::MAX;
+            state.source_bytes = usize::MAX;
+            return;
+        };
+        state.count = count;
+        state.source_bytes = source_bytes;
+    }
+}
 
 #[derive(Default)]
 struct PendingSettings {
@@ -148,6 +212,14 @@ enum Cmd {
         BlockerConfigUpdateDone,
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
+    LoadUserscriptCatalog(ProfileId, UserscriptCatalogLoadDone),
+    MutateUserscriptCatalog(
+        ProfileId,
+        UserscriptCatalogRevision,
+        UserscriptCatalogMutation,
+        UserscriptMutationPermit,
+        UserscriptCatalogMutationDone,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -177,6 +249,7 @@ pub struct SqliteStore {
     latest_session: Arc<Mutex<Option<SessionState>>>,
     pending_visits: Arc<Mutex<PendingVisits>>,
     pending_settings: Arc<Mutex<PendingSettings>>,
+    userscript_mutation_admission: Arc<Mutex<UserscriptMutationAdmission>>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
 }
@@ -213,6 +286,8 @@ impl SqliteStore {
         let actor_latest_session = latest_session.clone();
         let actor_pending_visits = pending_visits.clone();
         let actor_pending_settings = pending_settings.clone();
+        let userscript_mutation_admission =
+            Arc::new(Mutex::new(UserscriptMutationAdmission::default()));
         let (actor_exited, actor_exit) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("zephium-store".into())
@@ -246,6 +321,7 @@ impl SqliteStore {
             latest_session,
             pending_visits,
             pending_settings,
+            userscript_mutation_admission,
             lifecycle: Mutex::new(ActorLifecycle {
                 join: Some(join),
                 exited: actor_exit,
@@ -435,6 +511,49 @@ impl Store for SqliteStore {
         }
         self.tx
             .try_send(Cmd::LoadProfileBlockerConfig(profile, done))
+            .is_ok()
+    }
+
+    fn load_userscript_catalog(&self, profile: ProfileId, done: UserscriptCatalogLoadDone) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadUserscriptCatalog(profile, done))
+            .is_ok()
+    }
+
+    fn mutate_userscript_catalog(
+        &self,
+        profile: ProfileId,
+        expected: UserscriptCatalogRevision,
+        mutation: UserscriptCatalogMutation,
+        done: UserscriptCatalogMutationDone,
+    ) -> bool {
+        if !mutation.source_envelope_is_valid() {
+            return false;
+        }
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(permit) = UserscriptMutationPermit::acquire(
+            &self.userscript_mutation_admission,
+            mutation.source_bytes(),
+        ) else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::MutateUserscriptCatalog(
+                profile, expected, mutation, permit, done,
+            ))
             .is_ok()
     }
 
@@ -876,6 +995,30 @@ fn actor(
                             "store: profile {profile} blocker preference reconciliation failed: {error}"
                         );
                         BlockerConfigLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadUserscriptCatalog(profile, done)) => {
+                let outcome = match hub.load_userscript_catalog(profile) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} userscript catalog load failed: {error}"
+                        );
+                        UserscriptCatalogLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::MutateUserscriptCatalog(profile, expected, mutation, _permit, done)) => {
+                let outcome = match hub.mutate_userscript_catalog(profile, expected, mutation) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} userscript catalog mutation failed: {error}"
+                        );
+                        UserscriptCatalogMutationOutcome::Failed
                     }
                 };
                 done(outcome);

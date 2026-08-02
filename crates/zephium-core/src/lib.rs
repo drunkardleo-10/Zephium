@@ -17,6 +17,7 @@ pub mod runtime_security;
 pub mod session;
 pub mod spaces;
 pub mod split;
+pub mod userscripts;
 pub mod webkitgtk;
 pub mod webview2;
 pub mod windows;

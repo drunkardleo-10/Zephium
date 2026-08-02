@@ -610,6 +610,41 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 7,
+        up: |tx| {
+            tx.execute_batch(
+                // Source is the only durable metadata authority. Names,
+                // matches, grants and compatibility status are derived by
+                // the bounded core parser on every load, avoiding a second
+                // representation that could drift across runtime upgrades.
+                "CREATE TABLE userscript_catalog (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807)
+                 ) STRICT;
+                 INSERT INTO userscript_catalog(id, revision) VALUES (1, 1);
+                 CREATE TABLE userscripts (
+                     id TEXT PRIMARY KEY
+                         CHECK (length(CAST(id AS BLOB)) = 26),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     enabled INTEGER NOT NULL
+                         CHECK (enabled IN (0, 1)),
+                     metadata_format INTEGER NOT NULL
+                         CHECK (metadata_format BETWEEN 1 AND 2147483647),
+                     source TEXT NOT NULL
+                         CHECK (length(CAST(source AS BLOB)) BETWEEN 1 AND 2097152
+                                AND instr(CAST(source AS BLOB), X'00') = 0),
+                     -- SHA-256(\"zephium-userscript-source-v1\" || UTF-8 source).
+                     -- The versioned name prevents a future digest change
+                     -- from silently reinterpreting durable bytes.
+                     source_sha256_v1 BLOB NOT NULL
+                         CHECK (length(source_sha256_v1) = 32)
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -806,6 +841,102 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn profile_v7_adds_an_exact_empty_source_only_userscript_catalog() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..6]).unwrap();
+
+        apply(&mut conn, PROFILE).unwrap();
+
+        let state: (i64, i64) = conn
+            .query_row("SELECT id, revision FROM userscript_catalog", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(state, (1, 1));
+        let scripts: i64 = conn
+            .query_row("SELECT count(*) FROM userscripts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(scripts, 0);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn profile_v7_schema_rejects_unbounded_or_malformed_userscript_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        let valid_source =
+            "// ==UserScript==\n// @name A\n// @match https://example.com/*\n// ==/UserScript==\n";
+        for (id, revision, enabled, format, source, digest) in [
+            ("short", 1_i64, 0_i64, 1_i64, valid_source, vec![0_u8; 32]),
+            (
+                "01J00000000000000000000000",
+                0,
+                0,
+                1,
+                valid_source,
+                vec![0_u8; 32],
+            ),
+            (
+                "01J00000000000000000000001",
+                1,
+                2,
+                1,
+                valid_source,
+                vec![0_u8; 32],
+            ),
+            (
+                "01J00000000000000000000002",
+                1,
+                0,
+                0,
+                valid_source,
+                vec![0_u8; 32],
+            ),
+            ("01J00000000000000000000003", 1, 0, 1, "", vec![0_u8; 32]),
+            (
+                "01J00000000000000000000004",
+                1,
+                0,
+                1,
+                valid_source,
+                vec![0_u8; 31],
+            ),
+        ] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO userscripts(
+                         id, revision, enabled, metadata_format, source, source_sha256_v1
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![id, revision, enabled, format, source, digest],
+                )
+                .is_err(),
+                "accepted invalid userscript row {id}"
+            );
+        }
+
+        assert!(conn
+            .execute(
+                "UPDATE userscript_catalog SET revision = 0 WHERE id = 1",
+                []
+            )
+            .is_err());
+        let oversized = "x".repeat(zephium_core::ports::engine::MAX_USER_SCRIPT_BYTES + 1);
+        for source in [oversized.as_str(), "valid prefix\0invalid body"] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO userscripts(
+                         id, revision, enabled, metadata_format, source, source_sha256_v1
+                     ) VALUES (?1, 1, 0, 1, ?2, ?3)",
+                    rusqlite::params!["01J00000000000000000000005", source, vec![0_u8; 32]],
+                )
+                .is_err());
+        }
     }
 
     #[test]

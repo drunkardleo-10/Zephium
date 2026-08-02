@@ -70,5 +70,6 @@ ulid_id!(SpaceId);
 ulid_id!(ProfileId);
 ulid_id!(ScriptId);
 ulid_id!(ScriptPrincipalId);
+ulid_id!(UserscriptId);
 
 pub type WindowId = u64;

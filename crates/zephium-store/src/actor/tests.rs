@@ -1,11 +1,14 @@
 use super::*;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
-use zephium_core::ids::{ItemId, SpaceId};
+use zephium_core::ids::{ItemId, SpaceId, UserscriptId};
 use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
 use zephium_core::split::{Axis, Pane};
+use zephium_core::userscripts::{
+    UserscriptCatalogMutation, UserscriptCatalogRevision, UserscriptRevision,
+};
 
 fn tab(id: u128, space: SpaceId, url: &str) -> PersistedItem {
     PersistedItem {
@@ -34,6 +37,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         latest_session: Arc::new(Mutex::new(None)),
         pending_visits: Arc::new(Mutex::new(PendingVisits::new())),
         pending_settings: Arc::new(Mutex::new(PendingSettings::default())),
+        userscript_mutation_admission: Arc::new(Mutex::new(UserscriptMutationAdmission::default())),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
             exited,
@@ -169,6 +173,290 @@ fn loaded_session(state: SessionState) -> SessionLoad {
         blocker_configs: default_blocker_configs(&state),
         state,
     }
+}
+
+fn userscript_source(name: &str) -> Arc<str> {
+    format!(
+        "// ==UserScript==\n// @name {name}\n// @match https://example.com/*\n// ==/UserScript==\n"
+    )
+    .into()
+}
+
+fn load_userscripts(store: &impl Store, profile: ProfileId) -> UserscriptCatalogLoadOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.load_userscript_catalog(
+        profile,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn mutate_userscripts(
+    store: &impl Store,
+    profile: ProfileId,
+    expected: UserscriptCatalogRevision,
+    mutation: UserscriptCatalogMutation,
+) -> UserscriptCatalogMutationOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.mutate_userscript_catalog(
+        profile,
+        expected,
+        mutation,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+#[test]
+fn userscript_catalog_is_source_authoritative_durable_and_revision_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = UserscriptId::from(7);
+    let catalog_revision_before_reopen;
+    let script_revision_before_reopen;
+
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+
+        let UserscriptCatalogLoadOutcome::Loaded(initial) = load_userscripts(&store, profile)
+        else {
+            panic!("new profile did not expose an exact empty userscript catalog");
+        };
+        assert_eq!(initial.revision(), UserscriptCatalogRevision::INITIAL);
+        assert!(initial.scripts().is_empty());
+
+        assert_eq!(
+            mutate_userscripts(
+                &store,
+                profile,
+                initial.revision(),
+                UserscriptCatalogMutation::Install {
+                    id,
+                    enabled: true,
+                    source: "not a userscript".into(),
+                },
+            ),
+            UserscriptCatalogMutationOutcome::Invalid
+        );
+
+        let installed = mutate_userscripts(
+            &store,
+            profile,
+            initial.revision(),
+            UserscriptCatalogMutation::Install {
+                id,
+                enabled: true,
+                source: userscript_source("Installed"),
+            },
+        );
+        let UserscriptCatalogMutationOutcome::Applied(installed) = installed else {
+            panic!("valid install was not applied");
+        };
+        let installed_script = installed.script.unwrap();
+        assert_eq!(installed.catalog_revision.get(), 2);
+        assert_eq!(installed_script.revision, UserscriptRevision::INITIAL);
+        assert_eq!(installed_script.metadata.name.as_ref(), "Installed");
+        assert!(!installed_script.compatibility.executable);
+
+        assert_eq!(
+            mutate_userscripts(
+                &store,
+                profile,
+                UserscriptCatalogRevision::INITIAL,
+                UserscriptCatalogMutation::Delete {
+                    id,
+                    expected: UserscriptRevision::INITIAL,
+                },
+            ),
+            UserscriptCatalogMutationOutcome::Conflict {
+                current: installed.catalog_revision,
+            }
+        );
+        assert_eq!(
+            mutate_userscripts(
+                &store,
+                profile,
+                installed.catalog_revision,
+                UserscriptCatalogMutation::UpdateSource {
+                    id,
+                    expected: UserscriptRevision::new(2).unwrap(),
+                    source: userscript_source("Stale"),
+                },
+            ),
+            UserscriptCatalogMutationOutcome::Invalid
+        );
+
+        let updated = mutate_userscripts(
+            &store,
+            profile,
+            installed.catalog_revision,
+            UserscriptCatalogMutation::UpdateSource {
+                id,
+                expected: UserscriptRevision::INITIAL,
+                source: userscript_source("Updated"),
+            },
+        );
+        let UserscriptCatalogMutationOutcome::Applied(updated) = updated else {
+            panic!("valid source update was not applied");
+        };
+        let updated_script = updated.script.unwrap();
+        assert_eq!(updated.catalog_revision.get(), 3);
+        assert_eq!(updated_script.revision.get(), 2);
+        assert_eq!(updated_script.metadata.name.as_ref(), "Updated");
+
+        let unchanged = mutate_userscripts(
+            &store,
+            profile,
+            updated.catalog_revision,
+            UserscriptCatalogMutation::SetEnabled {
+                id,
+                expected: updated_script.revision,
+                enabled: true,
+            },
+        );
+        let UserscriptCatalogMutationOutcome::Applied(unchanged) = unchanged else {
+            panic!("idempotent toggle was not acknowledged");
+        };
+        assert_eq!(unchanged.catalog_revision, updated.catalog_revision);
+        assert_eq!(unchanged.script.unwrap().revision, updated_script.revision);
+
+        let disabled = mutate_userscripts(
+            &store,
+            profile,
+            updated.catalog_revision,
+            UserscriptCatalogMutation::SetEnabled {
+                id,
+                expected: updated_script.revision,
+                enabled: false,
+            },
+        );
+        let UserscriptCatalogMutationOutcome::Applied(disabled) = disabled else {
+            panic!("valid toggle was not applied");
+        };
+        let disabled_script = disabled.script.unwrap();
+        assert_eq!(disabled.catalog_revision.get(), 4);
+        assert_eq!(disabled_script.revision.get(), 3);
+        assert!(!disabled_script.enabled);
+        catalog_revision_before_reopen = disabled.catalog_revision;
+        script_revision_before_reopen = disabled_script.revision;
+        assert!(store.flush());
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let UserscriptCatalogLoadOutcome::Loaded(reopened) = load_userscripts(&store, profile) else {
+        panic!("durable catalog could not be reopened");
+    };
+    assert_eq!(reopened.revision(), catalog_revision_before_reopen);
+    assert_eq!(reopened.scripts().len(), 1);
+    let reopened_script = &reopened.scripts()[0];
+    assert_eq!(reopened_script.id, id);
+    assert_eq!(reopened_script.revision, script_revision_before_reopen);
+    assert_eq!(reopened_script.metadata.name.as_ref(), "Updated");
+    assert!(!reopened_script.enabled);
+
+    let deleted = mutate_userscripts(
+        &store,
+        profile,
+        reopened.revision(),
+        UserscriptCatalogMutation::Delete {
+            id,
+            expected: reopened_script.revision,
+        },
+    );
+    let UserscriptCatalogMutationOutcome::Applied(deleted) = deleted else {
+        panic!("valid deletion was not applied");
+    };
+    assert!(deleted.script.is_none());
+    let UserscriptCatalogLoadOutcome::Loaded(empty) = load_userscripts(&store, profile) else {
+        panic!("deleted catalog could not be loaded");
+    };
+    assert_eq!(empty.revision(), deleted.catalog_revision);
+    assert!(empty.scripts().is_empty());
+}
+
+#[test]
+fn userscript_mutation_admission_is_independently_bounded_and_exact() {
+    let (tx, rx) = mpsc::sync_channel(8);
+    let store = test_store_with_sender(tx);
+    let profile = ProfileId::from(1);
+
+    for id in 1..=MAX_PENDING_USERSCRIPT_MUTATIONS {
+        assert!(store.mutate_userscript_catalog(
+            profile,
+            UserscriptCatalogRevision::INITIAL,
+            UserscriptCatalogMutation::Install {
+                id: UserscriptId::from(id as u128),
+                enabled: true,
+                source: userscript_source("Queued"),
+            },
+            Box::new(|_| {}),
+        ));
+    }
+    assert!(!store.mutate_userscript_catalog(
+        profile,
+        UserscriptCatalogRevision::INITIAL,
+        UserscriptCatalogMutation::Install {
+            id: UserscriptId::from(99),
+            enabled: true,
+            source: userscript_source("Refused"),
+        },
+        Box::new(|_| {}),
+    ));
+
+    drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
+    assert!(store.mutate_userscript_catalog(
+        profile,
+        UserscriptCatalogRevision::INITIAL,
+        UserscriptCatalogMutation::Install {
+            id: UserscriptId::from(100),
+            enabled: true,
+            source: userscript_source("Admitted after release"),
+        },
+        Box::new(|_| {}),
+    ));
+
+    drop(rx);
+    let admission = store
+        .userscript_mutation_admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(admission.count, 0);
+    assert_eq!(admission.source_bytes, 0);
+}
+
+#[test]
+fn oversized_userscript_source_is_refused_without_callback_transfer() {
+    let (tx, _rx) = mpsc::sync_channel(1);
+    let store = test_store_with_sender(tx);
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(!store.mutate_userscript_catalog(
+        ProfileId::from(1),
+        UserscriptCatalogRevision::INITIAL,
+        UserscriptCatalogMutation::Install {
+            id: UserscriptId::from(1),
+            enabled: true,
+            source: "x"
+                .repeat(zephium_core::ports::engine::MAX_USER_SCRIPT_BYTES + 1)
+                .into(),
+        },
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    assert!(matches!(
+        outcome.recv_timeout(Duration::from_millis(20)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
 }
 
 #[test]
