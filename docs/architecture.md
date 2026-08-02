@@ -359,7 +359,11 @@ favorites and folders into one aggregate; there is no separate bookmarks system.
   refs: [ItemId | Url] }`. Notes/tasks/easel/research live here; easel cards
   can hold page captures (§8 engine `capture`).
 - **Downloads** - entries with state/progress; supervised subsystem.
-- **Permissions** - per `(profile, origin)`; default deny.
+- **Permissions** - page permissions are per `(profile, origin)`; extension API,
+  host, temporary, and scheme grants are a separate per-`(profile, extension)`
+  authority model. Everything defaults deny. A Chrome match pattern is never a
+  permission grant, and local-file access requires an independent explicit
+  grant even when the pattern is `<all_urls>`.
 - **SearchEngines / Settings / Themes** - data-driven; themes are token maps
   validated against a typed schema.
 - **Commands** - registry with stable string ids (`tab.close`, `space.next`,
@@ -420,11 +424,19 @@ The full surface is declared now; implementations land incrementally. Grouped:
 - **layout**: `set_content(window, tree, region)`, `set_drop_indicator(zone)`.
 - **page ops**: `capture -> png` (easel, previews), `extract_html` (html->md,
   research), `find`, `zoom`, `mute`, `print_pdf`.
-- **injection**: `set_user_content(scope, scripts, styles)` where scope is
-  profile or origin. Designed from day one with **isolated worlds and a
-  two-way messaging channel**, because the same pipeline serves the built-in
-  scrollbar CSS, Boosts (per-origin page customization), userscripts/
-  userstyles, adblock cosmetics, and a future extensions layer (§10).
+- **injection**: `set_user_content(scope, generation, content)` where
+  `ContentScope = Global | Profile` is ownership, not URL targeting. `Global`
+  is host-only; runtime callers may replace only a profile scope. Every
+  registration has a stable owner-qualified `(owner, ScriptId)` identity,
+  bounded `MatchSet`, and frame policy; scripts additionally carry `World` and
+  `RunAt`. `MatchSet` expresses bounded URL eligibility, not authority; the
+  permission broker must intersect host and scheme grants before installation.
+  A terminal settlement reports the requested generation as applied, retained
+  with the prior generation, or unavailable. The current adapters fail closed
+  for live-view mutation and all principal-owned content until exact pre-source
+  per-frame match enforcement, installed-state preservation, and isolated-world
+  gates pass. Dormant macOS/Linux per-principal handler primitives are not
+  retained by product construction; page worlds receive no native bridge.
 - **rules**: `install_content_rules(profile, generation, compiled)` with an
   exact settlement event. Windows installs a synchronous request matcher;
   macOS/Linux install declarative native rules. Core models both as immutable
@@ -520,46 +532,56 @@ gates are documented in
 
 ---
 
-## 10. Extensions (tiered; NOT impossible, priced honestly)
+## 10. Extensions (bounded MV3 subset; currently disabled)
 
-**The WebExtensions API is a browser-layer API, not an engine API.** Chrome and
-Firefox implement `chrome.*`/`browser.*` in the browser on top of engine
-primitives. Proof on our exact engines: Safari ships Web Extensions as an
-app-layer implementation on WebKit; Orion (Kagi) reimplemented ~70% of the API
-surface on WebKit over years of dedicated work; GNOME Epiphany has an
-experimental layer on WebKitGTK. So it is feasible, and it is expensive: an API
-surface of hundreds of methods with permanent parity-chasing.
+The WebExtensions API is a browser-layer compatibility product, not a feature
+the native engines provide uniformly. Zephium does not claim extension
+installation, API mediation, userscripts, or Chrome/Firefox compatibility in
+the current tree. The exact initial compatibility target is one pinned
+**Bitwarden Core** build with a written supported/degraded/unsupported matrix,
+not an open-store or general-parity promise.
 
-Strategy, in order:
+Delivery is layered and measured:
 
-- **Tier 0 (foundation, in the phases below): built-ins.** adblock (§9) +
-  userscripts/userstyles (Tampermonkey class) + Boosts, all on the one
-  injection pipeline. This covers the top reasons people install extensions.
-- **Tier 1 (cheap, after the Windows adapter): native Chrome extensions on
-  Windows.** WebView2 `CoreWebView2Profile.AddBrowserExtension` loads unpacked
-  Chrome extensions into the profile: real Chromium extension runtime (content
-  scripts, background, webRequest). WebView2 hosts no extension UI; we host
-  action popups/options in our overlay surfaces. Install = fetch .crx (zip),
-  unpack, add; persists per profile.
-- **Tier 2 (own phase, after core features): compat subset for macOS/Linux.**
-  Data-driven: take the top ~100 extensions, implement the API subset they
-  need (storage, runtime, tabs, scripting, cookies, contextMenus,
-  declarativeNetRequest). `chrome.*` vs `browser.*` is one implementation
-  behind a polyfill shim. Position like Orion: "supports popular extensions",
-  never promise 100%.
+- declarative data uses native rules/storage and no persistent JS runtime, but
+  still has compile, match, and memory cost;
+- userscripts/userstyles lazily require a native world/handler registration per
+  active principal in each eligible live content controller/view, plus an
+  isolated JS context in each eligible frame/document; both cardinalities are
+  explicitly capped; and
+- the macOS/Linux MV3 compatibility subset requires a bounded Zephium-owned
+  event-runtime view/context plus any chosen extension-UI or capability-specific
+  offscreen resources; WebView2-native extension workers are engine-managed and
+  require separate count admission and measured process-resource gates.
 
-Ceilings, stated plainly: public WKWebView has no blocking webRequest (Orion
-uses a custom WebKit build; we will not maintain an engine fork), so
-MV2-uBlock-class network extensions are out of reach on macOS/Linux; our
-built-in blocker is the answer there. The password-manager / Dark Reader /
-content-script class (the majority of real usage) fits within public
-primitives.
+macOS and Linux use a Zephium compatibility runtime only after per-principal
+world/handler isolation, exact match enforcement, protected-script installed
+state, and native hostile tests pass. Windows has two separate candidates:
+curated MV3 packages through a production wrapper around
+`AddBrowserExtension`, whose environment-level enablement is a startup-time
+decision, and a CDP isolated-world probe for first-party userscripts. The CDP
+probe is excluded from normal product builds and has no page-world fallback;
+its lifecycle, removal, navigation, resource, debugger-coexistence, and live
+performance gates remain open.
 
-**Architecturally, extensions are a future consumer of ports that already
-exist** (injection + isolated worlds + messaging, content rules, storage,
-overlay surfaces for popups, commands registry). No foundation change is
-required to keep this door open; the isolated-world messaging design in §8 is
-the one deliberate provision.
+This work needs new foundations rather than merely consuming existing ports:
+a profile-scoped permission broker, per-install extension scheme and
+unprivileged extension-UI trust zone, capability-scoped messaging, a bounded
+compatibility MV3 event-runtime state machine inside
+`MAX_NATIVE_VIEW_RESOURCES = 48`, a separate Windows-native admission/resource
+policy, storage quotas, and authenticated immutable package activation.
+Distribution reuses the blocker stack's generic package-authority model—fixed origins,
+authenticated content-addressed packages, monotonic candidate/current/previous
+state, staged activation, rollback, and crash recovery—without coupling
+extensions to blocker compilation.
+
+Permanent ceilings include Manifest V2, persistent backgrounds, blocking
+`webRequest` on public WebKit, devtools extensions, browser-identity overrides,
+native messaging in the initial target, and an open catalog. Unsupported or
+degraded APIs must fail deterministically and be disclosed; they are never
+silently approximated. Permanent security invariants and release gates live in
+[`security-model.md`](security-model.md); implementation sequencing is not part
+of this architecture contract.
 
 ---
 
@@ -780,7 +802,10 @@ FTS5; a test guards it).
 4. Only `desktop` knows Tauri. Page-derived network access stays inside the
    exact profile-scoped native engine; app-owned downloads require dedicated
    policy components rather than a generic fetch port.
-5. Content webviews are NEVER given a bridge (see security-model.md).
+5. Content page worlds are NEVER given a bridge (see security-model.md). Any
+   future content-native channel must be isolated-world-only, per principal,
+   capability-scoped, natively identity-bound, and disabled until the
+   architecture/security documentation and native hostile tests prove it.
 6. `unsafe` only in engine/native adapters, each block documented.
 7. In-app overlays position relative to the main window, never absolute.
 8. A change is not done until `cargo xtask ci` is green on all three targets.

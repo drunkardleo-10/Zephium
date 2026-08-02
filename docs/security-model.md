@@ -24,8 +24,10 @@ Chromium's full site-isolation model.
    storage are defense in depth, not reasons to trust its input.
 3. **Tab WebViews (untrusted).** Raw Wry child WebViews render arbitrary web content.
    They receive no Tauri command bridge, no Wry IPC handler, and no Zephium custom
-   protocol handler. The application currently injects only cosmetic page-world CSS;
-   injected page-world code has exactly the page's trust level.
+   protocol handler. The application injects fixed cosmetic CSS plus protected
+   page-world bootstraps for discard-safety observation, bounded HTML extraction, and
+   scripted-print denial. Those scripts expose no native bridge or application
+   authority; all injected page-world code has exactly the page's trust level.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.
