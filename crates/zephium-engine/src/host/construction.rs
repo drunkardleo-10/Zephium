@@ -12,6 +12,7 @@ use super::profiles::MAX_NATIVE_PROFILE_PROCESS_GROUPS;
 use super::profiles::{
     profile_scoped_value, profile_value_is_isolated, MAX_PROFILE_PERSISTENCE_BINDINGS,
 };
+use super::resources::{NativeResourceAdmissionError, NativeResourceClass};
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 use super::Spare;
 use super::{EngineHost, ObservedView};
@@ -37,51 +38,49 @@ use objc2::rc::Retained;
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
-// The app's current hard live-view budget is 32. This independent native
-// ceiling leaves sixteen emergency slots: enough to reconstruct all eight
-// visible panes, retain one warm spare, and still carry bounded teardown debt.
-// Every incomplete cleanup debt consumes a slot, even after Controller::Close
-// succeeds: a stuck subclass/HWND is still a native resource. Retries can
-// therefore never create around any failed teardown obligation.
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 48;
-const _: () = assert!(MAX_NATIVE_VIEW_RESOURCES >= 32 + 1 + 8);
-
-#[derive(Default)]
-pub(super) struct NativeViewReservations {
-    in_construction: usize,
+#[derive(Clone, Copy)]
+enum NativeViewPurpose {
+    Tab,
+    WarmSpare,
 }
 
-impl NativeViewReservations {
-    fn try_reserve(&mut self, already_owned: usize) -> Result<bool, ()> {
-        let Some(total) = already_owned.checked_add(self.in_construction) else {
-            return Err(());
-        };
-        if total >= MAX_NATIVE_VIEW_RESOURCES {
-            return Ok(false);
+impl NativeViewPurpose {
+    const fn resource_class(self) -> NativeResourceClass {
+        match self {
+            Self::Tab => NativeResourceClass::Tab,
+            Self::WarmSpare => NativeResourceClass::WarmSpare,
         }
-        self.in_construction = self.in_construction.checked_add(1).ok_or(())?;
-        Ok(true)
     }
 
-    fn release(&mut self) -> Result<(), ()> {
-        self.in_construction = self.in_construction.checked_sub(1).ok_or(())?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn in_construction(&self) -> usize {
-        self.in_construction
+    const fn reports_failure(self) -> bool {
+        matches!(self, Self::Tab)
     }
 }
 
-fn owned_native_view_resources(
-    live_views: usize,
-    has_warm_spare: bool,
-    cleanup_debts: usize,
-) -> Option<usize> {
-    live_views
-        .checked_add(usize::from(has_warm_spare))?
-        .checked_add(cleanup_debts)
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowsConstructionSettlement {
+    built_view_exists: bool,
+    native_cleanup_debts: usize,
+    native_cleanup_overflowed: bool,
+    host_cleanup_invariant_failed: bool,
+    native_accounting_failed: bool,
+    profile_is_quarantined: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsConstructionSettlement {
+    /// A constructed controller is publishable only when the same native
+    /// construction attempt produced no competing cleanup obligation and no
+    /// host barrier became sticky while WebView2 pumped the message loop.
+    const fn admits_view(self) -> bool {
+        self.built_view_exists
+            && self.native_cleanup_debts == 0
+            && !self.native_cleanup_overflowed
+            && !self.host_cleanup_invariant_failed
+            && !self.native_accounting_failed
+            && !self.profile_is_quarantined
+    }
 }
 
 impl EngineHost {
@@ -111,6 +110,19 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
+        #[cfg(target_os = "windows")]
+        {
+            // A reentrant WebView2 close can make the process-wide cleanup
+            // barrier sticky immediately before this queued create runs. Do
+            // this before warm-spare adoption as well as fresh construction;
+            // adoption otherwise bypasses build_view's native boundary.
+            self.collect_pending_windows_cleanup_debts();
+            if self.windows_view_admission_blocked(partition.profile()) {
+                self.sink
+                    .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
+                return;
+            }
+        }
         if !bind_profile_persistence_class(&mut self.profile_persistence_classes, partition) {
             eprintln!("privacy: rejected profile persistence-class mismatch or capacity");
             self.sink
@@ -130,6 +142,21 @@ impl EngineHost {
         }
         #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
         if let Some(mut spare) = self.spare.take_if(|s| s.partition == partition) {
+            if let Err(error) = spare
+                .view
+                .native_resource
+                .as_mut()
+                .ok_or(NativeResourceAdmissionError::AccountingInvariant)
+                .and_then(|lease| lease.reclassify(NativeResourceClass::Tab))
+            {
+                if error == NativeResourceAdmissionError::AccountingInvariant {
+                    self.native_resource_accounting_failed = true;
+                }
+                eprintln!("engine: rejected warm-spare resource transfer: {error:?}");
+                self.sink
+                    .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
+                return;
+            }
             // Update the logical id before binding. Neither this Cell write,
             // binding, nor epoch advance enters native code, so a queued
             // bootstrap callback cannot observe a half-adopted state.
@@ -174,6 +201,20 @@ impl EngineHost {
                 // the outer token while load_url is in progress.
                 return;
             }
+            #[cfg(target_os = "windows")]
+            {
+                // Navigation is another WebView2 message-loop pump. Reimport
+                // any cleanup obligation it exposed before making this
+                // adopted controller reachable as a live tab.
+                self.collect_pending_windows_cleanup_debts();
+                if self.windows_view_admission_blocked(partition.profile()) {
+                    drop(spare);
+                    self.collect_pending_windows_cleanup_debts();
+                    self.sink
+                        .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
+                    return;
+                }
+            }
             self.partitions.insert(id, partition);
             self.views.insert(id, spare.view);
             self.finish_new_view_insertion(id, &event_token);
@@ -185,8 +226,8 @@ impl EngineHost {
             partition,
             url,
             bounds,
-            true,
             EventPermit::bound(&event_token),
+            NativeViewPurpose::Tab,
         ) {
             if !event_token.load(Ordering::Acquire)
                 || !view.event_permit.matches_token(&event_token)
@@ -232,8 +273,8 @@ impl EngineHost {
             partition,
             "about:blank",
             Rect::default(),
-            false,
             EventPermit::inactive(),
+            NativeViewPurpose::WarmSpare,
         ) {
             self.spare = Some(Spare {
                 partition,
@@ -255,50 +296,17 @@ impl EngineHost {
         }
     }
 
-    fn native_owned_view_resources(&self) -> Option<usize> {
-        let live = self.views.len();
-        let has_spare = self.spare.is_some();
-        #[cfg(target_os = "windows")]
-        let cleanup_debts = self.windows_cleanup_debts.values().flatten().count();
-        #[cfg(not(target_os = "windows"))]
-        let cleanup_debts = 0;
-        owned_native_view_resources(live, has_spare, cleanup_debts)
-    }
-
-    fn reserve_native_view_resource(&mut self) -> bool {
-        if self.native_resource_accounting_failed {
-            return false;
-        }
-        let Some(owned) = self.native_owned_view_resources() else {
-            self.native_resource_accounting_failed = true;
-            return false;
-        };
-        match self.native_view_reservations.try_reserve(owned) {
-            Ok(admitted) => admitted,
-            Err(()) => {
-                self.native_resource_accounting_failed = true;
-                false
-            }
-        }
-    }
-
-    fn release_native_view_resource_reservation(&mut self) -> bool {
-        if self.native_view_reservations.release().is_err() {
-            self.native_resource_accounting_failed = true;
-            return false;
-        }
-        true
-    }
-
     fn build_view(
         &mut self,
         id: Rc<Cell<ItemId>>,
         partition: Partition,
         url: &str,
         bounds: Rect,
-        report_failure: bool,
         event_permit: EventPermit,
+        purpose: NativeViewPurpose,
     ) -> Option<ObservedView> {
+        let report_failure = purpose.reports_failure();
+        let target_resource_class = purpose.resource_class();
         let logical_id = id.get();
         let reservation_failure_permit = event_permit.clone();
         #[cfg(target_os = "windows")]
@@ -311,13 +319,41 @@ impl EngineHost {
             if !stale_debts.is_empty() {
                 self.fail_windows_cleanup_invariant();
                 for debt in stale_debts {
-                    self.retain_windows_cleanup_debt(partition.profile(), debt);
+                    self.retain_unattributed_windows_cleanup_debt(partition.profile(), debt);
                 }
             }
             self.collect_pending_windows_cleanup_debts();
         }
 
-        if !self.reserve_native_view_resource() {
+        let native_resource = match self
+            .native_resources
+            .try_acquire(NativeResourceClass::TransientConstruction)
+        {
+            Ok(resource) => resource,
+            Err(NativeResourceAdmissionError::AccountingInvariant) => {
+                self.native_resource_accounting_failed = true;
+                if report_failure {
+                    event_permit.emit(
+                        &self.sink,
+                        EngineEvent::ViewCreationFailed { id: logical_id },
+                    );
+                }
+                return None;
+            }
+            Err(
+                NativeResourceAdmissionError::ClassExhausted(_)
+                | NativeResourceAdmissionError::GlobalExhausted,
+            ) => {
+                if report_failure {
+                    event_permit.emit(
+                        &self.sink,
+                        EngineEvent::ViewCreationFailed { id: logical_id },
+                    );
+                }
+                return None;
+            }
+        };
+        if self.native_resource_accounting_failed {
             if report_failure {
                 event_permit.emit(
                     &self.sink,
@@ -326,27 +362,138 @@ impl EngineHost {
             }
             return None;
         }
-        let built = self.build_view_inner(id, partition, url, bounds, report_failure, event_permit);
+        let mut native_resource = Some(native_resource);
+        let mut built =
+            self.build_view_inner(id, partition, url, bounds, report_failure, event_permit);
         #[cfg(target_os = "windows")]
         {
-            for debt in wry::pending_webview2_cleanup_debts() {
-                self.retain_windows_cleanup_debt(partition.profile(), debt);
+            let construction_debts = wry::pending_webview2_cleanup_debts();
+            let construction_debt_count = construction_debts.len();
+            if !construction_debts.is_empty() {
+                if built.is_some() || construction_debts.len() != 1 {
+                    self.fail_windows_cleanup_invariant();
+                }
+                for debt in construction_debts {
+                    let resource = if built.is_none() {
+                        native_resource.take().or_else(|| {
+                            self.native_resources
+                                .try_acquire(NativeResourceClass::TeardownDebt)
+                                .ok()
+                        })
+                    } else {
+                        self.native_resources
+                            .try_acquire(NativeResourceClass::TeardownDebt)
+                            .ok()
+                    };
+                    let debt = super::OwnedWindowsCleanupDebt::new(debt, resource);
+                    if !debt.accounted_as_debt() {
+                        self.native_resource_accounting_failed = true;
+                    }
+                    self.retain_windows_cleanup_debt(partition.profile(), debt);
+                }
             }
-            if wry::webview2_cleanup_overflowed() {
+            let cleanup_overflowed = wry::webview2_cleanup_overflowed();
+            if cleanup_overflowed {
                 self.fail_windows_cleanup_invariant();
             }
             self.collect_pending_windows_cleanup_debts();
-        }
-        if !self.release_native_view_resource_reservation() {
-            if report_failure {
-                reservation_failure_permit.emit(
-                    &self.sink,
-                    EngineEvent::ViewCreationFailed { id: logical_id },
-                );
+
+            let settlement = WindowsConstructionSettlement {
+                built_view_exists: built.is_some(),
+                native_cleanup_debts: construction_debt_count,
+                native_cleanup_overflowed: cleanup_overflowed,
+                host_cleanup_invariant_failed: self.windows_cleanup_invariant_failed,
+                native_accounting_failed: self.native_resource_accounting_failed
+                    || !self.native_resources.is_healthy(),
+                profile_is_quarantined: self.windows_view_admission_blocked(partition.profile()),
+            };
+            if built.is_some() && !settlement.admits_view() {
+                if let Some(view) = built.as_mut() {
+                    // This exact transient lease already accounts for the
+                    // locally constructed controller. Give it to the view
+                    // before dropping so a failed close transfers the same
+                    // ownership into teardown debt instead of releasing the
+                    // slot around a possibly-live native object.
+                    view.native_resource = native_resource.take();
+                }
+                drop(built.take());
+                // ObservedView::drop can enqueue a new exact close debt.
+                // Import it before returning so provenance remains attached
+                // to this profile and the sticky barriers are visible now.
+                self.collect_pending_windows_cleanup_debts();
+                if report_failure {
+                    reservation_failure_permit.emit(
+                        &self.sink,
+                        EngineEvent::ViewCreationFailed { id: logical_id },
+                    );
+                }
+                return None;
             }
-            return None;
+        }
+        if built.is_some() {
+            let Some(resource) = native_resource.as_mut() else {
+                self.native_resource_accounting_failed = true;
+                if report_failure {
+                    reservation_failure_permit.emit(
+                        &self.sink,
+                        EngineEvent::ViewCreationFailed { id: logical_id },
+                    );
+                }
+                return None;
+            };
+            if let Err(error) = resource.reclassify(target_resource_class) {
+                if error == NativeResourceAdmissionError::AccountingInvariant {
+                    self.native_resource_accounting_failed = true;
+                }
+                eprintln!("engine: rejected constructed native-resource transfer: {error:?}");
+                if let Some(view) = built.as_mut() {
+                    // The native object already exists. Hand it the unchanged
+                    // construction lease before dropping it so a failed
+                    // WebView2 close can transfer that exact ownership to a
+                    // teardown debt instead of releasing capacity early.
+                    view.native_resource = native_resource.take();
+                }
+                if report_failure {
+                    reservation_failure_permit.emit(
+                        &self.sink,
+                        EngineEvent::ViewCreationFailed { id: logical_id },
+                    );
+                }
+                return None;
+            }
+            if let Some(view) = built.as_mut() {
+                view.native_resource = native_resource.take();
+            }
         }
         built
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retain_unattributed_windows_cleanup_debt(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        debt: wry::WebView2CleanupDebt,
+    ) {
+        let resource = self
+            .native_resources
+            .try_acquire(NativeResourceClass::TeardownDebt)
+            .ok();
+        let debt = super::OwnedWindowsCleanupDebt::new(debt, resource);
+        if !debt.accounted_as_debt() {
+            self.native_resource_accounting_failed = true;
+        }
+        self.retain_windows_cleanup_debt(profile, debt);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_view_admission_blocked(&self, profile: zephium_core::ids::ProfileId) -> bool {
+        self.exiting_browser_processes.contains(&profile)
+            || self.unverifiable_browser_processes.contains(&profile)
+            || self.construction_unproven.contains(&profile)
+            || self.windows_cleanup_debts.contains_key(&profile)
+            || self.windows_cleanup_invariant_failed
+            || self.native_resource_accounting_failed
+            || !self.native_resources.is_healthy()
     }
 
     fn build_view_inner(
@@ -384,18 +531,7 @@ impl EngineHost {
             return None;
         }
         #[cfg(target_os = "windows")]
-        if self
-            .exiting_browser_processes
-            .contains(&partition.profile())
-            || self
-                .unverifiable_browser_processes
-                .contains(&partition.profile())
-            || self.construction_unproven.contains(&partition.profile())
-            || self
-                .windows_cleanup_debts
-                .contains_key(&partition.profile())
-            || self.windows_cleanup_invariant_failed
-        {
+        if self.windows_view_admission_blocked(partition.profile()) {
             // A ProcessFailed callback is not the process-group release
             // barrier. Do not bind a replacement controller until the
             // Environment5 event retires the exact previous PID.
@@ -1252,6 +1388,7 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
             view,
+            native_resource: None,
         })
     }
 }

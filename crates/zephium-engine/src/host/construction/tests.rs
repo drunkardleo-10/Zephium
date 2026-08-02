@@ -33,31 +33,89 @@ fn wry_document_start_selection_preserves_protected_order_and_frame_policy() {
 }
 
 #[test]
-fn native_resource_ceiling_counts_spare_and_every_cleanup_debt() {
-    assert_eq!(owned_native_view_resources(32, false, 0), Some(32));
-    assert_eq!(owned_native_view_resources(32, true, 0), Some(33));
-    assert_eq!(owned_native_view_resources(32, true, 8), Some(41));
-    assert_eq!(owned_native_view_resources(usize::MAX, true, 0), None);
+fn windows_construction_settlement_rejects_every_unproven_native_result() {
+    let proven = WindowsConstructionSettlement {
+        built_view_exists: true,
+        native_cleanup_debts: 0,
+        native_cleanup_overflowed: false,
+        host_cleanup_invariant_failed: false,
+        native_accounting_failed: false,
+        profile_is_quarantined: false,
+    };
+    assert!(proven.admits_view());
+
+    for rejected in [
+        WindowsConstructionSettlement {
+            built_view_exists: false,
+            ..proven
+        },
+        WindowsConstructionSettlement {
+            native_cleanup_debts: 1,
+            ..proven
+        },
+        WindowsConstructionSettlement {
+            native_cleanup_overflowed: true,
+            ..proven
+        },
+        WindowsConstructionSettlement {
+            host_cleanup_invariant_failed: true,
+            ..proven
+        },
+        WindowsConstructionSettlement {
+            native_accounting_failed: true,
+            ..proven
+        },
+        WindowsConstructionSettlement {
+            profile_is_quarantined: true,
+            ..proven
+        },
+    ] {
+        assert!(!rejected.admits_view());
+    }
 }
 
 #[test]
-fn native_construction_reservation_is_bounded_and_released_exactly() {
-    let mut reservations = NativeViewReservations::default();
-    assert_eq!(
-        reservations.try_reserve(MAX_NATIVE_VIEW_RESOURCES - 1),
-        Ok(true)
-    );
-    assert_eq!(reservations.in_construction(), 1);
-    // Re-entry/retry observes the first construction reservation and may
-    // not allocate the forty-ninth native resource.
-    assert_eq!(
-        reservations.try_reserve(MAX_NATIVE_VIEW_RESOURCES - 1),
-        Ok(false)
-    );
-    assert_eq!(reservations.in_construction(), 1);
-    assert_eq!(reservations.release(), Ok(()));
-    assert_eq!(reservations.in_construction(), 0);
-    assert_eq!(reservations.release(), Err(()));
+fn windows_cleanup_barrier_is_collected_before_warm_spare_adoption() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
+    let create_view = source.find("pub(crate) fn create_view(").unwrap();
+    let source = &source[create_view..];
+    let collection = source
+        .find("self.collect_pending_windows_cleanup_debts();")
+        .unwrap();
+    let spare_adoption = source
+        .find("if let Some(mut spare) = self.spare.take_if")
+        .unwrap();
+    assert!(collection < spare_adoption);
+}
+
+#[test]
+fn rejected_windows_construction_transfers_lease_before_drop_and_recollection() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
+    let branch = source
+        .split_once("if built.is_some() && !settlement.admits_view()")
+        .expect("construction lost the terminal settlement branch")
+        .1;
+    let lease_transfer = branch
+        .find("view.native_resource = native_resource.take();")
+        .expect("rejected view lost its exact lease transfer");
+    let local_drop = branch
+        .find("drop(built.take());")
+        .expect("rejected native view is no longer dropped");
+    let debt_import = branch
+        .find("self.collect_pending_windows_cleanup_debts();")
+        .expect("rejected native view debt is no longer reimported");
+    let terminal_return = branch
+        .find("return None;")
+        .expect("rejected native view can escape its terminal branch");
+    assert!(lease_transfer < local_drop);
+    assert!(local_drop < debt_import);
+    assert!(debt_import < terminal_return);
 }
 
 #[test]

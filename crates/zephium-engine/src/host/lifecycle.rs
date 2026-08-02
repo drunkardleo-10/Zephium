@@ -130,6 +130,7 @@ impl EngineHost {
             && self.windows_cleanup_debts.is_empty()
             && !self.windows_cleanup_invariant_failed
             && !self.native_resource_accounting_failed
+            && self.native_resources.is_quiescent()
             && self
                 .environments
                 .keys()

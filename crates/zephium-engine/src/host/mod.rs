@@ -7,10 +7,10 @@ mod navigation;
 mod page_ops;
 mod permits;
 mod profiles;
+mod resources;
 mod scripts;
 mod stages;
 
-use construction::NativeViewReservations;
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
 pub(crate) use dispatch::{
@@ -27,6 +27,7 @@ pub(crate) use scripts::protected_script_specs_for_native_probe;
 use dispatch::queue_windows_cleanup_debt;
 use permits::{EventPermit, Sink};
 use profiles::ProfilePersistenceClass;
+use resources::{NativeResourceLease, NativeResourceLedger};
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -51,8 +52,7 @@ use {crate::platform::imp::ContentStage, objc2::rc::Retained};
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
 #[cfg(target_os = "windows")]
-const MAX_WINDOWS_CLEANUP_DEBTS: usize =
-    zephium_core::session::MAX_SESSION_ITEMS + zephium_core::session::MAX_SESSION_PROFILES;
+const MAX_WINDOWS_CLEANUP_DEBTS: usize = resources::MAX_NATIVE_TEARDOWN_DEBTS;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 struct ParentHandle(RawWindowHandle);
 
@@ -124,6 +124,64 @@ struct ObservedView {
     #[cfg(target_os = "windows")]
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     view: WebView,
+    // Keep this after `view`: fields drop in declaration order, so the native
+    // WebView wrapper completes its teardown path before capacity can be
+    // reissued. On Windows a failed explicit close takes and transfers the
+    // lease to the retained cleanup debt instead.
+    native_resource: Option<NativeResourceLease>,
+}
+
+/// A failed WebView2 close keeps the exact resource lease until every native
+/// teardown step succeeds. A refused class transfer also retains the original
+/// lease and is marked unaccounted so the host can quarantine construction;
+/// it never releases capacity for a native object that may still exist.
+#[cfg(target_os = "windows")]
+struct OwnedWindowsCleanupDebt {
+    debt: wry::WebView2CleanupDebt,
+    _native_resource: Option<NativeResourceLease>,
+    accounted_as_debt: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl OwnedWindowsCleanupDebt {
+    fn new(
+        debt: wry::WebView2CleanupDebt,
+        mut native_resource: Option<NativeResourceLease>,
+    ) -> Self {
+        let accounted_as_debt = native_resource
+            .as_mut()
+            .is_some_and(|resource| resource.mark_as_teardown_debt().is_ok());
+        Self {
+            debt,
+            _native_resource: native_resource,
+            accounted_as_debt,
+        }
+    }
+
+    fn retry(&mut self) -> Result<(), wry::WebView2CleanupFailure> {
+        self.debt.retry()
+    }
+
+    fn accounted_as_debt(&self) -> bool {
+        self.accounted_as_debt
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OwnedWindowsCleanupDebt {
+    fn drop(&mut self) {
+        if !self.debt.is_complete() {
+            // Wry's debt destructor retains the apartment-bound native
+            // obligation in its fallback registry. There is no channel for
+            // carrying our lease with that raw fallback entry, so leak only
+            // the accounting lease as a permanent fail-closed reservation.
+            // Releasing it here could authorize a replacement around an
+            // unproven controller/HWND teardown.
+            if let Some(native_resource) = self._native_resource.take() {
+                std::mem::forget(native_resource);
+            }
+        }
+    }
 }
 
 impl Drop for ObservedView {
@@ -148,6 +206,12 @@ impl Drop for ObservedView {
             if !self.native_close_attempted {
                 self.native_close_attempted = true;
                 if let Err(debt) = self.view.close() {
+                    let debt = OwnedWindowsCleanupDebt::new(debt, self.native_resource.take());
+                    if !debt.accounted_as_debt() {
+                        (self.native_terminal_failure)(
+                            "WebView2 cleanup debt exceeded native resource accounting",
+                        );
+                    }
                     queue_windows_cleanup_debt(self.cleanup_profile, debt);
                 }
             }
@@ -161,7 +225,7 @@ impl Drop for ObservedView {
 
 impl ObservedView {
     #[cfg(target_os = "windows")]
-    fn close_explicit(mut self) -> (Option<wry::WebView2CleanupDebt>, bool) {
+    fn close_explicit(mut self) -> (Option<OwnedWindowsCleanupDebt>, bool) {
         use wry::WebViewExtWindows;
         self.event_permit.revoke();
         self.navigation.revoke();
@@ -170,7 +234,12 @@ impl ObservedView {
             .take()
             .is_some_and(|registration| registration.retire().is_err());
         self.native_close_attempted = true;
-        (self.view.close().err(), policy_cleanup_failed)
+        let debt = self
+            .view
+            .close()
+            .err()
+            .map(|debt| OwnedWindowsCleanupDebt::new(debt, self.native_resource.take()));
+        (debt, policy_cleanup_failed)
     }
 }
 
@@ -269,7 +338,7 @@ pub(crate) struct EngineHost {
     #[cfg(target_os = "windows")]
     private_runtime: zephium_core::webview2::RuntimeGeneration,
     views: HashMap<ItemId, ObservedView>,
-    native_view_reservations: NativeViewReservations,
+    native_resources: NativeResourceLedger,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
     partitions: HashMap<ItemId, Partition>,
@@ -386,7 +455,7 @@ pub(crate) struct EngineHost {
     // into successful close/erasure merely because Rust released other COM
     // references.
     #[cfg(target_os = "windows")]
-    windows_cleanup_debts: HashMap<ProfileId, Vec<wry::WebView2CleanupDebt>>,
+    windows_cleanup_debts: HashMap<ProfileId, Vec<OwnedWindowsCleanupDebt>>,
     #[cfg(target_os = "windows")]
     windows_cleanup_invariant_failed: bool,
     // A tombstone is process-lifetime state: no failed/partial deletion may

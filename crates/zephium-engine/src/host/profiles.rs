@@ -505,10 +505,14 @@ impl EngineHost {
     pub(super) fn retain_windows_cleanup_debt(
         &mut self,
         profile: ProfileId,
-        mut debt: wry::WebView2CleanupDebt,
+        mut debt: super::OwnedWindowsCleanupDebt,
     ) {
         if debt.retry().is_ok() {
             return;
+        }
+        if !debt.accounted_as_debt() {
+            self.native_resource_accounting_failed = true;
+            self.fail_windows_cleanup_invariant();
         }
         let debt_count: usize = self.windows_cleanup_debts.values().map(Vec::len).sum();
         if debt_count >= MAX_WINDOWS_CLEANUP_DEBTS {

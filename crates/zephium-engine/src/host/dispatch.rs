@@ -11,8 +11,8 @@ use zephium_core::ids::ItemId;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::{UserContent, UserContentGeneration};
 
-use super::construction::{NativeViewReservations, MAX_NATIVE_VIEW_RESOURCES};
 use super::permits::Sink;
+use super::resources::{NativeResourceLedger, MAX_NATIVE_VIEW_RESOURCES};
 use super::EngineHost;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::ParentHandle;
@@ -26,7 +26,7 @@ thread_local! {
     static HOST_SEALED: Cell<bool> = const { Cell::new(false) };
     static HOST_INSTALLING: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "windows")]
-    static PENDING_WINDOWS_CLEANUP_DEBTS: RefCell<Vec<(ProfileId, wry::WebView2CleanupDebt)>> =
+    static PENDING_WINDOWS_CLEANUP_DEBTS: RefCell<Vec<(ProfileId, super::OwnedWindowsCleanupDebt)>> =
         const { RefCell::new(Vec::new()) };
     #[cfg(target_os = "windows")]
     static WINDOWS_CLEANUP_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
@@ -217,7 +217,7 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             private_runtime,
             views: HashMap::new(),
-            native_view_reservations: NativeViewReservations::default(),
+            native_resources: NativeResourceLedger::default(),
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),
@@ -333,7 +333,7 @@ pub(crate) fn make_unavailable_for_test() {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn queue_windows_cleanup_debt(profile: ProfileId, debt: wry::WebView2CleanupDebt) {
+pub(super) fn queue_windows_cleanup_debt(profile: ProfileId, debt: super::OwnedWindowsCleanupDebt) {
     PENDING_WINDOWS_CLEANUP_DEBTS.with(|pending| {
         let Ok(mut pending) = pending.try_borrow_mut() else {
             WINDOWS_CLEANUP_INVARIANT_FAILED.with(|failed| failed.set(true));
@@ -350,7 +350,7 @@ pub(super) fn queue_windows_cleanup_debt(profile: ProfileId, debt: wry::WebView2
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn drain_windows_cleanup_debts() -> Vec<(ProfileId, wry::WebView2CleanupDebt)> {
+pub(super) fn drain_windows_cleanup_debts() -> Vec<(ProfileId, super::OwnedWindowsCleanupDebt)> {
     PENDING_WINDOWS_CLEANUP_DEBTS.with(|pending| {
         let Ok(mut pending) = pending.try_borrow_mut() else {
             // Existing debts remain owned by the TLS queue. We cannot prove
