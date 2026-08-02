@@ -2,17 +2,25 @@ use super::*;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::extensions::{
-    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
+    ApiPermissionName, ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
+    ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
+    ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
+    ExtensionGrantAuthority, ExtensionGrantInitializationState, ExtensionGrantManifestBinding,
+    ExtensionGrantManifestBindings, ExtensionGrantMutation, ExtensionGrantRevision,
+    ExtensionHostPermissionSet, ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
+    ExtensionManifestDigest, ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
     ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
     EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
+use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
 use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::permissions::{
     PageOrigin, PagePermissionCatalogRevision, PagePermissionChange, PagePermissionGrantRevision,
     PagePermissionKind, PagePermissionPatch, RememberedPagePermission,
 };
+use zephium_core::ports::store::ExtensionGrantConflict;
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
 use zephium_core::split::{Axis, Pane};
@@ -53,6 +61,9 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         )),
         extension_install_mutation_admission: Arc::new(Mutex::new(
             ExtensionInstallMutationAdmission::default(),
+        )),
+        extension_grant_request_admission: Arc::new(Mutex::new(
+            ExtensionGrantRequestAdmission::default(),
         )),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
@@ -278,6 +289,122 @@ fn extension_package(authority: u8, key: u8, revision: u64) -> ExtensionPackageI
         ),
         ExtensionTreeDigest::from_bytes([revision.wrapping_add(2) as u8; EXTENSION_SHA256_BYTES]),
     )
+}
+
+fn extension_manifest(package: ExtensionPackageIdentity) -> Arc<ExtensionManifestDescriptor> {
+    let api = |names: &[&str]| {
+        ExtensionApiPermissionSet::new(
+            names
+                .iter()
+                .map(|name| ApiPermissionName::parse_exact(name).unwrap())
+                .collect(),
+        )
+        .unwrap()
+    };
+    let hosts = |patterns: &[&str]| {
+        ExtensionHostPermissionSet::new(
+            MatchSet::parse(
+                patterns,
+                std::iter::empty::<&str>(),
+                MatchOptions::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let declarations = ExtensionManifestDeclarations::new(
+        api(&["storage"]),
+        api(&["tabs"]),
+        Some(hosts(&["https://example.com/*"])),
+        Some(hosts(&["https://optional.example/*", "file:///*"])),
+        None,
+        None,
+        Vec::new(),
+        ExtensionManifestExecutionSurfaces::new(
+            Vec::new(),
+            ExtensionContentSecurityPolicyDeclaration::new(
+                ExtensionManifestResourceDigest::from_bytes([91; 32]),
+            ),
+            None,
+            Vec::new(),
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let compatibility = declarations
+        .declaration_keys()
+        .into_iter()
+        .map(|declaration| {
+            ExtensionCompatibilityClassification::new(
+                declaration,
+                ExtensionCompatibilityLevel::Compatible,
+            )
+        })
+        .collect();
+    Arc::new(
+        ExtensionManifestDescriptor::new(
+            package,
+            3,
+            declarations,
+            ExtensionCompatibilityTargetId::parse_exact("test.store.grants.v1").unwrap(),
+            compatibility,
+        )
+        .unwrap(),
+    )
+}
+
+fn extension_grant_bindings(
+    values: &[(ExtensionInstallId, Arc<ExtensionManifestDescriptor>)],
+) -> ExtensionGrantManifestBindings {
+    ExtensionGrantManifestBindings::new(
+        values
+            .iter()
+            .map(|(id, manifest)| ExtensionGrantManifestBinding::new(*id, manifest.clone()))
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn load_extension_grants(
+    store: &impl Store,
+    profile: ProfileId,
+    bindings: ExtensionGrantManifestBindings,
+) -> ExtensionGrantCohortLoadOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.load_extension_grant_cohort(
+        profile,
+        bindings,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mutate_extension_grants(
+    store: &impl Store,
+    profile: ProfileId,
+    expected_catalog: ExtensionInstallCatalogRevision,
+    expected_install: ExtensionInstallRevision,
+    install_id: ExtensionInstallId,
+    manifest: Arc<ExtensionManifestDescriptor>,
+    write: ExtensionGrantWrite,
+) -> ExtensionGrantMutationOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.mutate_extension_grants(
+        profile,
+        expected_catalog,
+        expected_install,
+        install_id,
+        manifest,
+        write,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
 }
 
 fn load_extension_installs(
@@ -910,6 +1037,7 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
     let personal_id = ExtensionInstallId::from(71);
     let work_id = ExtensionInstallId::from(72);
     let package = extension_package(11, 12, 7);
+    let manifest = extension_manifest(package.clone());
     let final_personal_revision;
 
     {
@@ -1014,6 +1142,21 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
             }
         );
 
+        assert_eq!(
+            mutate_extension_installs(
+                &store,
+                personal,
+                installed.catalog_revision,
+                ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                    id: personal_id,
+                    expected: personal_install.revision(),
+                    desired_enabled: true,
+                },
+            ),
+            ExtensionInstallCatalogMutationOutcome::Invalid,
+            "enabled intent must not be affirmed before grants initialize"
+        );
+
         let no_op = mutate_extension_installs(
             &store,
             personal,
@@ -1032,6 +1175,22 @@ fn extension_install_catalog_is_profile_scoped_durable_and_aggregate_owned() {
             no_op.install.unwrap().revision(),
             personal_install.revision()
         );
+
+        let authority = ExtensionGrantAuthority::new(&personal_install, &manifest).unwrap();
+        assert!(matches!(
+            mutate_extension_grants(
+                &store,
+                personal,
+                installed.catalog_revision,
+                personal_install.revision(),
+                personal_id,
+                manifest.clone(),
+                ExtensionGrantWrite::Initialize {
+                    authority: Box::new(authority),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Applied(_)
+        ));
 
         let enabled = mutate_extension_installs(
             &store,
@@ -1259,6 +1418,844 @@ fn extension_install_commit_ambiguity_requires_exact_load_reconciliation() {
 }
 
 #[test]
+fn extension_grants_batch_initialize_are_durable_atomic_and_sibling_independent() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let first_id = ExtensionInstallId::from(501);
+    let second_id = ExtensionInstallId::from(502);
+    let first_manifest = extension_manifest(extension_package(51, 52, 1));
+    let second_manifest = extension_manifest(extension_package(53, 54, 1));
+
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let first = mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: first_id,
+                package: first_manifest.package().clone(),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(first) = first else {
+            panic!("first extension install failed");
+        };
+        let second = mutate_extension_installs(
+            &store,
+            profile,
+            first.catalog_revision,
+            ExtensionInstallCatalogMutation::Install {
+                id: second_id,
+                package: second_manifest.package().clone(),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(second) = second else {
+            panic!("second extension install failed");
+        };
+        let catalog_revision = second.catalog_revision;
+        assert_eq!(
+            load_extension_grants(
+                &store,
+                profile,
+                ExtensionGrantManifestBindings::new(Vec::new()).unwrap(),
+            ),
+            ExtensionGrantCohortLoadOutcome::Invalid
+        );
+        assert_eq!(
+            load_extension_grants(
+                &store,
+                profile,
+                extension_grant_bindings(&[
+                    (first_id, second_manifest.clone()),
+                    (second_id, first_manifest.clone()),
+                ]),
+            ),
+            ExtensionGrantCohortLoadOutcome::Invalid
+        );
+        let bindings = extension_grant_bindings(&[
+            (first_id, first_manifest.clone()),
+            (second_id, second_manifest.clone()),
+        ]);
+        let ExtensionGrantCohortLoadOutcome::Loaded(initial) =
+            load_extension_grants(&store, profile, bindings.clone())
+        else {
+            panic!("initial grant cohort did not load");
+        };
+        assert_eq!(initial.install_catalog().revision(), catalog_revision);
+        assert!(matches!(
+            initial.get(first_id),
+            Some(ExtensionGrantInitializationState::Uninitialized)
+        ));
+        assert!(matches!(
+            initial.get(second_id),
+            Some(ExtensionGrantInitializationState::Uninitialized)
+        ));
+
+        let first_install = initial.install_catalog().get(first_id).unwrap();
+        let selected = ExtensionGrantAuthority::initialize(
+            first_install,
+            vec![ApiPermissionName::parse_exact("storage").unwrap()],
+            vec![MatchPattern::parse("https://example.com/*").unwrap()],
+            false,
+            true,
+            &first_manifest,
+        )
+        .unwrap();
+        let non_initial = selected
+            .clone()
+            .apply(
+                ExtensionGrantRevision::INITIAL,
+                &first_manifest,
+                ExtensionGrantMutation::SetPrivateAccess { granted: false },
+            )
+            .unwrap()
+            .into_authority();
+        assert_eq!(
+            mutate_extension_grants(
+                &store,
+                profile,
+                catalog_revision,
+                first_install.revision(),
+                first_id,
+                first_manifest.clone(),
+                ExtensionGrantWrite::Initialize {
+                    authority: Box::new(non_initial),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Invalid
+        );
+        let initialized = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            first_install.revision(),
+            first_id,
+            first_manifest.clone(),
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(selected),
+            },
+        );
+        let ExtensionGrantMutationOutcome::Applied(initialized) = initialized else {
+            panic!("batch grant initialization failed");
+        };
+        assert_eq!(
+            initialized.authority.revision(),
+            ExtensionGrantRevision::INITIAL
+        );
+        assert_eq!(
+            initialized
+                .authority
+                .persistence_projection()
+                .api_grant_count(),
+            1
+        );
+        assert_eq!(
+            initialized
+                .authority
+                .persistence_projection()
+                .host_grant_count(),
+            1
+        );
+        let duplicate_initialize = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            first_install.revision(),
+            first_id,
+            first_manifest.clone(),
+            ExtensionGrantWrite::Initialize {
+                authority: initialized.authority.clone(),
+            },
+        );
+        assert!(matches!(
+            duplicate_initialize,
+            ExtensionGrantMutationOutcome::Conflict(ExtensionGrantConflict {
+                current_catalog,
+                current_install: Some(ExtensionInstallRevision::INITIAL),
+                current_grant: Some(ExtensionGrantRevision::INITIAL),
+            }) if current_catalog == catalog_revision
+        ));
+
+        let second_install = initial.install_catalog().get(second_id).unwrap();
+        let second_empty = ExtensionGrantAuthority::new(second_install, &second_manifest).unwrap();
+        assert!(matches!(
+            mutate_extension_grants(
+                &store,
+                profile,
+                catalog_revision,
+                second_install.revision(),
+                second_id,
+                second_manifest.clone(),
+                ExtensionGrantWrite::Initialize {
+                    authority: Box::new(second_empty),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Applied(_)
+        ));
+
+        let stale_catalog = mutate_extension_grants(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            second_install.revision(),
+            second_id,
+            second_manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        );
+        assert!(matches!(
+            stale_catalog,
+            ExtensionGrantMutationOutcome::Conflict(ExtensionGrantConflict {
+                current_catalog,
+                current_install: Some(ExtensionInstallRevision::INITIAL),
+                current_grant: Some(ExtensionGrantRevision::INITIAL),
+            }) if current_catalog == catalog_revision
+        ));
+        let stale_install = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            ExtensionInstallRevision::new(2).unwrap(),
+            second_id,
+            second_manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        );
+        assert!(matches!(
+            stale_install,
+            ExtensionGrantMutationOutcome::Conflict(ExtensionGrantConflict {
+                current_install: Some(ExtensionInstallRevision::INITIAL),
+                current_grant: Some(ExtensionGrantRevision::INITIAL),
+                ..
+            })
+        ));
+
+        let first_changed = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            first_install.revision(),
+            first_id,
+            first_manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: false },
+            },
+        );
+        let ExtensionGrantMutationOutcome::Applied(first_changed) = first_changed else {
+            panic!("first per-install grant mutation failed");
+        };
+        assert_eq!(first_changed.authority.revision().get(), 2);
+
+        let apply_first = |expected, mutation| {
+            let outcome = mutate_extension_grants(
+                &store,
+                profile,
+                catalog_revision,
+                first_install.revision(),
+                first_id,
+                first_manifest.clone(),
+                ExtensionGrantWrite::Apply { expected, mutation },
+            );
+            let ExtensionGrantMutationOutcome::Applied(applied) = outcome else {
+                panic!("durable grant mutation was not applied");
+            };
+            applied
+        };
+
+        let api_added = apply_first(
+            ExtensionGrantRevision::new(2).unwrap(),
+            ExtensionGrantMutation::SetApi {
+                name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                granted: true,
+            },
+        );
+        assert_eq!(api_added.authority.revision().get(), 3);
+        assert_eq!(
+            api_added
+                .authority
+                .persistence_projection()
+                .api_grant_count(),
+            2
+        );
+        let api_removed = apply_first(
+            ExtensionGrantRevision::new(3).unwrap(),
+            ExtensionGrantMutation::SetApi {
+                name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                granted: false,
+            },
+        );
+        assert_eq!(api_removed.authority.revision().get(), 4);
+        assert_eq!(
+            api_removed
+                .authority
+                .persistence_projection()
+                .api_grant_count(),
+            1
+        );
+
+        let optional_host = MatchPattern::parse("https://optional.example/*").unwrap();
+        let host_added = apply_first(
+            ExtensionGrantRevision::new(4).unwrap(),
+            ExtensionGrantMutation::SetHost {
+                pattern: optional_host.clone(),
+                granted: true,
+            },
+        );
+        assert_eq!(host_added.authority.revision().get(), 5);
+        assert_eq!(
+            host_added
+                .authority
+                .persistence_projection()
+                .host_grant_count(),
+            2
+        );
+        let host_removed = apply_first(
+            ExtensionGrantRevision::new(5).unwrap(),
+            ExtensionGrantMutation::SetHost {
+                pattern: optional_host,
+                granted: false,
+            },
+        );
+        assert_eq!(host_removed.authority.revision().get(), 6);
+        assert_eq!(
+            host_removed
+                .authority
+                .persistence_projection()
+                .host_grant_count(),
+            1
+        );
+
+        let file_enabled = apply_first(
+            ExtensionGrantRevision::new(6).unwrap(),
+            ExtensionGrantMutation::SetFileAccess { granted: true },
+        );
+        let projection = file_enabled.authority.persistence_projection();
+        assert_eq!(projection.revision().get(), 7);
+        assert!(projection.persisted_file_access());
+        assert!(!projection.persisted_private_access());
+
+        // The sibling still accepts its original grant revision: there is no
+        // profile-global grant clock or false cross-extension conflict.
+        let second_changed = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            second_install.revision(),
+            second_id,
+            second_manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        );
+        let ExtensionGrantMutationOutcome::Applied(second_changed) = second_changed else {
+            panic!("sibling grant mutation falsely conflicted");
+        };
+        assert_eq!(second_changed.authority.revision().get(), 2);
+
+        let stale_grant = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            second_install.revision(),
+            second_id,
+            second_manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: false },
+            },
+        );
+        assert!(matches!(
+            stale_grant,
+            ExtensionGrantMutationOutcome::Conflict(ExtensionGrantConflict {
+                current_grant: Some(revision),
+                ..
+            }) if revision.get() == 2
+        ));
+
+        let no_op = mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            second_install.revision(),
+            second_id,
+            second_manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::new(2).unwrap(),
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        );
+        let ExtensionGrantMutationOutcome::Applied(no_op) = no_op else {
+            panic!("semantic no-op was not returned as applied");
+        };
+        assert_eq!(no_op.authority.revision().get(), 2);
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let bindings =
+        extension_grant_bindings(&[(first_id, first_manifest), (second_id, second_manifest)]);
+    let ExtensionGrantCohortLoadOutcome::Loaded(restarted) =
+        load_extension_grants(&store, profile, bindings)
+    else {
+        panic!("durable grant cohort did not survive restart");
+    };
+    let Some(ExtensionGrantInitializationState::Initialized(first)) = restarted.get(first_id)
+    else {
+        panic!("first durable authority is absent after restart");
+    };
+    let first_projection = first.persistence_projection();
+    assert_eq!(first_projection.revision().get(), 7);
+    assert_eq!(first_projection.api_grant_count(), 1);
+    assert_eq!(first_projection.host_grant_count(), 1);
+    assert!(first_projection.persisted_file_access());
+    assert!(!first_projection.persisted_private_access());
+
+    let Some(ExtensionGrantInitializationState::Initialized(second)) = restarted.get(second_id)
+    else {
+        panic!("second durable authority is absent after restart");
+    };
+    let second_projection = second.persistence_projection();
+    assert_eq!(second_projection.revision().get(), 2);
+    assert!(second_projection.persisted_private_access());
+}
+
+#[test]
+fn extension_grant_revision_exhaustion_is_atomic_and_definite() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(551);
+    let manifest = extension_manifest(extension_package(55, 56, 1));
+    let catalog_revision;
+
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let installed = mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: manifest.package().clone(),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(installed) = installed else {
+            panic!("extension install setup was rejected");
+        };
+        catalog_revision = installed.catalog_revision;
+        let install = installed.install.as_deref().unwrap();
+        let authority = ExtensionGrantAuthority::new(install, &manifest).unwrap();
+        assert!(matches!(
+            mutate_extension_grants(
+                &store,
+                profile,
+                catalog_revision,
+                install.revision(),
+                id,
+                manifest.clone(),
+                ExtensionGrantWrite::Initialize {
+                    authority: Box::new(authority),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Applied(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let profile_path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let conn = Connection::open(profile_path).unwrap();
+    conn.execute(
+        "UPDATE extension_grants SET revision = 9223372036854775807 WHERE install_id = ?1",
+        params![&id.bytes()[..]],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let maximum = ExtensionGrantRevision::new(i64::MAX as u64).unwrap();
+    assert_eq!(
+        mutate_extension_grants(
+            &store,
+            profile,
+            catalog_revision,
+            ExtensionInstallRevision::INITIAL,
+            id,
+            manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: maximum,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        ),
+        ExtensionGrantMutationOutcome::RevisionExhausted
+    );
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) =
+        load_extension_grants(&store, profile, extension_grant_bindings(&[(id, manifest)]))
+    else {
+        panic!("grant cohort could not be reloaded after exhaustion");
+    };
+    let Some(ExtensionGrantInitializationState::Initialized(authority)) = cohort.get(id) else {
+        panic!("grant authority disappeared after exhaustion");
+    };
+    let projection = authority.persistence_projection();
+    assert_eq!(projection.revision(), maximum);
+    assert!(!projection.persisted_private_access());
+}
+
+#[test]
+fn extension_grant_commit_ambiguity_requires_atomic_cohort_reconciliation() {
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(601);
+    let manifest = extension_manifest(extension_package(61, 62, 1));
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let installed = hub
+        .mutate_extension_install_catalog(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: manifest.package().clone(),
+            },
+        )
+        .unwrap();
+    let ExtensionInstallCatalogMutationOutcome::Applied(installed) = installed else {
+        panic!("fixture install failed");
+    };
+    let install = installed.install.unwrap();
+    let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+    hub.make_next_extension_grant_commit_ambiguous();
+    let store = SqliteStore::spawn(hub).unwrap();
+    assert_eq!(
+        mutate_extension_grants(
+            &store,
+            profile,
+            installed.catalog_revision,
+            install.revision(),
+            id,
+            manifest.clone(),
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(authority),
+            },
+        ),
+        ExtensionGrantMutationOutcome::OutcomeUnknown
+    );
+    let ExtensionGrantCohortLoadOutcome::Loaded(reconciled) =
+        load_extension_grants(&store, profile, extension_grant_bindings(&[(id, manifest)]))
+    else {
+        panic!("ambiguous grant commit could not be reconciled");
+    };
+    assert!(matches!(
+        reconciled.get(id),
+        Some(ExtensionGrantInitializationState::Initialized(authority))
+            if authority.revision() == ExtensionGrantRevision::INITIAL
+    ));
+}
+
+#[test]
+fn extension_grant_codec_rejects_digest_corruption_and_child_overflow_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(701);
+    let manifest = extension_manifest(extension_package(71, 72, 1));
+    let expected_digest;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let installed = mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: manifest.package().clone(),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(installed) = installed else {
+            panic!("fixture install failed");
+        };
+        let install = installed.install.unwrap();
+        let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+        expected_digest = authority.digest().bytes();
+        assert!(matches!(
+            mutate_extension_grants(
+                &store,
+                profile,
+                installed.catalog_revision,
+                install.revision(),
+                id,
+                manifest.clone(),
+                ExtensionGrantWrite::Initialize {
+                    authority: Box::new(authority),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Applied(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let id_bytes = id.bytes();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE extension_grants SET grant_sha256 = zeroblob(32)
+             WHERE install_id = ?1",
+            [&id_bytes[..]],
+        )
+        .unwrap();
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        assert_eq!(
+            load_extension_grants(
+                &store,
+                profile,
+                extension_grant_bindings(&[(id, manifest.clone())]),
+            ),
+            ExtensionGrantCohortLoadOutcome::Failed
+        );
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE extension_grants SET grant_sha256 = ?2 WHERE install_id = ?1",
+        params![&id_bytes[..], &expected_digest[..]],
+    )
+    .unwrap();
+    for index in 0..=zephium_core::extensions::MAX_EXTENSION_API_PERMISSIONS {
+        conn.execute(
+            "INSERT INTO extension_grant_api_permissions(install_id, name)
+             VALUES (?1, ?2)",
+            params![&id_bytes[..], format!("permission{index}")],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(
+        load_extension_grants(
+            &store,
+            profile,
+            extension_grant_bindings(&[(id, manifest.clone())]),
+        ),
+        ExtensionGrantCohortLoadOutcome::Failed
+    );
+    assert_eq!(
+        store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("DELETE FROM extension_grant_api_permissions", [])
+        .unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    conn.execute(
+        "INSERT INTO extension_grant_api_permissions(install_id, name)
+         VALUES (?1, 'storage')",
+        [vec![9_u8; 16]],
+    )
+    .unwrap();
+    drop(conn);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(
+        load_extension_grants(
+            &store,
+            profile,
+            extension_grant_bindings(&[(id, manifest.clone())]),
+        ),
+        ExtensionGrantCohortLoadOutcome::Failed,
+        "orphan child authority must not be silently filtered"
+    );
+    assert_eq!(
+        mutate_extension_grants(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::new(2).unwrap(),
+            ExtensionInstallRevision::INITIAL,
+            id,
+            manifest,
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        ),
+        ExtensionGrantMutationOutcome::Failed,
+        "mutation committed beside orphan sibling authority"
+    );
+}
+
+#[test]
+fn legacy_enabled_intent_reopens_but_cannot_be_reaffirmed_without_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(801);
+    let manifest = extension_manifest(extension_package(81, 82, 1));
+    let catalog_revision;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let installed = mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id,
+                package: manifest.package().clone(),
+            },
+        );
+        let ExtensionInstallCatalogMutationOutcome::Applied(installed) = installed else {
+            panic!("fixture install failed");
+        };
+        catalog_revision = installed.catalog_revision;
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+    let path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let id_bytes = id.bytes();
+    Connection::open(path)
+        .unwrap()
+        .execute(
+            "UPDATE extension_installs SET desired_enabled = 1 WHERE id = ?1",
+            [&id_bytes[..]],
+        )
+        .unwrap();
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(&store, profile)
+    else {
+        panic!("legacy enabled row did not remain representable");
+    };
+    let install = catalog.get(id).unwrap();
+    assert!(install.desired_enabled());
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) =
+        load_extension_grants(&store, profile, extension_grant_bindings(&[(id, manifest)]))
+    else {
+        panic!("legacy grant absence did not load explicitly");
+    };
+    assert!(matches!(
+        cohort.get(id),
+        Some(ExtensionGrantInitializationState::Uninitialized)
+    ));
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            catalog_revision,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id,
+                expected: install.revision(),
+                desired_enabled: true,
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Invalid
+    );
+    assert!(matches!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            catalog_revision,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id,
+                expected: install.revision(),
+                desired_enabled: false,
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Applied(_)
+    ));
+}
+
+#[test]
+fn stale_orphan_grant_rows_cannot_attach_to_a_reused_install_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(901);
+    let package = extension_package(91, 92, 1);
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        assert!(matches!(
+            load_extension_installs(&store, profile),
+            ExtensionInstallCatalogLoadOutcome::Loaded(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+    let path = dir.path().join(format!("profile-{profile}.sqlite"));
+    let conn = Connection::open(path).unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    let id_bytes = id.bytes();
+    let authority = package.authority().bytes();
+    let key = package.key().bytes();
+    let archive = package.archive_sha256().bytes();
+    let manifest = package.manifest_sha256().bytes();
+    let tree = package.tree_sha256().bytes();
+    conn.execute(
+        "INSERT INTO extension_grants(
+             install_id, revision, authority, package_key, package_revision,
+             archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+             file_access, private_access
+         ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 0, 0)",
+        params![
+            &id_bytes[..],
+            &authority[..],
+            &key[..],
+            &archive[..],
+            &manifest[..],
+            &tree[..],
+            vec![7_u8; 32],
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(
+        mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install { id, package },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Failed
+    );
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(&store, profile)
+    else {
+        panic!("catalog could not reconcile stale subordinate rows");
+    };
+    assert!(catalog.installs().is_empty());
+}
+
+#[test]
 fn extension_install_admission_and_callback_ownership_are_bounded() {
     let (tx, rx) = mpsc::sync_channel(MAX_PENDING_EXTENSION_INSTALL_MUTATIONS + 1);
     let store = test_store_with_sender(tx);
@@ -1365,6 +2362,65 @@ fn extension_install_admission_and_callback_ownership_are_bounded() {
 }
 
 #[test]
+fn extension_grant_admission_has_exact_byte_bound_and_releases_failed_enqueue() {
+    let admission = Arc::new(Mutex::new(ExtensionGrantRequestAdmission::default()));
+    let cohort = ExtensionGrantRequestPermit::acquire(
+        &admission,
+        MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+    )
+    .expect("one worst-case cohort must be admitted");
+    assert!(
+        ExtensionGrantRequestPermit::acquire(
+            &admission,
+            MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+        )
+        .is_none(),
+        "two worst-case cohorts exceeded the RAM policy"
+    );
+    let mutation = ExtensionGrantRequestPermit::acquire(
+        &admission,
+        MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES,
+    )
+    .expect("one worst-case mutation must fit beside one cohort");
+    assert!(ExtensionGrantRequestPermit::acquire(&admission, 1).is_none());
+    drop(mutation);
+    drop(cohort);
+    assert_eq!(
+        *admission.lock().unwrap(),
+        ExtensionGrantRequestAdmission::default()
+    );
+
+    let mut count_permits = Vec::new();
+    for _ in 0..MAX_PENDING_EXTENSION_GRANT_REQUESTS {
+        count_permits.push(
+            ExtensionGrantRequestPermit::acquire(&admission, 0)
+                .expect("request-count boundary rejected too early"),
+        );
+    }
+    assert!(ExtensionGrantRequestPermit::acquire(&admission, 0).is_none());
+    drop(count_permits);
+
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let store = std::mem::ManuallyDrop::new(test_store_with_sender(tx));
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_completions = completions.clone();
+    assert!(!store.load_extension_grant_cohort(
+        ProfileId::from(1),
+        ExtensionGrantManifestBindings::new(Vec::new()).unwrap(),
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+    let state = store
+        .extension_grant_request_admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(state.count, 0);
+    assert_eq!(state.retained_bytes, 0);
+}
+
+#[test]
 fn extension_install_unknown_or_ephemeral_profile_is_never_materialized() {
     let dir = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(dir.path()).unwrap();
@@ -1386,6 +2442,32 @@ fn extension_install_unknown_or_ephemeral_profile_is_never_materialized() {
             },
         ),
         ExtensionInstallCatalogMutationOutcome::NotRegistered
+    );
+    let id = ExtensionInstallId::from(902);
+    let manifest = extension_manifest(extension_package(43, 44, 1));
+    assert_eq!(
+        load_extension_grants(
+            &store,
+            ephemeral,
+            extension_grant_bindings(&[(id, manifest.clone())]),
+        ),
+        ExtensionGrantCohortLoadOutcome::NotRegistered
+    );
+    let install = zephium_core::extensions::ExtensionInstall::new(id, manifest.package().clone());
+    let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+    assert_eq!(
+        mutate_extension_grants(
+            &store,
+            ephemeral,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallRevision::INITIAL,
+            id,
+            manifest,
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(authority),
+            },
+        ),
+        ExtensionGrantMutationOutcome::NotRegistered
     );
     assert!(!dir
         .path()
@@ -2741,6 +3823,36 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
             },
         ),
         ExtensionInstallCatalogMutationOutcome::DegradedProfile
+    );
+    let degraded_id = ExtensionInstallId::from(815);
+    let degraded_manifest = extension_manifest(extension_package(63, 64, 1));
+    assert_eq!(
+        load_extension_grants(
+            &store,
+            degraded,
+            extension_grant_bindings(&[(degraded_id, degraded_manifest.clone())]),
+        ),
+        ExtensionGrantCohortLoadOutcome::DegradedProfile
+    );
+    let degraded_install = zephium_core::extensions::ExtensionInstall::new(
+        degraded_id,
+        degraded_manifest.package().clone(),
+    );
+    let degraded_authority =
+        ExtensionGrantAuthority::new(&degraded_install, &degraded_manifest).unwrap();
+    assert_eq!(
+        mutate_extension_grants(
+            &store,
+            degraded,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallRevision::INITIAL,
+            degraded_id,
+            degraded_manifest,
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(degraded_authority),
+            },
+        ),
+        ExtensionGrantMutationOutcome::DegradedProfile
     );
 
     // Degraded operations are terminal no-ops: they neither reopen the

@@ -7,6 +7,7 @@
 mod blocker;
 mod compatibility;
 mod deletion;
+mod extension_grants;
 mod extensions;
 mod favicons;
 mod filesystem;
@@ -80,6 +81,8 @@ pub struct Hub {
     ambiguous_page_permission_commit_once: bool,
     #[cfg(test)]
     ambiguous_extension_install_commit_once: bool,
+    #[cfg(test)]
+    ambiguous_extension_grant_commit_once: bool,
 }
 
 pub(crate) struct AuthoritativeLoad {
@@ -134,6 +137,8 @@ impl Hub {
             ambiguous_page_permission_commit_once: false,
             #[cfg(test)]
             ambiguous_extension_install_commit_once: false,
+            #[cfg(test)]
+            ambiguous_extension_grant_commit_once: false,
         };
         hub.load_registry()?;
         // The snapshot and registry must agree before profile files are
@@ -231,6 +236,8 @@ impl Hub {
             ambiguous_page_permission_commit_once: false,
             #[cfg(test)]
             ambiguous_extension_install_commit_once: false,
+            #[cfg(test)]
+            ambiguous_extension_grant_commit_once: false,
         })
     }
 

@@ -716,6 +716,59 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 10,
+        up: |tx| {
+            tx.execute_batch(
+                // Grant authority is subordinate to one exact install and is
+                // deliberately not a profile catalog. Absence means
+                // uninitialized/deny, so this migration must not manufacture
+                // rows for existing installs. The duplicated package identity
+                // and digest are revalidated by the bounded durable codec.
+                "CREATE TABLE extension_grants (
+                     install_id BLOB PRIMARY KEY
+                         REFERENCES extension_installs(id) ON DELETE CASCADE
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     authority BLOB NOT NULL
+                         CHECK (typeof(authority) = 'blob' AND length(authority) = 32),
+                     package_key BLOB NOT NULL
+                         CHECK (typeof(package_key) = 'blob' AND length(package_key) = 32),
+                     package_revision INTEGER NOT NULL
+                         CHECK (package_revision BETWEEN 1 AND 9223372036854775807),
+                     archive_sha256 BLOB NOT NULL
+                         CHECK (typeof(archive_sha256) = 'blob' AND length(archive_sha256) = 32),
+                     manifest_sha256 BLOB NOT NULL
+                         CHECK (typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32),
+                     tree_sha256 BLOB NOT NULL
+                         CHECK (typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32),
+                     grant_sha256 BLOB NOT NULL
+                         CHECK (typeof(grant_sha256) = 'blob' AND length(grant_sha256) = 32),
+                     file_access INTEGER NOT NULL CHECK (file_access IN (0, 1)),
+                     private_access INTEGER NOT NULL CHECK (private_access IN (0, 1))
+                 ) STRICT;
+                 CREATE TABLE extension_grant_api_permissions (
+                     install_id BLOB NOT NULL
+                         REFERENCES extension_grants(install_id) ON DELETE CASCADE
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     name TEXT NOT NULL
+                         CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 96
+                                AND instr(CAST(name AS BLOB), X'00') = 0),
+                     PRIMARY KEY (install_id, name)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE TABLE extension_grant_host_permissions (
+                     install_id BLOB NOT NULL
+                         REFERENCES extension_grants(install_id) ON DELETE CASCADE
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     pattern TEXT NOT NULL
+                         CHECK (length(CAST(pattern AS BLOB)) BETWEEN 1 AND 2048
+                                AND instr(CAST(pattern AS BLOB), X'00') = 0),
+                     PRIMARY KEY (install_id, pattern)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -731,6 +784,199 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, PROFILE.last().unwrap().version);
+    }
+
+    #[test]
+    fn grant_migration_preserves_uninitialized_absence_and_cascades_with_install() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &PROFILE[..9]).unwrap();
+        conn.execute(
+            "INSERT INTO extension_installs(
+                 id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, 0)",
+            rusqlite::params![
+                vec![1_u8; 16],
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+            ],
+        )
+        .unwrap();
+
+        apply(&mut conn, PROFILE).unwrap();
+        let roots: i64 = conn
+            .query_row("SELECT count(*) FROM extension_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(roots, 0, "migration must not grant existing installs");
+
+        conn.execute(
+            "INSERT INTO extension_grants(
+                 install_id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+                 file_access, private_access
+             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 0, 0)",
+            rusqlite::params![
+                vec![1_u8; 16],
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                vec![7_u8; 32],
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_grant_api_permissions(install_id, name)
+             VALUES (?1, 'storage')",
+            [vec![1_u8; 16]],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_grant_host_permissions(install_id, pattern)
+             VALUES (?1, 'https://example.com/*')",
+            [vec![1_u8; 16]],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM extension_installs", []).unwrap();
+        for table in [
+            "extension_grants",
+            "extension_grant_api_permissions",
+            "extension_grant_host_permissions",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "install deletion retained {table}");
+        }
+    }
+
+    #[test]
+    fn grant_migration_preserves_legacy_enabled_intent_without_inventing_authority() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..9]).unwrap();
+        conn.execute(
+            "INSERT INTO extension_installs(
+                 id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, 3, ?2, ?3, 4, ?4, ?5, ?6, 1)",
+            rusqlite::params![
+                vec![1_u8; 16],
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+            ],
+        )
+        .unwrap();
+
+        apply(&mut conn, PROFILE).unwrap();
+        let desired_enabled: i64 = conn
+            .query_row(
+                "SELECT desired_enabled FROM extension_installs",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let grants: i64 = conn
+            .query_row("SELECT count(*) FROM extension_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(desired_enabled, 1);
+        assert_eq!(grants, 0, "migration must never backfill grant authority");
+    }
+
+    #[test]
+    fn profile_v10_rejects_malformed_grant_roots_children_and_orphans() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        let id = vec![1_u8; 16];
+        conn.execute(
+            "INSERT INTO extension_installs(
+                 id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
+             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, 0)",
+            rusqlite::params![
+                &id,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+            ],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO extension_grants(
+                     install_id, revision, authority, package_key, package_revision,
+                     archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+                     file_access, private_access
+                 ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 0, 0)",
+                rusqlite::params![
+                    &id,
+                    vec![2_u8; 32],
+                    vec![3_u8; 32],
+                    vec![4_u8; 32],
+                    vec![5_u8; 32],
+                    vec![6_u8; 32],
+                    vec![7_u8; 31],
+                ],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO extension_grants(
+                 install_id, revision, authority, package_key, package_revision,
+                 archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
+                 file_access, private_access
+             ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 0, 0)",
+            rusqlite::params![
+                &id,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                vec![7_u8; 32],
+            ],
+        )
+        .unwrap();
+        for invalid in [String::new(), "x".repeat(97), "bad\0name".into()] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO extension_grant_api_permissions(install_id, name)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![&id, invalid],
+                )
+                .is_err());
+        }
+        for invalid in [String::new(), "x".repeat(2049), "bad\0pattern".into()] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO extension_grant_host_permissions(install_id, pattern)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![&id, invalid],
+                )
+                .is_err());
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO extension_grant_api_permissions(install_id, name)
+                 VALUES (?1, 'storage')",
+                [vec![9_u8; 16]],
+            )
+            .is_err());
     }
 
     #[test]
@@ -1100,7 +1346,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &PROFILE[..8]).unwrap();
 
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..9]).unwrap();
 
         let state: (i64, i64) = conn
             .query_row(

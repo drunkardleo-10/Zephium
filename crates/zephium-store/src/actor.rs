@@ -14,17 +14,23 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
-use zephium_core::extensions::{ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision};
-use zephium_core::ids::ProfileId;
+use zephium_core::extensions::{
+    ExtensionGrantManifestBindings, ExtensionInstallCatalogMutation,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
+    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+};
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::item::sanitize_page_title;
 use zephium_core::navigation;
 use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPatch};
 use zephium_core::ports::store::{
-    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionInstallCatalogLoadOutcome,
+    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionGrantCohortLoadOutcome,
+    ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
     ExtensionInstallCatalogMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
     PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
     ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
-    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
+    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome,
+    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -53,6 +59,25 @@ const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
 const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
 const MAX_PENDING_EXTENSION_INSTALL_MUTATIONS: usize = 16;
+const MAX_PENDING_EXTENSION_GRANT_REQUESTS: usize = 8;
+const MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES: usize = checked_const_add(
+    MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
+);
+// Permit one worst-case cohort load plus one worst-case mutation. A second
+// worst-case cohort waits until the first permit drops instead of allowing a
+// ~64 MiB privileged mailbox spike.
+const MAX_PENDING_EXTENSION_GRANT_RETAINED_BYTES: usize = checked_const_add(
+    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+    MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES,
+);
+
+const fn checked_const_add(left: usize, right: usize) -> usize {
+    match left.checked_add(right) {
+        Some(value) => value,
+        None => panic!("extension grant admission bound overflow"),
+    }
+}
 
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
@@ -65,6 +90,8 @@ type PagePermissionCatalogMutationDone =
 type ExtensionInstallCatalogLoadDone = Box<dyn FnOnce(ExtensionInstallCatalogLoadOutcome) + Send>;
 type ExtensionInstallCatalogMutationDone =
     Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
+type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>;
+type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
 
 #[derive(Default)]
 struct UserscriptMutationAdmission {
@@ -203,6 +230,60 @@ impl Drop for ExtensionInstallMutationPermit {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ExtensionGrantRequestAdmission {
+    count: usize,
+    retained_bytes: usize,
+}
+
+struct ExtensionGrantRequestPermit {
+    admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
+    retained_bytes: usize,
+}
+
+impl ExtensionGrantRequestPermit {
+    fn acquire(
+        admission: &Arc<Mutex<ExtensionGrantRequestAdmission>>,
+        retained_bytes: usize,
+    ) -> Option<Self> {
+        let mut state = admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next_count = state.count.checked_add(1)?;
+        let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
+        if next_count > MAX_PENDING_EXTENSION_GRANT_REQUESTS
+            || next_bytes > MAX_PENDING_EXTENSION_GRANT_RETAINED_BYTES
+        {
+            return None;
+        }
+        state.count = next_count;
+        state.retained_bytes = next_bytes;
+        Some(Self {
+            admission: admission.clone(),
+            retained_bytes,
+        })
+    }
+}
+
+impl Drop for ExtensionGrantRequestPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (Some(count), Some(retained_bytes)) = (
+            state.count.checked_sub(1),
+            state.retained_bytes.checked_sub(self.retained_bytes),
+        ) else {
+            state.count = usize::MAX;
+            state.retained_bytes = usize::MAX;
+            return;
+        };
+        state.count = count;
+        state.retained_bytes = retained_bytes;
+    }
+}
+
 #[derive(Default)]
 struct PendingSettings {
     pending: HashMap<String, String>,
@@ -326,6 +407,22 @@ enum Cmd {
         ExtensionInstallMutationPermit,
         ExtensionInstallCatalogMutationDone,
     ),
+    LoadExtensionGrantCohort(
+        ProfileId,
+        ExtensionGrantManifestBindings,
+        ExtensionGrantRequestPermit,
+        ExtensionGrantCohortLoadDone,
+    ),
+    MutateExtensionGrants(
+        ProfileId,
+        ExtensionInstallCatalogRevision,
+        ExtensionInstallRevision,
+        ExtensionInstallId,
+        Arc<ExtensionManifestDescriptor>,
+        ExtensionGrantWrite,
+        ExtensionGrantRequestPermit,
+        ExtensionGrantMutationDone,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -358,6 +455,7 @@ pub struct SqliteStore {
     userscript_mutation_admission: Arc<Mutex<UserscriptMutationAdmission>>,
     page_permission_mutation_admission: Arc<Mutex<PagePermissionMutationAdmission>>,
     extension_install_mutation_admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
+    extension_grant_request_admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
 }
@@ -400,6 +498,8 @@ impl SqliteStore {
             Arc::new(Mutex::new(PagePermissionMutationAdmission::default()));
         let extension_install_mutation_admission =
             Arc::new(Mutex::new(ExtensionInstallMutationAdmission::default()));
+        let extension_grant_request_admission =
+            Arc::new(Mutex::new(ExtensionGrantRequestAdmission::default()));
         let (actor_exited, actor_exit) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("zephium-store".into())
@@ -436,6 +536,7 @@ impl SqliteStore {
             userscript_mutation_admission,
             page_permission_mutation_admission,
             extension_install_mutation_admission,
+            extension_grant_request_admission,
             lifecycle: Mutex::new(ActorLifecycle {
                 join: Some(join),
                 exited: actor_exit,
@@ -753,6 +854,75 @@ impl Store for SqliteStore {
         self.tx
             .try_send(Cmd::MutateExtensionInstallCatalog(
                 profile, expected, mutation, permit, done,
+            ))
+            .is_ok()
+    }
+
+    fn load_extension_grant_cohort(
+        &self,
+        profile: ProfileId,
+        bindings: ExtensionGrantManifestBindings,
+        done: ExtensionGrantCohortLoadDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(permit) = ExtensionGrantRequestPermit::acquire(
+            &self.extension_grant_request_admission,
+            bindings.retained_bytes(),
+        ) else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::LoadExtensionGrantCohort(
+                profile, bindings, permit, done,
+            ))
+            .is_ok()
+    }
+
+    fn mutate_extension_grants(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+        install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        write: ExtensionGrantWrite,
+        done: ExtensionGrantMutationDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(retained_bytes) = manifest
+            .retained_bytes()
+            .checked_add(write.retained_bytes())
+        else {
+            return false;
+        };
+        let Some(permit) = ExtensionGrantRequestPermit::acquire(
+            &self.extension_grant_request_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::MutateExtensionGrants(
+                profile,
+                expected_catalog,
+                expected_install,
+                install_id,
+                manifest,
+                write,
+                permit,
+                done,
             ))
             .is_ok()
     }
@@ -1275,6 +1445,46 @@ fn actor(
                             "store: profile {profile} extension-install catalog mutation failed: {error}"
                         );
                         ExtensionInstallCatalogMutationOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionGrantCohort(profile, bindings, _permit, done)) => {
+                let outcome = match hub.load_extension_grant_cohort(profile, bindings) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} extension-grant cohort load failed: {error}"
+                        );
+                        ExtensionGrantCohortLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::MutateExtensionGrants(
+                profile,
+                expected_catalog,
+                expected_install,
+                install_id,
+                manifest,
+                write,
+                _permit,
+                done,
+            )) => {
+                let outcome = match hub.mutate_extension_grants(
+                    profile,
+                    expected_catalog,
+                    expected_install,
+                    install_id,
+                    manifest,
+                    write,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} extension-grant mutation failed: {error}"
+                        );
+                        ExtensionGrantMutationOutcome::Failed
                     }
                 };
                 done(outcome);

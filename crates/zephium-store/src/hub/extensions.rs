@@ -88,12 +88,32 @@ impl Hub {
             catalog_revision: application.catalog().revision(),
             install: application.install().cloned().map(Box::new),
         };
+        if matches!(
+            &mutation,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                desired_enabled: true,
+                ..
+            }
+        ) {
+            let install = application
+                .install()
+                .ok_or_else(|| invalid_data("enabled extension transition has no install row"))?;
+            if !super::extension_grants::has_exact_grant_root(&tx, install)? {
+                // Existing v9 rows with enabled intent remain representable
+                // after migration, but this adapter never newly affirms or
+                // persists enabled intent without an exact package-bound
+                // grant root. Activation still requires a freshly validated
+                // atomic grant cohort; this intent is not authority evidence.
+                return Ok(ExtensionInstallCatalogMutationOutcome::Invalid);
+            }
+        }
         if !application.changed() {
             return Ok(ExtensionInstallCatalogMutationOutcome::Applied(applied));
         }
 
         match &mutation {
             ExtensionInstallCatalogMutation::Install { id, .. } => {
+                super::extension_grants::ensure_install_id_has_no_grant_rows(&tx, *id)?;
                 let install = application
                     .install()
                     .ok_or_else(|| invalid_data("extension install transition has no row"))?;
@@ -217,7 +237,7 @@ fn insert_install(conn: &Connection, install: &ExtensionInstall) -> rusqlite::Re
     Ok(())
 }
 
-fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInstallCatalog> {
+pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInstallCatalog> {
     let (state_rows, raw_revision): (i64, Option<i64>) = conn.query_row(
         "SELECT count(*), CASE WHEN count(*) = 1 THEN max(revision) END
          FROM extension_install_catalog",
@@ -341,7 +361,7 @@ fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInstallCatalog> 
         .map_err(|_| invalid_data("extension install catalog is invalid"))
 }
 
-fn exact_blob<const N: usize>(
+pub(super) fn exact_blob<const N: usize>(
     value: Option<Vec<u8>>,
     message: &'static str,
 ) -> rusqlite::Result<[u8; N]> {
@@ -351,11 +371,11 @@ fn exact_blob<const N: usize>(
         .map_err(|_| invalid_data(message))
 }
 
-fn revision_u64(value: i64) -> Option<u64> {
+pub(super) fn revision_u64(value: i64) -> Option<u64> {
     u64::try_from(value).ok().filter(|revision| *revision != 0)
 }
 
-fn revision_i64(value: u64) -> rusqlite::Result<i64> {
+pub(super) fn revision_i64(value: u64) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| invalid_data("extension revision overflow"))
 }
 
