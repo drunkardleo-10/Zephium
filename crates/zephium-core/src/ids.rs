@@ -73,4 +73,75 @@ ulid_id!(PagePermissionGrantId);
 ulid_id!(ScriptId);
 ulid_id!(UserscriptId);
 
+impl ExtensionInstallId {
+    /// Mints a shell-edge identity strictly above the profile's durable
+    /// install-id floor.
+    ///
+    /// Ordinary randomized ULIDs are not monotonic within one millisecond and
+    /// can also sort below a future floor after clock rollback. This allocator
+    /// preserves a fresh ULID when it is already newer; otherwise it advances
+    /// the durable floor by exactly one. `None` reports the only exhausted
+    /// state, where the floor already occupies the complete 128-bit range.
+    pub fn generate_after(high_water: Option<Self>) -> Option<Self> {
+        Self::candidate_after(Self::generate(), high_water)
+    }
+
+    fn candidate_after(candidate: Self, high_water: Option<Self>) -> Option<Self> {
+        let Some(high_water) = high_water else {
+            return Some(candidate);
+        };
+        if candidate > high_water {
+            return Some(candidate);
+        }
+        high_water.0 .0.checked_add(1).map(Self::from)
+    }
+}
+
 pub type WindowId = u64;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_install_allocator_advances_same_millisecond_randomness() {
+        let timestamp = 0x0123_4567_89ab_u128 << 80;
+        let candidate = ExtensionInstallId::from(timestamp | 5);
+        let high_water = ExtensionInstallId::from(timestamp | 7);
+
+        assert_eq!(
+            ExtensionInstallId::candidate_after(candidate, Some(high_water)),
+            Some(ExtensionInstallId::from(timestamp | 8))
+        );
+    }
+
+    #[test]
+    fn extension_install_allocator_advances_a_future_clock_floor() {
+        let candidate = ExtensionInstallId::from(0x0123_4567_89ab_u128 << 80);
+        let future_floor = ExtensionInstallId::from((0x1123_4567_89ab_u128 << 80) | 99);
+
+        assert_eq!(
+            ExtensionInstallId::candidate_after(candidate, Some(future_floor)),
+            Some(ExtensionInstallId::from(
+                (0x1123_4567_89ab_u128 << 80) | 100
+            ))
+        );
+    }
+
+    #[test]
+    fn extension_install_allocator_preserves_newer_freshness_and_detects_exhaustion() {
+        let high_water = ExtensionInstallId::from(10);
+        let fresh = ExtensionInstallId::from(20);
+        assert_eq!(
+            ExtensionInstallId::candidate_after(fresh, Some(high_water)),
+            Some(fresh)
+        );
+        assert_eq!(
+            ExtensionInstallId::candidate_after(
+                ExtensionInstallId::from(u128::MAX - 1),
+                Some(ExtensionInstallId::from(u128::MAX)),
+            ),
+            None
+        );
+    }
+}

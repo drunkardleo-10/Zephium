@@ -118,6 +118,12 @@ impl ExtensionInstall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionInstallCatalog {
     revision: ExtensionInstallCatalogRevision,
+    /// Greatest install identity admitted since this floor became durable.
+    ///
+    /// This compact monotonic floor survives deletion so a stale subordinate
+    /// row, native receipt, or delayed message can never bind to a later
+    /// installation that reused the same identity.
+    install_id_high_water: Option<ExtensionInstallId>,
     installs: Vec<ExtensionInstall>,
     retained_bytes: usize,
 }
@@ -127,8 +133,31 @@ impl ExtensionInstallCatalog {
     ///
     /// One malformed or duplicate install rejects the entire catalog; callers
     /// must never activate a filtered subset of durable extension authority.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         revision: ExtensionInstallCatalogRevision,
+        installs: Vec<ExtensionInstall>,
+    ) -> Result<Self, ExtensionInstallCatalogError> {
+        let install_id_high_water = installs.iter().map(ExtensionInstall::id).max();
+        Self::validate(revision, install_id_high_water, installs)
+    }
+
+    /// Reconstructs a complete durable catalog with its explicit non-reuse
+    /// floor.
+    ///
+    /// Persistence adapters must use this constructor. Deriving the floor
+    /// from only the live rows would forget deleted identities after restart.
+    pub fn from_persisted(
+        revision: ExtensionInstallCatalogRevision,
+        install_id_high_water: Option<ExtensionInstallId>,
+        installs: Vec<ExtensionInstall>,
+    ) -> Result<Self, ExtensionInstallCatalogError> {
+        Self::validate(revision, install_id_high_water, installs)
+    }
+
+    fn validate(
+        revision: ExtensionInstallCatalogRevision,
+        install_id_high_water: Option<ExtensionInstallId>,
         installs: Vec<ExtensionInstall>,
     ) -> Result<Self, ExtensionInstallCatalogError> {
         if installs.len() > MAX_EXTENSION_INSTALLS_PER_PROFILE {
@@ -161,6 +190,16 @@ impl ExtensionInstallCatalog {
                 });
             }
         }
+        if let Some(live_maximum) = installs.iter().map(ExtensionInstall::id).max() {
+            if install_id_high_water.is_none_or(|high_water| high_water < live_maximum) {
+                return Err(
+                    ExtensionInstallCatalogError::InstallIdHighWaterBelowLiveInstall {
+                        high_water: install_id_high_water,
+                        live_maximum,
+                    },
+                );
+            }
+        }
 
         let retained_bytes = installs
             .capacity()
@@ -178,6 +217,7 @@ impl ExtensionInstallCatalog {
 
         Ok(Self {
             revision,
+            install_id_high_water,
             installs,
             retained_bytes,
         })
@@ -185,6 +225,11 @@ impl ExtensionInstallCatalog {
 
     pub const fn revision(&self) -> ExtensionInstallCatalogRevision {
         self.revision
+    }
+
+    /// Greatest install identity ever admitted, including deleted installs.
+    pub const fn install_id_high_water(&self) -> Option<ExtensionInstallId> {
+        self.install_id_high_water
     }
 
     pub fn installs(&self) -> &[ExtensionInstall] {
@@ -236,6 +281,16 @@ impl ExtensionInstallCatalog {
                 if self.get(id).is_some() {
                     return Err(ExtensionInstallCatalogApplyError::InstallAlreadyExists(id));
                 }
+                if let Some(high_water) = self.install_id_high_water {
+                    if id <= high_water {
+                        return Err(
+                            ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater {
+                                id,
+                                high_water,
+                            },
+                        );
+                    }
+                }
                 let (authority, key) = package.update_line();
                 if let Some(existing) = self.by_package(authority, key) {
                     return Err(ExtensionInstallCatalogApplyError::PackageAlreadyInstalled {
@@ -254,7 +309,7 @@ impl ExtensionInstallCatalog {
                     .next()
                     .ok_or(ExtensionInstallCatalogApplyError::CatalogRevisionExhausted)?;
                 self.installs.push(ExtensionInstall::new(id, package));
-                let catalog = Self::new(next_catalog, self.installs)
+                let catalog = Self::from_persisted(next_catalog, Some(id), self.installs)
                     .map_err(ExtensionInstallCatalogApplyError::CatalogRejected)?;
                 Ok(ExtensionInstallCatalogApplication {
                     catalog,
@@ -321,8 +376,9 @@ impl ExtensionInstallCatalog {
                     .next()
                     .ok_or(ExtensionInstallCatalogApplyError::CatalogRevisionExhausted)?;
                 self.installs.remove(index);
-                let catalog = Self::new(next_catalog, self.installs)
-                    .map_err(ExtensionInstallCatalogApplyError::CatalogRejected)?;
+                let catalog =
+                    Self::from_persisted(next_catalog, self.install_id_high_water, self.installs)
+                        .map_err(ExtensionInstallCatalogApplyError::CatalogRejected)?;
                 Ok(ExtensionInstallCatalogApplication {
                     catalog,
                     id,
@@ -410,6 +466,10 @@ pub enum ExtensionInstallCatalogApplyError {
         current: ExtensionInstallCatalogRevision,
     },
     InstallAlreadyExists(ExtensionInstallId),
+    InstallIdNotAboveHighWater {
+        id: ExtensionInstallId,
+        high_water: ExtensionInstallId,
+    },
     InstallNotFound(ExtensionInstallId),
     InstallRevisionConflict {
         id: ExtensionInstallId,
@@ -449,6 +509,10 @@ pub enum ExtensionInstallCatalogError {
         authority: ExtensionAuthorityId,
         key: ExtensionPackageKey,
     },
+    InstallIdHighWaterBelowLiveInstall {
+        high_water: Option<ExtensionInstallId>,
+        live_maximum: ExtensionInstallId,
+    },
 }
 
 impl fmt::Display for ExtensionInstallCatalogError {
@@ -474,6 +538,13 @@ impl fmt::Display for ExtensionInstallCatalogError {
                 formatter,
                 "extension catalog contains duplicate package {authority:?}/{key:?}"
             ),
+            Self::InstallIdHighWaterBelowLiveInstall {
+                high_water,
+                live_maximum,
+            } => write!(
+                formatter,
+                "extension install-id high-water {high_water:?} is below live install {live_maximum}"
+            ),
         }
     }
 }
@@ -492,6 +563,10 @@ impl fmt::Display for ExtensionInstallCatalogApplyError {
             Self::InstallAlreadyExists(id) => {
                 write!(formatter, "extension install {id} already exists")
             }
+            Self::InstallIdNotAboveHighWater { id, high_water } => write!(
+                formatter,
+                "extension install {id} does not exceed retained high-water {high_water}"
+            ),
             Self::InstallNotFound(id) => {
                 write!(formatter, "extension install {id} does not exist")
             }
@@ -651,6 +726,39 @@ mod tests {
             ),
             Some(&install(30, 3, 3))
         );
+        assert_eq!(
+            catalog.install_id_high_water(),
+            Some(ExtensionInstallId::from(30))
+        );
+    }
+
+    #[test]
+    fn persisted_catalog_requires_high_water_at_or_above_every_live_id() {
+        let revision = ExtensionInstallCatalogRevision::INITIAL;
+        let rows = vec![install(10, 1, 1), install(20, 2, 2)];
+
+        for high_water in [None, Some(ExtensionInstallId::from(19))] {
+            assert!(matches!(
+                ExtensionInstallCatalog::from_persisted(revision, high_water, rows.clone()),
+                Err(
+                    ExtensionInstallCatalogError::InstallIdHighWaterBelowLiveInstall {
+                        live_maximum,
+                        ..
+                    }
+                ) if live_maximum == ExtensionInstallId::from(20)
+            ));
+        }
+
+        let catalog = ExtensionInstallCatalog::from_persisted(
+            revision,
+            Some(ExtensionInstallId::from(25)),
+            rows,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog.install_id_high_water(),
+            Some(ExtensionInstallId::from(25))
+        );
     }
 
     #[test]
@@ -781,6 +889,74 @@ mod tests {
         assert_eq!(installed.revision(), ExtensionInstallRevision::INITIAL);
         assert_eq!(installed.package(), &selected_package);
         assert!(!installed.desired_enabled());
+        assert_eq!(
+            applied.catalog().install_id_high_water(),
+            Some(ExtensionInstallId::from(9))
+        );
+    }
+
+    #[test]
+    fn deletion_retains_high_water_and_rejects_reuse_or_lower_unused_ids() {
+        let initial_revision = ExtensionInstallCatalogRevision::INITIAL;
+        let installed = catalog_with(initial_revision, Vec::new())
+            .apply(
+                initial_revision,
+                ExtensionInstallCatalogMutation::Install {
+                    id: ExtensionInstallId::from(10),
+                    package: package(1, 1, 1),
+                },
+            )
+            .unwrap()
+            .into_catalog();
+        let after_install = installed.revision();
+        let deleted = installed
+            .apply(
+                after_install,
+                ExtensionInstallCatalogMutation::Delete {
+                    id: ExtensionInstallId::from(10),
+                    expected: ExtensionInstallRevision::INITIAL,
+                },
+            )
+            .unwrap()
+            .into_catalog();
+
+        assert!(deleted.installs().is_empty());
+        assert_eq!(
+            deleted.install_id_high_water(),
+            Some(ExtensionInstallId::from(10))
+        );
+        for refused in [9_u128, 10] {
+            assert_eq!(
+                deleted.clone().apply(
+                    deleted.revision(),
+                    ExtensionInstallCatalogMutation::Install {
+                        id: ExtensionInstallId::from(refused),
+                        package: package(refused as u8, refused as u8, 1),
+                    },
+                ),
+                Err(
+                    ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater {
+                        id: ExtensionInstallId::from(refused),
+                        high_water: ExtensionInstallId::from(10),
+                    }
+                )
+            );
+        }
+
+        let deleted_revision = deleted.revision();
+        let admitted = deleted
+            .apply(
+                deleted_revision,
+                ExtensionInstallCatalogMutation::Install {
+                    id: ExtensionInstallId::from(11),
+                    package: package(11, 11, 1),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            admitted.catalog().install_id_high_water(),
+            Some(ExtensionInstallId::from(11))
+        );
     }
 
     #[test]
@@ -904,6 +1080,7 @@ mod tests {
         assert!(applied.install().is_none());
         assert!(applied.catalog().installs().is_empty());
         assert_eq!(applied.catalog().retained_bytes(), 0);
+        assert_eq!(applied.catalog().install_id_high_water(), Some(id));
     }
 
     #[test]
@@ -1037,6 +1214,52 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn arbitrary_install_delete_sequences_retain_the_greatest_admitted_id(
+            operations in prop::collection::vec((1_u16..=1_000, any::<bool>()), 0..=MAX_EXTENSION_INSTALLS_PER_PROFILE),
+        ) {
+            let mut catalog = catalog_with(
+                ExtensionInstallCatalogRevision::INITIAL,
+                Vec::new(),
+            );
+            let mut next_id = 0_u128;
+
+            for (index, (increment, delete_after_install)) in
+                operations.into_iter().enumerate()
+            {
+                next_id += u128::from(increment);
+                let id = ExtensionInstallId::from(next_id);
+                let revision = catalog.revision();
+                let installed = catalog.apply(
+                    revision,
+                    ExtensionInstallCatalogMutation::Install {
+                        id,
+                        package: package(index as u8 + 1, index as u8 + 1, 1),
+                    },
+                ).unwrap();
+                prop_assert_eq!(installed.catalog().install_id_high_water(), Some(id));
+                catalog = installed.into_catalog();
+
+                if delete_after_install {
+                    let revision = catalog.revision();
+                    let deleted = catalog.apply(
+                        revision,
+                        ExtensionInstallCatalogMutation::Delete {
+                            id,
+                            expected: ExtensionInstallRevision::INITIAL,
+                        },
+                    ).unwrap();
+                    prop_assert_eq!(deleted.catalog().install_id_high_water(), Some(id));
+                    catalog = deleted.into_catalog();
+                }
+            }
+
+            prop_assert_eq!(
+                catalog.install_id_high_water(),
+                (next_id != 0).then(|| ExtensionInstallId::from(next_id)),
+            );
+        }
+
         #[test]
         fn persisted_install_round_trips_all_structural_fields(
             id in any::<u128>(),
