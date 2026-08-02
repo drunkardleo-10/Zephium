@@ -229,15 +229,29 @@ impl ExtensionGrantAuthority {
         install: &ExtensionInstall,
         manifest: &ExtensionManifestDescriptor,
     ) -> Result<Self, ExtensionGrantAuthorityError> {
+        Self::initialize(install, Vec::new(), Vec::new(), false, false, manifest)
+    }
+
+    /// Creates one complete initial authority from a bounded user-approved
+    /// selection. This supports a single atomic initialization write instead
+    /// of consuming one durable transaction per selected declaration.
+    pub fn initialize(
+        install: &ExtensionInstall,
+        granted_api: Vec<ApiPermissionName>,
+        granted_hosts: Vec<MatchPattern>,
+        file_access: bool,
+        private_access: bool,
+        manifest: &ExtensionManifestDescriptor,
+    ) -> Result<Self, ExtensionGrantAuthorityError> {
         validate_install_manifest(install, manifest)?;
         Self::build(
             install.id(),
             ExtensionGrantRevision::INITIAL,
             manifest.package().clone(),
-            Vec::new(),
-            Vec::new(),
-            false,
-            false,
+            granted_api,
+            granted_hosts,
+            file_access,
+            private_access,
             manifest,
         )
     }
@@ -1913,6 +1927,54 @@ mod tests {
                 .reconcile_manifest(authority.revision(), &current, &foreign),
             Err(ExtensionGrantApplyError::DifferentUpdateLine)
         );
+    }
+
+    #[test]
+    fn every_store_write_payload_stays_inside_its_exported_retained_bound() {
+        use crate::ports::store::{ExtensionGrantWrite, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES};
+
+        let manifest = manifest_for(
+            package(1, 1),
+            &["storage"],
+            &[],
+            &["https://example.com/*"],
+            &[],
+        );
+        let authority =
+            ExtensionGrantAuthority::new(&install(manifest.package().clone()), &manifest).unwrap();
+        let writes = [
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(authority),
+            },
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetApi {
+                    name: ApiPermissionName::parse_exact("storage").unwrap(),
+                    granted: true,
+                },
+            },
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetHost {
+                    pattern: MatchPattern::parse("https://example.com/*").unwrap(),
+                    granted: true,
+                },
+            },
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetFileAccess { granted: false },
+            },
+            ExtensionGrantWrite::Apply {
+                expected: ExtensionGrantRevision::INITIAL,
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        ];
+        for write in writes {
+            assert!(
+                write.retained_bytes() <= MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
+                "{write:?} exceeded the actor admission ceiling"
+            );
+        }
     }
 
     proptest! {

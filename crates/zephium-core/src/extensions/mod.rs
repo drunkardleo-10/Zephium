@@ -7,11 +7,18 @@
 //! were authenticated or remain available. A package-authority adapter must
 //! establish that proof and bind backend-native identifiers before activation.
 
+mod cohort;
 mod grants;
 mod identity;
 mod install;
 mod manifest;
 
+pub use cohort::{
+    ExtensionGrantCohort, ExtensionGrantCohortError, ExtensionGrantInitializationState,
+    ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
+    MAX_EXTENSION_GRANT_COHORT_RETAINED_BYTES,
+    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+};
 pub use grants::{
     ExtensionApiGrantDecision, ExtensionGrantApplication, ExtensionGrantApplyError,
     ExtensionGrantAuthority, ExtensionGrantAuthorityError, ExtensionGrantBrowsingContext,

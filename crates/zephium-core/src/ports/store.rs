@@ -1,9 +1,11 @@
 use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use crate::extensions::{
-    ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision,
+    ExtensionGrantAuthority, ExtensionGrantCohort, ExtensionGrantManifestBindings,
+    ExtensionGrantMutation, ExtensionGrantRevision, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDescriptor, MAX_EXTENSION_GRANT_RETAINED_BYTES,
 };
-use crate::ids::ProfileId;
+use crate::ids::{ExtensionInstallId, ProfileId};
 use crate::permissions::{
     PagePermissionCatalog, PagePermissionCatalogRevision, PagePermissionPatch,
     PagePermissionPatchResults,
@@ -12,6 +14,7 @@ use crate::session::SessionState;
 use crate::userscripts::{
     Userscript, UserscriptCatalog, UserscriptCatalogMutation, UserscriptCatalogRevision,
 };
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -257,6 +260,117 @@ pub enum ExtensionInstallCatalogMutationOutcome {
     Failed,
 }
 
+/// Bounded grant write payload. Initialization persists a complete selected
+/// grant set in one transaction; later settings changes remain per-install
+/// CAS operations.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExtensionGrantWrite {
+    Initialize {
+        authority: Box<ExtensionGrantAuthority>,
+    },
+    Apply {
+        expected: ExtensionGrantRevision,
+        mutation: ExtensionGrantMutation,
+    },
+}
+
+/// Conservative maximum logical retained bytes of one grant-write payload.
+pub const MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES: usize =
+    std::mem::size_of::<ExtensionGrantWrite>() + MAX_EXTENSION_GRANT_RETAINED_BYTES + 256;
+
+impl ExtensionGrantWrite {
+    pub fn retained_bytes(&self) -> usize {
+        let payload = match self {
+            Self::Initialize { authority } => authority.retained_bytes(),
+            Self::Apply { mutation, .. } => match mutation {
+                ExtensionGrantMutation::SetApi { name, .. } => {
+                    std::mem::size_of::<ExtensionGrantMutation>() + name.len() + 64
+                }
+                ExtensionGrantMutation::SetHost { pattern, .. } => pattern.retained_budget_bytes(),
+                ExtensionGrantMutation::SetFileAccess { .. }
+                | ExtensionGrantMutation::SetPrivateAccess { .. } => {
+                    std::mem::size_of::<ExtensionGrantMutation>()
+                }
+            },
+        };
+        let retained = std::mem::size_of::<Self>().saturating_add(payload);
+        debug_assert!(retained <= MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES);
+        retained
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExtensionGrantCohortLoadOutcome {
+    Loaded(ExtensionGrantCohort),
+    NotRegistered,
+    DegradedProfile,
+    /// The submitted manifest cohort does not exactly bind the current
+    /// install catalog. No durable write was attempted.
+    Invalid,
+    Failed,
+}
+
+/// Revisions observed while rejecting one grant CAS.
+///
+/// These values are diagnostic only: a caller must reload the exact atomic
+/// install-and-grant cohort before deriving another authority-bearing write.
+/// They are not a partial authority snapshot and must not be used for a blind
+/// retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtensionGrantConflict {
+    pub current_catalog: ExtensionInstallCatalogRevision,
+    pub current_install: Option<ExtensionInstallRevision>,
+    pub current_grant: Option<ExtensionGrantRevision>,
+}
+
+impl ExtensionGrantConflict {
+    pub const fn new(
+        current_catalog: ExtensionInstallCatalogRevision,
+        current_install: Option<ExtensionInstallRevision>,
+        current_grant: Option<ExtensionGrantRevision>,
+    ) -> Self {
+        Self {
+            current_catalog,
+            current_install,
+            current_grant,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExtensionGrantMutationApplied {
+    pub catalog_revision: ExtensionInstallCatalogRevision,
+    pub install: Box<ExtensionInstall>,
+    pub authority: Box<ExtensionGrantAuthority>,
+}
+
+impl ExtensionGrantMutationApplied {
+    pub const fn new(
+        catalog_revision: ExtensionInstallCatalogRevision,
+        install: Box<ExtensionInstall>,
+        authority: Box<ExtensionGrantAuthority>,
+    ) -> Self {
+        Self {
+            catalog_revision,
+            install,
+            authority,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExtensionGrantMutationOutcome {
+    Applied(ExtensionGrantMutationApplied),
+    Conflict(ExtensionGrantConflict),
+    NotRegistered,
+    DegradedProfile,
+    Uninitialized,
+    Invalid,
+    RevisionExhausted,
+    OutcomeUnknown,
+    Failed,
+}
+
 /// Result of the store's terminal process-boundary protocol.
 ///
 /// `RetryableFailure` proves the terminal command was not entered (normally
@@ -389,6 +503,32 @@ pub trait Store {
         _expected: ExtensionInstallCatalogRevision,
         _mutation: ExtensionInstallCatalogMutation,
         _done: Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Atomically loads the complete install catalog and explicit grant state
+    /// for every install against an exact bounded descriptor cohort.
+    fn load_extension_grant_cohort(
+        &self,
+        _profile: ProfileId,
+        _bindings: ExtensionGrantManifestBindings,
+        _done: Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Initializes or changes one grant authority only after comparing the
+    /// install catalog, exact install row, and target grant absence/revision
+    /// in the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    fn mutate_extension_grants(
+        &self,
+        _profile: ProfileId,
+        _expected_catalog: ExtensionInstallCatalogRevision,
+        _expected_install: ExtensionInstallRevision,
+        _install_id: ExtensionInstallId,
+        _manifest: Arc<ExtensionManifestDescriptor>,
+        _write: ExtensionGrantWrite,
+        _done: Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>,
     ) -> bool {
         false
     }
