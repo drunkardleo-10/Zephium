@@ -11,12 +11,14 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::ids::UserscriptId;
+use crate::ids::{ScriptId, UserscriptId};
 use crate::injection::{
     MatchOptions, MatchPattern, MatchPatternComponents, MatchPatternList, MatchSet, MatchSetError,
     MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES,
 };
-use crate::ports::engine::{RunAt, MAX_USER_SCRIPT_BYTES};
+use crate::ports::engine::{
+    RunAt, ScriptOwner, ScriptPrincipal, UserScript, World, MAX_USER_SCRIPT_BYTES,
+};
 
 use super::{
     assess_userscript_runtime_eligibility, parse_userscript_metadata, DeclaredRunAt, Userscript,
@@ -26,6 +28,15 @@ use super::{
 
 /// Fixed registration charge shared with the core engine admission policy.
 const PREPARED_RUNTIME_FIXED_RETAINED_BYTES: usize = 256;
+
+/// Owner-local registration slot for the unchanged userscript source.
+///
+/// The durable userscript id is the security principal. Keeping the native
+/// registration id fixed and owner-local makes source updates retain the same
+/// diff key while delete-and-reinstall obtains a distinct key through its new
+/// principal. Future implementation-owned wrappers must receive separate,
+/// explicitly assigned slots instead of deriving authority from a caller.
+const USERSCRIPT_SOURCE_REGISTRATION_ID: u128 = 1;
 
 /// Mathematical upper bound for one valid prepared userscript registration.
 ///
@@ -137,6 +148,29 @@ impl PreparedUserscriptRuntime {
 
     pub const fn accounting(&self) -> PreparedUserscriptAccounting {
         self.accounting
+    }
+
+    /// Consumes this revalidated descriptor and binds every engine-facing
+    /// authority field to its durable userscript identity.
+    ///
+    /// Callers cannot choose a different owner, isolated world, registration
+    /// id, match set, timing, or frame scope. This conversion is still only a
+    /// desired registration: native adapters may refuse it, and callers must
+    /// wait for the matching generation settlement before reporting it active.
+    pub fn into_engine_user_script(self) -> UserScript {
+        let principal = ScriptPrincipal::Userscript(self.id);
+        UserScript {
+            id: ScriptId::from(USERSCRIPT_SOURCE_REGISTRATION_ID),
+            owner: ScriptOwner::Principal(principal),
+            source: self.source,
+            world: World::Isolated(principal),
+            matches: self.matches,
+            run_at: match self.run_at {
+                PreparedUserscriptRunAt::DocumentStart => RunAt::DocumentStart,
+                PreparedUserscriptRunAt::DocumentEnd => RunAt::DocumentEnd,
+            },
+            all_frames: matches!(self.frame_scope, PreparedUserscriptFrameScope::AllFrames),
+        }
     }
 }
 
@@ -338,6 +372,7 @@ mod tests {
 
     use crate::ids::UserscriptId;
     use crate::injection::{MatchOptions, MatchSet};
+    use crate::ports::engine::UserContent;
     use crate::userscripts::{UserscriptRevision, MAX_USERSCRIPT_DIRECTIVES};
 
     use super::*;
@@ -587,6 +622,93 @@ mod tests {
             other_owner.source_digest()
         );
         assert_ne!(initial_prepared.id(), other_owner.id());
+    }
+
+    #[test]
+    fn engine_conversion_binds_owner_world_and_registration_to_one_identity() {
+        let candidate = Userscript::from_source(
+            UserscriptId::from(42),
+            UserscriptRevision::INITIAL,
+            true,
+            source(
+                "// @match https://example.com/*\n// @run-at document-start\n",
+                "window.bound = true;",
+            ),
+        )
+        .unwrap();
+        let prepared = prepare_userscript_runtime(&candidate).unwrap();
+        let expected_source = prepared.shared_source();
+        let expected_matches = prepared.matches().clone();
+        let engine = prepared.into_engine_user_script();
+        let principal = ScriptPrincipal::Userscript(candidate.id);
+
+        assert_eq!(engine.id, ScriptId::from(USERSCRIPT_SOURCE_REGISTRATION_ID));
+        assert_eq!(engine.owner, ScriptOwner::Principal(principal));
+        assert_eq!(engine.world, World::Isolated(principal));
+        assert_eq!(engine.source, expected_source);
+        assert_eq!(engine.matches, expected_matches);
+        assert_eq!(engine.run_at, RunAt::DocumentStart);
+        assert!(engine.all_frames);
+        assert!(UserContent {
+            scripts: vec![engine],
+            styles: Vec::new(),
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn updates_retain_engine_key_but_reinstall_mints_a_distinct_principal() {
+        let durable_id = UserscriptId::from(7);
+        let initial = Userscript::from_source(
+            durable_id,
+            UserscriptRevision::INITIAL,
+            true,
+            source("// @match https://example.com/*\n", "window.version = 1;"),
+        )
+        .unwrap();
+        let updated = Userscript::from_source(
+            durable_id,
+            initial.revision.next().unwrap(),
+            true,
+            source("// @match https://example.com/*\n", "window.version = 2;"),
+        )
+        .unwrap();
+        let reinstalled = Userscript::from_source(
+            UserscriptId::from(8),
+            UserscriptRevision::INITIAL,
+            true,
+            initial.source.clone(),
+        )
+        .unwrap();
+
+        let initial = prepare_userscript_runtime(&initial)
+            .unwrap()
+            .into_engine_user_script();
+        let updated = prepare_userscript_runtime(&updated)
+            .unwrap()
+            .into_engine_user_script();
+        let reinstalled = prepare_userscript_runtime(&reinstalled)
+            .unwrap()
+            .into_engine_user_script();
+
+        assert_eq!(initial.key(), updated.key());
+        assert_ne!(initial.source, updated.source);
+        assert_ne!(initial.key(), reinstalled.key());
+        assert_eq!(initial.id, reinstalled.id);
+    }
+
+    #[test]
+    fn engine_conversion_maps_top_frame_document_end_without_caller_input() {
+        let prepared = prepare_userscript_runtime(&script(
+            "// @match https://example.com/*\n// @noframes\n",
+            "void 0;",
+        ))
+        .unwrap();
+        let engine = prepared.into_engine_user_script();
+
+        assert_eq!(engine.run_at, RunAt::DocumentEnd);
+        assert!(!engine.all_frames);
     }
 
     #[test]
