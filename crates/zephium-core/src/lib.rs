@@ -11,6 +11,7 @@ pub mod items;
 pub mod layout;
 pub mod macos;
 pub mod navigation;
+pub mod permissions;
 pub mod ports;
 pub mod profiles;
 pub mod runtime_security;

@@ -645,6 +645,39 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 8,
+        up: |tx| {
+            tx.execute_batch(
+                // Absence is Ask. Remembered page permissions are an exact
+                // per-profile authority domain and intentionally share no
+                // table with extension API, host, temporary, or scheme grants.
+                "CREATE TABLE page_permission_catalog (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807)
+                 ) STRICT;
+                 INSERT INTO page_permission_catalog(id, revision) VALUES (1, 1);
+                 CREATE TABLE page_permission_grants (
+                     id TEXT PRIMARY KEY
+                         CHECK (length(CAST(id AS BLOB)) = 26),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     origin TEXT NOT NULL
+                         CHECK (length(CAST(origin AS BLOB)) BETWEEN 1 AND 512
+                                AND instr(CAST(origin AS BLOB), X'00') = 0),
+                     kind TEXT NOT NULL
+                         CHECK (kind IN (
+                             'geolocation', 'camera', 'microphone',
+                             'notifications', 'clipboard_read'
+                         )),
+                     decision TEXT NOT NULL
+                         CHECK (decision IN ('allow', 'deny')),
+                     UNIQUE(origin, kind)
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -848,7 +881,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &PROFILE[..6]).unwrap();
 
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..7]).unwrap();
 
         let state: (i64, i64) = conn
             .query_row("SELECT id, revision FROM userscript_catalog", [], |row| {
@@ -937,6 +970,91 @@ mod tests {
                 )
                 .is_err());
         }
+    }
+
+    #[test]
+    fn profile_v8_adds_an_exact_empty_page_permission_catalog() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..7]).unwrap();
+
+        apply(&mut conn, PROFILE).unwrap();
+
+        let state: (i64, i64) = conn
+            .query_row(
+                "SELECT id, revision FROM page_permission_catalog",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (1, 1));
+        let grants: i64 = conn
+            .query_row("SELECT count(*) FROM page_permission_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(grants, 0);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+    }
+
+    #[test]
+    fn profile_v8_schema_rejects_unbounded_or_malformed_permission_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        for (id, revision, origin, kind, decision) in [
+            ("short", 1_i64, "https://example.com", "camera", "allow"),
+            (
+                "01J00000000000000000000000",
+                0,
+                "https://example.com",
+                "camera",
+                "allow",
+            ),
+            ("01J00000000000000000000001", 1, "", "camera", "allow"),
+            (
+                "01J00000000000000000000002",
+                1,
+                "https://example.com",
+                "unknown",
+                "allow",
+            ),
+            (
+                "01J00000000000000000000003",
+                1,
+                "https://example.com",
+                "camera",
+                "ask",
+            ),
+        ] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO page_permission_grants(
+                         id, revision, origin, kind, decision
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![id, revision, origin, kind, decision],
+                )
+                .is_err(),
+                "accepted invalid page-permission row {id}"
+            );
+        }
+        for origin in ["x".repeat(513), "https://example.com\0suffix".into()] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO page_permission_grants(
+                         id, revision, origin, kind, decision
+                     ) VALUES ('01J00000000000000000000004', 1, ?1, 'camera', 'allow')",
+                    [origin],
+                )
+                .is_err());
+        }
+        assert!(conn
+            .execute(
+                "UPDATE page_permission_catalog SET revision = 0 WHERE id = 1",
+                [],
+            )
+            .is_err());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRu
 use crate::geometry::Rect;
 use crate::ids::{ItemId, ProfileId, ScriptId, ScriptPrincipalId, WindowId};
 use crate::injection::MatchSet;
+pub use crate::permissions::PagePermissionKind as PermissionKind;
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
@@ -676,15 +677,6 @@ pub enum ContentRuleSettlement {
     Unavailable {
         failure: ContentRuleApplyFailure,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PermissionKind {
-    Geolocation,
-    Camera,
-    Microphone,
-    Notifications,
-    ClipboardRead,
 }
 
 #[derive(Clone, Debug, PartialEq)]

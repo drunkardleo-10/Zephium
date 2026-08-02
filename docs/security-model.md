@@ -175,9 +175,11 @@ Zephium replaces Wry's permissive privileged UIDelegate with a retained deny-onl
 delegate for media capture, device orientation/motion, and file selection; optional
 dialog and popup methods are deliberately omitted so WebKit takes its cancel/no-dialog
 defaults. All privileged responses also deny ambient features through
-`Permissions-Policy` where the engine supports each directive. There is no permission
-prompt or persisted grant store. All downloads are disabled, so Zephium does not
-currently claim destination validation, dangerous-file handling, Windows
+`Permissions-Policy` where the engine supports each directive. A bounded per-profile
+store for remembered HTTP(S) origin decisions exists, but no permission prompt or
+native request broker consumes it; every live request therefore remains denied. All
+downloads are disabled, so Zephium does not currently claim destination validation,
+dangerous-file handling, Windows
 Mark-of-the-Web, or macOS quarantine. Linux also cancels privileged file-picker
 requests. Stable WebView2 exposes no supported file-chooser interception event, so a
 raw Windows file input remains an engine-owned, user-selected native upload surface and
@@ -885,7 +887,8 @@ These inherited properties must not be overstated:
 
 The following are roadmap items or disabled backends, not current security guarantees:
 
-- a user-facing permission broker or remembered per-origin grants;
+- a user-facing permission broker or native enforcement of remembered per-origin
+  grants;
 - downloads, safe filenames, destination mediation, quarantine/MOTW, or download
   scanning;
 - extension installation, extension API mediation, or Chrome/Firefox extension

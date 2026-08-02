@@ -1,8 +1,12 @@
 use super::*;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
-use zephium_core::ids::{ItemId, SpaceId, UserscriptId};
+use zephium_core::ids::{ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
 use zephium_core::item::{Placement, SpaceSection};
+use zephium_core::permissions::{
+    PageOrigin, PagePermissionCatalogRevision, PagePermissionChange, PagePermissionGrantRevision,
+    PagePermissionKind, PagePermissionPatch, RememberedPagePermission,
+};
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
 use zephium_core::split::{Axis, Pane};
@@ -38,6 +42,9 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         pending_visits: Arc::new(Mutex::new(PendingVisits::new())),
         pending_settings: Arc::new(Mutex::new(PendingSettings::default())),
         userscript_mutation_admission: Arc::new(Mutex::new(UserscriptMutationAdmission::default())),
+        page_permission_mutation_admission: Arc::new(Mutex::new(
+            PagePermissionMutationAdmission::default(),
+        )),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
             exited,
@@ -204,6 +211,46 @@ fn mutate_userscripts(
         profile,
         expected,
         mutation,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn page_origin(value: &str) -> PageOrigin {
+    PageOrigin::parse_exact(value).unwrap()
+}
+
+fn page_patch(changes: Vec<PagePermissionChange>) -> PagePermissionPatch {
+    PagePermissionPatch::new(changes).unwrap()
+}
+
+fn load_page_permissions(
+    store: &impl Store,
+    profile: ProfileId,
+) -> PagePermissionCatalogLoadOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.load_page_permission_catalog(
+        profile,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn mutate_page_permissions(
+    store: &impl Store,
+    profile: ProfileId,
+    expected: PagePermissionCatalogRevision,
+    patch: PagePermissionPatch,
+) -> PagePermissionCatalogMutationOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.mutate_page_permission_catalog(
+        profile,
+        expected,
+        patch,
         Box::new(move |result| {
             let _ = reply.send(result);
         }),
@@ -457,6 +504,348 @@ fn oversized_userscript_source_is_refused_without_callback_transfer() {
         outcome.recv_timeout(Duration::from_millis(20)),
         Err(mpsc::RecvTimeoutError::Disconnected)
     ));
+}
+
+#[test]
+fn page_permission_catalog_is_atomic_revision_checked_noop_stable_and_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let camera_id = PagePermissionGrantId::from(41);
+    let microphone_id = PagePermissionGrantId::from(42);
+    let origin = page_origin("https://permissions.example");
+    let final_revision;
+
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let PagePermissionCatalogLoadOutcome::Loaded(initial) =
+            load_page_permissions(&store, profile)
+        else {
+            panic!("new profile did not expose an exact empty permission catalog");
+        };
+        assert_eq!(initial.revision(), PagePermissionCatalogRevision::INITIAL);
+        assert!(initial.grants().is_empty());
+
+        let created = mutate_page_permissions(
+            &store,
+            profile,
+            initial.revision(),
+            page_patch(vec![
+                PagePermissionChange::Create {
+                    id: camera_id,
+                    origin: origin.clone(),
+                    kind: PagePermissionKind::Camera,
+                    decision: RememberedPagePermission::Allow,
+                },
+                PagePermissionChange::Create {
+                    id: microphone_id,
+                    origin: origin.clone(),
+                    kind: PagePermissionKind::Microphone,
+                    decision: RememberedPagePermission::Allow,
+                },
+            ]),
+        );
+        let PagePermissionCatalogMutationOutcome::Applied(created) = created else {
+            panic!("atomic camera/microphone create was not applied");
+        };
+        assert_eq!(created.catalog_revision.get(), 2);
+        assert_eq!(created.results.as_slice().len(), 2);
+        assert!(created.results.as_slice().iter().all(|result| {
+            result
+                .grant
+                .as_ref()
+                .is_some_and(|grant| grant.revision == PagePermissionGrantRevision::INITIAL)
+        }));
+
+        assert_eq!(
+            mutate_page_permissions(
+                &store,
+                profile,
+                PagePermissionCatalogRevision::INITIAL,
+                page_patch(vec![PagePermissionChange::Delete {
+                    id: camera_id,
+                    expected: PagePermissionGrantRevision::INITIAL,
+                }]),
+            ),
+            PagePermissionCatalogMutationOutcome::Conflict {
+                current: created.catalog_revision,
+            }
+        );
+
+        let no_op = mutate_page_permissions(
+            &store,
+            profile,
+            created.catalog_revision,
+            page_patch(vec![PagePermissionChange::Update {
+                id: camera_id,
+                expected: PagePermissionGrantRevision::INITIAL,
+                decision: RememberedPagePermission::Allow,
+            }]),
+        );
+        let PagePermissionCatalogMutationOutcome::Applied(no_op) = no_op else {
+            panic!("idempotent remembered decision was not acknowledged");
+        };
+        assert_eq!(no_op.catalog_revision, created.catalog_revision);
+        assert_eq!(
+            no_op.results.as_slice()[0].grant.as_ref().unwrap().revision,
+            PagePermissionGrantRevision::INITIAL
+        );
+
+        let updated = mutate_page_permissions(
+            &store,
+            profile,
+            created.catalog_revision,
+            page_patch(vec![
+                PagePermissionChange::Update {
+                    id: camera_id,
+                    expected: PagePermissionGrantRevision::INITIAL,
+                    decision: RememberedPagePermission::Deny,
+                },
+                PagePermissionChange::Update {
+                    id: microphone_id,
+                    expected: PagePermissionGrantRevision::INITIAL,
+                    decision: RememberedPagePermission::Deny,
+                },
+            ]),
+        );
+        let PagePermissionCatalogMutationOutcome::Applied(updated) = updated else {
+            panic!("atomic camera/microphone update was not applied");
+        };
+        assert_eq!(updated.catalog_revision.get(), 3);
+        assert!(updated.results.as_slice().iter().all(|result| {
+            result.grant.as_ref().is_some_and(|grant| {
+                grant.revision.get() == 2 && grant.decision == RememberedPagePermission::Deny
+            })
+        }));
+        final_revision = updated.catalog_revision;
+        assert_eq!(
+            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let PagePermissionCatalogLoadOutcome::Loaded(reopened) = load_page_permissions(&store, profile)
+    else {
+        panic!("durable page-permission catalog could not be reopened");
+    };
+    assert_eq!(reopened.revision(), final_revision);
+    assert_eq!(reopened.grants().len(), 2);
+    assert!(reopened.grants().iter().all(|grant| {
+        grant.revision.get() == 2 && grant.decision == RememberedPagePermission::Deny
+    }));
+}
+
+#[test]
+fn page_permission_authority_replacement_is_patch_order_independent() {
+    for create_first in [true, false] {
+        let store = SqliteStore::in_memory().unwrap();
+        let profile = ProfileId::from(1);
+        let old_id = PagePermissionGrantId::from(51);
+        let new_id = PagePermissionGrantId::from(52);
+        let origin = page_origin("https://replace.example");
+        store.save_session(sample());
+        assert!(store.flush());
+
+        let created = mutate_page_permissions(
+            &store,
+            profile,
+            PagePermissionCatalogRevision::INITIAL,
+            page_patch(vec![PagePermissionChange::Create {
+                id: old_id,
+                origin: origin.clone(),
+                kind: PagePermissionKind::Notifications,
+                decision: RememberedPagePermission::Allow,
+            }]),
+        );
+        let PagePermissionCatalogMutationOutcome::Applied(created) = created else {
+            panic!("replacement fixture was not created");
+        };
+        let create = PagePermissionChange::Create {
+            id: new_id,
+            origin: origin.clone(),
+            kind: PagePermissionKind::Notifications,
+            decision: RememberedPagePermission::Deny,
+        };
+        let delete = PagePermissionChange::Delete {
+            id: old_id,
+            expected: PagePermissionGrantRevision::INITIAL,
+        };
+        let changes = if create_first {
+            vec![create, delete]
+        } else {
+            vec![delete, create]
+        };
+        let replaced = mutate_page_permissions(
+            &store,
+            profile,
+            created.catalog_revision,
+            page_patch(changes),
+        );
+        let PagePermissionCatalogMutationOutcome::Applied(replaced) = replaced else {
+            panic!("authority replacement failed for create_first={create_first}");
+        };
+        let expected_result_ids = if create_first {
+            vec![new_id, old_id]
+        } else {
+            vec![old_id, new_id]
+        };
+        assert_eq!(
+            replaced
+                .results
+                .as_slice()
+                .iter()
+                .map(|result| result.id)
+                .collect::<Vec<_>>(),
+            expected_result_ids,
+            "response order drifted from patch order"
+        );
+        let PagePermissionCatalogLoadOutcome::Loaded(catalog) =
+            load_page_permissions(&store, profile)
+        else {
+            panic!("replaced authority could not be loaded");
+        };
+        assert_eq!(catalog.grants().len(), 1);
+        assert_eq!(catalog.grants()[0].id, new_id);
+        assert_eq!(catalog.grants()[0].origin, origin);
+        assert_eq!(catalog.grants()[0].decision, RememberedPagePermission::Deny);
+    }
+}
+
+#[test]
+fn page_permission_commit_ambiguity_requires_exact_load_reconciliation() {
+    let profile = ProfileId::from(1);
+    let id = PagePermissionGrantId::from(61);
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    hub.make_next_page_permission_commit_ambiguous();
+    let store = SqliteStore::spawn(hub).unwrap();
+
+    assert_eq!(
+        mutate_page_permissions(
+            &store,
+            profile,
+            PagePermissionCatalogRevision::INITIAL,
+            page_patch(vec![PagePermissionChange::Create {
+                id,
+                origin: page_origin("https://ambiguous.example"),
+                kind: PagePermissionKind::Geolocation,
+                decision: RememberedPagePermission::Deny,
+            }]),
+        ),
+        PagePermissionCatalogMutationOutcome::OutcomeUnknown
+    );
+    let PagePermissionCatalogLoadOutcome::Loaded(reconciled) =
+        load_page_permissions(&store, profile)
+    else {
+        panic!("ambiguous commit could not be reconciled");
+    };
+    assert_eq!(reconciled.revision().get(), 2);
+    assert_eq!(reconciled.grants().len(), 1);
+    assert_eq!(reconciled.grants()[0].id, id);
+}
+
+#[test]
+fn page_permission_store_admission_is_independently_bounded_and_exact() {
+    let (tx, rx) = mpsc::sync_channel(MAX_PENDING_PAGE_PERMISSION_MUTATIONS + 1);
+    let store = test_store_with_sender(tx);
+    let profile = ProfileId::from(1);
+
+    for id in 1..=MAX_PENDING_PAGE_PERMISSION_MUTATIONS {
+        assert!(store.mutate_page_permission_catalog(
+            profile,
+            PagePermissionCatalogRevision::INITIAL,
+            page_patch(vec![PagePermissionChange::Delete {
+                id: PagePermissionGrantId::from(id as u128),
+                expected: PagePermissionGrantRevision::INITIAL,
+            }]),
+            Box::new(|_| {}),
+        ));
+    }
+    assert!(!store.mutate_page_permission_catalog(
+        profile,
+        PagePermissionCatalogRevision::INITIAL,
+        page_patch(vec![PagePermissionChange::Delete {
+            id: PagePermissionGrantId::from(99),
+            expected: PagePermissionGrantRevision::INITIAL,
+        }]),
+        Box::new(|_| {}),
+    ));
+
+    drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
+    assert!(store.mutate_page_permission_catalog(
+        profile,
+        PagePermissionCatalogRevision::INITIAL,
+        page_patch(vec![PagePermissionChange::Delete {
+            id: PagePermissionGrantId::from(100),
+            expected: PagePermissionGrantRevision::INITIAL,
+        }]),
+        Box::new(|_| {}),
+    ));
+    drop(rx);
+    assert_eq!(
+        store
+            .page_permission_mutation_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .count,
+        0
+    );
+}
+
+#[test]
+fn page_permission_unknown_ephemeral_terminal_and_full_queue_paths_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    store.save_session(sample());
+    assert!(store.flush());
+    let ephemeral = ProfileId::from(700);
+    assert_eq!(
+        load_page_permissions(&store, ephemeral),
+        PagePermissionCatalogLoadOutcome::NotRegistered
+    );
+    assert_eq!(
+        mutate_page_permissions(
+            &store,
+            ephemeral,
+            PagePermissionCatalogRevision::INITIAL,
+            page_patch(vec![PagePermissionChange::Create {
+                id: PagePermissionGrantId::from(701),
+                origin: page_origin("https://private.example"),
+                kind: PagePermissionKind::ClipboardRead,
+                decision: RememberedPagePermission::Allow,
+            }]),
+        ),
+        PagePermissionCatalogMutationOutcome::NotRegistered
+    );
+    assert!(!dir
+        .path()
+        .join(format!("profile-{ephemeral}.sqlite"))
+        .exists());
+
+    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_completions = completions.clone();
+    assert!(!store.load_page_permission_catalog(
+        ProfileId::from(1),
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
+    store.lifecycle.lock().unwrap().terminal_admitted = false;
+
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let full = std::mem::ManuallyDrop::new(test_store_with_sender(tx));
+    let callback_completions = completions.clone();
+    assert!(!full.load_page_permission_catalog(
+        ProfileId::from(1),
+        Box::new(move |_| {
+            callback_completions.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(completions.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -1674,6 +2063,24 @@ fn semantic_session_corruption_is_quarantined_exactly_and_store_becomes_read_onl
         panic!("semantic corruption did not enter explicit recovery mode")
     };
     assert!(reason.contains("canonical"), "{reason}");
+    assert_eq!(
+        load_page_permissions(&store, ProfileId::from(1)),
+        PagePermissionCatalogLoadOutcome::Failed
+    );
+    assert_eq!(
+        mutate_page_permissions(
+            &store,
+            ProfileId::from(1),
+            PagePermissionCatalogRevision::INITIAL,
+            page_patch(vec![PagePermissionChange::Create {
+                id: PagePermissionGrantId::from(811),
+                origin: page_origin("https://recovery-must-not-write.example"),
+                kind: PagePermissionKind::Camera,
+                decision: RememberedPagePermission::Allow,
+            }]),
+        ),
+        PagePermissionCatalogMutationOutcome::Failed
+    );
     assert!(store.set_app_setting("must-not-write".into(), "value".into()));
     store.save_session(sample());
     assert!(!store.flush());
@@ -1739,6 +2146,24 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
             profiles: vec![degraded],
             blocker_configs: default_blocker_configs(&state),
         }
+    );
+    assert_eq!(
+        load_page_permissions(&store, degraded),
+        PagePermissionCatalogLoadOutcome::DegradedProfile
+    );
+    assert_eq!(
+        mutate_page_permissions(
+            &store,
+            degraded,
+            PagePermissionCatalogRevision::INITIAL,
+            page_patch(vec![PagePermissionChange::Create {
+                id: PagePermissionGrantId::from(812),
+                origin: page_origin("https://degraded-must-not-write.example"),
+                kind: PagePermissionKind::Microphone,
+                decision: RememberedPagePermission::Deny,
+            }]),
+        ),
+        PagePermissionCatalogMutationOutcome::DegradedProfile
     );
 
     // Degraded operations are terminal no-ops: they neither reopen the

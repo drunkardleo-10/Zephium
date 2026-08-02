@@ -1,5 +1,9 @@
 use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use crate::ids::ProfileId;
+use crate::permissions::{
+    PagePermissionCatalog, PagePermissionCatalogRevision, PagePermissionPatch,
+    PagePermissionPatchResults,
+};
 use crate::session::SessionState;
 use crate::userscripts::{
     Userscript, UserscriptCatalog, UserscriptCatalogMutation, UserscriptCatalogRevision,
@@ -169,6 +173,46 @@ pub enum UserscriptCatalogMutationOutcome {
     Failed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PagePermissionCatalogLoadOutcome {
+    Loaded(PagePermissionCatalog),
+    NotRegistered,
+    /// The exact per-profile database was preserved but could not be safely
+    /// opened at the shipped schema. No subset of its grants is returned.
+    DegradedProfile,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagePermissionCatalogMutationApplied {
+    pub catalog_revision: PagePermissionCatalogRevision,
+    /// One bounded result for every change in the submitted patch, in patch
+    /// order. Create/update carries the exact durable row; delete carries
+    /// `None`.
+    pub results: PagePermissionPatchResults,
+}
+
+/// Durable result of one atomic profile page-permission patch.
+///
+/// `OutcomeUnknown` means SQLite settlement could not be observed after the
+/// transaction entered commit; callers must exact-load before attempting a
+/// new mutation. `Invalid` and `LimitReached` prove no durable write or commit
+/// was attempted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PagePermissionCatalogMutationOutcome {
+    Applied(PagePermissionCatalogMutationApplied),
+    Conflict {
+        current: PagePermissionCatalogRevision,
+    },
+    NotRegistered,
+    DegradedProfile,
+    Invalid,
+    LimitReached,
+    RevisionExhausted,
+    OutcomeUnknown,
+    Failed,
+}
+
 /// Result of the store's terminal process-boundary protocol.
 ///
 /// `RetryableFailure` proves the terminal command was not entered (normally
@@ -253,6 +297,28 @@ pub trait Store {
         _expected: UserscriptCatalogRevision,
         _mutation: UserscriptCatalogMutation,
         _done: Box<dyn FnOnce(UserscriptCatalogMutationOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Loads one complete bounded page-permission authority catalog. `true`
+    /// transfers exactly-once callback ownership; `false` proves the request
+    /// was not admitted. Malformed durable state fails as a whole.
+    fn load_page_permission_catalog(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(PagePermissionCatalogLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Atomically applies at most four page-permission changes after comparing
+    /// the collection revision. The patch is already structurally bounded by
+    /// its core constructor before it can enter an adapter mailbox.
+    fn mutate_page_permission_catalog(
+        &self,
+        _profile: ProfileId,
+        _expected: PagePermissionCatalogRevision,
+        _patch: PagePermissionPatch,
+        _done: Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>,
     ) -> bool {
         false
     }

@@ -10,6 +10,7 @@ mod deletion;
 mod favicons;
 mod filesystem;
 mod history;
+mod page_permissions;
 mod session;
 mod settings;
 mod userscripts;
@@ -74,6 +75,8 @@ pub struct Hub {
     ambiguous_profile_deletion_commit_once: bool,
     #[cfg(test)]
     fail_profile_deletion_after_local_purge_once: bool,
+    #[cfg(test)]
+    ambiguous_page_permission_commit_once: bool,
 }
 
 pub(crate) struct AuthoritativeLoad {
@@ -124,6 +127,8 @@ impl Hub {
             ambiguous_profile_deletion_commit_once: false,
             #[cfg(test)]
             fail_profile_deletion_after_local_purge_once: false,
+            #[cfg(test)]
+            ambiguous_page_permission_commit_once: false,
         };
         hub.load_registry()?;
         // The snapshot and registry must agree before profile files are
@@ -217,6 +222,8 @@ impl Hub {
             ambiguous_profile_deletion_commit_once: false,
             #[cfg(test)]
             fail_profile_deletion_after_local_purge_once: false,
+            #[cfg(test)]
+            ambiguous_page_permission_commit_once: false,
         })
     }
 
