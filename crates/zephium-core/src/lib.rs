@@ -5,6 +5,7 @@ pub mod commands;
 pub mod geometry;
 pub mod icon;
 pub mod ids;
+pub mod injection;
 pub mod item;
 pub mod items;
 pub mod layout;
