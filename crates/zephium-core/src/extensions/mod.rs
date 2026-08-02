@@ -1,4 +1,4 @@
-//! Pure, bounded extension package, manifest-policy, and installation
+//! Pure, bounded extension package, manifest-policy, installation, and grant
 //! contracts.
 //!
 //! This module deliberately contains no manifest/archive parser, filesystem
@@ -7,10 +7,18 @@
 //! were authenticated or remain available. A package-authority adapter must
 //! establish that proof and bind backend-native identifiers before activation.
 
+mod grants;
 mod identity;
 mod install;
 mod manifest;
 
+pub use grants::{
+    ExtensionApiGrantDecision, ExtensionGrantApplication, ExtensionGrantApplyError,
+    ExtensionGrantAuthority, ExtensionGrantAuthorityError, ExtensionGrantBrowsingContext,
+    ExtensionGrantDenial, ExtensionGrantDigest, ExtensionGrantMutation,
+    ExtensionGrantPersistenceProjection, ExtensionGrantRevision, ExtensionUrlScopeDecision,
+    MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_HOST_GRANTS,
+};
 pub use identity::{
     ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionManifestDigest,
     ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision, ExtensionTreeDigest,
