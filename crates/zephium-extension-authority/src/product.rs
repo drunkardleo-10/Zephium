@@ -271,7 +271,7 @@ mod tests {
     fn package_json(key: u8, payload: &str) -> String {
         format!(
             concat!(
-                r#"{{"package_key":"{}","revision":1,"payload":{},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_file_count":1,"tree_bytes":4,"chromium":null,"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Example contributors","redistribution":"Reviewed bundled release","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}"#
+                r#"{{"package_key":"{}","revision":1,"payload":{},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_index_length":1,"tree_file_count":1,"tree_bytes":4,"chromium":null,"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Example contributors","redistribution":"Reviewed bundled release","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}"#
             ),
             hex(key),
             payload,
@@ -587,9 +587,26 @@ mod tests {
         assert_eq!(
             digest_catalog_inventory(&catalog).unwrap().bytes(),
             [
-                151, 140, 108, 241, 9, 163, 44, 218, 18, 59, 84, 175, 161, 154, 205, 176, 92, 123,
-                173, 8, 156, 66, 140, 159, 177, 224, 188, 5, 38, 75, 238, 12,
+                67, 122, 176, 172, 80, 12, 108, 188, 222, 236, 67, 183, 197, 182, 21, 209, 184, 96,
+                96, 204, 102, 239, 228, 66, 35, 50, 243, 80, 36, 123, 220, 173,
             ]
+        );
+    }
+
+    #[test]
+    fn inventory_digest_redundantly_binds_tree_index_length() {
+        let first = catalog_bytes();
+        let second = String::from_utf8(first.clone())
+            .unwrap()
+            .replace(r#""tree_index_length":1"#, r#""tree_index_length":2"#)
+            .into_bytes();
+        let first = ExtensionReleaseCatalog::parse_canonical(&first).unwrap();
+        let second = ExtensionReleaseCatalog::parse_canonical(&second).unwrap();
+
+        assert_ne!(
+            digest_catalog_inventory(&first),
+            digest_catalog_inventory(&second),
+            "sealed inventory framing must bind tree-index byte length"
         );
     }
 
@@ -624,8 +641,8 @@ mod tests {
         assert_eq!(
             digest_catalog_inventory(&catalog).unwrap().bytes(),
             [
-                104, 37, 211, 145, 129, 149, 144, 165, 0, 41, 202, 15, 147, 100, 176, 103, 75, 93,
-                75, 75, 162, 83, 75, 248, 75, 106, 58, 82, 151, 88, 251, 163,
+                30, 44, 28, 186, 57, 81, 90, 235, 123, 146, 89, 78, 170, 146, 219, 35, 127, 29, 39,
+                162, 172, 202, 81, 107, 72, 119, 142, 196, 184, 15, 30, 142,
             ]
         );
     }

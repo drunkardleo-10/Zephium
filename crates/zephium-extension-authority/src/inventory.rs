@@ -6,7 +6,7 @@ use zephium_extension_package::{ExtensionReleaseCatalog, ExtensionReleaseLegalAr
 
 use crate::BundledCatalogInventoryDigest;
 
-const INVENTORY_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v1\0";
+const INVENTORY_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v2\0";
 
 pub(crate) fn digest_catalog_inventory(
     catalog: &ExtensionReleaseCatalog,
@@ -31,6 +31,7 @@ pub(crate) fn digest_catalog_inventory(
         digest.update(identity.manifest_sha256().as_bytes());
         digest.update(identity.tree_sha256().as_bytes());
         digest.update(package.tree_index_sha256().as_bytes());
+        update_u64(&mut digest, package.tree_index_length());
         update_usize(&mut digest, package.tree_file_count())?;
         update_u64(&mut digest, package.tree_bytes());
 

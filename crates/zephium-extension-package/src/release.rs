@@ -20,7 +20,7 @@ use crate::{
     PortableRelativePath, MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_LEGAL_NOTICE_BYTES,
     MAX_EXTENSION_LICENSE_RULES, MAX_EXTENSION_PACKAGE_LINES,
     MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES, MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES,
-    MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_FILES,
+    MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
 const RELEASE_CATALOG_SCHEMA_VERSION: u32 = 1;
@@ -436,6 +436,7 @@ pub enum ExtensionReleaseLegalArtifactKind {
 pub struct ExtensionReleasePackage {
     identity: ExtensionPackageIdentity,
     tree_index_sha256: ExtensionTreeIndexDigest,
+    tree_index_length: u64,
     tree_file_count: usize,
     tree_bytes: u64,
     chromium: Option<ExpectedChromiumIdentity>,
@@ -456,6 +457,11 @@ impl ExtensionReleasePackage {
     /// Returns SHA-256 of exact canonical tree-index bytes.
     pub const fn tree_index_sha256(&self) -> ExtensionTreeIndexDigest {
         self.tree_index_sha256
+    }
+
+    /// Returns the signed exact canonical tree-index byte length.
+    pub const fn tree_index_length(&self) -> u64 {
+        self.tree_index_length
     }
 
     /// Returns the signed exact tree file count.
@@ -484,6 +490,7 @@ impl ExtensionReleasePackage {
         index: &'a CanonicalExtensionTreeIndex,
     ) -> Result<ExtensionReleaseTreeBinding<'a>, ExtensionReleaseCatalogError> {
         if self.tree_index_sha256 != index.index_sha256()
+            || self.tree_index_length != index.index_bytes()
             || self.identity.tree_sha256() != index.tree_sha256()
             || self.tree_file_count != index.files().len()
             || self.tree_bytes != index.total_bytes()
@@ -612,6 +619,15 @@ impl ExtensionReleaseCatalog {
                 decode_lower_hex_32(&raw_package.tree_index_sha256)
                     .map_err(|_| ExtensionReleaseCatalogError::Digest)?,
             );
+            let maximum_tree_index_bytes = MAX_EXTENSION_TREE_INDEX_BYTES as u64;
+            if raw_package.tree_index_length == 0
+                || raw_package.tree_index_length > maximum_tree_index_bytes
+            {
+                return Err(ExtensionReleaseCatalogError::TreeIndexSize {
+                    bytes: raw_package.tree_index_length,
+                    max: maximum_tree_index_bytes,
+                });
+            }
             let tree_file_count = usize::try_from(raw_package.tree_file_count).map_err(|_| {
                 ExtensionReleaseCatalogError::TreeFileCount {
                     count: raw_package.tree_file_count,
@@ -695,6 +711,7 @@ impl ExtensionReleaseCatalog {
                     tree_sha256,
                 ),
                 tree_index_sha256,
+                tree_index_length: raw_package.tree_index_length,
                 tree_file_count,
                 tree_bytes: raw_package.tree_bytes,
                 chromium,
@@ -959,6 +976,7 @@ struct RawReleasePackage {
     manifest_sha256: String,
     tree_sha256: String,
     tree_index_sha256: String,
+    tree_index_length: u64,
     tree_file_count: u32,
     tree_bytes: u64,
     chromium: Option<RawChromiumIdentity>,
@@ -1044,6 +1062,13 @@ pub enum ExtensionReleaseCatalogError {
     InvalidPackageRevision,
     /// Acquired archive bytes are zero or exceed their ceiling.
     ArchiveSize {
+        /// Observed bytes.
+        bytes: u64,
+        /// Maximum bytes.
+        max: u64,
+    },
+    /// Signed canonical tree-index bytes are zero or exceed their ceiling.
+    TreeIndexSize {
         /// Observed bytes.
         bytes: u64,
         /// Maximum bytes.
@@ -1144,6 +1169,10 @@ impl fmt::Display for ExtensionReleaseCatalogError {
             Self::ArchiveSize { bytes, max } => write!(
                 formatter,
                 "extension release archive uses {bytes} bytes; maximum is {max}"
+            ),
+            Self::TreeIndexSize { bytes, max } => write!(
+                formatter,
+                "extension release tree index uses {bytes} bytes; maximum is {max}"
             ),
             Self::TreeFileCount { count, max } => write!(
                 formatter,
@@ -1258,6 +1287,7 @@ mod tests {
                 manifest_sha256: hex(tree.manifest_sha256().bytes()),
                 tree_sha256: hex(tree.tree_sha256().bytes()),
                 tree_index_sha256: hex(tree.index_sha256().bytes()),
+                tree_index_length: tree.index_bytes(),
                 tree_file_count: tree.files().len() as u32,
                 tree_bytes: tree.total_bytes(),
                 chromium: Some(RawChromiumIdentity {
@@ -1312,6 +1342,7 @@ mod tests {
             package.payload(),
             ExtensionPackagePayloadIdentity::BundledTree
         );
+        assert_eq!(package.tree_index_length(), tree.index_bytes());
         let binding = package.bind_tree_index(&tree).unwrap();
         assert_eq!(binding.package().identity(), package.identity());
         assert_eq!(binding.index(), &tree);
@@ -1323,7 +1354,7 @@ mod tests {
         const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
         let golden = format!(
             concat!(
-                r#"{{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"{0}","admission_policy_sha256":"{0}","packages":[{{"package_key":"{0}","revision":1,"payload":{{"kind":"bundled_tree"}},"manifest_sha256":"{0}","tree_sha256":"{0}","tree_index_sha256":"{0}","tree_file_count":1,"tree_bytes":1,"chromium":null,"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Example","redistribution":"Reviewed","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{0}"}},"corresponding_source":null}}}}]}}"#,
+                r#"{{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"{0}","admission_policy_sha256":"{0}","packages":[{{"package_key":"{0}","revision":1,"payload":{{"kind":"bundled_tree"}},"manifest_sha256":"{0}","tree_sha256":"{0}","tree_index_sha256":"{0}","tree_index_length":1,"tree_file_count":1,"tree_bytes":1,"chromium":null,"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Example","redistribution":"Reviewed","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{0}"}},"corresponding_source":null}}}}]}}"#,
             ),
             ZERO,
         );
@@ -1471,6 +1502,30 @@ mod tests {
             ExtensionReleaseCatalog::parse_canonical(&bytes),
             Err(ExtensionReleaseCatalogError::Malformed)
         );
+
+        let mut value = serde_json::to_value(raw_catalog(&tree)).unwrap();
+        value["packages"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("tree_index_bytes".to_owned(), serde_json::Value::from(1));
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&bytes),
+            Err(ExtensionReleaseCatalogError::Malformed),
+            "release-package rows must deny unknown tree-index fields"
+        );
+
+        let mut value = serde_json::to_value(raw_catalog(&tree)).unwrap();
+        value["packages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tree_index_length");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&bytes),
+            Err(ExtensionReleaseCatalogError::Malformed),
+            "tree_index_length is required in every release-package row"
+        );
     }
 
     #[test]
@@ -1488,14 +1543,23 @@ mod tests {
     #[test]
     fn binding_checks_index_tree_metrics_and_manifest_independently() {
         let tree = canonical_tree();
-        let mut raw = raw_catalog(&tree);
-        raw.packages[0].tree_bytes += 1;
-        let bytes = serde_json::to_vec(&raw).unwrap();
-        let catalog = ExtensionReleaseCatalog::parse_canonical(&bytes).unwrap();
-        assert_eq!(
-            catalog.packages()[0].bind_tree_index(&tree).unwrap_err(),
-            ExtensionReleaseCatalogError::TreeIndexMismatch
-        );
+        let index_mutations: [fn(&mut RawReleasePackage); 5] = [
+            |package| package.tree_index_sha256 = hex([98; 32]),
+            |package| package.tree_index_length += 1,
+            |package| package.tree_sha256 = hex([98; 32]),
+            |package| package.tree_file_count += 1,
+            |package| package.tree_bytes += 1,
+        ];
+        for mutate in index_mutations {
+            let mut raw = raw_catalog(&tree);
+            mutate(&mut raw.packages[0]);
+            let bytes = serde_json::to_vec(&raw).unwrap();
+            let catalog = ExtensionReleaseCatalog::parse_canonical(&bytes).unwrap();
+            assert_eq!(
+                catalog.packages()[0].bind_tree_index(&tree).unwrap_err(),
+                ExtensionReleaseCatalogError::TreeIndexMismatch
+            );
+        }
 
         let mut raw = raw_catalog(&tree);
         raw.packages[0].manifest_sha256 = hex([99; 32]);
@@ -1709,6 +1773,28 @@ mod tests {
                 max: MAX_EXTENSION_ARCHIVE_BYTES,
             })
         );
+
+        let maximum_tree_index_bytes = MAX_EXTENSION_TREE_INDEX_BYTES as u64;
+        let mut raw = raw_catalog(&tree);
+        raw.packages[0].tree_index_length = maximum_tree_index_bytes;
+        let catalog = ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap())
+            .expect("the exact tree-index size ceiling is admissible");
+        assert_eq!(
+            catalog.packages()[0].tree_index_length(),
+            maximum_tree_index_bytes
+        );
+
+        for invalid_length in [0, maximum_tree_index_bytes + 1] {
+            let mut raw = raw_catalog(&tree);
+            raw.packages[0].tree_index_length = invalid_length;
+            assert_eq!(
+                ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+                Err(ExtensionReleaseCatalogError::TreeIndexSize {
+                    bytes: invalid_length,
+                    max: maximum_tree_index_bytes,
+                })
+            );
+        }
 
         let mut raw = raw_catalog(&tree);
         raw.packages[0].tree_file_count = u32::try_from(MAX_EXTENSION_TREE_FILES + 1).unwrap();

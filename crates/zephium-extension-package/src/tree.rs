@@ -80,6 +80,7 @@ impl ExtensionTreeFile {
 pub struct CanonicalExtensionTreeIndex {
     files: Box<[ExtensionTreeFile]>,
     index_sha256: ExtensionTreeIndexDigest,
+    index_bytes: u64,
     tree_sha256: ExtensionTreeDigest,
     manifest_sha256: ExtensionManifestDigest,
     total_bytes: u64,
@@ -190,9 +191,12 @@ impl CanonicalExtensionTreeIndex {
 
         let tree_sha256 = digest_tree(&files);
         let index_sha256 = ExtensionTreeIndexDigest(Sha256::digest(bytes).into());
+        let index_bytes =
+            u64::try_from(bytes.len()).map_err(|_| ExtensionTreeIndexError::AccountingOverflow)?;
         Ok(Self {
             files: files.into_boxed_slice(),
             index_sha256,
+            index_bytes,
             tree_sha256,
             manifest_sha256,
             total_bytes,
@@ -216,6 +220,11 @@ impl CanonicalExtensionTreeIndex {
     /// Returns SHA-256 of the exact canonical index document.
     pub const fn index_sha256(&self) -> ExtensionTreeIndexDigest {
         self.index_sha256
+    }
+
+    /// Returns the exact canonical index-document byte length.
+    pub const fn index_bytes(&self) -> u64 {
+        self.index_bytes
     }
 
     /// Returns SHA-256 of the canonical path/length/file-digest inventory.
@@ -408,6 +417,7 @@ mod tests {
         ]);
         let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes).unwrap();
         assert_eq!(parsed.files().len(), 2);
+        assert_eq!(parsed.index_bytes(), bytes.len() as u64);
         assert_eq!(parsed.total_bytes(), 140);
         assert_eq!(parsed.manifest_sha256().bytes(), [1; 32]);
         assert!(parsed.retained_bytes() <= MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES);

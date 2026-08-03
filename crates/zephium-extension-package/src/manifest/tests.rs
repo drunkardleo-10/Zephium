@@ -122,7 +122,7 @@ fn fixture_bytes(manifest: Vec<u8>, files: &[(&str, &[u8])], chromium: bool) -> 
     };
     let catalog_json = format!(
         concat!(
-            r#"{{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"{}","admission_policy_sha256":"{}","packages":[{{"package_key":"{}","revision":1,"payload":{{"kind":"bundled_tree"}},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_file_count":{},"tree_bytes":{},"chromium":{},"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Example","redistribution":"Reviewed","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}]}}"#,
+            r#"{{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"{}","admission_policy_sha256":"{}","packages":[{{"package_key":"{}","revision":1,"payload":{{"kind":"bundled_tree"}},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_index_length":{},"tree_file_count":{},"tree_bytes":{},"chromium":{},"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Example","redistribution":"Reviewed","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}]}}"#,
         ),
         hex([1; 32]),
         hex([2; 32]),
@@ -130,6 +130,7 @@ fn fixture_bytes(manifest: Vec<u8>, files: &[(&str, &[u8])], chromium: bool) -> 
         hex(tree.manifest_sha256().bytes()),
         hex(tree.tree_sha256().bytes()),
         hex(tree.index_sha256().bytes()),
+        tree.index_bytes(),
         tree.files().len(),
         tree.total_bytes(),
         chromium_json,
