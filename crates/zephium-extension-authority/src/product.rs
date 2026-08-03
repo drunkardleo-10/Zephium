@@ -147,6 +147,27 @@ impl BundledPackageAuthority {
         }
         Ok(Self { anchor, policy })
     }
+
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_catalog(
+        catalog_bytes: &[u8],
+        policy: ExtensionReleaseAdmissionPolicy,
+    ) -> Result<AdmittedBundledCatalog, BundledCatalogAdmissionError> {
+        let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
+            .map_err(BundledCatalogAdmissionError::Catalog)?;
+        let anchor = SealedBundledCatalogAnchor {
+            catalog_length: catalog_bytes.len(),
+            catalog_digest: ExtensionReleaseCatalogDigest::from_bytes(
+                Sha256::digest(catalog_bytes).into(),
+            ),
+            authority: catalog.authority(),
+            catalog_revision: catalog.revision(),
+            admission_policy_digest: catalog.admission_policy_sha256(),
+            inventory_digest: digest_catalog_inventory(&catalog)
+                .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?,
+        };
+        Self::from_sealed_parts(anchor, policy)?.admit_catalog(catalog_bytes)
+    }
 }
 
 /// Authenticated, semantically admitted metadata for one bundled catalog.

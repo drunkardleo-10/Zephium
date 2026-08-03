@@ -9,11 +9,16 @@
 //!
 //! The values produced here remain structural until a release or repository
 //! authority authenticates their exact bytes. In particular, parsing a
-//! catalog never makes its packages trusted by itself. Manifest admission
-//! additionally requires an exact authenticated release/tree binding and an
-//! explicit product compatibility decision for every typed or unmodeled
-//! declaration. Unknown top-level declarations remain runtime-blocking
-//! authority; they are never silently treated as compatible.
+//! catalog never makes its packages trusted by itself. Structural manifest
+//! admission additionally requires an exact release/tree binding and an
+//! explicit compatibility decision for every typed or unmodeled declaration.
+//! Its public policy trait is intentionally suitable for analysis and tests:
+//! neither a caller-selected policy nor [`AdmittedExtensionManifest`] is
+//! product authentication or native-activation authority. The sealed authority
+//! crate must authenticate the catalog and apply Zephium-owned exact backend
+//! policy; native activation additionally requires an exact sealed
+//! materialization receipt and live lease. Unknown top-level declarations remain
+//! runtime-blocking authority; they are never silently treated as compatible.
 //! Manifest UI strings remain typed as literal-or-localized until the exact
 //! admitted default-locale resource is supplied to the bounded resolver.
 

@@ -3,7 +3,9 @@
 //! Parsing is deliberately separate from compatibility policy. This module
 //! proves byte/tree identity, validates the closed typed subset, preserves all
 //! other top-level declarations as blocking unmodeled authority, and asks a
-//! product-owned policy to classify every resulting core declaration.
+//! caller-supplied structural policy to classify every resulting declaration.
+//! Product trust is established only by `zephium-extension-authority`; native
+//! activation additionally requires a sealed materialization receipt and lease.
 
 mod csp;
 mod execution;
@@ -62,13 +64,16 @@ pub use self::resources::{
 const ADMISSION_DIGEST_DOMAIN: &[u8] = b"zephium:extension-manifest-admission:v1\0";
 const MAX_ICON_ENTRIES: usize = 64;
 
-/// Product-owned compatibility decision source for one exact backend target.
+/// Structural compatibility decision source for one exact backend target.
 ///
-/// Returning `None` fails admission. The parser never supplies a default and
-/// never equates syntactic support with runtime support. Each decision receives
-/// both the path-free declaration set and the exact admitted resource plan so
-/// policy can inspect nested execution semantics instead of trusting an opaque
-/// digest or a broad declaration tag.
+/// This public trait deliberately supports analysis and tests. Implementing it
+/// does not create product trust, and [`AdmittedExtensionManifest`] produced by
+/// a caller-selected implementation is not native-activation authority.
+/// Returning `None` fails structural admission. The parser never supplies a
+/// default and never equates syntactic support with runtime support. Each
+/// decision receives both the path-free declaration set and the exact admitted
+/// resource plan so policy can inspect nested execution semantics instead of
+/// trusting an opaque digest or broad declaration tag.
 pub trait ExtensionManifestCompatibilityPolicy {
     /// Returns the exact versioned compatibility target being assessed.
     fn target(&self) -> &ExtensionCompatibilityTargetId;
@@ -132,7 +137,11 @@ impl fmt::Debug for ExtensionManifestAdmissionDigest {
     }
 }
 
-/// Exact admitted manifest, path plan, native identity evidence, and policy result.
+/// Exact structurally admitted manifest, path plan, identity, and policy result.
+///
+/// This value is deliberately cloneable parser output and is not product
+/// authentication or native-activation authority. Activation requires the
+/// non-forgeable product witness minted by `zephium-extension-authority`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedExtensionManifest {
     descriptor: ExtensionManifestDescriptor,
@@ -281,7 +290,10 @@ impl From<ExtensionManifestError> for ExtensionManifestAdmissionError {
     }
 }
 
-/// Admits one exact root `manifest.json` against a bound release tree and policy.
+/// Structurally admits one exact root `manifest.json` against a tree and policy.
+///
+/// The caller owns `compatibility`; successful parsing therefore cannot mint
+/// product or native-activation authority by itself.
 pub fn admit_extension_manifest(
     binding: ExtensionReleaseTreeBinding<'_>,
     manifest_bytes: &[u8],
