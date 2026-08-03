@@ -15,7 +15,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::injection::{MatchOptions, MatchSet};
 
-use super::metadata::parse_display_string;
+use super::metadata::{parse_unresolved_display_text, ExtensionUnresolvedDisplayText};
 use super::resources::{digest_resources, digest_strings};
 use super::{
     bind_resource, into_array, into_object, invalid, missing, optional_bool, optional_globs,
@@ -200,7 +200,7 @@ pub(super) struct ParsedAction {
     pub(super) declaration: Option<ExtensionActionDeclaration>,
     pub(super) popup: Option<ExtensionManifestResource>,
     pub(super) icons: Vec<ExtensionManifestIcon>,
-    pub(super) title: Option<String>,
+    pub(super) title: Option<ExtensionUnresolvedDisplayText>,
 }
 
 pub(super) fn parse_action(
@@ -238,10 +238,11 @@ pub(super) fn parse_action(
     let default_title = object
         .remove("default_title")
         .map(|value| {
-            parse_display_string(
+            parse_unresolved_display_text(
                 &value,
                 "action.default_title",
                 MAX_EXTENSION_METADATA_STRING_BYTES,
+                false,
             )
         })
         .transpose()?;

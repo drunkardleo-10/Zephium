@@ -7,6 +7,7 @@
 
 mod csp;
 mod execution;
+mod locale;
 mod metadata;
 mod resources;
 
@@ -42,8 +43,15 @@ use self::execution::{
     parse_action, parse_background, parse_content_scripts, parse_overrides, parse_sandbox,
     parse_web_accessible, ParsedAction,
 };
-pub use self::metadata::ExtensionManifestMetadata;
+pub use self::locale::{
+    resolve_extension_default_locale, ExtensionDefaultLocaleResolutionError,
+    ExtensionResolvedMetadataDigest, ResolvedExtensionManifestMetadata,
+    TrustedExtensionDisplayText,
+};
 use self::metadata::{parse_chromium_key, parse_inert_metadata, validate_required_metadata};
+pub use self::metadata::{
+    ExtensionLocalizedMessageKey, ExtensionManifestMetadata, ExtensionUnresolvedDisplayText,
+};
 use self::resources::digest_resources;
 pub use self::resources::{
     ExtensionContentScriptResources, ExtensionDeclaredResourcePattern, ExtensionManifestIcon,

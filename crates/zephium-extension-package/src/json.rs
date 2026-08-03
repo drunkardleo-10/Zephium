@@ -7,8 +7,9 @@ use serde_json::{Map, Number, Value};
 
 use crate::{
     MAX_EXTENSION_JSON_COLLECTION_ENTRIES, MAX_EXTENSION_JSON_DEPTH, MAX_EXTENSION_JSON_NODES,
-    MAX_EXTENSION_JSON_STRING_BYTES, MAX_EXTENSION_MANIFEST_BYTES,
-    MAX_EXTENSION_RELEASE_CATALOG_BYTES, MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
+    MAX_EXTENSION_JSON_STRING_BYTES, MAX_EXTENSION_LOCALE_MESSAGES_BYTES,
+    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_RELEASE_CATALOG_BYTES, MAX_EXTENSION_TREE_FILES,
+    MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
 const MAX_RELEASE_CATALOG_JSON_NODES: usize = 512;
@@ -51,6 +52,11 @@ impl BoundedJsonLimits {
     /// Limits for a source extension manifest.
     pub const fn extension_manifest() -> Self {
         Self::for_bytes(MAX_EXTENSION_MANIFEST_BYTES)
+    }
+
+    /// Limits for one authenticated default-locale `messages.json` document.
+    pub const fn extension_locale_messages() -> Self {
+        Self::for_bytes(MAX_EXTENSION_LOCALE_MESSAGES_BYTES as usize)
     }
 
     const fn for_bytes(max_bytes: usize) -> Self {

@@ -16,6 +16,10 @@ pub const MAX_EXTENSION_RESOURCE_PATTERN_BYTES: usize = MAX_EXTENSION_RELATIVE_P
 pub const MAX_EXTENSION_METADATA_STRING_BYTES: usize = 4 * 1024;
 /// Maximum exact bytes in the default locale's messages document.
 pub const MAX_EXTENSION_LOCALE_MESSAGES_BYTES: u64 = 512 * 1024;
+/// Maximum ASCII bytes in one locale message or placeholder key.
+pub const MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES: usize = 128;
+/// Maximum retained heap charge for resolved extension display metadata.
+pub const MAX_EXTENSION_RESOLVED_METADATA_RETAINED_BYTES: usize = 64 * 1024;
 /// Maximum bytes in one materialized resource tree.
 pub const MAX_EXTENSION_TREE_BYTES: u64 = 128 * 1024 * 1024;
 /// Maximum aggregate tree bytes named by one curated release catalog.
@@ -62,3 +66,5 @@ const _: () = assert!(MAX_EXTENSION_PACKAGE_LINES <= MAX_EXTENSION_TREE_FILES);
 const _: () = assert!(MAX_EXTENSION_PATH_COMPONENT_BYTES <= MAX_EXTENSION_RELATIVE_PATH_BYTES);
 const _: () = assert!(MAX_CHROMIUM_MANIFEST_KEY_BASE64_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
 const _: () = assert!(MAX_EXTENSION_LOCALE_MESSAGES_BYTES <= MAX_EXTENSION_TREE_FILE_BYTES);
+const _: () =
+    assert!(MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES <= MAX_EXTENSION_METADATA_STRING_BYTES);

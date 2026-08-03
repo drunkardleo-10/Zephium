@@ -14,6 +14,8 @@
 //! explicit product compatibility decision for every typed or unmodeled
 //! declaration. Unknown top-level declarations remain runtime-blocking
 //! authority; they are never silently treated as compatible.
+//! Manifest UI strings remain typed as literal-or-localized until the exact
+//! admitted default-locale resource is supplied to the bounded resolver.
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
@@ -33,12 +35,16 @@ pub use chromium::{
 pub use json::{parse_bounded_json, BoundedJsonError, BoundedJsonLimits, BoundedJsonValue};
 pub use limits::*;
 pub use manifest::{
-    admit_extension_manifest, AdmittedExtensionManifest, ExtensionContentScriptResources,
-    ExtensionDeclaredResourcePattern, ExtensionManifestAdmissionDigest,
-    ExtensionManifestAdmissionError, ExtensionManifestCompatibilityPolicy,
-    ExtensionManifestCompatibilitySubject, ExtensionManifestIcon, ExtensionManifestMetadata,
-    ExtensionManifestResource, ExtensionManifestResourcePlan, ExtensionOverrideResource,
-    ExtensionWebAccessibleAudience, ExtensionWebAccessibleResourceGroup,
+    admit_extension_manifest, resolve_extension_default_locale, AdmittedExtensionManifest,
+    ExtensionContentScriptResources, ExtensionDeclaredResourcePattern,
+    ExtensionDefaultLocaleResolutionError, ExtensionLocalizedMessageKey,
+    ExtensionManifestAdmissionDigest, ExtensionManifestAdmissionError,
+    ExtensionManifestCompatibilityPolicy, ExtensionManifestCompatibilitySubject,
+    ExtensionManifestIcon, ExtensionManifestMetadata, ExtensionManifestResource,
+    ExtensionManifestResourcePlan, ExtensionOverrideResource, ExtensionResolvedMetadataDigest,
+    ExtensionUnresolvedDisplayText, ExtensionWebAccessibleAudience,
+    ExtensionWebAccessibleResourceGroup, ResolvedExtensionManifestMetadata,
+    TrustedExtensionDisplayText,
 };
 pub use relative_path::{PortableRelativePath, PortableRelativePathError};
 pub use release::{
