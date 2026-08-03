@@ -31,6 +31,8 @@ pub const MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_EXTENSION_TREE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum files in one materialized resource tree.
 pub const MAX_EXTENSION_TREE_FILES: usize = 4_096;
+/// Maximum implicit non-root directories in one materialized resource tree.
+pub const MAX_EXTENSION_TREE_DIRECTORIES: usize = 4_096;
 /// Maximum supported package update lines in one release catalog.
 pub const MAX_EXTENSION_PACKAGE_LINES: usize = 8;
 /// Maximum exact license expressions in one product admission policy.

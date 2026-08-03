@@ -11,8 +11,9 @@ use crate::digest::decode_lower_hex_32;
 use crate::relative_path::portable_path_shape_conflicts;
 use crate::{
     parse_bounded_json, BoundedJsonError, BoundedJsonLimits, PortableRelativePath,
-    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_FILES,
-    MAX_EXTENSION_TREE_FILE_BYTES, MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
+    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_DIRECTORIES,
+    MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_FILE_BYTES,
+    MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
 };
 
 const TREE_INDEX_SCHEMA_VERSION: u32 = 1;
@@ -165,6 +166,13 @@ impl CanonicalExtensionTreeIndex {
             });
         }
         let manifest_sha256 = manifest_sha256.ok_or(ExtensionTreeIndexError::ManifestMissing)?;
+        let directory_count = count_implicit_directories(&files);
+        if directory_count > MAX_EXTENSION_TREE_DIRECTORIES {
+            return Err(ExtensionTreeIndexError::DirectoryCount {
+                count: directory_count,
+                max: MAX_EXTENSION_TREE_DIRECTORIES,
+            });
+        }
 
         let retained_bytes = files.iter().try_fold(
             TREE_INDEX_ACCOUNTING_FIXED_BYTES
@@ -248,6 +256,34 @@ impl CanonicalExtensionTreeIndex {
     }
 }
 
+/// Counts exact non-root directory prefixes without allocating.
+///
+/// Canonical path ordering makes every subtree contiguous, so a directory
+/// prefix has already been counted exactly when the preceding file has the
+/// same prefix. Every byte is visited a bounded number of times.
+fn count_implicit_directories(files: &[ExtensionTreeFile]) -> usize {
+    let mut count = 0_usize;
+    let mut previous_parent = None;
+
+    for file in files {
+        let Some((parent, _)) = file.path.as_str().rsplit_once('/') else {
+            previous_parent = None;
+            continue;
+        };
+        let shared_prefixes = previous_parent.map_or(0, |previous: &str| {
+            previous
+                .split('/')
+                .zip(parent.split('/'))
+                .take_while(|(left, right)| left == right)
+                .count()
+        });
+        count += parent.split('/').count() - shared_prefixes;
+        previous_parent = Some(parent);
+    }
+
+    count
+}
+
 fn digest_tree(files: &[ExtensionTreeFile]) -> ExtensionTreeDigest {
     let mut digest = Sha256::new();
     digest.update(TREE_DIGEST_DOMAIN);
@@ -300,6 +336,13 @@ pub enum ExtensionTreeIndexError {
     NonCanonicalOrder,
     /// Paths collide by case alias or would make one path both file and directory.
     PortablePathCollision,
+    /// The implicit non-root directory count exceeds its ceiling.
+    DirectoryCount {
+        /// Observed unique directories.
+        count: usize,
+        /// Maximum unique directories.
+        max: usize,
+    },
     /// One file exceeds its byte ceiling.
     FileTooLarge {
         /// Observed bytes.
@@ -356,6 +399,10 @@ impl fmt::Display for ExtensionTreeIndexError {
             Self::PortablePathCollision => {
                 formatter.write_str("extension tree index paths collide across platforms")
             }
+            Self::DirectoryCount { count, max } => write!(
+                formatter,
+                "extension tree index has {count} implicit directories; maximum is {max}"
+            ),
             Self::FileTooLarge { bytes, max } => write!(
                 formatter,
                 "extension tree file uses {bytes} bytes; maximum is {max}"
@@ -388,6 +435,7 @@ impl Error for ExtensionTreeIndexError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_EXTENSION_RELATIVE_PATH_DEPTH;
 
     fn digest(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
@@ -407,6 +455,29 @@ mod tests {
             length,
             sha256: digest(byte),
         }
+    }
+
+    fn deepest_file_path() -> String {
+        let mut components = (0..MAX_EXTENSION_RELATIVE_PATH_DEPTH - 1)
+            .map(|index| format!("deep-{index:02}"))
+            .collect::<Vec<_>>();
+        components.push("leaf.js".to_owned());
+        components.join("/")
+    }
+
+    fn directory_boundary_index(extra_root_directories: usize) -> Vec<u8> {
+        let deepest_directory_count = MAX_EXTENSION_RELATIVE_PATH_DEPTH - 1;
+        let root_directory_count = MAX_EXTENSION_TREE_DIRECTORIES
+            .checked_sub(deepest_directory_count)
+            .unwrap();
+        let mut files = Vec::with_capacity(root_directory_count + extra_root_directories + 2);
+        files.push(file("manifest.json", 1, 1));
+        files.push(file(&deepest_file_path(), 1, 2));
+        for index in 0..root_directory_count + extra_root_directories {
+            files.push(file(&format!("root-{index:04}/leaf.js"), 1, 3));
+        }
+        files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        index(files)
     }
 
     #[test]
@@ -449,6 +520,50 @@ mod tests {
             ),
             "tree-index v1 digest framing changed"
         );
+    }
+
+    #[test]
+    fn admits_exact_implicit_directory_boundary_with_a_deepest_portable_path() {
+        let bytes = directory_boundary_index(0);
+        let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes).unwrap();
+        let deepest = PortableRelativePath::parse(&deepest_file_path()).unwrap();
+
+        assert_eq!(deepest.depth(), MAX_EXTENSION_RELATIVE_PATH_DEPTH);
+        assert_eq!(
+            count_implicit_directories(parsed.files()),
+            MAX_EXTENSION_TREE_DIRECTORIES
+        );
+    }
+
+    #[test]
+    fn rejects_one_implicit_directory_above_the_boundary() {
+        let bytes = directory_boundary_index(1);
+        let error = ExtensionTreeIndexError::DirectoryCount {
+            count: MAX_EXTENSION_TREE_DIRECTORIES + 1,
+            max: MAX_EXTENSION_TREE_DIRECTORIES,
+        };
+
+        assert_eq!(
+            CanonicalExtensionTreeIndex::parse_canonical(&bytes),
+            Err(error)
+        );
+        assert_eq!(
+            error.to_string(),
+            "extension tree index has 4097 implicit directories; maximum is 4096"
+        );
+    }
+
+    #[test]
+    fn shared_directory_prefixes_are_counted_once_at_the_file_boundary() {
+        let mut files = Vec::with_capacity(MAX_EXTENSION_TREE_FILES);
+        files.push(file("manifest.json", 1, 1));
+        for index in 0..MAX_EXTENSION_TREE_FILES - 1 {
+            files.push(file(&format!("shared/leaf-{index:04}.js"), 1, 2));
+        }
+        let parsed = CanonicalExtensionTreeIndex::parse_canonical(&index(files)).unwrap();
+
+        assert_eq!(parsed.files().len(), MAX_EXTENSION_TREE_FILES);
+        assert_eq!(count_implicit_directories(parsed.files()), 1);
     }
 
     #[test]
