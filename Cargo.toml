@@ -22,6 +22,7 @@ zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
+zephium-private-fs = { path = "crates/zephium-private-fs", version = "=0.1.0" }
 zephium-store = { path = "crates/zephium-store", version = "=0.1.0" }
 zephium-app = { path = "crates/zephium-app", version = "=0.1.0" }
 
