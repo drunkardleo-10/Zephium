@@ -6258,6 +6258,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-extension-package"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+ "zephium-core",
+]
+
+[[package]]
 name = "zephium-ipc"
 version = "0.1.0"
 dependencies = [
