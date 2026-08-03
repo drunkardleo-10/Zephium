@@ -19,6 +19,7 @@
 #![deny(unsafe_code)]
 
 mod component;
+mod entry_name;
 mod error;
 mod identity;
 mod lease;
@@ -26,6 +27,7 @@ mod namespace;
 mod platform;
 
 pub use component::{PrivateComponent, PrivateComponentError};
+pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_NAME_BYTES};
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
 pub use namespace::{ByteLimit, LockedPrivateNamespace, PrivateDirectory};
