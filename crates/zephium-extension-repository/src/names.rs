@@ -5,7 +5,7 @@ use zephium_private_fs::PrivateComponent;
 use crate::state::Digest32;
 use crate::ExtensionRepositoryError;
 
-pub(crate) const MAX_ROOT_ENTRIES: usize = 6;
+pub(crate) const MAX_ROOT_ENTRIES: usize = 7;
 pub(crate) const MAX_CATALOG_OBJECT_ENTRIES: usize = 64;
 pub(crate) const MAX_JOURNAL_ENTRIES: usize = 64;
 

@@ -7,6 +7,7 @@ use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_C
 use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsError};
 
 use crate::codec;
+use crate::materialization::MaterializationRuntime;
 use crate::names::{state_file, state_stage};
 use crate::recovery::open_repository;
 use crate::state::{
@@ -43,16 +44,17 @@ pub enum BundledCatalogRecordOutcome {
 
 /// Exclusive crash-durable extension catalog authority repository.
 ///
-/// This value owns the private namespace lock. It records only authentication
-/// high-water marks and cannot issue a package, profile, or native-runtime
-/// lease. A post-commit ambiguity seals the instance until a fresh
-/// [`Self::open`] performs exact journal recovery.
+/// This value owns the private namespace lock. Its internal materialization
+/// metadata and sealed roots remain non-public and cannot issue a package,
+/// profile, receipt, or native-runtime lease. A post-commit ambiguity seals
+/// the instance until a fresh [`Self::open`] performs exact journal recovery.
 pub struct ExtensionRepository {
     _namespace: LockedPrivateNamespace,
     catalogs: PrivateDirectory,
     journals: PrivateDirectory,
     state: RepositoryState,
     state_bytes: Vec<u8>,
+    _materialization: MaterializationRuntime,
     sealed: bool,
 }
 
@@ -70,6 +72,7 @@ impl ExtensionRepository {
             journals: opened.journals,
             state: opened.state,
             state_bytes: opened.state_bytes,
+            _materialization: opened.materialization,
             sealed: false,
         })
     }

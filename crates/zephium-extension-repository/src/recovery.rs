@@ -4,15 +4,15 @@ use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_C
 use zephium_private_fs::{LockedPrivateNamespace, PrivateComponent, PrivateDirectory};
 
 use crate::codec;
+use crate::materialization::{self, MaterializationRuntime};
 use crate::names::{self, catalog_file, checkpoint_stage, state_file, state_stage};
 use crate::state::{
     validate_catalog_lines, RecoveryCheckpoint, RepositoryState, TransitionJournal,
     MAX_CHECKPOINT_BYTES, MAX_JOURNAL_BYTES, MAX_STATE_BYTES,
 };
 use crate::storage::{
-    atomic_write_control, map_recovery_fs, read_optional_recovery, read_optional_state,
-    read_required_recovery, read_required_state, remove_required, validate_named_catalog_object,
-    write_checkpoint,
+    atomic_write_control, map_recovery_fs, read_required_recovery, read_required_state,
+    remove_required, validate_named_catalog_object, write_checkpoint,
 };
 use crate::ExtensionRepositoryError;
 
@@ -22,13 +22,14 @@ pub(crate) struct OpenedRepository {
     pub(crate) journals: PrivateDirectory,
     pub(crate) state: RepositoryState,
     pub(crate) state_bytes: Vec<u8>,
+    pub(crate) materialization: MaterializationRuntime,
 }
 
 pub(crate) fn open_repository(
     namespace: LockedPrivateNamespace,
 ) -> Result<OpenedRepository, ExtensionRepositoryError> {
     let root = namespace.directory();
-    let root_shape = validate_root_shape(root)?;
+    let mut root_shape = validate_root_shape(root)?;
     let catalogs = if root_shape.has_catalogs {
         root.open_private_child(&names::catalogs_directory())?
     } else {
@@ -36,15 +37,16 @@ pub(crate) fn open_repository(
     };
     // Validate an existing catalogs directory before completing a partial
     // catalogs-only initialization with a new journals directory.
-    let catalog_stages = inspect_catalogs(&catalogs)?;
+    let catalog_inventory = inspect_catalogs(&catalogs)?;
     let journals = if root_shape.has_journals {
         root.open_private_child(&names::journals_directory())?
     } else {
         root.create_new_private_child(&names::journals_directory())?
     };
     let journal_inventory = inspect_journals(&journals)?;
+    root_shape = initialize_controls(root, root_shape, &catalog_inventory, &journal_inventory)?;
     let (state, state_bytes) = read_state(root)?;
-    let checkpoint = read_checkpoint(root, &RepositoryState::default())?;
+    let checkpoint = read_checkpoint(root)?;
     let disposition = assess_recovery(
         &catalogs,
         &state,
@@ -63,7 +65,7 @@ pub(crate) fn open_repository(
         root,
         &catalogs,
         &journals,
-        catalog_stages,
+        catalog_inventory.stages,
         journal_inventory.stages,
         root_shape,
     )?;
@@ -75,12 +77,20 @@ pub(crate) fn open_repository(
         journal_inventory.prepared,
         disposition,
     )?;
+    let materialization = materialization::open_or_recover(
+        root,
+        &catalogs,
+        state.checkpoint(),
+        root_shape.has_materialization,
+        materialization::FaultPoint::None,
+    )?;
     Ok(OpenedRepository {
         namespace,
         catalogs,
         journals,
         state,
         state_bytes,
+        materialization,
     })
 }
 
@@ -88,8 +98,11 @@ pub(crate) fn open_repository(
 struct RootShape {
     has_catalogs: bool,
     has_journals: bool,
+    has_state: bool,
+    has_checkpoint: bool,
     has_state_stage: bool,
     has_checkpoint_stage: bool,
+    has_materialization: bool,
 }
 
 fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRepositoryError> {
@@ -99,8 +112,11 @@ fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRe
     let mut shape = RootShape {
         has_catalogs: false,
         has_journals: false,
+        has_state: false,
+        has_checkpoint: false,
         has_state_stage: false,
         has_checkpoint_stage: false,
+        has_materialization: false,
     };
     let mut has_control = false;
     for entry in entries {
@@ -113,10 +129,18 @@ fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRe
                 root.open_private_child(&entry).map_err(map_recovery_fs)?;
                 shape.has_journals = true;
             }
-            "state.json" | "recovery-checkpoint.json" => {
+            "state.json" => {
                 if !root.regular_exists(&entry).map_err(map_recovery_fs)? {
                     return Err(ExtensionRepositoryError::RecoveryAmbiguous);
                 }
+                shape.has_state = true;
+                has_control = true;
+            }
+            "recovery-checkpoint.json" => {
+                if !root.regular_exists(&entry).map_err(map_recovery_fs)? {
+                    return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+                }
+                shape.has_checkpoint = true;
                 has_control = true;
             }
             "state.stage" => {
@@ -133,6 +157,10 @@ fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRe
                 shape.has_checkpoint_stage = true;
                 has_control = true;
             }
+            "materialization" => {
+                root.open_private_child(&entry).map_err(map_recovery_fs)?;
+                shape.has_materialization = true;
+            }
             _ => return Err(ExtensionRepositoryError::RecoveryAmbiguous),
         }
     }
@@ -145,12 +173,20 @@ fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRe
     if has_control && (!shape.has_catalogs || !shape.has_journals) {
         return Err(ExtensionRepositoryError::RecoveryAmbiguous);
     }
+    if shape.has_materialization && (!shape.has_catalogs || !shape.has_journals) {
+        return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+    }
     Ok(shape)
+}
+
+struct CatalogInventory {
+    stages: Vec<PrivateComponent>,
+    final_count: usize,
 }
 
 fn inspect_catalogs(
     catalogs: &PrivateDirectory,
-) -> Result<Vec<PrivateComponent>, ExtensionRepositoryError> {
+) -> Result<CatalogInventory, ExtensionRepositoryError> {
     let entries = catalogs
         .list_components(names::MAX_CATALOG_OBJECT_ENTRIES)
         .map_err(map_recovery_fs)?;
@@ -175,12 +211,77 @@ fn inspect_catalogs(
     {
         return Err(ExtensionRepositoryError::RecoveryAmbiguous);
     }
-    Ok(stages.into_iter().map(|(name, _)| name).collect())
+    Ok(CatalogInventory {
+        stages: stages.into_iter().map(|(name, _)| name).collect(),
+        final_count: finals.len(),
+    })
 }
 
 struct JournalInventory {
     stages: Vec<PrivateComponent>,
     prepared: Option<(PrivateComponent, TransitionJournal)>,
+}
+
+fn initialize_controls(
+    root: &PrivateDirectory,
+    mut shape: RootShape,
+    catalogs: &CatalogInventory,
+    journals: &JournalInventory,
+) -> Result<RootShape, ExtensionRepositoryError> {
+    if shape.has_state && shape.has_checkpoint {
+        return Ok(shape);
+    }
+    let pristine_materialization =
+        materialization::is_pristine_for_outer_initialization(root, shape.has_materialization)?;
+    if catalogs.final_count != 0
+        || !catalogs.stages.is_empty()
+        || !journals.stages.is_empty()
+        || journals.prepared.is_some()
+        || !pristine_materialization
+    {
+        // Missing outer controls next to any authority or writer-owned data
+        // could represent deletion of the monotonic high-water. Never mint a
+        // generation-zero state over that evidence.
+        return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+    }
+
+    let default_state = RepositoryState::default();
+    let default_bytes = codec::encode(&default_state, MAX_STATE_BYTES)
+        .map_err(|_| ExtensionRepositoryError::StateCorrupt)?;
+    if !shape.has_state {
+        if shape.has_checkpoint || shape.has_checkpoint_stage {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        if shape.has_state_stage {
+            remove_required(root, &state_stage())?;
+            shape.has_state_stage = false;
+        }
+        atomic_write_control(
+            root,
+            &state_file(),
+            &state_stage(),
+            &default_bytes,
+            MAX_STATE_BYTES,
+        )?;
+        shape.has_state = true;
+    }
+
+    if !shape.has_checkpoint {
+        let observed = read_required_state(root, &state_file(), MAX_STATE_BYTES)?;
+        if observed != default_bytes || shape.has_state_stage {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        if shape.has_checkpoint_stage {
+            remove_required(root, &checkpoint_stage())?;
+            shape.has_checkpoint_stage = false;
+        }
+        write_checkpoint(
+            root,
+            &RecoveryCheckpoint::new(0, codec::digest(&default_bytes)),
+        )?;
+        shape.has_checkpoint = true;
+    }
+    Ok(shape)
 }
 
 fn inspect_journals(
@@ -234,11 +335,7 @@ fn read_state(
     root: &PrivateDirectory,
 ) -> Result<(RepositoryState, Vec<u8>), ExtensionRepositoryError> {
     let name = state_file();
-    let bytes = match read_optional_state(root, &name, MAX_STATE_BYTES)? {
-        Some(bytes) => bytes,
-        None => codec::encode(&RepositoryState::default(), MAX_STATE_BYTES)
-            .map_err(|_| ExtensionRepositoryError::StateCorrupt)?,
-    };
+    let bytes = read_required_state(root, &name, MAX_STATE_BYTES)?;
     let state: RepositoryState = codec::decode(&bytes, MAX_STATE_BYTES)
         .map_err(|_| ExtensionRepositoryError::StateCorrupt)?;
     state.validate()?;
@@ -247,18 +344,11 @@ fn read_state(
 
 fn read_checkpoint(
     root: &PrivateDirectory,
-    default_state: &RepositoryState,
 ) -> Result<RecoveryCheckpoint, ExtensionRepositoryError> {
     let name = names::checkpoint_file();
-    let checkpoint = match read_optional_recovery(root, &name, MAX_CHECKPOINT_BYTES)? {
-        Some(bytes) => codec::decode(&bytes, MAX_CHECKPOINT_BYTES)
-            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?,
-        None => {
-            let default_bytes = codec::encode(default_state, MAX_STATE_BYTES)
-                .map_err(|_| ExtensionRepositoryError::StateCorrupt)?;
-            RecoveryCheckpoint::new(0, codec::digest(&default_bytes))
-        }
-    };
+    let bytes = read_required_recovery(root, &name, MAX_CHECKPOINT_BYTES)?;
+    let checkpoint: RecoveryCheckpoint = codec::decode(&bytes, MAX_CHECKPOINT_BYTES)
+        .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
     checkpoint.validate()?;
     Ok(checkpoint)
 }
@@ -340,7 +430,7 @@ fn assess_recovery(
 }
 
 fn inspect_control_stages(
-    root: &PrivateDirectory,
+    _root: &PrivateDirectory,
     shape: RootShape,
     checkpoint: RecoveryCheckpoint,
     journal: Option<&(PrivateComponent, TransitionJournal)>,
@@ -353,28 +443,20 @@ fn inspect_control_stages(
         if disposition != RecoveryDisposition::ApplyPrepared {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
-        let (_, prepared) = journal.ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-        let expected = codec::encode(&prepared.next_state, MAX_STATE_BYTES)
-            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
-        let observed = read_required_recovery(root, &state_stage(), MAX_STATE_BYTES)?;
-        if observed != expected {
-            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-        }
+        journal.ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
     }
     if shape.has_checkpoint_stage {
         if disposition != RecoveryDisposition::CheckpointPrepared {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
         let (_, prepared) = journal.ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-        let expected_checkpoint =
-            RecoveryCheckpoint::new(prepared.generation, prepared.next_state_sha256);
-        let expected = codec::encode(&expected_checkpoint, MAX_CHECKPOINT_BYTES)
-            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
-        let observed = read_required_recovery(root, &checkpoint_stage(), MAX_CHECKPOINT_BYTES)?;
-        if observed != expected || checkpoint.generation >= prepared.generation {
+        if checkpoint.generation >= prepared.generation {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
     }
+    // A surviving create-new stage has not crossed its atomic publication
+    // rename. Its payload is scratch and may be torn; the final journal and
+    // committed controls, not scratch-byte equality, determine recovery.
     Ok(())
 }
 

@@ -471,6 +471,153 @@ fn exact_control_stages_are_safe_to_discard_before_journal_recovery() {
 }
 
 #[test]
+fn outer_controls_are_initialized_before_any_writer_owned_data() {
+    let harness = Harness::new();
+    let repository = harness.open();
+    let root = repository._namespace.directory();
+    assert!(root.regular_exists(&state_file()).unwrap());
+    assert!(root.regular_exists(&names::checkpoint_file()).unwrap());
+    drop(repository);
+
+    let namespace = harness.namespace();
+    let root = namespace.directory();
+    assert!(root
+        .remove_verified_regular(&names::checkpoint_file())
+        .unwrap());
+    root.write_new_synced(
+        &checkpoint_stage(),
+        b"torn initialization scratch",
+        ByteLimit::new(MAX_CHECKPOINT_BYTES).unwrap(),
+    )
+    .unwrap();
+    drop(namespace);
+
+    let repository = harness.open();
+    assert_eq!(repository.state, RepositoryState::default());
+    assert!(!repository
+        ._namespace
+        .directory()
+        .regular_exists(&checkpoint_stage())
+        .unwrap());
+}
+
+#[test]
+fn missing_outer_controls_never_demote_authority_or_materialization_data() {
+    let catalog_harness = Harness::new();
+    let bytes = one_package_catalog(1, 1, 1, 0);
+    let witness = TestCatalogWitness::new(&bytes);
+    let mut repository = catalog_harness.open();
+    assert_eq!(
+        repository.record_with_fault(&witness, &bytes, FaultPoint::None),
+        Ok(BundledCatalogRecordOutcome::Recorded)
+    );
+    drop(repository);
+    let namespace = catalog_harness.namespace();
+    let root = namespace.directory();
+    assert!(root.remove_verified_regular(&state_file()).unwrap());
+    assert!(root
+        .remove_verified_regular(&names::checkpoint_file())
+        .unwrap());
+    drop(namespace);
+    assert_eq!(
+        catalog_harness.open_error(),
+        ExtensionRepositoryError::RecoveryAmbiguous
+    );
+
+    let materialization_harness = Harness::new();
+    let repository = materialization_harness.open();
+    drop(repository);
+    let namespace = materialization_harness.namespace();
+    let root = namespace.directory();
+    let materialization = root
+        .open_private_child(&PrivateComponent::new("materialization").unwrap())
+        .unwrap();
+    let trees = materialization
+        .open_private_child(&PrivateComponent::new("trees").unwrap())
+        .unwrap();
+    let object = PrivateComponent::new(format!("{}.object", hex(91))).unwrap();
+    trees
+        .create_new_private_child(&object)
+        .unwrap()
+        .seal()
+        .unwrap();
+    assert!(root.remove_verified_regular(&state_file()).unwrap());
+    assert!(root
+        .remove_verified_regular(&names::checkpoint_file())
+        .unwrap());
+    drop(trees);
+    drop(materialization);
+    drop(namespace);
+    assert_eq!(
+        materialization_harness.open_error(),
+        ExtensionRepositoryError::RecoveryAmbiguous
+    );
+}
+
+#[test]
+fn torn_control_stage_payloads_do_not_override_the_final_journal() {
+    for stage_bytes in [vec![b'x'], vec![b'x'; MAX_STATE_BYTES + 1]] {
+        let harness = Harness::new();
+        let bytes = one_package_catalog(1, 1, 1, 0);
+        let witness = TestCatalogWitness::new(&bytes);
+        let mut repository = harness.open();
+        assert_eq!(
+            repository.record_with_fault(&witness, &bytes, FaultPoint::AfterJournal),
+            Err(ExtensionRepositoryError::InjectedCrash)
+        );
+        drop(repository);
+        let namespace = harness.namespace();
+        namespace
+            .directory()
+            .write_new_synced(
+                &state_stage(),
+                &stage_bytes,
+                ByteLimit::new(stage_bytes.len()).unwrap(),
+            )
+            .unwrap();
+        drop(namespace);
+
+        let recovered = harness.open();
+        assert_eq!(recovered.state.generation, 1);
+        assert!(!recovered
+            ._namespace
+            .directory()
+            .regular_exists(&state_stage())
+            .unwrap());
+    }
+
+    for stage_bytes in [vec![b'x'], vec![b'x'; MAX_CHECKPOINT_BYTES + 1]] {
+        let harness = Harness::new();
+        let bytes = one_package_catalog(1, 1, 1, 0);
+        let witness = TestCatalogWitness::new(&bytes);
+        let mut repository = harness.open();
+        assert_eq!(
+            repository.record_with_fault(&witness, &bytes, FaultPoint::AfterState),
+            Err(ExtensionRepositoryError::InjectedCrash)
+        );
+        drop(repository);
+        let namespace = harness.namespace();
+        namespace
+            .directory()
+            .write_new_synced(
+                &checkpoint_stage(),
+                &stage_bytes,
+                ByteLimit::new(stage_bytes.len()).unwrap(),
+            )
+            .unwrap();
+        drop(namespace);
+
+        let recovered = harness.open();
+        assert_eq!(recovered.state.generation, 1);
+        assert!(!recovered
+            ._namespace
+            .directory()
+            .regular_exists(&checkpoint_stage())
+            .unwrap());
+    }
+}
+
+#[test]
 fn orphan_object_and_journal_stages_are_cleaned_only_after_consistent_preflight() {
     let harness = Harness::new();
     drop(harness.open());
