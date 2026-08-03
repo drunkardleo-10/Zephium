@@ -203,6 +203,14 @@ pub(crate) fn open_sealed_child_directory(
     Err(PrivateFsError::PrimitiveUnavailable)
 }
 
+pub(crate) fn open_child_directory_any_mode(
+    _parent: &File,
+    _parent_path: &Path,
+    _name: &str,
+) -> Result<(File, RawIdentity, DirectoryMode), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
 pub(crate) fn revalidate_child_directory(
     _parent: &File,
     _parent_path: &Path,

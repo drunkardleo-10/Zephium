@@ -36,7 +36,8 @@ pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
 pub use namespace::{
-    ByteLimit, LockedPrivateNamespace, PrivateChildKind, PrivateDirectory, SealedPrivateDirectory,
+    ByteLimit, LockedPrivateNamespace, OpenedPrivateDirectory, PrivateChildKind, PrivateDirectory,
+    SealedPrivateDirectory,
 };
 pub use streaming::{StreamingFileLength, StreamingWriteError, MAX_STREAMING_FILE_BYTES};
 pub use transition::PrivateFsTransitionError;

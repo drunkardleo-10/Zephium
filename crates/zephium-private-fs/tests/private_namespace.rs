@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use zephium_private_fs::PrivateComponent;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use zephium_private_fs::{
-    ByteLimit, PrivateChildKind, PrivateEntryName, PrivateFsTransitionError, StreamingFileLength,
-    StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
+    ByteLimit, OpenedPrivateDirectory, PrivateChildKind, PrivateEntryName,
+    PrivateFsTransitionError, StreamingFileLength, StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
 };
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
@@ -1156,6 +1156,10 @@ fn entry_operations_never_admit_a_case_alias_on_case_insensitive_storage() {
             Some(PrivateFsError::Unsafe)
         );
         assert_eq!(
+            directory.open_entry_child_any_mode(&alias_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
             directory.create_entry_child(&alias_directory).err(),
             Some(PrivateFsError::Unsafe)
         );
@@ -1190,6 +1194,10 @@ fn entry_operations_never_admit_a_case_alias_on_case_insensitive_storage() {
     } else {
         assert_eq!(
             directory.open_entry_child(&alias_directory).err(),
+            Some(PrivateFsError::NotFound)
+        );
+        assert_eq!(
+            directory.open_entry_child_any_mode(&alias_directory).err(),
             Some(PrivateFsError::NotFound)
         );
         assert_eq!(directory.inspect_entry(&alias_directory).unwrap(), None);
@@ -1243,6 +1251,12 @@ fn control_operations_never_admit_a_case_alias_on_case_insensitive_storage() {
     if aliases_resolve {
         assert_eq!(
             directory.open_private_child(&exact_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            directory
+                .open_private_child_any_mode(&exact_directory)
+                .err(),
             Some(PrivateFsError::Unsafe)
         );
         assert_eq!(
@@ -1420,6 +1434,10 @@ fn root_lock_component_is_reserved_from_every_caller_role() {
     directory.write_new_synced(&stage, b"stage", limit).unwrap();
     for reserved in [component(LOCK_NAME), component(LOCK_STAGING_NAME)] {
         assert_eq!(
+            directory.open_private_child_any_mode(&reserved).err(),
+            Some(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
             directory.create_private_child(&reserved).err().unwrap(),
             PrivateFsError::ReservedComponent
         );
@@ -1544,6 +1562,10 @@ fn root_lock_names_are_reserved_from_every_entry_operation_and_listing() {
     ] {
         assert_eq!(
             directory.open_entry_child(&reserved).err(),
+            Some(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.open_entry_child_any_mode(&reserved).err(),
             Some(PrivateFsError::ReservedComponent)
         );
         assert_eq!(
@@ -1875,6 +1897,57 @@ fn sealing_is_exact_bottom_up_and_unsealing_is_top_down() {
         0o400
     );
     assert!(leaf.entry_regular_exists(&file_name).unwrap());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn any_mode_child_open_returns_one_exact_typed_capability() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let writable_name = component("writable");
+    let sealed_name = entry_name("Sealed Tree");
+
+    let writable = namespace
+        .directory()
+        .create_new_private_child(&writable_name)
+        .unwrap();
+    let writable_identity = writable.identity();
+    assert!(matches!(
+        namespace
+            .directory()
+            .open_private_child_any_mode(&writable_name)
+            .unwrap(),
+        OpenedPrivateDirectory::Writable(opened) if opened.identity() == writable_identity
+    ));
+
+    let sealed = namespace
+        .directory()
+        .create_new_entry_child(&sealed_name)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let sealed_identity = sealed.identity();
+    assert!(matches!(
+        namespace
+            .directory()
+            .open_entry_child_any_mode(&sealed_name)
+            .unwrap(),
+        OpenedPrivateDirectory::Sealed(opened) if opened.identity() == sealed_identity
+    ));
+
+    let hostile_path = root.join("hostile-mode");
+    fs::create_dir(&hostile_path).unwrap();
+    fs::set_permissions(&hostile_path, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(
+        namespace
+            .directory()
+            .open_private_child_any_mode(&component("hostile-mode")),
+        Err(PrivateFsError::Unsafe)
+    ));
+    fs::set_permissions(&hostile_path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

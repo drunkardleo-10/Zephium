@@ -145,6 +145,31 @@ pub struct SealedPrivateDirectory {
     lease: Arc<NamespaceLease>,
 }
 
+/// One exact child directory admitted in either private lifecycle mode.
+///
+/// This sum type is intended for bounded crash recovery, where an interrupted
+/// bottom-up seal may legitimately leave different nodes at `0700` and
+/// `0500`. Both variants retain the same parent-bound identity and namespace
+/// lease guarantees as their mode-specific open operations. Hostile modes,
+/// links, ACLs, aliases, and identity races are still rejected.
+pub enum OpenedPrivateDirectory {
+    /// Exact writable `0700` child authority.
+    Writable(PrivateDirectory),
+    /// Exact sealed `0500` child authority.
+    Sealed(SealedPrivateDirectory),
+}
+
+impl OpenedPrivateDirectory {
+    /// Returns the admitted child's opaque open-handle identity.
+    #[must_use]
+    pub const fn identity(&self) -> DirectoryIdentity {
+        match self {
+            Self::Writable(directory) => directory.identity(),
+            Self::Sealed(directory) => directory.identity(),
+        }
+    }
+}
+
 impl SealedPrivateDirectory {
     /// Returns this sealed directory's opaque open-handle identity.
     #[must_use]
@@ -651,6 +676,70 @@ impl PrivateDirectory {
         name: &PrivateEntryName,
     ) -> Result<SealedPrivateDirectory, PrivateFsError> {
         self.open_sealed_child(ChildName::Entry(name))
+    }
+
+    /// Opens one protocol child in its exact writable or sealed mode.
+    ///
+    /// Mode is observed from the same held descriptor whose identity and
+    /// spelling are revalidated. This avoids using a failed mode-specific open
+    /// as a discriminator during crash recovery.
+    pub fn open_private_child_any_mode(
+        &self,
+        component: &PrivateComponent,
+    ) -> Result<OpenedPrivateDirectory, PrivateFsError> {
+        self.open_child_any_mode(ChildName::Control(component))
+    }
+
+    /// Opens one case-preserving payload child in exact writable or sealed mode.
+    pub fn open_entry_child_any_mode(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<OpenedPrivateDirectory, PrivateFsError> {
+        self.open_child_any_mode(ChildName::Entry(name))
+    }
+
+    fn open_child_any_mode(
+        &self,
+        name: ChildName<'_>,
+    ) -> Result<OpenedPrivateDirectory, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        let (handle, identity, mode) =
+            self.lease.observe(platform::open_child_directory_any_mode(
+                &self.core.handle,
+                &self.core.path,
+                name.as_str(),
+            ))?;
+        let core = DirectoryCore {
+            path: self.core.path.join(name.as_str()),
+            handle,
+            identity: DirectoryIdentity(identity),
+            parent: Some(ParentAuthority {
+                path: self.core.path.clone(),
+                handle: self
+                    .core
+                    .handle
+                    .try_clone()
+                    .map_err(|_| PrivateFsError::Io)?,
+                identity: self.core.identity,
+                child_name: name.to_owned_name(),
+                mode: DirectoryMode::Writable,
+            }),
+        };
+        self.lease.observe(verify_core_boundary(&core, mode))?;
+        self.precheck_unlocked()?;
+        Ok(match mode {
+            DirectoryMode::Writable => OpenedPrivateDirectory::Writable(PrivateDirectory {
+                core,
+                lease: Arc::clone(&self.lease),
+                role: DirectoryRole::Child,
+            }),
+            DirectoryMode::Sealed => OpenedPrivateDirectory::Sealed(SealedPrivateDirectory {
+                core,
+                lease: Arc::clone(&self.lease),
+            }),
+        })
     }
 
     fn open_sealed_child(

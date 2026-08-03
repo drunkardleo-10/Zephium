@@ -223,6 +223,28 @@ pub(crate) fn open_sealed_child_directory(
     open_relative_directory(parent, name, Some(DirectoryMode::Sealed))
 }
 
+pub(crate) fn open_child_directory_any_mode(
+    parent: &File,
+    parent_path: &Path,
+    name: &str,
+) -> Result<(File, RawIdentity, DirectoryMode), PrivateFsError> {
+    let (file, identity) = open_relative_directory(parent, name, None)?;
+    // Classify an already-stable case alias as hostile input, matching the
+    // mode-specific openers. A later spelling failure during revalidation is
+    // instead identity-ambiguous because the namespace may have raced after
+    // this first exact-name proof.
+    verify_exact_name(&file, name)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    // `open_relative_directory` already rejected a stable hostile mode. A
+    // failure in this second descriptor snapshot therefore means the mode
+    // changed after admission and must quarantine the namespace lease.
+    let mode = admitted_directory_mode(&metadata).map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    revalidate_child_directory(parent, parent_path, name, &file, identity, mode)?;
+    Ok((file, identity, mode))
+}
+
 pub(crate) fn revalidate_child_directory(
     parent: &File,
     _parent_path: &Path,
@@ -739,6 +761,16 @@ fn open_relative_directory(
         return Err(PrivateFsError::IdentityAmbiguous);
     }
     Ok((file, identity))
+}
+
+fn admitted_directory_mode(metadata: &Metadata) -> Result<DirectoryMode, PrivateFsError> {
+    if validate_private_directory_metadata_mode(metadata, DirectoryMode::Writable).is_ok() {
+        Ok(DirectoryMode::Writable)
+    } else if validate_private_directory_metadata_mode(metadata, DirectoryMode::Sealed).is_ok() {
+        Ok(DirectoryMode::Sealed)
+    } else {
+        Err(PrivateFsError::Unsafe)
+    }
 }
 
 #[cfg(target_os = "macos")]
