@@ -21,6 +21,15 @@ pub enum PrivateFsError {
     /// A no-replace publication found an existing destination.
     #[error("private filesystem publication destination already exists")]
     AlreadyExists,
+    /// Two capabilities do not belong to the same locked namespace lease.
+    #[error("private filesystem capabilities belong to different namespaces")]
+    NamespaceMismatch,
+    /// A directory expected to be empty still contains at least one entry.
+    #[error("private filesystem directory is not empty")]
+    DirectoryNotEmpty,
+    /// A namespace mutation was refused while one or more verified paths are pinned.
+    #[error("private filesystem namespace is in use")]
+    InUse,
     /// Pre-commit observations disagreed about one node's exact identity.
     ///
     /// Once a namespace lease exists, it is quarantined before this error is

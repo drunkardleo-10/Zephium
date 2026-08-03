@@ -29,13 +29,17 @@ mod lease;
 mod namespace;
 mod platform;
 mod streaming;
+mod transition;
 
 pub use component::{PrivateComponent, PrivateComponentError};
 pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_NAME_BYTES};
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
-pub use namespace::{ByteLimit, LockedPrivateNamespace, PrivateChildKind, PrivateDirectory};
+pub use namespace::{
+    ByteLimit, LockedPrivateNamespace, PrivateChildKind, PrivateDirectory, SealedPrivateDirectory,
+};
 pub use streaming::{StreamingFileLength, StreamingWriteError, MAX_STREAMING_FILE_BYTES};
+pub use transition::PrivateFsTransitionError;
 
 /// Hard ceiling for any allocation or write accepted by the in-memory API.
 ///

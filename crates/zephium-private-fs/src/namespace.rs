@@ -5,13 +5,13 @@ use std::sync::{Arc, MutexGuard};
 
 use crate::identity::{DirectoryIdentity, FileIdentity};
 use crate::lease::NamespaceLease;
-use crate::platform::{self, OpenPurpose};
+use crate::platform::{self, DirectoryMode, OpenPurpose, RegularMode};
 use crate::streaming::copy_exact;
 #[cfg(test)]
 use crate::streaming::ExactCopyError;
 use crate::{
-    PrivateComponent, PrivateEntryName, PrivateFsError, StreamingFileLength, StreamingWriteError,
-    MAX_IN_MEMORY_FILE_BYTES,
+    PrivateComponent, PrivateEntryName, PrivateFsError, PrivateFsTransitionError,
+    StreamingFileLength, StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
 };
 
 const MAX_INVENTORY_ENTRIES: usize = 4_096;
@@ -43,7 +43,15 @@ struct DirectoryCore {
     path: PathBuf,
     handle: File,
     identity: DirectoryIdentity,
-    child_name: Option<OwnedChildName>,
+    parent: Option<ParentAuthority>,
+}
+
+struct ParentAuthority {
+    path: PathBuf,
+    handle: File,
+    identity: DirectoryIdentity,
+    child_name: OwnedChildName,
+    mode: DirectoryMode,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -125,6 +133,442 @@ pub struct PrivateDirectory {
     role: DirectoryRole,
 }
 
+/// Linear capability for one exact read-only private directory.
+///
+/// The capability owns a live directory descriptor and a privately captured
+/// immediate-parent descriptor, path, identity, expected mode, and typed exact
+/// child name. It is intentionally not cloneable. Publication, unsealing, and
+/// removal consume it so an old source authority cannot be reused after a
+/// successful transition.
+pub struct SealedPrivateDirectory {
+    core: DirectoryCore,
+    lease: Arc<NamespaceLease>,
+}
+
+impl SealedPrivateDirectory {
+    /// Returns this sealed directory's opaque open-handle identity.
+    #[must_use]
+    pub const fn identity(&self) -> DirectoryIdentity {
+        self.core.identity
+    }
+
+    /// Opens one exact sealed protocol child beneath this sealed directory.
+    pub fn open_sealed_private_child(
+        &self,
+        component: &PrivateComponent,
+    ) -> Result<Self, PrivateFsError> {
+        self.open_sealed_child(ChildName::Control(component))
+    }
+
+    /// Opens one exact sealed case-preserving child beneath this directory.
+    pub fn open_sealed_entry_child(&self, name: &PrivateEntryName) -> Result<Self, PrivateFsError> {
+        self.open_sealed_child(ChildName::Entry(name))
+    }
+
+    fn open_sealed_child(&self, name: ChildName<'_>) -> Result<Self, PrivateFsError> {
+        let _operation = self.lease.begin()?;
+        self.precheck_unlocked()?;
+        let child = self.lease.observe(open_sealed_child_unlocked(
+            &self.core,
+            &self.lease,
+            DirectoryMode::Sealed,
+            name,
+        ))?;
+        self.precheck_unlocked()?;
+        Ok(child)
+    }
+
+    /// Lists a bounded byte-sorted snapshot of exact payload entry names.
+    ///
+    /// Enumeration validates only the portable exact name grammar. Callers
+    /// must pass every returned name through [`Self::inspect_entry`] or the
+    /// bounded regular-reader API before trusting its kind or content.
+    pub fn list_entry_names(
+        &self,
+        max_entries: usize,
+    ) -> Result<Vec<PrivateEntryName>, PrivateFsError> {
+        let _operation = self.lease.begin()?;
+        if max_entries == 0 || max_entries > MAX_INVENTORY_ENTRIES {
+            return Err(PrivateFsError::BoundExceeded);
+        }
+        self.precheck_unlocked()?;
+        let mut entries = platform::list_names(&self.core.handle, &self.core.path, max_entries)?
+            .into_iter()
+            .map(|name| PrivateEntryName::new(name).map_err(|_| PrivateFsError::Unsafe))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_unstable();
+        self.precheck_unlocked()?;
+        Ok(entries)
+    }
+
+    /// Inspects one optional exact payload entry through sealed-node admission.
+    ///
+    /// A regular file must be exact mode `0400`; a directory must be exact
+    /// mode `0500`. Links, special nodes, writable nodes, unsafe ACLs, case
+    /// aliases, and identity races are rejected instead of projected as kinds.
+    pub fn inspect_entry(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<Option<PrivateChildKind>, PrivateFsError> {
+        let _operation = self.lease.begin()?;
+        self.precheck_unlocked()?;
+        let inspected = inspect_sealed_entry_unlocked(&self.core, &self.lease, name)?;
+        self.precheck_unlocked()?;
+        Ok(inspected)
+    }
+
+    /// Runs a callback with one exact `0400` bounded payload-file reader.
+    ///
+    /// The callback sees only a [`Read`] capability capped at the admitted
+    /// initial length. Its result remains nested so caller validation failures
+    /// are distinct from filesystem failures. Exact mode, length, identity,
+    /// spelling, and the sealed directory boundary are revalidated afterward,
+    /// even when the callback returns an error. The callback executes under the
+    /// non-reentrant operation mutex and must not call back into this namespace.
+    pub fn with_bounded_entry_regular_reader<T, E>(
+        &self,
+        name: &PrivateEntryName,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        let _operation = self.lease.begin()?;
+        self.precheck_unlocked()?;
+        with_bounded_sealed_regular_reader_unlocked(
+            &self.core,
+            &self.lease,
+            DirectoryMode::Sealed,
+            ChildName::Entry(name),
+            limit,
+            callback,
+        )
+    }
+
+    /// Runs a synchronous callback with this sealed capability's verified path.
+    ///
+    /// This has the same synchronous-only authority and namespace-wide mutation
+    /// pin contract as [`PrivateDirectory::with_verified_path`]. The path must
+    /// not be retained and treated as authority after the callback returns.
+    pub fn with_verified_path<T>(
+        &self,
+        callback: impl FnOnce(&Path) -> T,
+    ) -> Result<T, PrivateFsError> {
+        with_verified_path_callback(&self.core, &self.lease, DirectoryMode::Sealed, callback)
+    }
+
+    /// Unseals this directory to exact writable mode `0700`.
+    ///
+    /// Unsealing is top-down: the privately bound immediate parent must already
+    /// be writable. A capability issued while that parent was sealed becomes
+    /// stale when the parent transitions and fails closed; reopen the child from
+    /// the freshly unsealed parent before calling this method.
+    pub fn unseal(
+        self,
+    ) -> Result<PrivateDirectory, PrivateFsTransitionError<SealedPrivateDirectory>> {
+        let operation = match self.lease.begin() {
+            Ok(operation) => operation,
+            Err(error) => return Err(PrivateFsTransitionError::terminal(error)),
+        };
+        if let Err(error) = self.precheck_unlocked() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
+        if let Err(error) = self.lease.mutation_allowed() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(error, self));
+        }
+        if self
+            .core
+            .parent
+            .as_ref()
+            .is_none_or(|parent| parent.mode != DirectoryMode::Writable)
+        {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(
+                PrivateFsError::Unsafe,
+                self,
+            ));
+        }
+
+        let chmod = platform::set_directory_mode(&self.core.handle, DirectoryMode::Writable);
+        #[cfg(test)]
+        let chmod = chmod.and_then(|()| {
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::UnsealDirectoryCommitted)
+            {
+                Err(PrivateFsError::Io)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = chmod {
+            let unchanged = verify_core_boundary(&self.core, DirectoryMode::Sealed)
+                .and_then(|()| self.lease.verify_authority());
+            drop(operation);
+            return if unchanged.is_ok() {
+                Err(PrivateFsTransitionError::recoverable(error, self))
+            } else {
+                Err(PrivateFsTransitionError::terminal(
+                    terminal_settlement_error(&self.lease),
+                ))
+            };
+        }
+
+        let settlement = (|| {
+            platform::sync_directory(&self.core.handle)?;
+            #[cfg(test)]
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::UnsealDirectorySelfSync)
+            {
+                return Err(PrivateFsError::Io);
+            }
+            let parent = self
+                .core
+                .parent
+                .as_ref()
+                .ok_or(PrivateFsError::IdentityAmbiguous)?;
+            platform::sync_directory(&parent.handle)?;
+            #[cfg(test)]
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::UnsealDirectoryParentSync)
+            {
+                return Err(PrivateFsError::Io);
+            }
+            verify_core_boundary(&self.core, DirectoryMode::Writable)?;
+            self.lease.verify_authority()
+        })();
+        if settlement.is_err() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(
+                terminal_settlement_error(&self.lease),
+            ));
+        }
+        drop(operation);
+        let Self { core, lease } = self;
+        Ok(PrivateDirectory {
+            core,
+            lease,
+            role: DirectoryRole::Child,
+        })
+    }
+
+    /// Publishes this sealed directory under a lowercase protocol name.
+    ///
+    /// Publication uses one descriptor-relative no-replace rename and returns a
+    /// freshly opened destination capability. The source and destination
+    /// parents must share the exact same namespace lease. Same-parent
+    /// publication is the universal layout and flushes that parent exactly
+    /// once. Linux additionally supports distinct parents and flushes both;
+    /// macOS returns a clean [`PrivateFsError::PrimitiveUnavailable`] because
+    /// that kernel requires write permission on a moved directory to update
+    /// `..`, which conflicts with the exact `0500` seal.
+    pub fn publish_noreplace(
+        self,
+        destination_parent: &PrivateDirectory,
+        destination: &PrivateComponent,
+    ) -> Result<Self, PrivateFsTransitionError<Self>> {
+        self.publish_noreplace_named(destination_parent, ChildName::Control(destination))
+    }
+
+    /// Publishes this sealed directory under one case-preserving payload name.
+    pub fn publish_entry_noreplace(
+        self,
+        destination_parent: &PrivateDirectory,
+        destination: &PrivateEntryName,
+    ) -> Result<Self, PrivateFsTransitionError<Self>> {
+        self.publish_noreplace_named(destination_parent, ChildName::Entry(destination))
+    }
+
+    fn publish_noreplace_named(
+        self,
+        destination_parent: &PrivateDirectory,
+        destination: ChildName<'_>,
+    ) -> Result<Self, PrivateFsTransitionError<Self>> {
+        let operation = match self.lease.begin() {
+            Ok(operation) => operation,
+            Err(error) => return Err(PrivateFsTransitionError::terminal(error)),
+        };
+        if let Err(error) = self.precheck_unlocked() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
+        if let Err(error) = self.lease.mutation_allowed() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(error, self));
+        }
+        if !Arc::ptr_eq(&self.lease, &destination_parent.lease) {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(
+                PrivateFsError::NamespaceMismatch,
+                self,
+            ));
+        }
+        if let Err(error) = destination_parent.reject_reserved_name(destination) {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(error, self));
+        }
+        if let Err(error) = destination_parent.verify_boundary_unlocked() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
+        let Some(source_parent) = self.core.parent.as_ref() else {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(
+                PrivateFsError::Unsafe,
+                self,
+            ));
+        };
+        let same_parent = source_parent.identity == destination_parent.core.identity;
+        #[cfg(target_os = "macos")]
+        if !same_parent {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(
+                PrivateFsError::PrimitiveUnavailable,
+                self,
+            ));
+        }
+        if same_parent && source_parent.child_name.as_str() == destination.as_str() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(
+                PrivateFsError::Unsafe,
+                self,
+            ));
+        }
+        if self.core.handle.sync_all().is_err() {
+            let unchanged = self.precheck_unlocked();
+            drop(operation);
+            return if unchanged.is_ok() {
+                Err(PrivateFsTransitionError::recoverable(
+                    PrivateFsError::Io,
+                    self,
+                ))
+            } else {
+                Err(PrivateFsTransitionError::terminal(
+                    terminal_settlement_error(&self.lease),
+                ))
+            };
+        }
+
+        let rename = platform::atomic_publish_noreplace_between(
+            &source_parent.handle,
+            &source_parent.path,
+            source_parent.child_name.as_str(),
+            &destination_parent.core.handle,
+            &destination_parent.core.path,
+            destination.as_str(),
+        );
+        if let Err(error) = rename {
+            let (clean_error, clean) = if error == PrivateFsError::AlreadyExists {
+                let classification =
+                    classify_existing_destination_unlocked(destination_parent, destination);
+                let unchanged = self
+                    .precheck_unlocked()
+                    .and_then(|()| destination_parent.verify_boundary_unlocked());
+                match (classification, unchanged) {
+                    (Ok(ExistingDestination::Safe), Ok(())) => {
+                        (PrivateFsError::AlreadyExists, Ok(()))
+                    }
+                    (Ok(ExistingDestination::Hostile), Ok(())) => (PrivateFsError::Unsafe, Ok(())),
+                    (Err(classification), Ok(())) => (classification, Err(classification)),
+                    (_, Err(unchanged)) => (unchanged, Err(unchanged)),
+                }
+            } else {
+                (
+                    error,
+                    ensure_child_absent_unlocked(&destination_parent.core, destination)
+                        .and_then(|()| self.precheck_unlocked())
+                        .and_then(|()| destination_parent.verify_boundary_unlocked()),
+                )
+            };
+            drop(operation);
+            return if clean.is_ok() {
+                Err(PrivateFsTransitionError::recoverable(clean_error, self))
+            } else {
+                Err(PrivateFsTransitionError::terminal(
+                    terminal_settlement_error(&self.lease),
+                ))
+            };
+        }
+
+        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+        if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::PublishDestinationIdentity)
+            && replace_published_directory_identity_for_test(destination_parent, destination)
+                .is_err()
+        {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(
+                terminal_settlement_error(&self.lease),
+            ));
+        }
+
+        let settlement = (|| {
+            platform::sync_directory(&source_parent.handle)?;
+            #[cfg(test)]
+            if same_parent {
+                self.lease.record_same_parent_publish_sync();
+            }
+            #[cfg(test)]
+            if self.lease.take_lifecycle_fault(if same_parent {
+                crate::lease::LifecycleFault::PublishSameParentSync
+            } else {
+                crate::lease::LifecycleFault::PublishSourceParentSync
+            }) {
+                return Err(PrivateFsError::Io);
+            }
+            if !same_parent {
+                platform::sync_directory(&destination_parent.core.handle)?;
+                #[cfg(test)]
+                if self.lease.take_lifecycle_fault(
+                    crate::lease::LifecycleFault::PublishDestinationParentSync,
+                ) {
+                    return Err(PrivateFsError::Io);
+                }
+            }
+            let installed = open_sealed_child_unlocked(
+                &destination_parent.core,
+                &destination_parent.lease,
+                DirectoryMode::Writable,
+                destination,
+            )?;
+            if installed.core.identity != self.core.identity {
+                return Err(PrivateFsError::IdentityAmbiguous);
+            }
+            ensure_child_absent_owned_unlocked(source_parent)?;
+            verify_parent_authority(source_parent)?;
+            destination_parent.verify_boundary_unlocked()?;
+            self.lease.verify_authority()?;
+            Ok(installed)
+        })();
+        drop(operation);
+        match settlement {
+            Ok(installed) => Ok(installed),
+            Err(_) => Err(PrivateFsTransitionError::terminal(
+                terminal_settlement_error(&self.lease),
+            )),
+        }
+    }
+
+    /// Removes this directory only when its exact descriptor is empty.
+    ///
+    /// The operation is nonrecursive and consumes the capability. A clean
+    /// pre-commit failure returns the unchanged sealed capability.
+    pub fn remove_empty(self) -> Result<(), PrivateFsTransitionError<Self>> {
+        remove_empty_sealed(self)
+    }
+
+    fn precheck_unlocked(&self) -> Result<(), PrivateFsError> {
+        self.lease.observe(
+            self.lease
+                .verify_authority()
+                .and_then(|()| verify_core_boundary(&self.core, DirectoryMode::Sealed)),
+        )
+    }
+}
+
 impl PrivateDirectory {
     /// Returns this directory's opaque open-handle identity.
     #[must_use]
@@ -190,6 +634,329 @@ impl PrivateDirectory {
         self.child_directory(ChildName::Entry(name), ChildDirectoryMode::CreateNew)
     }
 
+    /// Opens one exact sealed protocol child directory.
+    ///
+    /// The child must have exact mode `0500`; a writable directory is not
+    /// silently admitted through the sealed capability surface.
+    pub fn open_sealed_private_child(
+        &self,
+        component: &PrivateComponent,
+    ) -> Result<SealedPrivateDirectory, PrivateFsError> {
+        self.open_sealed_child(ChildName::Control(component))
+    }
+
+    /// Opens one exact sealed case-preserving payload child directory.
+    pub fn open_sealed_entry_child(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<SealedPrivateDirectory, PrivateFsError> {
+        self.open_sealed_child(ChildName::Entry(name))
+    }
+
+    fn open_sealed_child(
+        &self,
+        name: ChildName<'_>,
+    ) -> Result<SealedPrivateDirectory, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        let child = self.lease.observe(open_sealed_child_unlocked(
+            &self.core,
+            &self.lease,
+            DirectoryMode::Writable,
+            name,
+        ))?;
+        self.precheck_unlocked()?;
+        Ok(child)
+    }
+
+    /// Seals one optional protocol regular file to exact mode `0400`.
+    ///
+    /// An already sealed exact file is returned idempotently. Any possible
+    /// failure after descriptor chmod quarantines the namespace and reports
+    /// [`PrivateFsError::SettlementUnknown`].
+    pub fn seal_verified_regular(
+        &self,
+        component: &PrivateComponent,
+    ) -> Result<Option<FileIdentity>, PrivateFsError> {
+        self.seal_verified_regular_named(ChildName::Control(component))
+    }
+
+    /// Seals one optional case-preserving payload regular file to mode `0400`.
+    pub fn seal_verified_entry_regular(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<Option<FileIdentity>, PrivateFsError> {
+        self.seal_verified_regular_named(ChildName::Entry(name))
+    }
+
+    fn seal_verified_regular_named(
+        &self,
+        name: ChildName<'_>,
+    ) -> Result<Option<FileIdentity>, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        self.lease.mutation_allowed()?;
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        let Some(verified) = self.open_optional_regular_unlocked(name, OpenPurpose::Mutation)?
+        else {
+            self.precheck_unlocked()?;
+            return Ok(None);
+        };
+        if platform::revalidate_regular_mode(
+            &self.core.handle,
+            &self.core.path,
+            name.as_str(),
+            &verified.file,
+            verified.identity.0,
+            RegularMode::Sealed,
+        )
+        .is_ok()
+        {
+            self.precheck_unlocked()?;
+            return Ok(Some(verified.identity));
+        }
+        self.lease.observe(platform::revalidate_regular_mode(
+            &self.core.handle,
+            &self.core.path,
+            name.as_str(),
+            &verified.file,
+            verified.identity.0,
+            RegularMode::Writable,
+        ))?;
+        self.precheck_unlocked()?;
+
+        let chmod = platform::set_regular_mode(&verified.file, RegularMode::Sealed);
+        #[cfg(test)]
+        let chmod = chmod.and_then(|()| {
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::SealRegularCommitted)
+            {
+                Err(PrivateFsError::Io)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = chmod {
+            let unchanged = platform::revalidate_regular_mode(
+                &self.core.handle,
+                &self.core.path,
+                name.as_str(),
+                &verified.file,
+                verified.identity.0,
+                RegularMode::Writable,
+            )
+            .and_then(|()| self.verify_boundary_unlocked());
+            return if unchanged.is_ok() {
+                Err(error)
+            } else {
+                Err(terminal_settlement_error(&self.lease))
+            };
+        }
+
+        let settlement: Result<FileIdentity, PrivateFsError> = (|| {
+            verified.file.sync_all().map_err(|_| PrivateFsError::Io)?;
+            #[cfg(test)]
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::SealRegularFileSync)
+            {
+                return Err(PrivateFsError::Io);
+            }
+            platform::revalidate_regular_mode(
+                &self.core.handle,
+                &self.core.path,
+                name.as_str(),
+                &verified.file,
+                verified.identity.0,
+                RegularMode::Sealed,
+            )?;
+            platform::sync_directory(&self.core.handle)?;
+            #[cfg(test)]
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::SealRegularParentSync)
+            {
+                return Err(PrivateFsError::Io);
+            }
+            self.verify_boundary_unlocked()?;
+            Ok(verified.identity)
+        })();
+        match settlement {
+            Ok(identity) => Ok(Some(identity)),
+            Err(_) => Err(terminal_settlement_error(&self.lease)),
+        }
+    }
+
+    /// Seals this child directory to exact mode `0500`.
+    ///
+    /// This is a one-level linear transition. Every direct regular child must
+    /// already pass dedicated exact `0400` admission and every direct directory
+    /// must already pass dedicated exact `0500` admission, enforcing bottom-up
+    /// sealing without recursive traversal. The namespace root cannot be
+    /// sealed because its live lock authority requires writable mode `0700`.
+    /// Previously issued child capabilities bind this directory's old expected
+    /// parent mode and therefore fail closed after this transition; callers
+    /// must reopen children from the returned sealed capability.
+    pub fn seal(
+        self,
+    ) -> Result<SealedPrivateDirectory, PrivateFsTransitionError<PrivateDirectory>> {
+        let operation = match self.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return Err(PrivateFsTransitionError::terminal(error)),
+        };
+        if let Err(error) = self.precheck_unlocked() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
+        if let Err(error) = self.lease.mutation_allowed() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(error, self));
+        }
+        if self.role == DirectoryRole::Root {
+            drop(operation);
+            return Err(PrivateFsTransitionError::recoverable(
+                PrivateFsError::Unsafe,
+                self,
+            ));
+        }
+        if let Err(error) = self.direct_children_are_sealed_unlocked() {
+            if error == PrivateFsError::IdentityAmbiguous {
+                drop(operation);
+                return Err(PrivateFsTransitionError::terminal(error));
+            }
+            let unchanged = self.verify_boundary_unlocked();
+            drop(operation);
+            return if unchanged.is_ok() {
+                Err(PrivateFsTransitionError::recoverable(error, self))
+            } else {
+                Err(PrivateFsTransitionError::terminal(
+                    terminal_settlement_error(&self.lease),
+                ))
+            };
+        }
+        if let Err(error) = self.verify_boundary_unlocked() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
+
+        let chmod = platform::set_directory_mode(&self.core.handle, DirectoryMode::Sealed);
+        #[cfg(test)]
+        let chmod = chmod.and_then(|()| {
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::SealDirectoryCommitted)
+            {
+                Err(PrivateFsError::Io)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = chmod {
+            let unchanged = verify_core_boundary(&self.core, DirectoryMode::Writable)
+                .and_then(|()| self.lease.verify_authority());
+            drop(operation);
+            return if unchanged.is_ok() {
+                Err(PrivateFsTransitionError::recoverable(error, self))
+            } else {
+                Err(PrivateFsTransitionError::terminal(
+                    terminal_settlement_error(&self.lease),
+                ))
+            };
+        }
+
+        let settlement = (|| {
+            platform::sync_directory(&self.core.handle)?;
+            #[cfg(test)]
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::SealDirectorySelfSync)
+            {
+                return Err(PrivateFsError::Io);
+            }
+            let parent = self
+                .core
+                .parent
+                .as_ref()
+                .ok_or(PrivateFsError::IdentityAmbiguous)?;
+            platform::sync_directory(&parent.handle)?;
+            #[cfg(test)]
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::SealDirectoryParentSync)
+            {
+                return Err(PrivateFsError::Io);
+            }
+            verify_core_boundary(&self.core, DirectoryMode::Sealed)?;
+            self.lease.verify_authority()
+        })();
+        if settlement.is_err() {
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(
+                terminal_settlement_error(&self.lease),
+            ));
+        }
+        drop(operation);
+        let Self {
+            core,
+            lease,
+            role: _,
+        } = self;
+        Ok(SealedPrivateDirectory { core, lease })
+    }
+
+    fn direct_children_are_sealed_unlocked(&self) -> Result<(), PrivateFsError> {
+        let names = platform::list_names(
+            &self.core.handle,
+            &self.core.path,
+            MAX_INVENTORY_ENTRIES.saturating_add(1),
+        )?;
+        if names.len() > MAX_INVENTORY_ENTRIES {
+            return Err(PrivateFsError::BoundExceeded);
+        }
+        for name in names {
+            PrivateEntryName::new(name.clone()).map_err(|_| PrivateFsError::Unsafe)?;
+            #[cfg(test)]
+            if self.lease.take_seal_child_identity_fault() {
+                return self.lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+            }
+            match self.lease.observe(platform::inspect_child(
+                &self.core.handle,
+                &self.core.path,
+                &name,
+            ))? {
+                Some(platform::RawChildKind::Regular(expected)) => {
+                    let (file, identity) = self.lease.observe(platform::open_sealed_regular(
+                        &self.core.handle,
+                        &self.core.path,
+                        &name,
+                    ))?;
+                    if identity != expected {
+                        return self.lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                    }
+                    self.lease
+                        .observe(platform::verify_exact_name(&file, &name))?;
+                }
+                Some(platform::RawChildKind::Directory(expected)) => {
+                    let (directory, identity) =
+                        self.lease.observe(platform::open_sealed_child_directory(
+                            &self.core.handle,
+                            &self.core.path,
+                            &name,
+                        ))?;
+                    if identity != expected {
+                        return self.lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                    }
+                    self.lease
+                        .observe(platform::verify_exact_name(&directory, &name))?;
+                }
+                None => return self.lease.observe(Err(PrivateFsError::IdentityAmbiguous)),
+            }
+        }
+        Ok(())
+    }
+
     fn child_directory(
         &self,
         name: ChildName<'_>,
@@ -197,12 +964,14 @@ impl PrivateDirectory {
     ) -> Result<Self, PrivateFsError> {
         let _operation = self.begin_operation()?;
         self.reject_reserved_name(name)?;
-        self.precheck_unlocked()?;
         if matches!(mode, ChildDirectoryMode::OpenExisting) {
+            self.precheck_unlocked()?;
             let child = self.lease.observe(self.open_child_unlocked(name))?;
             self.precheck_unlocked()?;
             return Ok(child);
         }
+        self.lease.mutation_allowed()?;
+        self.precheck_unlocked()?;
 
         let created = match self.create_directory_unlocked(name) {
             Ok(created) => created,
@@ -482,6 +1251,79 @@ impl PrivateDirectory {
         self.with_bounded_regular_reader_named(ChildName::Entry(name), limit, callback)
     }
 
+    /// Runs a callback with one exact `0400` protocol-file reader.
+    ///
+    /// Unlike [`Self::with_bounded_entry_regular_reader`], this admission is
+    /// intentionally strict even though the containing directory remains
+    /// writable: an exact `0600` file is refused. This is the read boundary for
+    /// already sealed artifacts during staged materialization. The callback
+    /// receives only a bounded [`Read`] capability, its result remains nested,
+    /// and exact mode, length, identity, spelling, and the writable parent
+    /// capability are revalidated afterward. It must not re-enter this
+    /// namespace while the callback is running.
+    pub fn with_bounded_sealed_regular_reader<T, E>(
+        &self,
+        component: &PrivateComponent,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        self.with_bounded_sealed_regular_reader_named(
+            ChildName::Control(component),
+            limit,
+            callback,
+        )
+    }
+
+    /// Runs a callback with one exact `0400` payload-file reader.
+    ///
+    /// This is the case-preserving entry-name variant of
+    /// [`Self::with_bounded_sealed_regular_reader`] and has the same strict
+    /// admission, bounded-reader, and post-callback reproof contract.
+    pub fn with_bounded_sealed_entry_regular_reader<T, E>(
+        &self,
+        name: &PrivateEntryName,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        self.with_bounded_sealed_regular_reader_named(ChildName::Entry(name), limit, callback)
+    }
+
+    fn with_bounded_sealed_regular_reader_named<T, E>(
+        &self,
+        name: ChildName<'_>,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        with_bounded_sealed_regular_reader_unlocked(
+            &self.core,
+            &self.lease,
+            DirectoryMode::Writable,
+            name,
+            limit,
+            callback,
+        )
+    }
+
+    /// Runs a synchronous callback with this capability's currently verified path.
+    ///
+    /// The operation mutex is released while the callback runs so read-only
+    /// namespace operations may re-enter. A namespace-wide path pin makes every
+    /// mutation return [`PrivateFsError::InUse`] until the callback finishes.
+    /// On ordinary return the mutex is reacquired and the complete capability
+    /// boundary is revalidated before the pin is released. Panic unwinding
+    /// releases the pin through RAII; the next operation still performs its
+    /// normal precheck. The borrowed path is synchronous validation context
+    /// only: retaining or later reusing it does not retain filesystem authority.
+    pub fn with_verified_path<T>(
+        &self,
+        callback: impl FnOnce(&Path) -> T,
+    ) -> Result<T, PrivateFsError> {
+        with_verified_path_callback(&self.core, &self.lease, DirectoryMode::Writable, callback)
+    }
+
     fn with_bounded_regular_reader_named<T, E>(
         &self,
         name: ChildName<'_>,
@@ -639,6 +1481,9 @@ impl PrivateDirectory {
         expected_length: StreamingFileLength,
     ) -> Result<FileIdentity, StreamingWriteError> {
         let _operation = self.begin_operation().map_err(StreamingWriteError::from)?;
+        self.lease
+            .mutation_allowed()
+            .map_err(StreamingWriteError::from)?;
         self.reject_reserved_name(name)
             .map_err(StreamingWriteError::from)?;
         self.precheck_unlocked()
@@ -787,6 +1632,7 @@ impl PrivateDirectory {
         limit: ByteLimit,
     ) -> Result<FileIdentity, PrivateFsError> {
         let _operation = self.begin_operation()?;
+        self.lease.mutation_allowed()?;
         self.reject_reserved_name(name)?;
         if bytes.len() > limit.get() {
             return Err(PrivateFsError::BoundExceeded);
@@ -865,6 +1711,7 @@ impl PrivateDirectory {
 
     fn remove_verified_regular_named(&self, name: ChildName<'_>) -> Result<bool, PrivateFsError> {
         let _operation = self.begin_operation()?;
+        self.lease.mutation_allowed()?;
         self.reject_reserved_name(name)?;
         self.precheck_unlocked()?;
         let Some(verified) = self.open_optional_regular_unlocked(name, OpenPurpose::Mutation)?
@@ -905,6 +1752,7 @@ impl PrivateDirectory {
         destination: &PrivateComponent,
     ) -> Result<FileIdentity, PrivateFsError> {
         let _operation = self.begin_operation()?;
+        self.lease.mutation_allowed()?;
         self.reject_reserved(source)?;
         self.reject_reserved(destination)?;
         if source == destination {
@@ -948,6 +1796,7 @@ impl PrivateDirectory {
         destination: &PrivateComponent,
     ) -> Result<FileIdentity, PrivateFsError> {
         let _operation = self.begin_operation()?;
+        self.lease.mutation_allowed()?;
         self.reject_reserved(source)?;
         self.reject_reserved(destination)?;
         if source == destination {
@@ -973,6 +1822,76 @@ impl PrivateDirectory {
             return self.settle_failed_mutation_unlocked(unchanged, error);
         }
         self.settle_rename_unlocked(source, destination, source_file)
+    }
+
+    /// Removes this directory only when its exact descriptor is empty.
+    ///
+    /// This nonrecursive linear transition is unavailable for the namespace
+    /// root. A clean pre-commit failure returns the unchanged capability;
+    /// every possible committed removal returns no capability and quarantines
+    /// the shared lease when durable settlement cannot be proven.
+    pub fn remove_empty(self) -> Result<(), PrivateFsTransitionError<Self>> {
+        remove_empty_writable(self)
+    }
+
+    /// Opens and consumes one named protocol child for exact empty removal.
+    ///
+    /// Absence is `false`. The relationship is captured internally from the
+    /// opened child; no caller-provided parent/name relationship is trusted.
+    pub fn remove_empty_private_child(
+        &self,
+        component: &PrivateComponent,
+    ) -> Result<bool, PrivateFsError> {
+        self.remove_empty_child_named(ChildName::Control(component))
+    }
+
+    /// Opens and consumes one case-preserving child for exact empty removal.
+    pub fn remove_empty_entry_child(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<bool, PrivateFsError> {
+        self.remove_empty_child_named(ChildName::Entry(name))
+    }
+
+    fn remove_empty_child_named(&self, name: ChildName<'_>) -> Result<bool, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        self.lease.mutation_allowed()?;
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        #[cfg(test)]
+        let opened = if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::RemoveChildOpenIdentity)
+        {
+            Err(PrivateFsError::IdentityAmbiguous)
+        } else {
+            self.open_child_unlocked(name)
+        };
+        #[cfg(not(test))]
+        let opened = self.open_child_unlocked(name);
+        let (core, mode) = match self.lease.observe(opened) {
+            Ok(child) => (child.core, DirectoryMode::Writable),
+            Err(PrivateFsError::NotFound) => {
+                self.precheck_unlocked()?;
+                return Ok(false);
+            }
+            Err(PrivateFsError::Unsafe) => {
+                let child = self.lease.observe(open_sealed_child_unlocked(
+                    &self.core,
+                    &self.lease,
+                    DirectoryMode::Writable,
+                    name,
+                ))?;
+                (child.core, DirectoryMode::Sealed)
+            }
+            Err(error) => return Err(error),
+        };
+        match remove_empty_core_unlocked(&core, &self.lease, mode) {
+            Ok(()) => Ok(true),
+            Err(RemoveEmptyFailure::Clean(error) | RemoveEmptyFailure::Terminal(error)) => {
+                Err(error)
+            }
+        }
     }
 
     /// Flushes this directory's metadata after serialized boundary checks.
@@ -1074,7 +1993,7 @@ impl PrivateDirectory {
 
     fn verify_boundary_unlocked(&self) -> Result<(), PrivateFsError> {
         self.lease.verify_authority()?;
-        verify_core_boundary(&self.core)
+        verify_core_boundary(&self.core, DirectoryMode::Writable)
     }
 
     fn open_child_unlocked(&self, name: ChildName<'_>) -> Result<Self, PrivateFsError> {
@@ -1086,7 +2005,17 @@ impl PrivateDirectory {
                 path: self.core.path.join(name.as_str()),
                 handle,
                 identity: DirectoryIdentity(identity),
-                child_name: Some(name.to_owned_name()),
+                parent: Some(ParentAuthority {
+                    path: self.core.path.clone(),
+                    handle: self
+                        .core
+                        .handle
+                        .try_clone()
+                        .map_err(|_| PrivateFsError::Io)?,
+                    identity: self.core.identity,
+                    child_name: name.to_owned_name(),
+                    mode: DirectoryMode::Writable,
+                }),
             },
             lease: Arc::clone(&self.lease),
             role: DirectoryRole::Child,
@@ -1320,7 +2249,7 @@ fn admit_root(path: PathBuf) -> Result<DirectoryCore, PrivateFsError> {
         path,
         handle,
         identity: DirectoryIdentity(identity),
-        child_name: None,
+        parent: None,
     })
 }
 
@@ -1396,7 +2325,7 @@ fn admit_existing_lock(
         return Err(PrivateFsError::Unsafe);
     }
     revalidate_exact_lock_regular(directory, lock_name, &lock)?;
-    verify_core_boundary(directory)?;
+    verify_core_boundary(directory, DirectoryMode::Writable)?;
     inspect_and_cleanup_lock_staging(directory, lock_name, &mut lock, lock_staging_name)?;
     if read_lock_content(&mut lock.file)? != LOCK_FILE_CONTENT {
         return Err(PrivateFsError::Unsafe);
@@ -1520,7 +2449,7 @@ fn prepare_staged_lock(
     if read_lock_content(&mut staging.file)? != LOCK_FILE_CONTENT {
         return Err(PrivateFsError::IdentityAmbiguous);
     }
-    verify_core_boundary(directory)
+    verify_core_boundary(directory, DirectoryMode::Writable)
 }
 
 fn settle_published_lock(
@@ -1536,7 +2465,7 @@ fn settle_published_lock(
             return Err(PrivateFsError::IdentityAmbiguous);
         }
         revalidate_exact_lock_regular(directory, lock_name, &lock)?;
-        verify_core_boundary(directory)?;
+        verify_core_boundary(directory, DirectoryMode::Writable)?;
         inspect_and_cleanup_lock_staging(directory, lock_name, &mut lock, lock_staging_name)?;
         Ok(lock)
     })();
@@ -1584,7 +2513,7 @@ fn inspect_and_cleanup_lock_staging(
         if read_lock_content(&mut lock.file)? != LOCK_FILE_CONTENT {
             return Err(PrivateFsError::IdentityAmbiguous);
         }
-        verify_core_boundary(directory)
+        verify_core_boundary(directory, DirectoryMode::Writable)
     })();
     settlement.map_err(|_| PrivateFsError::SettlementUnknown)
 }
@@ -1628,22 +2557,524 @@ fn classify_root_create_error(root: &Path, _error: &std::io::Error) -> PrivateFs
     }
 }
 
-fn verify_core_boundary(directory: &DirectoryCore) -> Result<(), PrivateFsError> {
+fn with_verified_path_callback<T>(
+    core: &DirectoryCore,
+    lease: &Arc<NamespaceLease>,
+    mode: DirectoryMode,
+    callback: impl FnOnce(&Path) -> T,
+) -> Result<T, PrivateFsError> {
+    let operation = lease.begin()?;
+    lease.observe(
+        lease
+            .verify_authority()
+            .and_then(|()| verify_core_boundary(core, mode)),
+    )?;
+    let pin = lease.pin_path()?;
+    drop(operation);
+
+    let callback_result = callback(&core.path);
+
+    let operation = match lease.begin() {
+        Ok(operation) => operation,
+        Err(error) => {
+            pin.release();
+            return Err(error);
+        }
+    };
+    let validation = lease.observe(
+        lease
+            .verify_authority()
+            .and_then(|()| verify_core_boundary(core, mode)),
+    );
+    pin.release();
+    drop(operation);
+    validation?;
+    Ok(callback_result)
+}
+
+fn open_sealed_child_unlocked(
+    parent: &DirectoryCore,
+    lease: &Arc<NamespaceLease>,
+    parent_mode: DirectoryMode,
+    name: ChildName<'_>,
+) -> Result<SealedPrivateDirectory, PrivateFsError> {
+    let (handle, identity) =
+        platform::open_sealed_child_directory(&parent.handle, &parent.path, name.as_str())?;
+    platform::verify_exact_name(&handle, name.as_str())?;
+    Ok(SealedPrivateDirectory {
+        core: DirectoryCore {
+            path: parent.path.join(name.as_str()),
+            handle,
+            identity: DirectoryIdentity(identity),
+            parent: Some(ParentAuthority {
+                path: parent.path.clone(),
+                handle: parent.handle.try_clone().map_err(|_| PrivateFsError::Io)?,
+                identity: parent.identity,
+                child_name: name.to_owned_name(),
+                mode: parent_mode,
+            }),
+        },
+        lease: Arc::clone(lease),
+    })
+}
+
+fn inspect_sealed_entry_unlocked(
+    parent: &DirectoryCore,
+    lease: &NamespaceLease,
+    name: &PrivateEntryName,
+) -> Result<Option<PrivateChildKind>, PrivateFsError> {
+    let Some(observed) = lease.observe(platform::inspect_child(
+        &parent.handle,
+        &parent.path,
+        name.as_str(),
+    ))?
+    else {
+        return Ok(None);
+    };
+
+    match observed {
+        platform::RawChildKind::Regular(expected) => {
+            let opened = platform::open_sealed_regular(&parent.handle, &parent.path, name.as_str());
+            let (file, identity) = match opened {
+                Ok(opened) => opened,
+                Err(PrivateFsError::Unsafe) => {
+                    let unchanged = matches!(
+                        platform::inspect_child(&parent.handle, &parent.path, name.as_str()),
+                        Ok(Some(platform::RawChildKind::Regular(identity))) if identity == expected
+                    );
+                    if unchanged {
+                        return Err(PrivateFsError::Unsafe);
+                    }
+                    return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                }
+                Err(PrivateFsError::NotFound | PrivateFsError::IdentityAmbiguous) => {
+                    return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                }
+                Err(error) => return lease.observe(Err(error)),
+            };
+            if identity != expected {
+                return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+            }
+            if platform::verify_exact_name(&file, name.as_str()).is_err() {
+                return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+            }
+            Ok(Some(PrivateChildKind::RegularFile(FileIdentity(identity))))
+        }
+        platform::RawChildKind::Directory(expected) => {
+            let opened =
+                platform::open_sealed_child_directory(&parent.handle, &parent.path, name.as_str());
+            let (directory, identity) = match opened {
+                Ok(opened) => opened,
+                Err(PrivateFsError::Unsafe) => {
+                    let unchanged = matches!(
+                        platform::inspect_child(&parent.handle, &parent.path, name.as_str()),
+                        Ok(Some(platform::RawChildKind::Directory(identity))) if identity == expected
+                    );
+                    if unchanged {
+                        return Err(PrivateFsError::Unsafe);
+                    }
+                    return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                }
+                Err(PrivateFsError::NotFound | PrivateFsError::IdentityAmbiguous) => {
+                    return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                }
+                Err(error) => return lease.observe(Err(error)),
+            };
+            if identity != expected {
+                return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+            }
+            if platform::verify_exact_name(&directory, name.as_str()).is_err() {
+                return lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+            }
+            Ok(Some(PrivateChildKind::Directory(DirectoryIdentity(
+                identity,
+            ))))
+        }
+    }
+}
+
+fn with_bounded_sealed_regular_reader_unlocked<T, E>(
+    parent: &DirectoryCore,
+    lease: &NamespaceLease,
+    parent_mode: DirectoryMode,
+    name: ChildName<'_>,
+    limit: ByteLimit,
+    callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+) -> Result<Option<Result<T, E>>, PrivateFsError> {
+    let opened = platform::open_sealed_regular(&parent.handle, &parent.path, name.as_str())
+        .and_then(|(file, identity)| {
+            platform::verify_exact_name(&file, name.as_str())?;
+            Ok((file, identity))
+        });
+    let (mut file, identity) = match lease.observe(opened) {
+        Ok(opened) => opened,
+        Err(PrivateFsError::NotFound) => {
+            lease.observe(
+                lease
+                    .verify_authority()
+                    .and_then(|()| verify_core_boundary(parent, parent_mode)),
+            )?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    #[cfg(test)]
+    let initial_metadata =
+        if lease.take_streaming_fault(crate::lease::StreamingFault::InitialReadMetadata) {
+            Err(PrivateFsError::IdentityAmbiguous)
+        } else {
+            file.metadata()
+                .map_err(|_| PrivateFsError::IdentityAmbiguous)
+        };
+    #[cfg(not(test))]
+    let initial_metadata = file
+        .metadata()
+        .map_err(|_| PrivateFsError::IdentityAmbiguous);
+    let initial_length = lease.observe(initial_metadata)?.len();
+    if initial_length > u64::try_from(limit.get()).unwrap_or(u64::MAX) {
+        lease.observe(validate_sealed_regular_after_read(
+            parent,
+            lease,
+            parent_mode,
+            name,
+            &file,
+            identity,
+            initial_length,
+        ))?;
+        return Err(PrivateFsError::BoundExceeded);
+    }
+
+    let callback_result = {
+        let mut bounded = Read::by_ref(&mut file).take(initial_length);
+        callback(&mut bounded)
+    };
+    lease.observe(validate_sealed_regular_after_read(
+        parent,
+        lease,
+        parent_mode,
+        name,
+        &file,
+        identity,
+        initial_length,
+    ))?;
+    Ok(Some(callback_result))
+}
+
+fn validate_sealed_regular_after_read(
+    parent: &DirectoryCore,
+    lease: &NamespaceLease,
+    parent_mode: DirectoryMode,
+    name: ChildName<'_>,
+    file: &File,
+    identity: platform::RawIdentity,
+    initial_length: u64,
+) -> Result<(), PrivateFsError> {
+    let final_length = file
+        .metadata()
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?
+        .len();
+    if final_length != initial_length {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    platform::revalidate_regular_mode(
+        &parent.handle,
+        &parent.path,
+        name.as_str(),
+        file,
+        identity,
+        RegularMode::Sealed,
+    )?;
+    lease.verify_authority()?;
+    verify_core_boundary(parent, parent_mode)
+}
+
+fn terminal_settlement_error(lease: &NamespaceLease) -> PrivateFsError {
+    lease
+        .settle_after_commit::<()>(Err(PrivateFsError::SettlementUnknown))
+        .err()
+        .unwrap_or(PrivateFsError::SettlementUnknown)
+}
+
+enum ExistingDestination {
+    Safe,
+    Hostile,
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+fn replace_published_directory_identity_for_test(
+    destination_parent: &PrivateDirectory,
+    destination: ChildName<'_>,
+) -> Result<(), PrivateFsError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let installed = destination_parent.core.path.join(destination.as_str());
+    let recovery = destination_parent
+        .core
+        .path
+        .join(format!(".{}.identity-race", destination.as_str()));
+    fs::rename(&installed, &recovery).map_err(|_| PrivateFsError::Io)?;
+    private_directory_builder()
+        .create(&installed)
+        .map_err(|_| PrivateFsError::Io)?;
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o500))
+        .map_err(|_| PrivateFsError::Io)
+}
+
+fn classify_existing_destination_unlocked(
+    destination_parent: &PrivateDirectory,
+    destination: ChildName<'_>,
+) -> Result<ExistingDestination, PrivateFsError> {
+    match platform::inspect_child(
+        &destination_parent.core.handle,
+        &destination_parent.core.path,
+        destination.as_str(),
+    ) {
+        Ok(Some(_)) => Ok(ExistingDestination::Safe),
+        Err(PrivateFsError::Unsafe) => Ok(ExistingDestination::Hostile),
+        Ok(None) | Err(PrivateFsError::NotFound | PrivateFsError::IdentityAmbiguous) => {
+            Err(PrivateFsError::IdentityAmbiguous)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_child_absent_unlocked(
+    parent: &DirectoryCore,
+    name: ChildName<'_>,
+) -> Result<(), PrivateFsError> {
+    match platform::inspect_child(&parent.handle, &parent.path, name.as_str())? {
+        None => Ok(()),
+        Some(_) => Err(PrivateFsError::IdentityAmbiguous),
+    }
+}
+
+fn ensure_child_absent_owned_unlocked(parent: &ParentAuthority) -> Result<(), PrivateFsError> {
+    match platform::inspect_child(&parent.handle, &parent.path, parent.child_name.as_str())? {
+        None => Ok(()),
+        Some(_) => Err(PrivateFsError::IdentityAmbiguous),
+    }
+}
+
+fn verify_parent_authority(parent: &ParentAuthority) -> Result<(), PrivateFsError> {
+    if !platform::same_open_identity(&parent.handle, parent.identity.0) {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    let (current, identity) = platform::open_directory_with_mode(&parent.path, parent.mode)
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    if identity != parent.identity.0 || !platform::same_open_identity(&current, identity) {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    Ok(())
+}
+
+enum RemoveEmptyFailure {
+    Clean(PrivateFsError),
+    Terminal(PrivateFsError),
+}
+
+fn remove_empty_writable(
+    directory: PrivateDirectory,
+) -> Result<(), PrivateFsTransitionError<PrivateDirectory>> {
+    let operation = match directory.lease.begin() {
+        Ok(operation) => operation,
+        Err(error) => return Err(PrivateFsTransitionError::terminal(error)),
+    };
+    if let Err(error) = directory.precheck_unlocked() {
+        drop(operation);
+        return Err(PrivateFsTransitionError::terminal(error));
+    }
+    if let Err(error) = directory.lease.mutation_allowed() {
+        drop(operation);
+        return Err(PrivateFsTransitionError::recoverable(error, directory));
+    }
+    if directory.role == DirectoryRole::Root {
+        drop(operation);
+        return Err(PrivateFsTransitionError::recoverable(
+            PrivateFsError::Unsafe,
+            directory,
+        ));
+    }
+    let result =
+        remove_empty_core_unlocked(&directory.core, &directory.lease, DirectoryMode::Writable);
+    drop(operation);
+    match result {
+        Ok(()) => Ok(()),
+        Err(RemoveEmptyFailure::Clean(error)) => {
+            Err(PrivateFsTransitionError::recoverable(error, directory))
+        }
+        Err(RemoveEmptyFailure::Terminal(error)) => Err(PrivateFsTransitionError::terminal(error)),
+    }
+}
+
+fn remove_empty_sealed(
+    directory: SealedPrivateDirectory,
+) -> Result<(), PrivateFsTransitionError<SealedPrivateDirectory>> {
+    let operation = match directory.lease.begin() {
+        Ok(operation) => operation,
+        Err(error) => return Err(PrivateFsTransitionError::terminal(error)),
+    };
+    if let Err(error) = directory.precheck_unlocked() {
+        drop(operation);
+        return Err(PrivateFsTransitionError::terminal(error));
+    }
+    if let Err(error) = directory.lease.mutation_allowed() {
+        drop(operation);
+        return Err(PrivateFsTransitionError::recoverable(error, directory));
+    }
+    let result =
+        remove_empty_core_unlocked(&directory.core, &directory.lease, DirectoryMode::Sealed);
+    drop(operation);
+    match result {
+        Ok(()) => Ok(()),
+        Err(RemoveEmptyFailure::Clean(error)) => {
+            Err(PrivateFsTransitionError::recoverable(error, directory))
+        }
+        Err(RemoveEmptyFailure::Terminal(error)) => Err(PrivateFsTransitionError::terminal(error)),
+    }
+}
+
+fn remove_empty_core_unlocked(
+    core: &DirectoryCore,
+    lease: &NamespaceLease,
+    mode: DirectoryMode,
+) -> Result<(), RemoveEmptyFailure> {
+    let Some(parent) = core.parent.as_ref() else {
+        return Err(RemoveEmptyFailure::Clean(PrivateFsError::Unsafe));
+    };
+    let precheck = lease
+        .verify_authority()
+        .and_then(|()| verify_core_boundary(core, mode));
+    if let Err(error) = lease.observe(precheck) {
+        return Err(RemoveEmptyFailure::Terminal(error));
+    }
+    if parent.mode != DirectoryMode::Writable {
+        return Err(RemoveEmptyFailure::Clean(PrivateFsError::Unsafe));
+    }
+    match platform::directory_is_empty(&core.handle) {
+        Ok(true) => {}
+        Ok(false) => {
+            return if verify_core_boundary(core, mode)
+                .and_then(|()| lease.verify_authority())
+                .is_ok()
+            {
+                Err(RemoveEmptyFailure::Clean(PrivateFsError::DirectoryNotEmpty))
+            } else {
+                Err(RemoveEmptyFailure::Terminal(
+                    lease
+                        .observe::<()>(Err(PrivateFsError::IdentityAmbiguous))
+                        .err()
+                        .unwrap_or(PrivateFsError::IdentityAmbiguous),
+                ))
+            };
+        }
+        Err(error) => {
+            return if verify_core_boundary(core, mode)
+                .and_then(|()| lease.verify_authority())
+                .is_ok()
+            {
+                Err(RemoveEmptyFailure::Clean(error))
+            } else {
+                Err(RemoveEmptyFailure::Terminal(terminal_settlement_error(
+                    lease,
+                )))
+            };
+        }
+    }
+    #[cfg(test)]
+    if lease.take_remove_empty_race() {
+        match platform::create_new_regular(&core.handle, &core.path, "remove-race-entry") {
+            Ok((file, _)) => drop(file),
+            Err(_) => {
+                return Err(RemoveEmptyFailure::Terminal(terminal_settlement_error(
+                    lease,
+                )));
+            }
+        }
+    }
+    if let Err(error) = verify_core_boundary(core, mode).and_then(|()| lease.verify_authority()) {
+        let error = lease.observe::<()>(Err(error)).err().unwrap_or(error);
+        return Err(RemoveEmptyFailure::Terminal(error));
+    }
+
+    let removed =
+        platform::remove_directory(&parent.handle, &parent.path, parent.child_name.as_str());
+    #[cfg(test)]
+    let removed = removed.and_then(|()| {
+        if lease.take_lifecycle_fault(crate::lease::LifecycleFault::RemoveDirectoryCommitted) {
+            Err(PrivateFsError::Io)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = removed {
+        return if verify_core_boundary(core, mode)
+            .and_then(|()| lease.verify_authority())
+            .is_ok()
+        {
+            Err(RemoveEmptyFailure::Clean(error))
+        } else {
+            Err(RemoveEmptyFailure::Terminal(terminal_settlement_error(
+                lease,
+            )))
+        };
+    }
+
+    let settlement = (|| {
+        platform::sync_directory(&parent.handle)?;
+        #[cfg(test)]
+        if lease.take_lifecycle_fault(crate::lease::LifecycleFault::RemoveDirectoryParentSync) {
+            return Err(PrivateFsError::Io);
+        }
+        ensure_child_absent_owned_unlocked(parent)?;
+        verify_parent_authority(parent)?;
+        lease.verify_authority()
+    })();
+    if settlement.is_ok() {
+        Ok(())
+    } else {
+        Err(RemoveEmptyFailure::Terminal(terminal_settlement_error(
+            lease,
+        )))
+    }
+}
+
+fn verify_core_boundary(
+    directory: &DirectoryCore,
+    mode: DirectoryMode,
+) -> Result<(), PrivateFsError> {
     if !platform::same_open_identity(&directory.handle, directory.identity.0) {
         return Err(PrivateFsError::IdentityAmbiguous);
     }
-    if let Some(child_name) = &directory.child_name {
-        platform::verify_exact_name(&directory.handle, child_name.as_str())
+    if let Some(parent) = &directory.parent {
+        if !platform::same_open_identity(&parent.handle, parent.identity.0) {
+            return Err(PrivateFsError::IdentityAmbiguous);
+        }
+        let (current_parent, current_parent_identity) =
+            platform::open_directory_with_mode(&parent.path, parent.mode)
+                .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+        if current_parent_identity != parent.identity.0
+            || !platform::same_open_identity(&current_parent, parent.identity.0)
+        {
+            return Err(PrivateFsError::IdentityAmbiguous);
+        }
+        platform::revalidate_child_directory(
+            &parent.handle,
+            &parent.path,
+            parent.child_name.as_str(),
+            &directory.handle,
+            directory.identity.0,
+            mode,
+        )
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+        if directory.path != parent.path.join(parent.child_name.as_str()) {
+            return Err(PrivateFsError::IdentityAmbiguous);
+        }
+    } else {
+        let (current, identity) = platform::open_directory_with_mode(&directory.path, mode)
             .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    }
-    let (current, identity) =
-        platform::open_directory(&directory.path).map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    if identity != directory.identity.0 || !platform::same_open_identity(&current, identity) {
-        return Err(PrivateFsError::IdentityAmbiguous);
-    }
-    if let Some(child_name) = &directory.child_name {
-        platform::verify_exact_name(&current, child_name.as_str())
-            .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+        if identity != directory.identity.0 || !platform::same_open_identity(&current, identity) {
+            return Err(PrivateFsError::IdentityAmbiguous);
+        }
     }
     Ok(())
 }
@@ -1686,7 +3117,7 @@ fn private_directory_builder() -> fs::DirBuilder {
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
-    use crate::lease::{CommittedMutationFault, StreamingFault};
+    use crate::lease::{CommittedMutationFault, LifecycleFault, StreamingFault};
     use std::fs::OpenOptions;
     use std::io::Cursor;
 
@@ -1764,6 +3195,531 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let namespace = LockedPrivateNamespace::open_or_create(parent.path().join(name)).unwrap();
         (parent, namespace)
+    }
+
+    fn transition_error_while_pinned<T, S>(
+        lease: &Arc<NamespaceLease>,
+        transition: impl FnOnce() -> Result<T, PrivateFsTransitionError<S>>,
+    ) -> PrivateFsTransitionError<S> {
+        let operation = lease.begin().unwrap();
+        let pin = lease.pin_path().unwrap();
+        drop(operation);
+        let error = transition().err().unwrap();
+        drop(pin);
+        error
+    }
+
+    fn assert_terminal_identity_ambiguity<S>(error: PrivateFsTransitionError<S>) {
+        let (kind, state) = error.into_parts();
+        assert_eq!(kind, PrivateFsError::IdentityAmbiguous);
+        assert!(
+            state.is_none(),
+            "terminal transition returned stale authority"
+        );
+    }
+
+    #[test]
+    fn reported_post_chmod_directory_failure_is_terminal_and_quarantines() {
+        let (_parent, namespace) = test_namespace("seal-commit-fault-test");
+        let child = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("child").unwrap())
+            .unwrap();
+        child
+            .lease
+            .inject_lifecycle_fault(crate::lease::LifecycleFault::SealDirectoryCommitted);
+
+        let error = child.seal().err().unwrap();
+        assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+        assert!(!error.is_recoverable());
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn committed_unseal_failure_returns_no_capability_and_quarantines() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (parent, namespace) = test_namespace("unseal-commit-fault-test");
+        let child = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("child").unwrap())
+            .unwrap()
+            .seal()
+            .unwrap();
+        child
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::UnsealDirectoryCommitted);
+
+        let error = child.unseal().err().unwrap();
+        let (kind, state) = error.into_parts();
+        assert_eq!(kind, PrivateFsError::SettlementUnknown);
+        assert!(state.is_none());
+        assert_eq!(
+            fs::metadata(parent.path().join("unseal-commit-fault-test/child"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn committed_regular_seal_failure_is_terminal_and_quarantines() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (parent, namespace) = test_namespace("regular-seal-commit-fault-test");
+        let child = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("child").unwrap())
+            .unwrap();
+        let payload = PrivateComponent::new("payload.bin").unwrap();
+        child
+            .write_new_synced(&payload, b"payload", ByteLimit::new(16).unwrap())
+            .unwrap();
+        child
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::SealRegularCommitted);
+
+        assert_eq!(
+            child.seal_verified_regular(&payload),
+            Err(PrivateFsError::SettlementUnknown)
+        );
+        assert_eq!(
+            fs::metadata(
+                parent
+                    .path()
+                    .join("regular-seal-commit-fault-test/child/payload.bin")
+            )
+            .unwrap()
+            .permissions()
+            .mode()
+                & 0o7777,
+            0o400
+        );
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn every_consuming_transition_reproves_stale_authority_before_pin_refusal() {
+        {
+            let (parent, namespace) = test_namespace("stale-pinned-seal-test");
+            let name = PrivateComponent::new("child").unwrap();
+            let child = namespace.directory.create_new_private_child(&name).unwrap();
+            fs::rename(
+                parent.path().join("stale-pinned-seal-test/child"),
+                parent.path().join("stale-pinned-seal-test/moved"),
+            )
+            .unwrap();
+            let lease = Arc::clone(&child.lease);
+            let error = transition_error_while_pinned(&lease, || child.seal());
+            assert_terminal_identity_ambiguity(error);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+
+        {
+            let (parent, namespace) = test_namespace("stale-pinned-unseal-test");
+            let name = PrivateComponent::new("child").unwrap();
+            let child = namespace
+                .directory
+                .create_new_private_child(&name)
+                .unwrap()
+                .seal()
+                .unwrap();
+            fs::rename(
+                parent.path().join("stale-pinned-unseal-test/child"),
+                parent.path().join("stale-pinned-unseal-test/moved"),
+            )
+            .unwrap();
+            let lease = Arc::clone(&child.lease);
+            let error = transition_error_while_pinned(&lease, || child.unseal());
+            assert_terminal_identity_ambiguity(error);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+
+        {
+            let (parent, namespace) = test_namespace("stale-pinned-publish-test");
+            let container = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+                .unwrap();
+            let child = container
+                .create_new_private_child(&PrivateComponent::new("source").unwrap())
+                .unwrap()
+                .seal()
+                .unwrap();
+            fs::rename(
+                parent
+                    .path()
+                    .join("stale-pinned-publish-test/objects/source"),
+                parent
+                    .path()
+                    .join("stale-pinned-publish-test/objects/moved"),
+            )
+            .unwrap();
+            let lease = Arc::clone(&child.lease);
+            let error = transition_error_while_pinned(&lease, || {
+                child.publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+            });
+            assert_terminal_identity_ambiguity(error);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+
+        {
+            let (parent, namespace) = test_namespace("stale-pinned-writable-remove-test");
+            let child = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("child").unwrap())
+                .unwrap();
+            fs::rename(
+                parent
+                    .path()
+                    .join("stale-pinned-writable-remove-test/child"),
+                parent
+                    .path()
+                    .join("stale-pinned-writable-remove-test/moved"),
+            )
+            .unwrap();
+            let lease = Arc::clone(&child.lease);
+            let error = transition_error_while_pinned(&lease, || child.remove_empty());
+            assert_terminal_identity_ambiguity(error);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+
+        {
+            let (parent, namespace) = test_namespace("stale-pinned-sealed-remove-test");
+            let child = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("child").unwrap())
+                .unwrap()
+                .seal()
+                .unwrap();
+            fs::rename(
+                parent.path().join("stale-pinned-sealed-remove-test/child"),
+                parent.path().join("stale-pinned-sealed-remove-test/moved"),
+            )
+            .unwrap();
+            let lease = Arc::clone(&child.lease);
+            let error = transition_error_while_pinned(&lease, || child.remove_empty());
+            assert_terminal_identity_ambiguity(error);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_frontier_identity_ambiguity_never_returns_writable_authority() {
+        let (_parent, namespace) = test_namespace("seal-frontier-identity-test");
+        let child = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("child").unwrap())
+            .unwrap();
+        let payload = PrivateComponent::new("payload.bin").unwrap();
+        child
+            .write_new_synced(&payload, b"payload", ByteLimit::new(16).unwrap())
+            .unwrap();
+        child.seal_verified_regular(&payload).unwrap().unwrap();
+        child.lease.inject_seal_child_identity_fault();
+
+        let error = child.seal().err().unwrap();
+        assert_terminal_identity_ambiguity(error);
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn remove_child_identity_observation_stickily_quarantines() {
+        let (_parent, namespace) = test_namespace("remove-open-identity-test");
+        let name = PrivateComponent::new("child").unwrap();
+        let child = namespace.directory.create_new_private_child(&name).unwrap();
+        namespace
+            .directory
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::RemoveChildOpenIdentity);
+
+        assert_eq!(
+            namespace.directory.remove_empty_private_child(&name),
+            Err(PrivateFsError::IdentityAmbiguous)
+        );
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+        drop(child);
+    }
+
+    #[test]
+    fn empty_removal_race_returns_directory_not_empty_with_capability() {
+        let (parent, namespace) = test_namespace("remove-empty-race-test");
+        let name = PrivateComponent::new("child").unwrap();
+        let child = namespace.directory.create_new_private_child(&name).unwrap();
+        child.lease.inject_remove_empty_race();
+
+        let error = child.remove_empty().err().unwrap();
+        let (kind, child) = error.into_parts();
+        assert_eq!(kind, PrivateFsError::DirectoryNotEmpty);
+        let child = child.expect("rmdir race did not commit removal");
+        assert_eq!(
+            child.list_components(4).unwrap(),
+            vec![PrivateComponent::new("remove-race-entry").unwrap()]
+        );
+        assert!(parent
+            .path()
+            .join("remove-empty-race-test/child/remove-race-entry")
+            .is_file());
+    }
+
+    #[test]
+    fn same_parent_publication_syncs_once_and_settles_identity() {
+        let (_parent, namespace) = test_namespace("same-parent-publish-test");
+        let container = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+            .unwrap();
+        let source = container
+            .create_new_private_child(&PrivateComponent::new("source").unwrap())
+            .unwrap()
+            .seal()
+            .unwrap();
+        let identity = source.identity();
+        source
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::PublishDestinationParentSync);
+
+        let installed = source
+            .publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+            .unwrap();
+        assert_eq!(installed.identity(), identity);
+        assert_eq!(installed.lease.same_parent_publish_sync_count(), 1);
+        installed.with_verified_path(|_| ()).unwrap();
+    }
+
+    #[test]
+    fn same_parent_publication_sync_failure_is_terminal() {
+        let (parent, namespace) = test_namespace("same-parent-sync-fault-test");
+        let container = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+            .unwrap();
+        let source = container
+            .create_new_private_child(&PrivateComponent::new("source").unwrap())
+            .unwrap()
+            .seal()
+            .unwrap();
+        source
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::PublishSameParentSync);
+
+        let error = source
+            .publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+            .err()
+            .unwrap();
+        assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+        assert!(!error.is_recoverable());
+        assert!(parent
+            .path()
+            .join("same-parent-sync-fault-test/objects/installed")
+            .is_dir());
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn destination_identity_substitution_after_publication_is_terminal() {
+        let (parent, namespace) = test_namespace("publish-identity-fault-test");
+        let container = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+            .unwrap();
+        let source = container
+            .create_new_private_child(&PrivateComponent::new("source").unwrap())
+            .unwrap()
+            .seal()
+            .unwrap();
+        source
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::PublishDestinationIdentity);
+
+        let error = source
+            .publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+            .err()
+            .unwrap();
+        assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+        assert!(parent
+            .path()
+            .join("publish-identity-fault-test/objects/installed")
+            .is_dir());
+        assert!(parent
+            .path()
+            .join("publish-identity-fault-test/objects/.installed.identity-race")
+            .is_dir());
+        assert_eq!(
+            namespace.directory.list_components(4),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn distinct_parent_publication_quarantines_on_each_parent_sync_fault() {
+        for (suffix, fault) in [
+            ("source", LifecycleFault::PublishSourceParentSync),
+            ("destination", LifecycleFault::PublishDestinationParentSync),
+        ] {
+            let namespace_name = format!("distinct-parent-{suffix}-sync-test");
+            let (_parent, namespace) = test_namespace(&namespace_name);
+            let source_parent = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("staging").unwrap())
+                .unwrap();
+            let destination_parent = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+                .unwrap();
+            let source = source_parent
+                .create_new_private_child(&PrivateComponent::new("source").unwrap())
+                .unwrap()
+                .seal()
+                .unwrap();
+            source.lease.inject_lifecycle_fault(fault);
+
+            let error = source
+                .publish_noreplace(
+                    &destination_parent,
+                    &PrivateComponent::new("installed").unwrap(),
+                )
+                .err()
+                .unwrap();
+            assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+    }
+
+    #[test]
+    fn every_seal_and_unseal_sync_frontier_is_terminal() {
+        for (suffix, fault) in [
+            ("seal-self", LifecycleFault::SealDirectorySelfSync),
+            ("seal-parent", LifecycleFault::SealDirectoryParentSync),
+        ] {
+            let namespace_name = format!("{suffix}-fault-test");
+            let (_parent, namespace) = test_namespace(&namespace_name);
+            let child = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("child").unwrap())
+                .unwrap();
+            child.lease.inject_lifecycle_fault(fault);
+            let error = child.seal().err().unwrap();
+            assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+
+        for (suffix, fault) in [
+            ("unseal-self", LifecycleFault::UnsealDirectorySelfSync),
+            ("unseal-parent", LifecycleFault::UnsealDirectoryParentSync),
+        ] {
+            let namespace_name = format!("{suffix}-fault-test");
+            let (_parent, namespace) = test_namespace(&namespace_name);
+            let child = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("child").unwrap())
+                .unwrap()
+                .seal()
+                .unwrap();
+            child.lease.inject_lifecycle_fault(fault);
+            let error = child.unseal().err().unwrap();
+            assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+    }
+
+    #[test]
+    fn regular_seal_sync_frontiers_are_terminal() {
+        for (suffix, fault) in [
+            ("file", LifecycleFault::SealRegularFileSync),
+            ("parent", LifecycleFault::SealRegularParentSync),
+        ] {
+            let namespace_name = format!("regular-seal-{suffix}-fault-test");
+            let (_parent, namespace) = test_namespace(&namespace_name);
+            let child = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("child").unwrap())
+                .unwrap();
+            let file = PrivateComponent::new("payload.bin").unwrap();
+            child
+                .write_new_synced(&file, b"payload", ByteLimit::new(16).unwrap())
+                .unwrap();
+            child.lease.inject_lifecycle_fault(fault);
+
+            assert_eq!(
+                child.seal_verified_regular(&file),
+                Err(PrivateFsError::SettlementUnknown)
+            );
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_removal_post_commit_frontiers_are_terminal() {
+        for (suffix, fault) in [
+            ("commit", LifecycleFault::RemoveDirectoryCommitted),
+            ("sync", LifecycleFault::RemoveDirectoryParentSync),
+        ] {
+            let namespace_name = format!("remove-{suffix}-fault-test");
+            let (_parent, namespace) = test_namespace(&namespace_name);
+            let child = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("child").unwrap())
+                .unwrap();
+            child.lease.inject_lifecycle_fault(fault);
+
+            let error = child.remove_empty().err().unwrap();
+            assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+            assert!(!error.is_recoverable());
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+        }
     }
 
     #[test]

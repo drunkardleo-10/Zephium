@@ -6,6 +6,7 @@ use std::path::Path;
 
 use rustix::fs::{FileType, Mode, OFlags};
 
+use super::{DirectoryMode, RegularMode};
 use crate::PrivateFsError;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -50,9 +51,33 @@ pub(crate) fn raw_identity(metadata: &Metadata) -> RawIdentity {
 
 pub(crate) fn open_regular(
     directory: &File,
+    directory_path: &Path,
+    name: &str,
+    purpose: OpenPurpose,
+) -> Result<(File, RawIdentity), PrivateFsError> {
+    open_regular_with_mode(directory, directory_path, name, purpose, None)
+}
+
+pub(crate) fn open_sealed_regular(
+    directory: &File,
+    directory_path: &Path,
+    name: &str,
+) -> Result<(File, RawIdentity), PrivateFsError> {
+    open_regular_with_mode(
+        directory,
+        directory_path,
+        name,
+        OpenPurpose::Read,
+        Some(RegularMode::Sealed),
+    )
+}
+
+fn open_regular_with_mode(
+    directory: &File,
     _directory_path: &Path,
     name: &str,
     purpose: OpenPurpose,
+    expected_mode: Option<RegularMode>,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
     let access = match purpose {
         OpenPurpose::Read | OpenPurpose::Mutation => OFlags::RDONLY,
@@ -69,7 +94,10 @@ pub(crate) fn open_regular(
     let opened = file
         .metadata()
         .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    validate_regular_metadata(&opened)?;
+    match expected_mode {
+        Some(mode) => validate_regular_metadata_mode(&opened, mode)?,
+        None => validate_regular_metadata(&opened)?,
+    }
     let identity = raw_identity(&opened);
     if !acl_is_private(&file) {
         return Err(PrivateFsError::Unsafe);
@@ -100,7 +128,7 @@ pub(crate) fn create_new_regular(
     let file = File::from(descriptor);
     let admission = (|| {
         let opened = file.metadata().map_err(|_| PrivateFsError::Io)?;
-        validate_regular_metadata(&opened)?;
+        validate_regular_metadata_mode(&opened, RegularMode::Writable)?;
         let identity = raw_identity(&opened);
         if !acl_is_private(&file) || relative_regular_identity(directory, name)? != identity {
             return Err(PrivateFsError::IdentityAmbiguous);
@@ -137,6 +165,35 @@ pub(crate) fn revalidate_regular(
     verify_exact_name(file, name).map_err(|_| PrivateFsError::IdentityAmbiguous)
 }
 
+pub(crate) fn revalidate_regular_mode(
+    directory: &File,
+    _directory_path: &Path,
+    name: &str,
+    file: &File,
+    expected: RawIdentity,
+    mode: RegularMode,
+) -> Result<(), PrivateFsError> {
+    let opened = file
+        .metadata()
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    if validate_regular_metadata_mode(&opened, mode).is_err()
+        || raw_identity(&opened) != expected
+        || relative_regular_identity(directory, name)? != expected
+        || !acl_is_private(file)
+    {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    verify_exact_name(file, name).map_err(|_| PrivateFsError::IdentityAmbiguous)
+}
+
+pub(crate) fn set_regular_mode(file: &File, mode: RegularMode) -> Result<(), PrivateFsError> {
+    let raw_mode = match mode {
+        RegularMode::Writable => 0o600,
+        RegularMode::Sealed => 0o400,
+    };
+    rustix::fs::fchmod(file, Mode::from_raw_mode(raw_mode)).map_err(|_| PrivateFsError::Io)
+}
+
 pub(crate) fn create_directory(
     parent: &File,
     _parent_path: &Path,
@@ -155,7 +212,49 @@ pub(crate) fn open_child_directory(
     _parent_path: &Path,
     name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    open_relative_directory(parent, name)
+    open_relative_directory(parent, name, Some(DirectoryMode::Writable))
+}
+
+pub(crate) fn open_sealed_child_directory(
+    parent: &File,
+    _parent_path: &Path,
+    name: &str,
+) -> Result<(File, RawIdentity), PrivateFsError> {
+    open_relative_directory(parent, name, Some(DirectoryMode::Sealed))
+}
+
+pub(crate) fn revalidate_child_directory(
+    parent: &File,
+    _parent_path: &Path,
+    name: &str,
+    directory: &File,
+    expected: RawIdentity,
+    mode: DirectoryMode,
+) -> Result<(), PrivateFsError> {
+    let metadata = directory
+        .metadata()
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    if validate_private_directory_metadata_mode(&metadata, mode).is_err()
+        || raw_identity(&metadata) != expected
+        || !acl_is_private(directory)
+    {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    verify_exact_name(directory, name).map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    let (current, current_identity) = open_relative_directory(parent, name, Some(mode))
+        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    if current_identity != expected || !same_open_identity(&current, expected) {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    verify_exact_name(&current, name).map_err(|_| PrivateFsError::IdentityAmbiguous)
+}
+
+pub(crate) fn set_directory_mode(file: &File, mode: DirectoryMode) -> Result<(), PrivateFsError> {
+    let raw_mode = match mode {
+        DirectoryMode::Writable => 0o700,
+        DirectoryMode::Sealed => 0o500,
+    };
+    rustix::fs::fchmod(file, Mode::from_raw_mode(raw_mode)).map_err(|_| PrivateFsError::Io)
 }
 
 pub(crate) fn inspect_child(
@@ -195,7 +294,7 @@ fn inspect_observed_child(
             Ok(RawChildKind::Regular(identity))
         }
         FileType::Directory => {
-            let (directory, identity) = match open_child_directory(parent, parent_path, name) {
+            let (directory, identity) = match open_relative_directory(parent, name, None) {
                 Err(PrivateFsError::NotFound) => {
                     return Err(PrivateFsError::IdentityAmbiguous);
                 }
@@ -290,6 +389,17 @@ pub(crate) fn list_names(
     Ok(names)
 }
 
+pub(crate) fn directory_is_empty(directory: &File) -> Result<bool, PrivateFsError> {
+    let mut reader = rustix::fs::Dir::read_from(directory).map_err(|_| PrivateFsError::Io)?;
+    for entry in &mut reader {
+        let entry = entry.map_err(|_| PrivateFsError::Io)?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn remove_regular(
     directory: &File,
     _directory_path: &Path,
@@ -299,9 +409,33 @@ pub(crate) fn remove_regular(
         .map_err(|_| PrivateFsError::Io)
 }
 
+pub(crate) fn remove_directory(
+    parent: &File,
+    _parent_path: &Path,
+    name: &str,
+) -> Result<(), PrivateFsError> {
+    rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR).map_err(|error| {
+        if matches!(
+            error,
+            rustix::io::Errno::NOTEMPTY | rustix::io::Errno::EXIST
+        ) {
+            PrivateFsError::DirectoryNotEmpty
+        } else {
+            PrivateFsError::Io
+        }
+    })
+}
+
 pub(crate) fn open_directory(path: &Path) -> Result<(File, RawIdentity), PrivateFsError> {
+    open_directory_with_mode(path, DirectoryMode::Writable)
+}
+
+pub(crate) fn open_directory_with_mode(
+    path: &Path,
+    mode: DirectoryMode,
+) -> Result<(File, RawIdentity), PrivateFsError> {
     let before = std::fs::symlink_metadata(path).map_err(map_boundary_io)?;
-    validate_private_directory_node(path, &before)?;
+    validate_private_directory_metadata_mode(&before, mode)?;
     let descriptor = rustix::fs::open(
         path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -313,8 +447,8 @@ pub(crate) fn open_directory(path: &Path) -> Result<(File, RawIdentity), Private
         .metadata()
         .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
     let after = std::fs::symlink_metadata(path).map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    validate_private_directory_node(path, &opened)?;
-    validate_private_directory_node(path, &after)?;
+    validate_private_directory_metadata_mode(&opened, mode)?;
+    validate_private_directory_metadata_mode(&after, mode)?;
     let identity = raw_identity(&opened);
     if !acl_is_private(&file) {
         return Err(PrivateFsError::Unsafe);
@@ -332,11 +466,28 @@ pub(crate) fn same_open_identity(file: &File, expected: RawIdentity) -> bool {
 }
 
 pub(crate) fn validate_regular_metadata(metadata: &Metadata) -> Result<(), PrivateFsError> {
+    if validate_regular_metadata_mode(metadata, RegularMode::Writable).is_ok()
+        || validate_regular_metadata_mode(metadata, RegularMode::Sealed).is_ok()
+    {
+        Ok(())
+    } else {
+        Err(PrivateFsError::Unsafe)
+    }
+}
+
+fn validate_regular_metadata_mode(
+    metadata: &Metadata,
+    expected: RegularMode,
+) -> Result<(), PrivateFsError> {
+    let expected_mode = match expected {
+        RegularMode::Writable => 0o600,
+        RegularMode::Sealed => 0o400,
+    };
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.nlink() != 1
         || metadata.uid() != current_user()
-        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o7777 != expected_mode
     {
         return Err(PrivateFsError::Unsafe);
     }
@@ -347,10 +498,21 @@ pub(crate) fn validate_private_directory_node(
     _path: &Path,
     metadata: &Metadata,
 ) -> Result<(), PrivateFsError> {
+    validate_private_directory_metadata_mode(metadata, DirectoryMode::Writable)
+}
+
+fn validate_private_directory_metadata_mode(
+    metadata: &Metadata,
+    expected: DirectoryMode,
+) -> Result<(), PrivateFsError> {
+    let expected_mode = match expected {
+        DirectoryMode::Writable => 0o700,
+        DirectoryMode::Sealed => 0o500,
+    };
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != current_user()
-        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o7777 != expected_mode
     {
         return Err(PrivateFsError::Unsafe);
     }
@@ -400,6 +562,32 @@ pub(crate) fn atomic_publish_noreplace(
         directory,
         source,
         directory,
+        destination,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            PrivateFsError::AlreadyExists
+        } else {
+            PrivateFsError::Io
+        }
+    })
+}
+
+pub(crate) fn atomic_publish_noreplace_between(
+    source_directory: &File,
+    _source_directory_path: &Path,
+    source: &str,
+    destination_directory: &File,
+    _destination_directory_path: &Path,
+    destination: &str,
+) -> Result<(), PrivateFsError> {
+    use rustix::fs::{renameat_with, RenameFlags};
+
+    renameat_with(
+        source_directory,
+        source,
+        destination_directory,
         destination,
         RenameFlags::NOREPLACE,
     )
@@ -511,6 +699,7 @@ fn raw_stat_identity(stat: &rustix::fs::Stat) -> Result<RawIdentity, PrivateFsEr
 fn open_relative_directory(
     parent: &File,
     name: &str,
+    expected_mode: Option<DirectoryMode>,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
     let descriptor = rustix::fs::openat(
         parent,
@@ -523,7 +712,17 @@ fn open_relative_directory(
     let metadata = file
         .metadata()
         .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    validate_private_directory_node(Path::new(name), &metadata)?;
+    match expected_mode {
+        Some(mode) => validate_private_directory_metadata_mode(&metadata, mode)?,
+        None => {
+            if validate_private_directory_metadata_mode(&metadata, DirectoryMode::Writable).is_err()
+                && validate_private_directory_metadata_mode(&metadata, DirectoryMode::Sealed)
+                    .is_err()
+            {
+                return Err(PrivateFsError::Unsafe);
+            }
+        }
+    }
     if !acl_is_private(&file) {
         return Err(PrivateFsError::Unsafe);
     }

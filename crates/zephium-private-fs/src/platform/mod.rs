@@ -5,6 +5,18 @@ mod unix;
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectoryMode {
+    Writable,
+    Sealed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegularMode {
+    Writable,
+    Sealed,
+}
+
 #[cfg(unix)]
 pub(crate) use unix::*;
 #[cfg(target_os = "windows")]

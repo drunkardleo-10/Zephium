@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use zephium_private_fs::PrivateComponent;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use zephium_private_fs::{
-    ByteLimit, PrivateChildKind, PrivateEntryName, StreamingFileLength, StreamingWriteError,
-    MAX_IN_MEMORY_FILE_BYTES,
+    ByteLimit, PrivateChildKind, PrivateEntryName, PrivateFsTransitionError, StreamingFileLength,
+    StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
 };
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
@@ -106,6 +106,20 @@ fn rolling_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn recover_transition<S>(error: PrivateFsTransitionError<S>, expected: PrivateFsError) -> S {
+    let (actual, state) = error.into_parts();
+    assert_eq!(actual, expected);
+    state.expect("clean pre-commit failure must return the unchanged capability")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn unix_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path).unwrap().permissions().mode() & 0o7777
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -903,6 +917,150 @@ fn bounded_reader_preserves_callback_errors_and_enforces_the_bound_for_both_name
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn exact_sealed_readers_under_writable_parent_support_both_name_domains() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let control = component("object.bin");
+    let entry = entry_name("Payload Object.bin");
+    let writable = entry_name("Writable Object.bin");
+    let limit = ByteLimit::new(32).unwrap();
+    directory
+        .write_new_synced(&control, b"control", limit)
+        .unwrap();
+    directory
+        .write_new_entry_synced(&entry, b"payload", limit)
+        .unwrap();
+    directory
+        .write_new_entry_synced(&writable, b"mutable", limit)
+        .unwrap();
+    directory.seal_verified_regular(&control).unwrap().unwrap();
+    directory
+        .seal_verified_entry_regular(&entry)
+        .unwrap()
+        .unwrap();
+
+    let control_bytes = directory
+        .with_bounded_sealed_regular_reader(&control, limit, |reader| {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(control_bytes, b"control");
+    let callback_error = directory
+        .with_bounded_sealed_entry_regular_reader(&entry, limit, |reader| {
+            let mut byte = [0_u8; 1];
+            reader.read_exact(&mut byte).unwrap();
+            Err::<(), _>("digest mismatch")
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(callback_error, Err("digest mismatch"));
+    assert_eq!(
+        directory.with_bounded_sealed_entry_regular_reader(
+            &writable,
+            limit,
+            |_reader| Ok::<_, ()>(()),
+        ),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(
+        directory.with_bounded_sealed_regular_reader(&component("missing.bin"), limit, |_reader| {
+            Ok::<_, ()>(())
+        },),
+        Ok(None)
+    );
+    assert_eq!(unix_mode(&root.join(control.as_str())), 0o400);
+    assert_eq!(unix_mode(&root.join(entry.as_str())), 0o400);
+    assert_eq!(unix_mode(&root.join(writable.as_str())), 0o600);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn exact_sealed_reader_quarantines_post_read_mode_ambiguity() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let entry = entry_name("Payload.bin");
+    let path = root.join(entry.as_str());
+    directory
+        .write_new_entry_synced(&entry, b"payload", ByteLimit::new(16).unwrap())
+        .unwrap();
+    directory
+        .seal_verified_entry_regular(&entry)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        directory.with_bounded_sealed_entry_regular_reader(
+            &entry,
+            ByteLimit::new(16).unwrap(),
+            |reader| {
+                let mut byte = [0_u8; 1];
+                reader.read_exact(&mut byte).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                Ok::<_, ()>(())
+            },
+        ),
+        Err(PrivateFsError::IdentityAmbiguous)
+    );
+    assert_eq!(
+        directory.list_entry_names(8),
+        Err(PrivateFsError::Quarantined)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn exact_sealed_reader_quarantines_post_read_identity_substitution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let entry = entry_name("Payload.bin");
+    let path = root.join(entry.as_str());
+    let moved = root.join("Moved Payload.bin");
+    directory
+        .write_new_entry_synced(&entry, b"payload", ByteLimit::new(16).unwrap())
+        .unwrap();
+    directory
+        .seal_verified_entry_regular(&entry)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        directory.with_bounded_sealed_entry_regular_reader(
+            &entry,
+            ByteLimit::new(16).unwrap(),
+            |reader| {
+                let mut byte = [0_u8; 1];
+                reader.read_exact(&mut byte).unwrap();
+                fs::rename(&path, &moved).unwrap();
+                fs::write(&path, b"payload").unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+                Ok::<_, ()>(())
+            },
+        ),
+        Err(PrivateFsError::IdentityAmbiguous)
+    );
+    assert_eq!(fs::read(&moved).unwrap(), b"payload");
+    assert_eq!(
+        directory.list_entry_names(8),
+        Err(PrivateFsError::Quarantined)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn bounded_reader_revalidates_the_node_even_when_the_callback_returns_an_error() {
     let parent = private_parent();
     let root = namespace_root(parent.path());
@@ -1656,6 +1814,812 @@ fn fifo_and_socket_rejection_is_nonblocking_and_bounded() {
             .read_bounded_regular(&component("hostile.socket"), ByteLimit::new(16).unwrap(),),
         Err(PrivateFsError::Unsafe)
     );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn sealing_is_exact_bottom_up_and_unsealing_is_top_down() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let tree_name = component("tree");
+    let leaf_name = entry_name("Payload Leaf");
+    let file_name = entry_name("Manifest.JSON");
+    let tree = namespace
+        .directory()
+        .create_new_private_child(&tree_name)
+        .unwrap();
+    let leaf = tree.create_new_entry_child(&leaf_name).unwrap();
+    leaf.write_new_entry_synced(&file_name, b"manifest", ByteLimit::new(32).unwrap())
+        .unwrap();
+
+    let leaf = recover_transition(leaf.seal().err().unwrap(), PrivateFsError::Unsafe);
+    assert_eq!(
+        unix_mode(&root.join("tree/Payload Leaf/Manifest.JSON")),
+        0o600
+    );
+    assert_eq!(
+        leaf.seal_verified_entry_regular(&file_name).unwrap(),
+        leaf.entry_regular_identity(&file_name).unwrap()
+    );
+    assert_eq!(
+        unix_mode(&root.join("tree/Payload Leaf/Manifest.JSON")),
+        0o400
+    );
+    assert!(leaf
+        .seal_verified_entry_regular(&file_name)
+        .unwrap()
+        .is_some());
+
+    let sealed_leaf = leaf.seal().unwrap();
+    assert_eq!(unix_mode(&root.join("tree/Payload Leaf")), 0o500);
+    drop(sealed_leaf);
+    let sealed_tree = tree.seal().unwrap();
+    assert_eq!(unix_mode(&root.join("tree")), 0o500);
+    assert_eq!(
+        namespace.directory().open_private_child(&tree_name).err(),
+        Some(PrivateFsError::Unsafe)
+    );
+
+    let sealed_leaf = sealed_tree.open_sealed_entry_child(&leaf_name).unwrap();
+    let sealed_leaf =
+        recover_transition(sealed_leaf.unseal().err().unwrap(), PrivateFsError::Unsafe);
+    let tree = sealed_tree.unseal().unwrap();
+    assert_eq!(unix_mode(&root.join("tree")), 0o700);
+    drop(sealed_leaf);
+    let sealed_leaf = tree.open_sealed_entry_child(&leaf_name).unwrap();
+    let leaf = sealed_leaf.unseal().unwrap();
+    assert_eq!(unix_mode(&root.join("tree/Payload Leaf")), 0o700);
+    assert_eq!(
+        unix_mode(&root.join("tree/Payload Leaf/Manifest.JSON")),
+        0o400
+    );
+    assert!(leaf.entry_regular_exists(&file_name).unwrap());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn sealed_payload_traversal_is_exact_bounded_and_rejects_hostile_nodes() {
+    use std::cell::Cell;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let bundle_name = component("bundle");
+    let manifest_name = entry_name("Manifest.JSON");
+    let payload_name = entry_name("Payload Files");
+    let manifest_bytes = b"authenticated manifest";
+    let bundle = namespace
+        .directory()
+        .create_new_private_child(&bundle_name)
+        .unwrap();
+    let payload = bundle.create_new_entry_child(&payload_name).unwrap();
+    let payload_identity = payload.identity();
+    bundle
+        .write_new_entry_synced(&manifest_name, manifest_bytes, ByteLimit::new(64).unwrap())
+        .unwrap();
+    let manifest_identity = bundle
+        .seal_verified_entry_regular(&manifest_name)
+        .unwrap()
+        .unwrap();
+    drop(payload.seal().unwrap());
+    let sealed = bundle.seal().unwrap();
+
+    assert_eq!(unix_mode(&root.join("bundle/Manifest.JSON")), 0o400);
+    assert_eq!(unix_mode(&root.join("bundle/Payload Files")), 0o500);
+    assert_eq!(unix_mode(&root.join("bundle")), 0o500);
+    assert_eq!(
+        sealed.list_entry_names(8).unwrap(),
+        vec![manifest_name.clone(), payload_name.clone()]
+    );
+    assert_eq!(
+        sealed.list_entry_names(1),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert_eq!(
+        sealed.inspect_entry(&manifest_name).unwrap(),
+        Some(PrivateChildKind::RegularFile(manifest_identity))
+    );
+    assert_eq!(
+        sealed.inspect_entry(&payload_name).unwrap(),
+        Some(PrivateChildKind::Directory(payload_identity))
+    );
+    assert_eq!(
+        sealed.inspect_entry(&entry_name("Missing.bin")).unwrap(),
+        None
+    );
+
+    let hash = sealed
+        .with_bounded_entry_regular_reader(&manifest_name, ByteLimit::new(64).unwrap(), |reader| {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(rolling_hash(&bytes))
+        })
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(hash, rolling_hash(manifest_bytes));
+    let called = Cell::new(false);
+    assert_eq!(
+        sealed.with_bounded_entry_regular_reader(
+            &manifest_name,
+            ByteLimit::new(manifest_bytes.len() - 1).unwrap(),
+            |_reader| {
+                called.set(true);
+                Ok::<_, ()>(())
+            },
+        ),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert!(!called.get());
+
+    let bundle_path = root.join("bundle");
+    fs::set_permissions(&bundle_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let writable_name = entry_name("Writable.bin");
+    write_private_file(&bundle_path.join(writable_name.as_str()), b"mutable");
+    let linked_name = entry_name("Linked.bin");
+    symlink(
+        manifest_name.as_str(),
+        bundle_path.join(linked_name.as_str()),
+    )
+    .unwrap();
+    fs::set_permissions(&bundle_path, fs::Permissions::from_mode(0o500)).unwrap();
+
+    assert_eq!(
+        sealed.inspect_entry(&writable_name),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(
+        sealed.inspect_entry(&linked_name),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(
+        sealed.with_bounded_entry_regular_reader(
+            &writable_name,
+            ByteLimit::new(16).unwrap(),
+            |_reader| Ok::<_, ()>(()),
+        ),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(
+        sealed.inspect_entry(&manifest_name).unwrap(),
+        Some(PrivateChildKind::RegularFile(manifest_identity))
+    );
+
+    // TempDir cleanup cannot traverse a deliberately read-only fixture.
+    fs::set_permissions(&bundle_path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn parent_mode_transitions_invalidate_previously_issued_child_capabilities() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let parent_name = component("parent");
+    let child_name = component("child");
+    let directory = namespace
+        .directory()
+        .create_new_private_child(&parent_name)
+        .unwrap();
+    let child = directory
+        .create_new_private_child(&child_name)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let stale = directory.open_sealed_private_child(&child_name).unwrap();
+    let sealed_parent = directory.seal().unwrap();
+
+    assert_eq!(
+        stale.with_verified_path(|_| ()).err(),
+        Some(PrivateFsError::IdentityAmbiguous)
+    );
+    assert_eq!(
+        sealed_parent.with_verified_path(|_| ()).err(),
+        Some(PrivateFsError::Quarantined)
+    );
+    drop(child);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn sealed_directories_publish_same_parent_for_both_name_domains() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let staging = namespace
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let source_control = component("control-source");
+    let source = staging
+        .create_new_private_child(&source_control)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let expected = source.identity();
+    let destination_control = component("aabbcc");
+    let installed = source
+        .publish_noreplace(&staging, &destination_control)
+        .unwrap();
+    assert_eq!(installed.identity(), expected);
+    assert!(!root.join("staging/control-source").exists());
+    assert_eq!(unix_mode(&root.join("staging/aabbcc")), 0o500);
+    installed
+        .with_verified_path(|path| assert_eq!(path, root.join("staging/aabbcc")))
+        .unwrap();
+
+    let source_entry_name = entry_name("Internal Package Source");
+    let source = staging
+        .create_new_entry_child(&source_entry_name)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let expected = source.identity();
+    let destination_entry = entry_name("Package 1.0.0");
+    let installed = source
+        .publish_entry_noreplace(&staging, &destination_entry)
+        .unwrap();
+    assert_eq!(installed.identity(), expected);
+    assert!(!root.join("staging/Internal Package Source").exists());
+    assert_eq!(unix_mode(&root.join("staging/Package 1.0.0")), 0o500);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_sealed_directory_publication_supports_distinct_parents() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let staging = namespace
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let objects = namespace
+        .directory()
+        .create_new_private_child(&component("objects"))
+        .unwrap();
+    let source = staging
+        .create_new_private_child(&component("source"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let identity = source.identity();
+    let installed = source
+        .publish_noreplace(&objects, &component("installed"))
+        .unwrap();
+    assert_eq!(installed.identity(), identity);
+    assert!(!root.join("staging/source").exists());
+    assert_eq!(unix_mode(&root.join("objects/installed")), 0o500);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_distinct_parent_publication_is_cleanly_unavailable_without_mode_change() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let staging = namespace
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let objects = namespace
+        .directory()
+        .create_new_private_child(&component("objects"))
+        .unwrap();
+    let source = staging
+        .create_new_private_child(&component("source"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let source = recover_transition(
+        source
+            .publish_noreplace(&objects, &component("installed"))
+            .err()
+            .unwrap(),
+        PrivateFsError::PrimitiveUnavailable,
+    );
+    assert_eq!(unix_mode(&root.join("staging/source")), 0o500);
+    assert!(!root.join("objects/installed").exists());
+    source.with_verified_path(|_| ()).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn publication_returns_source_only_for_safe_eexist_or_namespace_mismatch() {
+    let first_parent = private_parent();
+    let first_root = namespace_root(first_parent.path());
+    let first = open(&first_root);
+    let staging = first
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let source_name = component("source");
+    let source = staging
+        .create_new_private_child(&source_name)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let existing_name = component("existing");
+    let existing = staging
+        .create_new_private_child(&existing_name)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let existing_identity = existing.identity();
+    drop(existing);
+
+    let source = recover_transition(
+        source
+            .publish_noreplace(&staging, &existing_name)
+            .err()
+            .unwrap(),
+        PrivateFsError::AlreadyExists,
+    );
+    assert_eq!(
+        staging
+            .open_sealed_private_child(&existing_name)
+            .unwrap()
+            .identity(),
+        existing_identity
+    );
+    assert!(first_root.join("staging/source").is_dir());
+
+    let writable_name = component("writable-existing");
+    let writable = staging.create_new_private_child(&writable_name).unwrap();
+    let writable_identity = writable.identity();
+    let source = recover_transition(
+        source
+            .publish_noreplace(&staging, &writable_name)
+            .err()
+            .unwrap(),
+        PrivateFsError::AlreadyExists,
+    );
+    assert_eq!(
+        staging
+            .open_private_child(&writable_name)
+            .unwrap()
+            .identity(),
+        writable_identity
+    );
+
+    let regular_name = component("regular-existing");
+    staging
+        .write_new_synced(&regular_name, b"keep", ByteLimit::new(16).unwrap())
+        .unwrap();
+    let source = recover_transition(
+        source
+            .publish_noreplace(&staging, &regular_name)
+            .err()
+            .unwrap(),
+        PrivateFsError::AlreadyExists,
+    );
+    assert_eq!(
+        staging
+            .read_bounded_regular(&regular_name, ByteLimit::new(16).unwrap())
+            .unwrap(),
+        Some(b"keep".to_vec())
+    );
+
+    let second_parent = private_parent();
+    let second_root = namespace_root(second_parent.path());
+    let second = open(&second_root);
+    let source = recover_transition(
+        source
+            .publish_noreplace(second.directory(), &component("foreign"))
+            .err()
+            .unwrap(),
+        PrivateFsError::NamespaceMismatch,
+    );
+    assert!(first_root.join("staging/source").is_dir());
+    source.with_verified_path(|_| ()).unwrap();
+    assert!(!second_root.join("foreign").exists());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn hostile_eexist_is_recoverable_only_after_source_and_parent_proof() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::FileTypeExt;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let staging = namespace
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let source = staging
+        .create_new_private_child(&component("source"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    symlink("missing", root.join("staging/hostile")).unwrap();
+
+    let source = recover_transition(
+        source
+            .publish_noreplace(&staging, &component("hostile"))
+            .err()
+            .unwrap(),
+        PrivateFsError::Unsafe,
+    );
+    assert!(fs::symlink_metadata(root.join("staging/hostile"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(root.join("staging/source").is_dir());
+
+    let fifo_path = root.join("staging/hostile.fifo");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .unwrap()
+        .success());
+    let source = recover_transition(
+        source
+            .publish_noreplace(&staging, &component("hostile.fifo"))
+            .err()
+            .unwrap(),
+        PrivateFsError::Unsafe,
+    );
+    assert!(fs::symlink_metadata(&fifo_path)
+        .unwrap()
+        .file_type()
+        .is_fifo());
+    source.with_verified_path(|_| ()).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn concurrent_sealed_publication_has_one_linear_winner() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let staging = namespace
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let first = staging
+        .create_new_private_child(&component("first"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let second = staging
+        .create_new_private_child(&component("second"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let destination = component("winner");
+
+    let (first_result, second_result) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| first.publish_noreplace(&staging, &destination));
+        let second = scope.spawn(|| second.publish_noreplace(&staging, &destination));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    let outcomes = [first_result, second_result];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let loser = outcomes
+        .into_iter()
+        .find_map(Result::err)
+        .expect("one source must lose no-replace publication");
+    assert_eq!(loser.error(), PrivateFsError::AlreadyExists);
+    assert!(loser.is_recoverable());
+    assert!(root.join("staging/winner").is_dir());
+    assert_eq!(
+        [root.join("staging/first"), root.join("staging/second")]
+            .iter()
+            .filter(|path| path.exists())
+            .count(),
+        1
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn empty_removal_is_consuming_exact_and_available_for_both_name_domains() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let child_name = component("nonempty");
+    let child = directory.create_new_private_child(&child_name).unwrap();
+    let file = component("payload.bin");
+    child
+        .write_new_synced(&file, b"payload", ByteLimit::new(16).unwrap())
+        .unwrap();
+
+    let child = recover_transition(
+        child.remove_empty().err().unwrap(),
+        PrivateFsError::DirectoryNotEmpty,
+    );
+    assert!(root.join("nonempty/payload.bin").is_file());
+    assert!(child.remove_verified_regular(&file).unwrap());
+    child.remove_empty().unwrap();
+    assert!(!root.join("nonempty").exists());
+
+    let control = component("control-empty");
+    directory.create_new_private_child(&control).unwrap();
+    assert!(directory.remove_empty_private_child(&control).unwrap());
+    assert!(!directory.remove_empty_private_child(&control).unwrap());
+
+    let entry = entry_name("Internal Empty Directory");
+    let sealed = directory
+        .create_new_entry_child(&entry)
+        .unwrap()
+        .seal()
+        .unwrap();
+    drop(sealed);
+    assert!(directory.remove_empty_entry_child(&entry).unwrap());
+    assert!(!root.join("Internal Empty Directory").exists());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn sealed_child_removal_requires_a_writable_bound_parent() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let parent_name = component("parent");
+    let child_name = component("child");
+    let directory = namespace
+        .directory()
+        .create_new_private_child(&parent_name)
+        .unwrap();
+    drop(
+        directory
+            .create_new_private_child(&child_name)
+            .unwrap()
+            .seal()
+            .unwrap(),
+    );
+    let sealed_parent = directory.seal().unwrap();
+    let sealed_child = sealed_parent
+        .open_sealed_private_child(&child_name)
+        .unwrap();
+
+    let sealed_child = recover_transition(
+        sealed_child.remove_empty().err().unwrap(),
+        PrivateFsError::Unsafe,
+    );
+    assert!(root.join("parent/child").is_dir());
+    sealed_child.with_verified_path(|_| ()).unwrap();
+    drop(sealed_child);
+
+    let directory = sealed_parent.unseal().unwrap();
+    directory
+        .open_sealed_private_child(&child_name)
+        .unwrap()
+        .remove_empty()
+        .unwrap();
+    directory.remove_empty().unwrap();
+    assert!(!root.join("parent").exists());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn verified_path_pin_allows_reads_refuses_mutation_and_releases_on_panic() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let existing = component("existing.bin");
+    directory
+        .write_new_synced(&existing, b"value", ByteLimit::new(16).unwrap())
+        .unwrap();
+    let refused = component("refused.bin");
+
+    directory
+        .with_verified_path(|path| {
+            assert_eq!(path, root);
+            assert!(directory.regular_exists(&existing).unwrap());
+            directory
+                .with_verified_path(|nested| assert_eq!(nested, root))
+                .unwrap();
+            assert_eq!(
+                directory.write_new_synced(&refused, b"x", ByteLimit::new(4).unwrap()),
+                Err(PrivateFsError::InUse)
+            );
+        })
+        .unwrap();
+    assert!(!root.join("refused.bin").exists());
+
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = directory.with_verified_path::<()>(|_| panic!("injected callback panic"));
+    }));
+    assert!(panic.is_err());
+    directory
+        .write_new_synced(&refused, b"x", ByteLimit::new(4).unwrap())
+        .unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn verified_path_pin_is_namespace_wide_across_threads() {
+    use std::sync::{Arc, Barrier};
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+
+    std::thread::scope(|scope| {
+        let entered_callback = Arc::clone(&entered);
+        let release_callback = Arc::clone(&release);
+        let callback = scope.spawn(move || {
+            directory
+                .with_verified_path(|_| {
+                    entered_callback.wait();
+                    release_callback.wait();
+                })
+                .unwrap();
+        });
+        entered.wait();
+        assert_eq!(
+            directory
+                .create_new_private_child(&component("blocked"))
+                .err(),
+            Some(PrivateFsError::InUse)
+        );
+        release.wait();
+        callback.join().unwrap();
+    });
+    directory
+        .create_new_private_child(&component("allowed"))
+        .unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn consuming_transitions_return_the_valid_capability_while_path_pinned() {
+    use std::cell::RefCell;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+
+    let writable = RefCell::new(Some(
+        directory
+            .create_new_private_child(&component("seal-child"))
+            .unwrap(),
+    ));
+    directory
+        .with_verified_path(|_| {
+            let child = writable.borrow_mut().take().unwrap();
+            writable.replace(Some(recover_transition(
+                child.seal().err().unwrap(),
+                PrivateFsError::InUse,
+            )));
+        })
+        .unwrap();
+    let sealed = RefCell::new(Some(writable.into_inner().unwrap().seal().unwrap()));
+    directory
+        .with_verified_path(|_| {
+            let child = sealed.borrow_mut().take().unwrap();
+            sealed.replace(Some(recover_transition(
+                child.unseal().err().unwrap(),
+                PrivateFsError::InUse,
+            )));
+        })
+        .unwrap();
+    sealed
+        .into_inner()
+        .unwrap()
+        .unseal()
+        .unwrap()
+        .remove_empty()
+        .unwrap();
+
+    let container = directory
+        .create_new_private_child(&component("objects"))
+        .unwrap();
+    let source = RefCell::new(Some(
+        container
+            .create_new_private_child(&component("source"))
+            .unwrap()
+            .seal()
+            .unwrap(),
+    ));
+    directory
+        .with_verified_path(|_| {
+            let source_capability = source.borrow_mut().take().unwrap();
+            source.replace(Some(recover_transition(
+                source_capability
+                    .publish_noreplace(&container, &component("installed"))
+                    .err()
+                    .unwrap(),
+                PrivateFsError::InUse,
+            )));
+        })
+        .unwrap();
+    let installed = source
+        .into_inner()
+        .unwrap()
+        .publish_noreplace(&container, &component("installed"))
+        .unwrap();
+    installed.unseal().unwrap().remove_empty().unwrap();
+
+    let writable = RefCell::new(Some(
+        container
+            .create_new_private_child(&component("writable-empty"))
+            .unwrap(),
+    ));
+    directory
+        .with_verified_path(|_| {
+            let child = writable.borrow_mut().take().unwrap();
+            writable.replace(Some(recover_transition(
+                child.remove_empty().err().unwrap(),
+                PrivateFsError::InUse,
+            )));
+        })
+        .unwrap();
+    writable.into_inner().unwrap().remove_empty().unwrap();
+
+    let sealed = RefCell::new(Some(
+        container
+            .create_new_private_child(&component("sealed-empty"))
+            .unwrap()
+            .seal()
+            .unwrap(),
+    ));
+    directory
+        .with_verified_path(|_| {
+            let child = sealed.borrow_mut().take().unwrap();
+            sealed.replace(Some(recover_transition(
+                child.remove_empty().err().unwrap(),
+                PrivateFsError::InUse,
+            )));
+        })
+        .unwrap();
+    sealed.into_inner().unwrap().remove_empty().unwrap();
+    container.remove_empty().unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn publication_case_alias_is_recoverable_unsafe_on_case_insensitive_storage() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let staging = namespace
+        .directory()
+        .create_new_private_child(&component("staging"))
+        .unwrap();
+    let source = staging
+        .create_new_private_child(&component("source"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let exact = entry_name("Exact Destination");
+    let alias = entry_name("exact destination");
+    let existing = staging
+        .create_new_entry_child(&exact)
+        .unwrap()
+        .seal()
+        .unwrap();
+    drop(existing);
+    if root.join("staging/exact destination").is_dir() {
+        let source = recover_transition(
+            source
+                .publish_entry_noreplace(&staging, &alias)
+                .err()
+                .unwrap(),
+            PrivateFsError::Unsafe,
+        );
+        assert!(root.join("staging/source").is_dir());
+        source.with_verified_path(|_| ()).unwrap();
+    } else {
+        let installed = source.publish_entry_noreplace(&staging, &alias).unwrap();
+        assert_eq!(
+            installed.identity(),
+            staging.open_sealed_entry_child(&alias).unwrap().identity()
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

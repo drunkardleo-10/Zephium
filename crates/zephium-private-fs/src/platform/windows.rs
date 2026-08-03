@@ -30,6 +30,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::IO::OVERLAPPED;
 
+use super::{DirectoryMode, RegularMode};
 use crate::PrivateFsError;
 
 const FILE_ATTRIBUTE_REPARSE_POINT_RAW: u32 = 0x400;
@@ -105,6 +106,14 @@ pub(crate) fn open_regular(
     Ok((file, opened))
 }
 
+pub(crate) fn open_sealed_regular(
+    _directory: &File,
+    _directory_path: &Path,
+    _name: &str,
+) -> Result<(File, RawIdentity), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
 pub(crate) fn create_new_regular(
     _directory: &File,
     directory_path: &Path,
@@ -149,6 +158,21 @@ pub(crate) fn revalidate_regular(
     Ok(())
 }
 
+pub(crate) fn revalidate_regular_mode(
+    _directory: &File,
+    _directory_path: &Path,
+    _name: &str,
+    _file: &File,
+    _expected: RawIdentity,
+    _mode: RegularMode,
+) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
+pub(crate) fn set_regular_mode(_file: &File, _mode: RegularMode) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
 pub(crate) fn create_directory(
     _parent: &File,
     parent_path: &Path,
@@ -169,6 +193,29 @@ pub(crate) fn open_child_directory(
     name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
     open_directory(&parent_path.join(name))
+}
+
+pub(crate) fn open_sealed_child_directory(
+    _parent: &File,
+    _parent_path: &Path,
+    _name: &str,
+) -> Result<(File, RawIdentity), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
+pub(crate) fn revalidate_child_directory(
+    _parent: &File,
+    _parent_path: &Path,
+    _name: &str,
+    _directory: &File,
+    _expected: RawIdentity,
+    _mode: DirectoryMode,
+) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
+pub(crate) fn set_directory_mode(_file: &File, _mode: DirectoryMode) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
 }
 
 pub(crate) fn inspect_child(
@@ -206,12 +253,24 @@ pub(crate) fn list_names(
     Ok(names)
 }
 
+pub(crate) fn directory_is_empty(_directory: &File) -> Result<bool, PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
 pub(crate) fn remove_regular(
     _directory: &File,
     directory_path: &Path,
     name: &str,
 ) -> Result<(), PrivateFsError> {
     std::fs::remove_file(directory_path.join(name)).map_err(|_| PrivateFsError::Io)
+}
+
+pub(crate) fn remove_directory(
+    _parent: &File,
+    _parent_path: &Path,
+    _name: &str,
+) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
 }
 
 pub(crate) fn open_directory(path: &Path) -> Result<(File, RawIdentity), PrivateFsError> {
@@ -232,6 +291,13 @@ pub(crate) fn open_directory(path: &Path) -> Result<(File, RawIdentity), Private
         return Err(PrivateFsError::IdentityAmbiguous);
     }
     Ok((file, opened))
+}
+
+pub(crate) fn open_directory_with_mode(
+    _path: &Path,
+    _mode: DirectoryMode,
+) -> Result<(File, RawIdentity), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
 }
 
 pub(crate) fn same_open_identity(file: &File, expected: RawIdentity) -> bool {
@@ -306,6 +372,17 @@ pub(crate) fn atomic_publish_noreplace(
         Err(PrivateFsError::AlreadyExists) => Err(PrivateFsError::AlreadyExists),
         Err(_) => Err(PrivateFsError::Io),
     }
+}
+
+pub(crate) fn atomic_publish_noreplace_between(
+    _source_directory: &File,
+    _source_directory_path: &Path,
+    _source: &str,
+    _destination_directory: &File,
+    _destination_directory_path: &Path,
+    _destination: &str,
+) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
 }
 
 pub(crate) fn sync_directory(_file: &File) -> Result<(), PrivateFsError> {

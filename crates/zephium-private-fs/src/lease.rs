@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicU16;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::platform;
@@ -17,13 +17,22 @@ pub(crate) struct NamespaceLease {
     root_handle: File,
     root_identity: DirectoryIdentity,
     operation: Mutex<()>,
+    path_pins: AtomicUsize,
     quarantined: AtomicBool,
     #[cfg(all(test, unix))]
     fail_next_settlement: AtomicBool,
     #[cfg(test)]
-    committed_mutation_faults: AtomicU8,
+    committed_mutation_faults: AtomicU16,
     #[cfg(test)]
-    streaming_faults: AtomicU8,
+    streaming_faults: AtomicU16,
+    #[cfg(test)]
+    lifecycle_faults: AtomicU16,
+    #[cfg(test)]
+    remove_empty_race: AtomicBool,
+    #[cfg(test)]
+    seal_child_identity_fault: AtomicBool,
+    #[cfg(test)]
+    same_parent_publish_syncs: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -45,6 +54,56 @@ pub(crate) enum StreamingFault {
     InitialReadMetadata = 1 << 4,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum LifecycleFault {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    PublishDestinationIdentity = 1 << 0,
+    PublishSourceParentSync = 1 << 1,
+    PublishDestinationParentSync = 1 << 2,
+    SealRegularCommitted = 1 << 3,
+    SealRegularFileSync = 1 << 4,
+    SealRegularParentSync = 1 << 5,
+    SealDirectoryCommitted = 1 << 6,
+    SealDirectorySelfSync = 1 << 7,
+    SealDirectoryParentSync = 1 << 8,
+    UnsealDirectoryCommitted = 1 << 9,
+    UnsealDirectorySelfSync = 1 << 10,
+    UnsealDirectoryParentSync = 1 << 11,
+    RemoveDirectoryCommitted = 1 << 12,
+    RemoveDirectoryParentSync = 1 << 13,
+    PublishSameParentSync = 1 << 14,
+    RemoveChildOpenIdentity = 1 << 15,
+}
+
+pub(crate) struct PathPinGuard<'a> {
+    lease: &'a NamespaceLease,
+    active: bool,
+}
+
+impl PathPinGuard<'_> {
+    pub(crate) fn release(mut self) {
+        self.release_inner();
+    }
+
+    fn release_inner(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if self.lease.path_pins.fetch_sub(1, Ordering::AcqRel) == 0 {
+            self.lease.path_pins.store(0, Ordering::Release);
+            self.lease.quarantined.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for PathPinGuard<'_> {
+    fn drop(&mut self) {
+        self.release_inner();
+    }
+}
+
 impl NamespaceLease {
     pub(crate) fn new(
         lock: File,
@@ -64,13 +123,22 @@ impl NamespaceLease {
             root_handle,
             root_identity,
             operation: Mutex::new(()),
+            path_pins: AtomicUsize::new(0),
             quarantined: AtomicBool::new(false),
             #[cfg(all(test, unix))]
             fail_next_settlement: AtomicBool::new(false),
             #[cfg(test)]
-            committed_mutation_faults: AtomicU8::new(0),
+            committed_mutation_faults: AtomicU16::new(0),
             #[cfg(test)]
-            streaming_faults: AtomicU8::new(0),
+            streaming_faults: AtomicU16::new(0),
+            #[cfg(test)]
+            lifecycle_faults: AtomicU16::new(0),
+            #[cfg(test)]
+            remove_empty_race: AtomicBool::new(false),
+            #[cfg(test)]
+            seal_child_identity_fault: AtomicBool::new(false),
+            #[cfg(test)]
+            same_parent_publish_syncs: AtomicUsize::new(0),
         }
     }
 
@@ -90,6 +158,26 @@ impl NamespaceLease {
 
     pub(crate) fn is_reserved_name(&self, name: &str) -> bool {
         self.is_reserved_lock_name(name) || self.is_reserved_lock_staging_name(name)
+    }
+
+    pub(crate) fn mutation_allowed(&self) -> Result<(), PrivateFsError> {
+        if self.path_pins.load(Ordering::Acquire) == 0 {
+            Ok(())
+        } else {
+            Err(PrivateFsError::InUse)
+        }
+    }
+
+    pub(crate) fn pin_path(&self) -> Result<PathPinGuard<'_>, PrivateFsError> {
+        self.path_pins
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pins| {
+                pins.checked_add(1)
+            })
+            .map_err(|_| PrivateFsError::InUse)?;
+        Ok(PathPinGuard {
+            lease: self,
+            active: true,
+        })
     }
 
     pub(crate) fn is_reserved_lock_name(&self, name: &str) -> bool {
@@ -162,12 +250,12 @@ impl NamespaceLease {
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub(crate) fn inject_committed_mutation_fault(&self, fault: CommittedMutationFault) {
         self.committed_mutation_faults
-            .fetch_or(fault as u8, Ordering::AcqRel);
+            .fetch_or(fault as u16, Ordering::AcqRel);
     }
 
     #[cfg(test)]
     pub(crate) fn take_committed_mutation_fault(&self, fault: CommittedMutationFault) -> bool {
-        let mask = fault as u8;
+        let mask = fault as u16;
         self.committed_mutation_faults
             .fetch_and(!mask, Ordering::AcqRel)
             & mask
@@ -177,12 +265,56 @@ impl NamespaceLease {
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub(crate) fn inject_streaming_fault(&self, fault: StreamingFault) {
         self.streaming_faults
-            .fetch_or(fault as u8, Ordering::AcqRel);
+            .fetch_or(fault as u16, Ordering::AcqRel);
     }
 
     #[cfg(test)]
     pub(crate) fn take_streaming_fault(&self, fault: StreamingFault) -> bool {
-        let mask = fault as u8;
+        let mask = fault as u16;
         self.streaming_faults.fetch_and(!mask, Ordering::AcqRel) & mask != 0
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_lifecycle_fault(&self, fault: LifecycleFault) {
+        self.lifecycle_faults
+            .fetch_or(fault as u16, Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_lifecycle_fault(&self, fault: LifecycleFault) -> bool {
+        let mask = fault as u16;
+        self.lifecycle_faults.fetch_and(!mask, Ordering::AcqRel) & mask != 0
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_remove_empty_race(&self) {
+        self.remove_empty_race.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_remove_empty_race(&self) -> bool {
+        self.remove_empty_race.swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_seal_child_identity_fault(&self) {
+        self.seal_child_identity_fault
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_seal_child_identity_fault(&self) -> bool {
+        self.seal_child_identity_fault.swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_same_parent_publish_sync(&self) {
+        self.same_parent_publish_syncs
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn same_parent_publish_sync_count(&self) -> usize {
+        self.same_parent_publish_syncs.load(Ordering::Acquire)
     }
 }
