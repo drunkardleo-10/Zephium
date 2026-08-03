@@ -78,7 +78,12 @@ pub enum ProductExtensionRuntimeTarget {
 }
 
 impl ProductExtensionRuntimeTarget {
-    const fn compatibility_target_id(self) -> &'static str {
+    /// Returns the only compatibility-profile identifier valid for this backend.
+    ///
+    /// Durable adapters use this closed mapping when reconstructing metadata;
+    /// parsing an otherwise valid identifier is not sufficient because it
+    /// could belong to a different native runtime.
+    pub const fn compatibility_target_id(self) -> &'static str {
         match self {
             Self::MacosNative => MACOS_NATIVE_COMPATIBILITY_TARGET,
             Self::MacosCompatibility => MACOS_COMPATIBILITY_TARGET,
