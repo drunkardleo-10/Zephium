@@ -1545,6 +1545,23 @@ impl PrivateDirectory {
         self.write_new_synced_named(ChildName::Entry(name), bytes, limit)
     }
 
+    /// Streams one exact-length source into a new regular protocol child.
+    ///
+    /// This has the same create-new, exact-EOF, cleanup, durability, and
+    /// quarantine contract as [`Self::write_new_entry_from_reader`], but it
+    /// accepts the canonical [`PrivateComponent`] namespace used by subsystem
+    /// metadata protocols. The reader executes under the non-reentrant
+    /// namespace operation lease and therefore must not re-enter this
+    /// namespace.
+    pub fn write_new_from_reader<R: Read + ?Sized>(
+        &self,
+        component: &PrivateComponent,
+        reader: &mut R,
+        expected_length: StreamingFileLength,
+    ) -> Result<FileIdentity, StreamingWriteError> {
+        self.write_new_from_reader_named(ChildName::Control(component), reader, expected_length)
+    }
+
     /// Streams one exact-length source into a new regular payload entry.
     ///
     /// The source must yield exactly `expected_length` bytes followed by EOF.
@@ -3914,6 +3931,44 @@ mod tests {
                 .remove_verified_entry_regular(&name)
                 .unwrap());
         }
+    }
+
+    #[test]
+    fn control_streaming_writer_has_the_exact_cleanup_and_durability_contract() {
+        let (parent, namespace) = test_namespace("control-stream-write-test");
+        let complete = PrivateComponent::new("complete.stage").unwrap();
+        let incomplete = PrivateComponent::new("incomplete.stage").unwrap();
+
+        let mut source = Cursor::new(b"value");
+        namespace
+            .directory
+            .write_new_from_reader(&complete, &mut source, StreamingFileLength::new(5).unwrap())
+            .unwrap();
+        assert_eq!(
+            namespace
+                .directory
+                .read_bounded_regular(&complete, ByteLimit::new(5).unwrap())
+                .unwrap(),
+            Some(b"value".to_vec())
+        );
+
+        let mut short = Cursor::new(b"four");
+        assert_eq!(
+            namespace.directory.write_new_from_reader(
+                &incomplete,
+                &mut short,
+                StreamingFileLength::new(5).unwrap(),
+            ),
+            Err(StreamingWriteError::SourceTooShort)
+        );
+        assert!(!parent
+            .path()
+            .join("control-stream-write-test/incomplete.stage")
+            .exists());
+        assert_eq!(
+            namespace.directory.list_components(8).unwrap(),
+            vec![complete]
+        );
     }
 
     #[test]
