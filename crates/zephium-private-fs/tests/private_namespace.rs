@@ -1,12 +1,17 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::fs;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::io::{Cursor, Error as IoError, Read};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use zephium_private_fs::PrivateComponent;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use zephium_private_fs::{ByteLimit, PrivateChildKind, PrivateEntryName, MAX_IN_MEMORY_FILE_BYTES};
+use zephium_private_fs::{
+    ByteLimit, PrivateChildKind, PrivateEntryName, StreamingFileLength, StreamingWriteError,
+    MAX_IN_MEMORY_FILE_BYTES,
+};
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -69,6 +74,38 @@ fn write_private_file(path: &Path, bytes: &[u8]) {
 fn establish_canonical_lock(root: &Path) {
     drop(open(root));
     assert_eq!(fs::read(root.join(LOCK_NAME)).unwrap(), LOCK_MARKER);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct ErrorAtEof {
+    bytes: Cursor<Vec<u8>>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl ErrorAtEof {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: Cursor::new(bytes),
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Read for ErrorAtEof {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.bytes.position() < self.bytes.get_ref().len() as u64 {
+            self.bytes.read(buffer)
+        } else {
+            Err(IoError::other("injected source validation failure"))
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rolling_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -623,6 +660,318 @@ fn case_preserving_entry_files_list_inspect_and_round_trip_with_bounds() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn streaming_entry_write_handles_zero_fixed_chunks_and_hash_style_reads() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+
+    for (index, length) in [0_usize, 64 * 1024, 128 * 1024, 128 * 1024 + 1]
+        .into_iter()
+        .enumerate()
+    {
+        let name = entry_name(&format!("Payload {index}.BIN"));
+        let bytes = vec![u8::try_from(index + 1).unwrap(); length];
+        let mut source = Cursor::new(bytes.as_slice());
+        let identity = directory
+            .write_new_entry_from_reader(
+                &name,
+                &mut source,
+                StreamingFileLength::new(u64::try_from(length).unwrap()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            directory.entry_regular_identity(&name).unwrap(),
+            Some(identity)
+        );
+        assert_eq!(
+            fs::metadata(root.join(name.as_str())).unwrap().len(),
+            u64::try_from(length).unwrap()
+        );
+
+        let consumed = directory
+            .with_bounded_entry_regular_reader(
+                &name,
+                ByteLimit::new(length.max(1)).unwrap(),
+                |reader| {
+                    let mut buffer = [0_u8; 8 * 1024];
+                    let mut count = 0_usize;
+                    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+                    loop {
+                        let read = reader.read(&mut buffer)?;
+                        if read == 0 {
+                            break;
+                        }
+                        count += read;
+                        for byte in &buffer[..read] {
+                            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+                        }
+                    }
+                    Ok::<_, std::io::Error>((count, hash))
+                },
+            )
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(consumed, (length, rolling_hash(&bytes)));
+        assert!(directory.remove_verified_entry_regular(&name).unwrap());
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn streaming_source_rejections_prove_cleanup_and_leave_the_lease_reusable() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let cases: Vec<(Box<dyn Read>, u64, StreamingWriteError)> = vec![
+        (
+            Box::new(Cursor::new(b"abc".to_vec())),
+            4,
+            StreamingWriteError::SourceTooShort,
+        ),
+        (
+            Box::new(Cursor::new(b"abcde".to_vec())),
+            4,
+            StreamingWriteError::SourceTooLong,
+        ),
+        (
+            Box::new(ErrorAtEof::new(Vec::new())),
+            4,
+            StreamingWriteError::SourceRead,
+        ),
+        (
+            Box::new(ErrorAtEof::new(b"ab".to_vec())),
+            4,
+            StreamingWriteError::SourceRead,
+        ),
+        (
+            Box::new(ErrorAtEof::new(b"abcd".to_vec())),
+            4,
+            StreamingWriteError::SourceRead,
+        ),
+    ];
+
+    for (index, (mut source, expected, error)) in cases.into_iter().enumerate() {
+        let name = entry_name(&format!("Rejected Source {index}.bin"));
+        assert_eq!(
+            directory.write_new_entry_from_reader(
+                &name,
+                &mut source,
+                StreamingFileLength::new(expected).unwrap(),
+            ),
+            Err(error)
+        );
+        assert!(!root.join(name.as_str()).exists());
+        assert!(!directory.entry_regular_exists(&name).unwrap());
+
+        let mut empty = Cursor::new([]);
+        directory
+            .write_new_entry_from_reader(&name, &mut empty, StreamingFileLength::ZERO)
+            .unwrap();
+        assert!(directory.remove_verified_entry_regular(&name).unwrap());
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn streaming_writer_refuses_existing_and_hostile_nodes_without_consuming_them() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let mut empty = Cursor::new([]);
+
+    let regular = entry_name("Existing Regular.bin");
+    write_private_file(&root.join(regular.as_str()), b"keep");
+    assert_eq!(
+        directory.write_new_entry_from_reader(&regular, &mut empty, StreamingFileLength::ZERO),
+        Err(StreamingWriteError::Filesystem(
+            PrivateFsError::AlreadyExists
+        ))
+    );
+    assert_eq!(fs::read(root.join(regular.as_str())).unwrap(), b"keep");
+
+    let child = entry_name("Existing Directory");
+    fs::create_dir(root.join(child.as_str())).unwrap();
+    fs::set_permissions(root.join(child.as_str()), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        directory.write_new_entry_from_reader(&child, &mut empty, StreamingFileLength::ZERO),
+        Err(StreamingWriteError::Filesystem(PrivateFsError::Unsafe))
+    );
+
+    let linked = entry_name("Existing Link");
+    symlink("missing", root.join(linked.as_str())).unwrap();
+    assert_eq!(
+        directory.write_new_entry_from_reader(&linked, &mut empty, StreamingFileLength::ZERO),
+        Err(StreamingWriteError::Filesystem(PrivateFsError::Unsafe))
+    );
+
+    let fifo = entry_name("Existing FIFO");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(root.join(fifo.as_str()))
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        directory.write_new_entry_from_reader(&fifo, &mut empty, StreamingFileLength::ZERO),
+        Err(StreamingWriteError::Filesystem(PrivateFsError::Unsafe))
+    );
+
+    let exact_alias = entry_name("alias.bin");
+    write_private_file(&root.join("Alias.BIN"), b"alias");
+    if root.join(exact_alias.as_str()).is_file() {
+        assert_eq!(
+            directory.write_new_entry_from_reader(
+                &exact_alias,
+                &mut empty,
+                StreamingFileLength::ZERO,
+            ),
+            Err(StreamingWriteError::Filesystem(PrivateFsError::Unsafe))
+        );
+        assert_eq!(fs::read(root.join("Alias.BIN")).unwrap(), b"alias");
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn bounded_reader_preserves_callback_errors_and_enforces_the_bound_for_both_name_types() {
+    use std::cell::Cell;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let control = component("control.bin");
+    let entry = entry_name("Payload.bin");
+    directory
+        .write_new_synced(&control, b"control", ByteLimit::new(16).unwrap())
+        .unwrap();
+    directory
+        .write_new_entry_synced(&entry, b"payload", ByteLimit::new(16).unwrap())
+        .unwrap();
+
+    let control_bytes = directory
+        .with_bounded_regular_reader(&control, ByteLimit::new(16).unwrap(), |reader| {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(control_bytes, b"control");
+
+    let callback_error = directory
+        .with_bounded_entry_regular_reader(&entry, ByteLimit::new(16).unwrap(), |reader| {
+            let mut byte = [0_u8; 1];
+            reader.read_exact(&mut byte).unwrap();
+            Err::<(), _>("digest mismatch")
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(callback_error, Err("digest mismatch"));
+    assert!(directory.entry_regular_exists(&entry).unwrap());
+
+    let called = Cell::new(false);
+    assert_eq!(
+        directory.with_bounded_entry_regular_reader(
+            &entry,
+            ByteLimit::new(3).unwrap(),
+            |_reader| {
+                called.set(true);
+                Ok::<_, ()>(())
+            },
+        ),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert!(!called.get());
+
+    let missing = entry_name("Missing.bin");
+    assert_eq!(
+        directory.with_bounded_entry_regular_reader(
+            &missing,
+            ByteLimit::new(16).unwrap(),
+            |_reader| Ok::<_, ()>(()),
+        ),
+        Ok(None)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn bounded_reader_revalidates_the_node_even_when_the_callback_returns_an_error() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let entry = entry_name("Mutable Payload.bin");
+    directory
+        .write_new_entry_synced(&entry, b"payload", ByteLimit::new(16).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        directory.with_bounded_entry_regular_reader(
+            &entry,
+            ByteLimit::new(16).unwrap(),
+            |_reader| {
+                fs::remove_file(root.join(entry.as_str())).unwrap();
+                Err::<(), _>("caller error")
+            },
+        ),
+        Err(PrivateFsError::IdentityAmbiguous)
+    );
+    assert_eq!(
+        directory.list_entry_names(8),
+        Err(PrivateFsError::Quarantined)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn verified_entry_removal_is_exact_durable_and_optional() {
+    use std::os::unix::fs::symlink;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let entry = entry_name("Remove This Payload.bin");
+    directory
+        .write_new_entry_synced(&entry, b"payload", ByteLimit::new(16).unwrap())
+        .unwrap();
+
+    assert!(directory.remove_verified_entry_regular(&entry).unwrap());
+    assert!(!root.join(entry.as_str()).exists());
+    assert!(!directory.remove_verified_entry_regular(&entry).unwrap());
+
+    let linked = entry_name("Do Not Remove Link");
+    symlink("missing", root.join(linked.as_str())).unwrap();
+    assert_eq!(
+        directory.remove_verified_entry_regular(&linked),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert!(fs::symlink_metadata(root.join(linked.as_str()))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    let alias = entry_name("alias.bin");
+    write_private_file(&root.join("Alias.BIN"), b"keep");
+    if root.join(alias.as_str()).is_file() {
+        assert_eq!(
+            directory.remove_verified_entry_regular(&alias),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(fs::read(root.join("Alias.BIN")).unwrap(), b"keep");
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn entry_operations_never_admit_a_case_alias_on_case_insensitive_storage() {
     let parent = private_parent();
     let root = namespace_root(parent.path());
@@ -901,6 +1250,8 @@ fn rejects_root_permission_and_identity_substitution() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn root_lock_component_is_reserved_from_every_caller_role() {
+    use std::cell::Cell;
+
     let parent = private_parent();
     let root = namespace_root(parent.path());
     let namespace = open(&root);
@@ -934,6 +1285,15 @@ fn root_lock_component_is_reserved_from_every_caller_role() {
             directory.read_bounded_regular(&reserved, limit),
             Err(PrivateFsError::ReservedComponent)
         );
+        let callback_called = Cell::new(false);
+        assert_eq!(
+            directory.with_bounded_regular_reader(&reserved, limit, |_reader| {
+                callback_called.set(true);
+                Ok::<_, ()>(())
+            }),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        assert!(!callback_called.get());
     }
     assert_eq!(directory.list_components(8).unwrap(), vec![stage]);
 }
@@ -1010,6 +1370,8 @@ fn post_activation_lock_aliases_are_visible_hostile_inventory() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn root_lock_names_are_reserved_from_every_entry_operation_and_listing() {
+    use std::cell::Cell;
+
     let parent = private_parent();
     let root = namespace_root(parent.path());
     let namespace = open(&root);
@@ -1050,8 +1412,37 @@ fn root_lock_names_are_reserved_from_every_entry_operation_and_listing() {
             directory.read_bounded_entry_regular(&reserved, limit),
             Err(PrivateFsError::ReservedComponent)
         );
+        let callback_called = Cell::new(false);
+        assert_eq!(
+            directory.with_bounded_entry_regular_reader(&reserved, limit, |_reader| {
+                callback_called.set(true);
+                Ok::<_, ()>(())
+            }),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        assert!(!callback_called.get());
         assert_eq!(
             directory.write_new_entry_synced(&reserved, b"x", limit),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        let mut source = Cursor::new(b"x");
+        assert_eq!(
+            directory.write_new_entry_from_reader(
+                &reserved,
+                &mut source,
+                StreamingFileLength::new(1).unwrap(),
+            ),
+            Err(StreamingWriteError::Filesystem(
+                PrivateFsError::ReservedComponent
+            ))
+        );
+        assert_eq!(
+            source.position(),
+            0,
+            "reserved writes must not consume input"
+        );
+        assert_eq!(
+            directory.remove_verified_entry_regular(&reserved),
             Err(PrivateFsError::ReservedComponent)
         );
     }
@@ -1109,7 +1500,9 @@ fn child_keeps_the_root_lock_lease_alive_after_namespace_drop() {
         PrivateFsError::LockUnavailable
     );
     drop(child);
-    assert!(LockedPrivateNamespace::open_or_create(&root).is_ok());
+    if let Err(error) = LockedPrivateNamespace::open_or_create(&root) {
+        panic!("root lock was not released with the last control child: {error:?}");
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1137,7 +1530,9 @@ fn entry_child_keeps_the_root_lock_lease_alive_after_namespace_drop() {
         PrivateFsError::LockUnavailable
     );
     drop(child);
-    assert!(LockedPrivateNamespace::open_or_create(&root).is_ok());
+    if let Err(error) = LockedPrivateNamespace::open_or_create(&root) {
+        panic!("root lock was not released with the last entry child: {error:?}");
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

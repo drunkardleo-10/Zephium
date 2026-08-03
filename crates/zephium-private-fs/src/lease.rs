@@ -22,6 +22,8 @@ pub(crate) struct NamespaceLease {
     fail_next_settlement: AtomicBool,
     #[cfg(test)]
     committed_mutation_faults: AtomicU8,
+    #[cfg(test)]
+    streaming_faults: AtomicU8,
 }
 
 #[cfg(test)]
@@ -31,6 +33,16 @@ pub(crate) enum CommittedMutationFault {
     Replace = 1 << 1,
     PublishNoreplace = 1 << 2,
     CreateDirectory = 1 << 3,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum StreamingFault {
+    Write = 1 << 0,
+    FileSync = 1 << 1,
+    DirectorySync = 1 << 2,
+    CleanupDirectorySync = 1 << 3,
+    InitialReadMetadata = 1 << 4,
 }
 
 impl NamespaceLease {
@@ -57,6 +69,8 @@ impl NamespaceLease {
             fail_next_settlement: AtomicBool::new(false),
             #[cfg(test)]
             committed_mutation_faults: AtomicU8::new(0),
+            #[cfg(test)]
+            streaming_faults: AtomicU8::new(0),
         }
     }
 
@@ -158,5 +172,17 @@ impl NamespaceLease {
             .fetch_and(!mask, Ordering::AcqRel)
             & mask
             != 0
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_streaming_fault(&self, fault: StreamingFault) {
+        self.streaming_faults
+            .fetch_or(fault as u8, Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_streaming_fault(&self, fault: StreamingFault) -> bool {
+        let mask = fault as u8;
+        self.streaming_faults.fetch_and(!mask, Ordering::AcqRel) & mask != 0
     }
 }

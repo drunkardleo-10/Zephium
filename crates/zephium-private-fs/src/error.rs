@@ -15,7 +15,7 @@ pub enum PrivateFsError {
     /// Another process owns the exact namespace lock, or locking failed.
     #[error("private filesystem namespace lock is unavailable")]
     LockUnavailable,
-    /// A caller or observed file exceeded the fixed in-memory byte bound.
+    /// A caller or observed file exceeded its fixed operation byte bound.
     #[error("private filesystem byte bound was exceeded")]
     BoundExceeded,
     /// A no-replace publication found an existing destination.

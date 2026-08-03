@@ -6,7 +6,13 @@ use std::sync::{Arc, MutexGuard};
 use crate::identity::{DirectoryIdentity, FileIdentity};
 use crate::lease::NamespaceLease;
 use crate::platform::{self, OpenPurpose};
-use crate::{PrivateComponent, PrivateEntryName, PrivateFsError, MAX_IN_MEMORY_FILE_BYTES};
+use crate::streaming::copy_exact;
+#[cfg(test)]
+use crate::streaming::ExactCopyError;
+use crate::{
+    PrivateComponent, PrivateEntryName, PrivateFsError, StreamingFileLength, StreamingWriteError,
+    MAX_IN_MEMORY_FILE_BYTES,
+};
 
 const MAX_INVENTORY_ENTRIES: usize = 4_096;
 const LOCK_COMPONENT_NAME: &str = ".zephium-private-fs-lock-v1";
@@ -444,6 +450,100 @@ impl PrivateDirectory {
         self.read_bounded_regular_named(ChildName::Entry(name), limit)
     }
 
+    /// Runs a callback with one bounded verified protocol-file reader.
+    ///
+    /// The callback receives only a [`Read`] capability capped at the file's
+    /// admitted initial length, never a file or path. Its result is nested so
+    /// caller-owned validation failures remain distinct from filesystem
+    /// failures. Identity, exact spelling, length, and the namespace boundary
+    /// are revalidated after the callback even when it returns an error value.
+    /// The callback executes under the namespace operation lease and therefore
+    /// must not re-enter this namespace.
+    pub fn with_bounded_regular_reader<T, E>(
+        &self,
+        component: &PrivateComponent,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        self.with_bounded_regular_reader_named(ChildName::Control(component), limit, callback)
+    }
+
+    /// Runs a callback with one bounded verified payload-entry reader.
+    ///
+    /// The callback receives only a [`Read`] capability capped at the file's
+    /// admitted initial length. Filesystem validation always takes precedence
+    /// over the nested callback result. It must not re-enter this namespace.
+    pub fn with_bounded_entry_regular_reader<T, E>(
+        &self,
+        name: &PrivateEntryName,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        self.with_bounded_regular_reader_named(ChildName::Entry(name), limit, callback)
+    }
+
+    fn with_bounded_regular_reader_named<T, E>(
+        &self,
+        name: ChildName<'_>,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        let Some(mut verified) = self.open_optional_regular_unlocked(name, OpenPurpose::Read)?
+        else {
+            self.precheck_unlocked()?;
+            return Ok(None);
+        };
+        #[cfg(test)]
+        let initial_metadata = if self
+            .lease
+            .take_streaming_fault(crate::lease::StreamingFault::InitialReadMetadata)
+        {
+            Err(PrivateFsError::IdentityAmbiguous)
+        } else {
+            verified
+                .file
+                .metadata()
+                .map_err(|_| PrivateFsError::IdentityAmbiguous)
+        };
+        #[cfg(not(test))]
+        let initial_metadata = verified
+            .file
+            .metadata()
+            .map_err(|_| PrivateFsError::IdentityAmbiguous);
+        let initial_length = self.lease.observe(initial_metadata)?.len();
+        if initial_length > u64::try_from(limit.get()).unwrap_or(u64::MAX) {
+            return Err(PrivateFsError::BoundExceeded);
+        }
+
+        let callback_result = {
+            let mut bounded = Read::by_ref(&mut verified.file).take(initial_length);
+            callback(&mut bounded)
+        };
+        let validation = (|| {
+            let final_length = verified
+                .file
+                .metadata()
+                .map_err(|_| PrivateFsError::IdentityAmbiguous)?
+                .len();
+            if final_length != initial_length {
+                return Err(PrivateFsError::IdentityAmbiguous);
+            }
+            platform::revalidate_regular(
+                &self.core.handle,
+                &self.core.path,
+                name.as_str(),
+                &verified.file,
+                verified.identity.0,
+            )?;
+            self.verify_boundary_unlocked()
+        })();
+        self.lease.observe(validation)?;
+        Ok(Some(callback_result))
+    }
+
     fn read_bounded_regular_named(
         &self,
         name: ChildName<'_>,
@@ -512,6 +612,172 @@ impl PrivateDirectory {
         limit: ByteLimit,
     ) -> Result<FileIdentity, PrivateFsError> {
         self.write_new_synced_named(ChildName::Entry(name), bytes, limit)
+    }
+
+    /// Streams one exact-length source into a new regular payload entry.
+    ///
+    /// The source must yield exactly `expected_length` bytes followed by EOF.
+    /// Short, long, and source-error outcomes trigger held-identity cleanup;
+    /// they are returned as clean source failures only after durable removal,
+    /// exact absence, and the namespace boundary have all been proven. Source
+    /// errors and source bytes are never retained. The reader executes under
+    /// the non-reentrant namespace operation lease and therefore must not
+    /// re-enter this namespace.
+    pub fn write_new_entry_from_reader<R: Read + ?Sized>(
+        &self,
+        name: &PrivateEntryName,
+        reader: &mut R,
+        expected_length: StreamingFileLength,
+    ) -> Result<FileIdentity, StreamingWriteError> {
+        self.write_new_from_reader_named(ChildName::Entry(name), reader, expected_length)
+    }
+
+    fn write_new_from_reader_named(
+        &self,
+        name: ChildName<'_>,
+        reader: &mut (impl Read + ?Sized),
+        expected_length: StreamingFileLength,
+    ) -> Result<FileIdentity, StreamingWriteError> {
+        let _operation = self.begin_operation().map_err(StreamingWriteError::from)?;
+        self.reject_reserved_name(name)
+            .map_err(StreamingWriteError::from)?;
+        self.precheck_unlocked()
+            .map_err(StreamingWriteError::from)?;
+
+        let (file, identity) =
+            match platform::create_new_regular(&self.core.handle, &self.core.path, name.as_str()) {
+                Ok(created) => created,
+                Err(PrivateFsError::SettlementUnknown) => {
+                    return self.quarantine_streaming_write_unlocked();
+                }
+                Err(PrivateFsError::AlreadyExists) => {
+                    let inspected = self
+                        .lease
+                        .observe(platform::inspect_child(
+                            &self.core.handle,
+                            &self.core.path,
+                            name.as_str(),
+                        ))
+                        .map_err(StreamingWriteError::from)?;
+                    let error = match inspected {
+                        Some(platform::RawChildKind::Regular(_)) => PrivateFsError::AlreadyExists,
+                        Some(platform::RawChildKind::Directory(_)) => PrivateFsError::Unsafe,
+                        None => {
+                            let error = self
+                                .lease
+                                .observe::<()>(Err(PrivateFsError::IdentityAmbiguous))
+                                .err()
+                                .unwrap_or(PrivateFsError::IdentityAmbiguous);
+                            return Err(StreamingWriteError::Filesystem(error));
+                        }
+                    };
+                    self.precheck_unlocked()
+                        .map_err(StreamingWriteError::from)?;
+                    return Err(StreamingWriteError::Filesystem(error));
+                }
+                Err(error) => {
+                    self.precheck_unlocked()
+                        .map_err(StreamingWriteError::from)?;
+                    return Err(StreamingWriteError::Filesystem(error));
+                }
+            };
+        let mut verified = VerifiedRegular {
+            file,
+            identity: FileIdentity(identity),
+        };
+
+        if platform::verify_exact_name(&verified.file, name.as_str()).is_err() {
+            return self.quarantine_streaming_write_unlocked();
+        }
+
+        #[cfg(test)]
+        let copy_result = if self
+            .lease
+            .take_streaming_fault(crate::lease::StreamingFault::Write)
+        {
+            Err(ExactCopyError::SinkWrite)
+        } else {
+            copy_exact(reader, &mut verified.file, expected_length)
+        };
+        #[cfg(not(test))]
+        let copy_result = copy_exact(reader, &mut verified.file, expected_length);
+        if let Err(error) = copy_result {
+            return self.fail_streaming_write_unlocked(name, verified, error.into_public());
+        }
+
+        // `Read` is caller-controlled through the EOF probe. It may have
+        // mutated the newly created inode by another descriptor while still
+        // reporting exact EOF, so bind the result to the declared length only
+        // after the final source invocation has returned.
+        let exact_length = verified
+            .file
+            .metadata()
+            .map(|metadata| metadata.len() == expected_length.get())
+            .unwrap_or(false);
+        if !exact_length {
+            return self.fail_streaming_write_unlocked(
+                name,
+                verified,
+                StreamingWriteError::SinkLengthMismatch,
+            );
+        }
+
+        let file_sync = verified.file.sync_all().map_err(|_| PrivateFsError::Io);
+        #[cfg(test)]
+        let file_sync = file_sync.and_then(|()| {
+            if self
+                .lease
+                .take_streaming_fault(crate::lease::StreamingFault::FileSync)
+            {
+                Err(PrivateFsError::Io)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = file_sync {
+            return self.fail_streaming_write_unlocked(
+                name,
+                verified,
+                StreamingWriteError::Filesystem(error),
+            );
+        }
+
+        if platform::revalidate_regular(
+            &self.core.handle,
+            &self.core.path,
+            name.as_str(),
+            &verified.file,
+            verified.identity.0,
+        )
+        .is_err()
+        {
+            return self.quarantine_streaming_write_unlocked();
+        }
+
+        let directory_sync = platform::sync_directory(&self.core.handle);
+        #[cfg(test)]
+        let directory_sync = directory_sync.and_then(|()| {
+            if self
+                .lease
+                .take_streaming_fault(crate::lease::StreamingFault::DirectorySync)
+            {
+                Err(PrivateFsError::Io)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = directory_sync {
+            return self.fail_streaming_write_unlocked(
+                name,
+                verified,
+                StreamingWriteError::Filesystem(error),
+            );
+        }
+
+        if self.verify_boundary_unlocked().is_err() {
+            return self.quarantine_streaming_write_unlocked();
+        }
+        Ok(verified.identity)
     }
 
     fn write_new_synced_named(
@@ -583,20 +849,34 @@ impl PrivateDirectory {
         &self,
         component: &PrivateComponent,
     ) -> Result<bool, PrivateFsError> {
+        self.remove_verified_regular_named(ChildName::Control(component))
+    }
+
+    /// Durably removes one optional verified regular payload entry.
+    ///
+    /// Links, directories, special nodes, unsafe permissions or ACLs, case
+    /// aliases, and identity races fail closed without being removed.
+    pub fn remove_verified_entry_regular(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<bool, PrivateFsError> {
+        self.remove_verified_regular_named(ChildName::Entry(name))
+    }
+
+    fn remove_verified_regular_named(&self, name: ChildName<'_>) -> Result<bool, PrivateFsError> {
         let _operation = self.begin_operation()?;
-        self.reject_reserved(component)?;
+        self.reject_reserved_name(name)?;
         self.precheck_unlocked()?;
-        let Some(verified) = self
-            .open_optional_regular_unlocked(ChildName::Control(component), OpenPurpose::Mutation)?
+        let Some(verified) = self.open_optional_regular_unlocked(name, OpenPurpose::Mutation)?
         else {
             self.precheck_unlocked()?;
             return Ok(false);
         };
-        if let Err(error) = self.remove_regular_unlocked(component) {
+        if let Err(error) = self.remove_regular_unlocked(name) {
             let unchanged = platform::revalidate_regular(
                 &self.core.handle,
                 &self.core.path,
-                component.as_str(),
+                name.as_str(),
                 &verified.file,
                 verified.identity.0,
             )
@@ -606,7 +886,7 @@ impl PrivateDirectory {
         let settlement = (|| {
             drop(verified);
             platform::sync_directory(&self.core.handle)?;
-            self.ensure_absent_unlocked(component)?;
+            self.ensure_absent_unlocked(name)?;
             self.verify_boundary_unlocked()?;
             Ok(true)
         })();
@@ -720,9 +1000,8 @@ impl PrivateDirectory {
         result
     }
 
-    fn remove_regular_unlocked(&self, component: &PrivateComponent) -> Result<(), PrivateFsError> {
-        let result =
-            platform::remove_regular(&self.core.handle, &self.core.path, component.as_str());
+    fn remove_regular_unlocked(&self, name: ChildName<'_>) -> Result<(), PrivateFsError> {
+        let result = platform::remove_regular(&self.core.handle, &self.core.path, name.as_str());
         #[cfg(test)]
         if result.is_ok()
             && self
@@ -835,9 +1114,9 @@ impl PrivateDirectory {
         }
     }
 
-    fn ensure_absent_unlocked(&self, component: &PrivateComponent) -> Result<(), PrivateFsError> {
+    fn ensure_absent_unlocked(&self, name: ChildName<'_>) -> Result<(), PrivateFsError> {
         if self
-            .open_optional_regular_unlocked(ChildName::Control(component), OpenPurpose::Read)?
+            .open_optional_regular_unlocked(name, OpenPurpose::Read)?
             .is_some()
         {
             return Err(PrivateFsError::IdentityAmbiguous);
@@ -859,7 +1138,7 @@ impl PrivateDirectory {
             if source_file.identity != destination_file.identity {
                 return Err(PrivateFsError::IdentityAmbiguous);
             }
-            self.ensure_absent_unlocked(source)?;
+            self.ensure_absent_unlocked(ChildName::Control(source))?;
             self.verify_boundary_unlocked()?;
             Ok(destination_file.identity)
         })();
@@ -892,6 +1171,64 @@ impl PrivateDirectory {
             self.lease
                 .settle_after_commit(Err(PrivateFsError::SettlementUnknown))
         }
+    }
+
+    fn fail_streaming_write_unlocked<T>(
+        &self,
+        name: ChildName<'_>,
+        verified: VerifiedRegular,
+        clean_error: StreamingWriteError,
+    ) -> Result<T, StreamingWriteError> {
+        if self
+            .cleanup_created_regular_unlocked(name, verified)
+            .is_ok()
+        {
+            return Err(clean_error);
+        }
+
+        self.quarantine_streaming_write_unlocked()
+    }
+
+    fn quarantine_streaming_write_unlocked<T>(&self) -> Result<T, StreamingWriteError> {
+        let settlement = self
+            .lease
+            .settle_after_commit::<()>(Err(PrivateFsError::SettlementUnknown));
+        let error = settlement
+            .err()
+            .unwrap_or(PrivateFsError::SettlementUnknown);
+        Err(StreamingWriteError::Filesystem(error))
+    }
+
+    fn cleanup_created_regular_unlocked(
+        &self,
+        name: ChildName<'_>,
+        verified: VerifiedRegular,
+    ) -> Result<(), PrivateFsError> {
+        platform::revalidate_regular(
+            &self.core.handle,
+            &self.core.path,
+            name.as_str(),
+            &verified.file,
+            verified.identity.0,
+        )?;
+        // `Read` is caller-controlled and may have invalidated the namespace
+        // while the operation lease was held. Re-establish root, lock, and
+        // directory authority immediately before the cleanup mutation. If
+        // authority is ambiguous, leave the held inode as recovery residue and
+        // let the caller quarantine the lease.
+        self.verify_boundary_unlocked()?;
+        self.remove_regular_unlocked(name)?;
+        drop(verified);
+        platform::sync_directory(&self.core.handle)?;
+        #[cfg(test)]
+        if self
+            .lease
+            .take_streaming_fault(crate::lease::StreamingFault::CleanupDirectorySync)
+        {
+            return Err(PrivateFsError::Io);
+        }
+        self.ensure_absent_unlocked(name)?;
+        self.verify_boundary_unlocked()
     }
 }
 
@@ -1349,7 +1686,77 @@ fn private_directory_builder() -> fs::DirBuilder {
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
-    use crate::lease::CommittedMutationFault;
+    use crate::lease::{CommittedMutationFault, StreamingFault};
+    use std::fs::OpenOptions;
+    use std::io::Cursor;
+
+    struct RenameOnFirstRead {
+        bytes: Cursor<Vec<u8>>,
+        source: PathBuf,
+        destination: PathBuf,
+        renamed: bool,
+    }
+
+    impl Read for RenameOnFirstRead {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.bytes.read(buffer)?;
+            if read != 0 && !self.renamed {
+                fs::rename(&self.source, &self.destination)?;
+                self.renamed = true;
+            }
+            Ok(read)
+        }
+    }
+
+    struct RemoveOnFirstRead {
+        bytes: Cursor<Vec<u8>>,
+        target: PathBuf,
+        removed: bool,
+    }
+
+    impl Read for RemoveOnFirstRead {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.bytes.read(buffer)?;
+            if read != 0 && !self.removed {
+                fs::remove_file(&self.target)?;
+                self.removed = true;
+            }
+            Ok(read)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum EofMutation {
+        Append,
+        Truncate,
+    }
+
+    struct MutateOnEof {
+        bytes: Cursor<Vec<u8>>,
+        target: PathBuf,
+        mutation: EofMutation,
+        mutated: bool,
+    }
+
+    impl Read for MutateOnEof {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.bytes.read(buffer)?;
+            if read == 0 && !self.mutated {
+                let mut options = OpenOptions::new();
+                options.write(true);
+                match self.mutation {
+                    EofMutation::Append => {
+                        options.append(true).open(&self.target)?.write_all(b"x")?;
+                    }
+                    EofMutation::Truncate => {
+                        options.truncate(true).open(&self.target)?;
+                    }
+                }
+                self.mutated = true;
+            }
+            Ok(read)
+        }
+    }
 
     fn test_namespace(name: &str) -> (tempfile::TempDir, LockedPrivateNamespace) {
         let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -1416,6 +1823,275 @@ mod tests {
             namespace.directory.list_components(8),
             Err(PrivateFsError::Quarantined)
         );
+    }
+
+    #[test]
+    fn reported_stream_write_and_sync_failures_cleanly_remove_the_created_entry() {
+        let (parent, namespace) = test_namespace("stream-io-cleanup-test");
+
+        for (index, fault) in [
+            StreamingFault::Write,
+            StreamingFault::FileSync,
+            StreamingFault::DirectorySync,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = PrivateEntryName::new(format!("Payload {index}.bin")).unwrap();
+            namespace.directory.lease.inject_streaming_fault(fault);
+            let mut source = Cursor::new(b"value");
+            assert_eq!(
+                namespace.directory.write_new_entry_from_reader(
+                    &name,
+                    &mut source,
+                    StreamingFileLength::new(5).unwrap(),
+                ),
+                Err(StreamingWriteError::Filesystem(PrivateFsError::Io))
+            );
+            assert!(!parent
+                .path()
+                .join("stream-io-cleanup-test")
+                .join(name.as_str())
+                .exists());
+            assert!(namespace.directory.list_entry_names(8).unwrap().is_empty());
+
+            let mut retry = Cursor::new(b"value");
+            namespace
+                .directory
+                .write_new_entry_from_reader(
+                    &name,
+                    &mut retry,
+                    StreamingFileLength::new(5).unwrap(),
+                )
+                .unwrap();
+            assert!(namespace
+                .directory
+                .remove_verified_entry_regular(&name)
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn streaming_cleanup_unlink_ambiguity_is_unknown_and_stickily_quarantined() {
+        let (parent, namespace) = test_namespace("stream-cleanup-unlink-test");
+        let name = PrivateEntryName::new("Payload.bin").unwrap();
+        namespace
+            .directory
+            .lease
+            .inject_committed_mutation_fault(CommittedMutationFault::Remove);
+        let mut short = Cursor::new(b"four");
+
+        assert_eq!(
+            namespace.directory.write_new_entry_from_reader(
+                &name,
+                &mut short,
+                StreamingFileLength::new(5).unwrap(),
+            ),
+            Err(StreamingWriteError::Filesystem(
+                PrivateFsError::SettlementUnknown
+            ))
+        );
+        assert!(!parent
+            .path()
+            .join("stream-cleanup-unlink-test/Payload.bin")
+            .exists());
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn streaming_cleanup_directory_sync_ambiguity_is_unknown_and_stickily_quarantined() {
+        let (parent, namespace) = test_namespace("stream-cleanup-sync-test");
+        let name = PrivateEntryName::new("Payload.bin").unwrap();
+        namespace
+            .directory
+            .lease
+            .inject_streaming_fault(StreamingFault::CleanupDirectorySync);
+        let mut short = Cursor::new(b"four");
+
+        assert_eq!(
+            namespace.directory.write_new_entry_from_reader(
+                &name,
+                &mut short,
+                StreamingFileLength::new(5).unwrap(),
+            ),
+            Err(StreamingWriteError::Filesystem(
+                PrivateFsError::SettlementUnknown
+            ))
+        );
+        assert!(!parent
+            .path()
+            .join("stream-cleanup-sync-test/Payload.bin")
+            .exists());
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn bounded_reader_initial_metadata_failure_is_identity_ambiguous_and_quarantines() {
+        use std::cell::Cell;
+
+        let (_parent, namespace) = test_namespace("stream-read-metadata-test");
+        let name = PrivateEntryName::new("Payload.bin").unwrap();
+        namespace
+            .directory
+            .write_new_entry_synced(&name, b"value", ByteLimit::new(16).unwrap())
+            .unwrap();
+        namespace
+            .directory
+            .lease
+            .inject_streaming_fault(StreamingFault::InitialReadMetadata);
+        let called = Cell::new(false);
+
+        assert_eq!(
+            namespace.directory.with_bounded_entry_regular_reader(
+                &name,
+                ByteLimit::new(16).unwrap(),
+                |_reader| {
+                    called.set(true);
+                    Ok::<_, ()>(())
+                },
+            ),
+            Err(PrivateFsError::IdentityAmbiguous)
+        );
+        assert!(!called.get());
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn final_stream_identity_ambiguity_quarantines_without_unlinking_the_moved_inode() {
+        let (parent, namespace) = test_namespace("stream-final-identity-test");
+        let root = parent.path().join("stream-final-identity-test");
+        let name = PrivateEntryName::new("Payload.bin").unwrap();
+        let moved = root.join("Moved Payload.bin");
+        let mut source = RenameOnFirstRead {
+            bytes: Cursor::new(b"value".to_vec()),
+            source: root.join(name.as_str()),
+            destination: moved.clone(),
+            renamed: false,
+        };
+
+        assert_eq!(
+            namespace.directory.write_new_entry_from_reader(
+                &name,
+                &mut source,
+                StreamingFileLength::new(5).unwrap(),
+            ),
+            Err(StreamingWriteError::Filesystem(
+                PrivateFsError::SettlementUnknown
+            ))
+        );
+        assert!(moved.exists(), "ambiguous moved inode must not be unlinked");
+        assert_eq!(fs::read(moved).unwrap(), b"value");
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn final_stream_lock_ambiguity_quarantines_without_attempting_payload_cleanup() {
+        let (parent, namespace) = test_namespace("stream-final-lock-test");
+        let root = parent.path().join("stream-final-lock-test");
+        let name = PrivateEntryName::new("Payload.bin").unwrap();
+        let mut source = RemoveOnFirstRead {
+            bytes: Cursor::new(b"value".to_vec()),
+            target: root.join(LOCK_COMPONENT_NAME),
+            removed: false,
+        };
+
+        assert_eq!(
+            namespace.directory.write_new_entry_from_reader(
+                &name,
+                &mut source,
+                StreamingFileLength::new(5).unwrap(),
+            ),
+            Err(StreamingWriteError::Filesystem(
+                PrivateFsError::SettlementUnknown
+            ))
+        );
+        assert_eq!(
+            fs::read(root.join(name.as_str())).unwrap(),
+            b"value",
+            "payload must remain when lock authority is already ambiguous"
+        );
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn failed_stream_with_lost_lock_quarantines_without_cleanup_mutation() {
+        let (parent, namespace) = test_namespace("stream-failed-lock-test");
+        let root = parent.path().join("stream-failed-lock-test");
+        let name = PrivateEntryName::new("Payload.bin").unwrap();
+        let mut source = RemoveOnFirstRead {
+            bytes: Cursor::new(b"val".to_vec()),
+            target: root.join(LOCK_COMPONENT_NAME),
+            removed: false,
+        };
+
+        assert_eq!(
+            namespace.directory.write_new_entry_from_reader(
+                &name,
+                &mut source,
+                StreamingFileLength::new(5).unwrap(),
+            ),
+            Err(StreamingWriteError::Filesystem(
+                PrivateFsError::SettlementUnknown
+            ))
+        );
+        assert_eq!(
+            fs::read(root.join(name.as_str())).unwrap(),
+            b"val",
+            "partial payload must remain when cleanup authority is ambiguous"
+        );
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn exact_stream_length_is_revalidated_after_the_hostile_eof_probe() {
+        let (parent, namespace) = test_namespace("stream-eof-mutation-test");
+        let root = parent.path().join("stream-eof-mutation-test");
+
+        for (entry, mutation) in [
+            ("Appended.bin", EofMutation::Append),
+            ("Truncated.bin", EofMutation::Truncate),
+        ] {
+            let name = PrivateEntryName::new(entry).unwrap();
+            let target = root.join(name.as_str());
+            let mut source = MutateOnEof {
+                bytes: Cursor::new(b"value".to_vec()),
+                target: target.clone(),
+                mutation,
+                mutated: false,
+            };
+
+            assert_eq!(
+                namespace.directory.write_new_entry_from_reader(
+                    &name,
+                    &mut source,
+                    StreamingFileLength::new(5).unwrap(),
+                ),
+                Err(StreamingWriteError::SinkLengthMismatch)
+            );
+            assert!(
+                !target.exists(),
+                "length-mismatched held inode must be durably cleaned"
+            );
+            assert_eq!(namespace.directory.list_entry_names(8).unwrap(), vec![]);
+        }
     }
 
     #[test]
