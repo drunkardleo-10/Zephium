@@ -8,9 +8,9 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 
 use super::{
     ExtensionGrantAuthority, ExtensionInstall, ExtensionInstallCatalog,
-    ExtensionManifestDescriptor, MAX_EXTENSION_GRANT_RETAINED_BYTES,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE, MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES,
-    MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ExtensionInstallCatalogRevision, ExtensionManifestDescriptor,
+    MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 
 const BINDINGS_FIXED_BYTES: usize = 256;
@@ -173,6 +173,7 @@ impl ExtensionGrantInitializationState {
 #[derive(Clone, Copy, Debug)]
 pub struct ExtensionGrantCohortEntry<'a> {
     profile: ProfileId,
+    catalog_revision: ExtensionInstallCatalogRevision,
     install: &'a ExtensionInstall,
     binding: &'a ExtensionGrantManifestBinding,
     state: &'a ExtensionGrantInitializationState,
@@ -181,6 +182,12 @@ pub struct ExtensionGrantCohortEntry<'a> {
 impl<'a> ExtensionGrantCohortEntry<'a> {
     pub const fn profile(self) -> ProfileId {
         self.profile
+    }
+
+    /// Exact catalog revision from the same atomic cohort snapshot as every
+    /// other value exposed by this entry.
+    pub const fn catalog_revision(self) -> ExtensionInstallCatalogRevision {
+        self.catalog_revision
     }
 
     pub const fn install(self) -> &'a ExtensionInstall {
@@ -201,6 +208,34 @@ impl<'a> ExtensionGrantCohortEntry<'a> {
 
     pub const fn authority_arc(self) -> Option<&'a Arc<ExtensionGrantAuthority>> {
         self.state.authority_arc()
+    }
+}
+
+/// Borrowed proof that one install id is absent from a complete atomic
+/// profile cohort and is covered by the catalog's durable non-reuse floor.
+/// Callers cannot construct this witness from a filtered lookup result.
+#[derive(Clone, Copy, Debug)]
+pub struct ExtensionGrantCohortAbsence<'a> {
+    cohort: &'a ExtensionGrantCohort,
+    install_id: ExtensionInstallId,
+    install_id_high_water: ExtensionInstallId,
+}
+
+impl ExtensionGrantCohortAbsence<'_> {
+    pub const fn profile(self) -> ProfileId {
+        self.cohort.profile
+    }
+
+    pub const fn catalog_revision(self) -> ExtensionInstallCatalogRevision {
+        self.cohort.install_catalog.revision()
+    }
+
+    pub const fn install_id(self) -> ExtensionInstallId {
+        self.install_id
+    }
+
+    pub const fn install_id_high_water(self) -> ExtensionInstallId {
+        self.install_id_high_water
     }
 }
 
@@ -267,7 +302,7 @@ impl ExtensionGrantCohort {
             }
             match next_authority.peek() {
                 Some(authority) if authority.install_id() < install.id() => {
-                    return Err(ExtensionGrantCohortError::UnknownAuthority)
+                    return Err(ExtensionGrantCohortError::UnknownAuthority);
                 }
                 Some(authority) if authority.install_id() == install.id() => {
                     let authority = next_authority
@@ -367,9 +402,31 @@ impl ExtensionGrantCohort {
             .ok()?;
         Some(ExtensionGrantCohortEntry {
             profile: self.profile,
+            catalog_revision: self.install_catalog.revision(),
             install: self.install_catalog.get(id)?,
             binding: self.bindings.bindings.get(index)?,
             state: self.states.get(index)?,
+        })
+    }
+
+    /// Issues an exact absence witness only from this complete cohort and only
+    /// when the durable non-reuse floor proves that the id existed in, or is
+    /// older than, the catalog's admitted identity domain.
+    pub fn resolve_absence(
+        &self,
+        id: ExtensionInstallId,
+    ) -> Option<ExtensionGrantCohortAbsence<'_>> {
+        if self.install_catalog.get(id).is_some() {
+            return None;
+        }
+        let install_id_high_water = self.install_catalog.install_id_high_water()?;
+        if install_id_high_water < id {
+            return None;
+        }
+        Some(ExtensionGrantCohortAbsence {
+            cohort: self,
+            install_id: id,
+            install_id_high_water,
         })
     }
 
@@ -557,6 +614,37 @@ mod tests {
     }
 
     #[test]
+    fn absence_witness_requires_complete_catalog_non_reuse_floor() {
+        let manifest = manifest();
+        let install = ExtensionInstall::new(ExtensionInstallId::from(7), package());
+        let catalog = ExtensionInstallCatalog::from_persisted(
+            ExtensionInstallCatalogRevision::new(4).unwrap(),
+            Some(ExtensionInstallId::from(9)),
+            vec![install.clone()],
+        )
+        .unwrap();
+        let bindings =
+            ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+                install.id(),
+                manifest,
+            )])
+            .unwrap();
+        let cohort =
+            ExtensionGrantCohort::from_persisted(ProfileId::from(3), catalog, bindings, Vec::new())
+                .unwrap();
+
+        assert!(cohort.resolve_absence(install.id()).is_none());
+        assert!(cohort
+            .resolve_absence(ExtensionInstallId::from(10))
+            .is_none());
+        let absence = cohort.resolve_absence(ExtensionInstallId::from(8)).unwrap();
+        assert_eq!(absence.profile(), ProfileId::from(3));
+        assert_eq!(absence.catalog_revision().get(), 4);
+        assert_eq!(absence.install_id(), ExtensionInstallId::from(8));
+        assert_eq!(absence.install_id_high_water(), ExtensionInstallId::from(9));
+    }
+
+    #[test]
     fn exact_entry_resolution_borrows_one_atomic_arc_backed_binding() {
         let first_package = package();
         let first_manifest = manifest_for(first_package.clone(), "test.cohort.first.v1");
@@ -604,6 +692,10 @@ mod tests {
 
         let resolved = cohort.resolve_entry(second_install.id()).unwrap();
         assert_eq!(resolved.profile(), ProfileId::from(42));
+        assert_eq!(
+            resolved.catalog_revision(),
+            ExtensionInstallCatalogRevision::INITIAL
+        );
         assert_eq!(resolved.install(), &second_install);
         assert_eq!(resolved.manifest(), second_manifest.as_ref());
         assert!(Arc::ptr_eq(resolved.manifest_arc(), &second_manifest));

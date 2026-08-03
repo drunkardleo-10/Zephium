@@ -738,6 +738,28 @@ impl ExtensionGrantAuthority {
         Ok(())
     }
 
+    /// Checks only that every required API and host declaration in the exact
+    /// manifest is covered by current grants. This does not check file/private
+    /// toggles or prove compatibility, package admission/materialization,
+    /// lease ownership, other activation authority, or runtime safety.
+    pub fn has_required_api_and_host_grants_for(
+        &self,
+        manifest: &ExtensionManifestDescriptor,
+    ) -> bool {
+        &self.package == manifest.package()
+            && manifest
+                .declarations()
+                .required_api()
+                .names()
+                .iter()
+                .all(|name| self.contains_api_internal(name))
+            && manifest
+                .declarations()
+                .required_host_authorities()
+                .into_iter()
+                .all(|pattern| self.contains_host_internal(pattern.as_str()))
+    }
+
     fn contains_api_internal(&self, name: &ApiPermissionName) -> bool {
         self.required_api.binary_search(name).is_ok()
             || self.optional_api.binary_search(name).is_ok()
@@ -1285,6 +1307,35 @@ mod tests {
     }
 
     #[test]
+    fn required_authority_check_covers_every_required_api_and_host_only() {
+        let package_identity = package(1, 7);
+        let install = install(package_identity.clone());
+        let manifest = manifest_for(
+            package_identity,
+            &["tabs"],
+            &["storage"],
+            &["https://required.example/*"],
+            &["https://optional.example/*"],
+        );
+        let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+        assert!(!authority.has_required_api_and_host_grants_for(&manifest));
+
+        let authority = grant_api(authority, &manifest, "tabs");
+        assert!(!authority.has_required_api_and_host_grants_for(&manifest));
+        let authority = grant_host(authority, &manifest, "https://required.example/*");
+        assert!(authority.has_required_api_and_host_grants_for(&manifest));
+
+        let other_manifest = manifest_for(
+            package(1, 8),
+            &["tabs"],
+            &[],
+            &["https://required.example/*"],
+            &[],
+        );
+        assert!(!authority.has_required_api_and_host_grants_for(&other_manifest));
+    }
+
+    #[test]
     fn new_authority_defaults_every_capability_deny() {
         let manifest = manifest_for(
             package(1, 1),
@@ -1447,11 +1498,7 @@ mod tests {
                 base_package.revision(),
                 ExtensionPackagePayloadIdentity::acquired_zip(
                     2,
-                    base_package
-                        .payload()
-                        .acquired_zip_evidence()
-                        .unwrap()
-                        .1,
+                    base_package.payload().acquired_zip_evidence().unwrap().1,
                 )
                 .unwrap(),
                 base_package.manifest_sha256(),
