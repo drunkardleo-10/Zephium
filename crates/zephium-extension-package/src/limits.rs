@@ -29,10 +29,14 @@ pub const MAX_EXTENSION_TREE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum bytes in one materialized resource file.
 pub const MAX_EXTENSION_TREE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum aggregate regular files plus distinct implicit non-root directories
+/// in one materialized resource tree.
+pub const MAX_EXTENSION_TREE_ENTRIES: usize = 4_096;
 /// Maximum files in one materialized resource tree.
-pub const MAX_EXTENSION_TREE_FILES: usize = 4_096;
-/// Maximum implicit non-root directories in one materialized resource tree.
-pub const MAX_EXTENSION_TREE_DIRECTORIES: usize = 4_096;
+///
+/// This remains a named JSON/catalog field ceiling, but cannot drift above the
+/// aggregate filesystem-entry ceiling.
+pub const MAX_EXTENSION_TREE_FILES: usize = MAX_EXTENSION_TREE_ENTRIES;
 /// Maximum supported package update lines in one release catalog.
 pub const MAX_EXTENSION_PACKAGE_LINES: usize = 8;
 /// Maximum exact license expressions in one product admission policy.
@@ -64,6 +68,7 @@ pub const MAX_EXTENSION_LEGAL_NOTICE_BYTES: u64 = 4 * 1024 * 1024;
 
 const _: () = assert!(MAX_EXTENSION_TREE_FILE_BYTES <= MAX_EXTENSION_TREE_BYTES);
 const _: () = assert!(MAX_EXTENSION_TREE_BYTES <= MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES);
+const _: () = assert!(MAX_EXTENSION_TREE_FILES <= MAX_EXTENSION_TREE_ENTRIES);
 const _: () = assert!(MAX_EXTENSION_PACKAGE_LINES <= MAX_EXTENSION_TREE_FILES);
 const _: () = assert!(MAX_EXTENSION_PATH_COMPONENT_BYTES <= MAX_EXTENSION_RELATIVE_PATH_BYTES);
 const _: () = assert!(MAX_CHROMIUM_MANIFEST_KEY_BASE64_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);

@@ -11,7 +11,7 @@ use crate::digest::decode_lower_hex_32;
 use crate::relative_path::portable_path_shape_conflicts;
 use crate::{
     parse_bounded_json, BoundedJsonError, BoundedJsonLimits, PortableRelativePath,
-    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_DIRECTORIES,
+    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES,
     MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_FILE_BYTES,
     MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
 };
@@ -80,6 +80,8 @@ impl ExtensionTreeFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalExtensionTreeIndex {
     files: Box<[ExtensionTreeFile]>,
+    implicit_directory_count: usize,
+    total_entry_count: usize,
     index_sha256: ExtensionTreeIndexDigest,
     index_bytes: u64,
     tree_sha256: ExtensionTreeDigest,
@@ -166,11 +168,12 @@ impl CanonicalExtensionTreeIndex {
             });
         }
         let manifest_sha256 = manifest_sha256.ok_or(ExtensionTreeIndexError::ManifestMissing)?;
-        let directory_count = count_implicit_directories(&files);
-        if directory_count > MAX_EXTENSION_TREE_DIRECTORIES {
-            return Err(ExtensionTreeIndexError::DirectoryCount {
-                count: directory_count,
-                max: MAX_EXTENSION_TREE_DIRECTORIES,
+        let implicit_directory_count = count_implicit_directories(&files)?;
+        let total_entry_count = checked_total_entry_count(files.len(), implicit_directory_count)?;
+        if total_entry_count > MAX_EXTENSION_TREE_ENTRIES {
+            return Err(ExtensionTreeIndexError::EntryCount {
+                count: total_entry_count,
+                max: MAX_EXTENSION_TREE_ENTRIES,
             });
         }
 
@@ -203,6 +206,8 @@ impl CanonicalExtensionTreeIndex {
             u64::try_from(bytes.len()).map_err(|_| ExtensionTreeIndexError::AccountingOverflow)?;
         Ok(Self {
             files: files.into_boxed_slice(),
+            implicit_directory_count,
+            total_entry_count,
             index_sha256,
             index_bytes,
             tree_sha256,
@@ -215,6 +220,16 @@ impl CanonicalExtensionTreeIndex {
     /// Returns the canonical sorted file inventory.
     pub fn files(&self) -> &[ExtensionTreeFile] {
         &self.files
+    }
+
+    /// Returns the exact number of distinct implicit non-root directories.
+    pub const fn implicit_directory_count(&self) -> usize {
+        self.implicit_directory_count
+    }
+
+    /// Returns the exact aggregate regular-file and implicit-directory count.
+    pub const fn total_entry_count(&self) -> usize {
+        self.total_entry_count
     }
 
     /// Finds one exact canonical path without allocating.
@@ -261,7 +276,9 @@ impl CanonicalExtensionTreeIndex {
 /// Canonical path ordering makes every subtree contiguous, so a directory
 /// prefix has already been counted exactly when the preceding file has the
 /// same prefix. Every byte is visited a bounded number of times.
-fn count_implicit_directories(files: &[ExtensionTreeFile]) -> usize {
+fn count_implicit_directories(
+    files: &[ExtensionTreeFile],
+) -> Result<usize, ExtensionTreeIndexError> {
     let mut count = 0_usize;
     let mut previous_parent = None;
 
@@ -277,11 +294,26 @@ fn count_implicit_directories(files: &[ExtensionTreeFile]) -> usize {
                 .take_while(|(left, right)| left == right)
                 .count()
         });
-        count += parent.split('/').count() - shared_prefixes;
+        let parent_prefixes = parent.split('/').count();
+        let new_prefixes = parent_prefixes
+            .checked_sub(shared_prefixes)
+            .ok_or(ExtensionTreeIndexError::EntryCountOverflow)?;
+        count = count
+            .checked_add(new_prefixes)
+            .ok_or(ExtensionTreeIndexError::EntryCountOverflow)?;
         previous_parent = Some(parent);
     }
 
-    count
+    Ok(count)
+}
+
+fn checked_total_entry_count(
+    file_count: usize,
+    directory_count: usize,
+) -> Result<usize, ExtensionTreeIndexError> {
+    file_count
+        .checked_add(directory_count)
+        .ok_or(ExtensionTreeIndexError::EntryCountOverflow)
 }
 
 fn digest_tree(files: &[ExtensionTreeFile]) -> ExtensionTreeDigest {
@@ -336,13 +368,15 @@ pub enum ExtensionTreeIndexError {
     NonCanonicalOrder,
     /// Paths collide by case alias or would make one path both file and directory.
     PortablePathCollision,
-    /// The implicit non-root directory count exceeds its ceiling.
-    DirectoryCount {
-        /// Observed unique directories.
+    /// The aggregate regular-file and implicit-directory count exceeds its ceiling.
+    EntryCount {
+        /// Observed aggregate entries.
         count: usize,
-        /// Maximum unique directories.
+        /// Maximum aggregate entries.
         max: usize,
     },
+    /// Aggregate tree-entry counting overflowed.
+    EntryCountOverflow,
     /// One file exceeds its byte ceiling.
     FileTooLarge {
         /// Observed bytes.
@@ -399,10 +433,13 @@ impl fmt::Display for ExtensionTreeIndexError {
             Self::PortablePathCollision => {
                 formatter.write_str("extension tree index paths collide across platforms")
             }
-            Self::DirectoryCount { count, max } => write!(
+            Self::EntryCount { count, max } => write!(
                 formatter,
-                "extension tree index has {count} implicit directories; maximum is {max}"
+                "extension tree index has {count} files and implicit directories; maximum is {max}"
             ),
+            Self::EntryCountOverflow => {
+                formatter.write_str("extension tree entry count overflowed")
+            }
             Self::FileTooLarge { bytes, max } => write!(
                 formatter,
                 "extension tree file uses {bytes} bytes; maximum is {max}"
@@ -436,6 +473,7 @@ impl Error for ExtensionTreeIndexError {}
 mod tests {
     use super::*;
     use crate::MAX_EXTENSION_RELATIVE_PATH_DEPTH;
+    use proptest::prelude::*;
 
     fn digest(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
@@ -465,16 +503,13 @@ mod tests {
         components.join("/")
     }
 
-    fn directory_boundary_index(extra_root_directories: usize) -> Vec<u8> {
-        let deepest_directory_count = MAX_EXTENSION_RELATIVE_PATH_DEPTH - 1;
-        let root_directory_count = MAX_EXTENSION_TREE_DIRECTORIES
-            .checked_sub(deepest_directory_count)
-            .unwrap();
-        let mut files = Vec::with_capacity(root_directory_count + extra_root_directories + 2);
+    fn entry_boundary_index(extra_root_files: usize) -> Vec<u8> {
+        let root_file_count = MAX_EXTENSION_TREE_ENTRIES.checked_sub(3).unwrap();
+        let mut files = Vec::with_capacity(root_file_count + extra_root_files + 2);
         files.push(file("manifest.json", 1, 1));
-        files.push(file(&deepest_file_path(), 1, 2));
-        for index in 0..root_directory_count + extra_root_directories {
-            files.push(file(&format!("root-{index:04}/leaf.js"), 1, 3));
+        files.push(file("shared/leaf.js", 1, 2));
+        for index in 0..root_file_count + extra_root_files {
+            files.push(file(&format!("root-{index:04}.js"), 1, 3));
         }
         files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         index(files)
@@ -488,6 +523,8 @@ mod tests {
         ]);
         let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes).unwrap();
         assert_eq!(parsed.files().len(), 2);
+        assert_eq!(parsed.implicit_directory_count(), 1);
+        assert_eq!(parsed.total_entry_count(), 3);
         assert_eq!(parsed.index_bytes(), bytes.len() as u64);
         assert_eq!(parsed.total_bytes(), 140);
         assert_eq!(parsed.manifest_sha256().bytes(), [1; 32]);
@@ -503,6 +540,8 @@ mod tests {
         );
         let parsed = CanonicalExtensionTreeIndex::parse_canonical(GOLDEN.as_bytes()).unwrap();
         assert_eq!(parsed.files().len(), 1);
+        assert_eq!(parsed.implicit_directory_count(), 0);
+        assert_eq!(parsed.total_entry_count(), 1);
         assert_eq!(parsed.manifest_sha256().bytes(), [1; 32]);
         assert_eq!(
             (parsed.index_sha256().bytes(), parsed.tree_sha256().bytes(),),
@@ -523,24 +562,21 @@ mod tests {
     }
 
     #[test]
-    fn admits_exact_implicit_directory_boundary_with_a_deepest_portable_path() {
-        let bytes = directory_boundary_index(0);
+    fn admits_exact_aggregate_entry_boundary_with_a_shared_directory() {
+        let bytes = entry_boundary_index(0);
         let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes).unwrap();
-        let deepest = PortableRelativePath::parse(&deepest_file_path()).unwrap();
 
-        assert_eq!(deepest.depth(), MAX_EXTENSION_RELATIVE_PATH_DEPTH);
-        assert_eq!(
-            count_implicit_directories(parsed.files()),
-            MAX_EXTENSION_TREE_DIRECTORIES
-        );
+        assert_eq!(parsed.files().len(), MAX_EXTENSION_TREE_ENTRIES - 1);
+        assert_eq!(parsed.implicit_directory_count(), 1);
+        assert_eq!(parsed.total_entry_count(), MAX_EXTENSION_TREE_ENTRIES);
     }
 
     #[test]
-    fn rejects_one_implicit_directory_above_the_boundary() {
-        let bytes = directory_boundary_index(1);
-        let error = ExtensionTreeIndexError::DirectoryCount {
-            count: MAX_EXTENSION_TREE_DIRECTORIES + 1,
-            max: MAX_EXTENSION_TREE_DIRECTORIES,
+    fn rejects_one_aggregate_entry_above_the_boundary() {
+        let bytes = entry_boundary_index(1);
+        let error = ExtensionTreeIndexError::EntryCount {
+            count: MAX_EXTENSION_TREE_ENTRIES + 1,
+            max: MAX_EXTENSION_TREE_ENTRIES,
         };
 
         assert_eq!(
@@ -549,21 +585,48 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "extension tree index has 4097 implicit directories; maximum is 4096"
+            "extension tree index has 4097 files and implicit directories; maximum is 4096"
         );
     }
 
     #[test]
     fn shared_directory_prefixes_are_counted_once_at_the_file_boundary() {
-        let mut files = Vec::with_capacity(MAX_EXTENSION_TREE_FILES);
+        let mut files = Vec::with_capacity(MAX_EXTENSION_TREE_ENTRIES - 1);
         files.push(file("manifest.json", 1, 1));
-        for index in 0..MAX_EXTENSION_TREE_FILES - 1 {
+        for index in 0..MAX_EXTENSION_TREE_ENTRIES - 2 {
             files.push(file(&format!("shared/leaf-{index:04}.js"), 1, 2));
         }
         let parsed = CanonicalExtensionTreeIndex::parse_canonical(&index(files)).unwrap();
 
-        assert_eq!(parsed.files().len(), MAX_EXTENSION_TREE_FILES);
-        assert_eq!(count_implicit_directories(parsed.files()), 1);
+        assert_eq!(parsed.files().len(), MAX_EXTENSION_TREE_ENTRIES - 1);
+        assert_eq!(parsed.implicit_directory_count(), 1);
+        assert_eq!(parsed.total_entry_count(), MAX_EXTENSION_TREE_ENTRIES);
+    }
+
+    #[test]
+    fn deepest_portable_path_exposes_every_distinct_directory_prefix() {
+        let path = deepest_file_path();
+        let bytes = index(vec![file(&path, 1, 2), file("manifest.json", 1, 1)]);
+        let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes).unwrap();
+        let deepest = PortableRelativePath::parse(&path).unwrap();
+
+        assert_eq!(deepest.depth(), MAX_EXTENSION_RELATIVE_PATH_DEPTH);
+        assert_eq!(
+            parsed.implicit_directory_count(),
+            MAX_EXTENSION_RELATIVE_PATH_DEPTH - 1
+        );
+        assert_eq!(
+            parsed.total_entry_count(),
+            MAX_EXTENSION_RELATIVE_PATH_DEPTH + 1
+        );
+    }
+
+    #[test]
+    fn aggregate_entry_count_overflow_is_rejected() {
+        assert_eq!(
+            checked_total_entry_count(usize::MAX, 1),
+            Err(ExtensionTreeIndexError::EntryCountOverflow)
+        );
     }
 
     #[test]
@@ -667,5 +730,65 @@ mod tests {
         .unwrap();
         assert_ne!(first.tree_sha256(), changed.tree_sha256());
         assert_ne!(first.index_sha256(), changed.index_sha256());
+    }
+
+    #[test]
+    fn existing_index_and_tree_digests_bind_implicit_directory_topology() {
+        let flat = CanonicalExtensionTreeIndex::parse_canonical(&index(vec![
+            file("manifest.json", 1, 1),
+            file("script.js", 2, 2),
+        ]))
+        .unwrap();
+        let nested = CanonicalExtensionTreeIndex::parse_canonical(&index(vec![
+            file("manifest.json", 1, 1),
+            file("scripts/script.js", 2, 2),
+        ]))
+        .unwrap();
+
+        assert_eq!(flat.files().len(), nested.files().len());
+        assert_eq!(flat.total_bytes(), nested.total_bytes());
+        assert_eq!(flat.implicit_directory_count(), 0);
+        assert_eq!(nested.implicit_directory_count(), 1);
+        assert_ne!(flat.index_sha256(), nested.index_sha256());
+        assert_ne!(flat.tree_sha256(), nested.tree_sha256());
+    }
+
+    proptest! {
+        #[test]
+        fn exposed_directory_and_total_counts_match_a_prefix_set(
+            generated in prop::collection::vec((0_u8..16, 0_u8..16, 0_u8..16), 0..96)
+        ) {
+            let mut paths = BTreeSet::new();
+            paths.insert("manifest.json".to_owned());
+            for (first, second, leaf) in generated {
+                paths.insert(format!("d-{first:02}/s-{second:02}/leaf-{leaf:02}.js"));
+            }
+
+            let raw_files = paths
+                .iter()
+                .map(|path| file(path, 1, 1))
+                .collect::<Vec<_>>();
+            let parsed = CanonicalExtensionTreeIndex::parse_canonical(&index(raw_files)).unwrap();
+
+            let mut directories = BTreeSet::new();
+            for path in &paths {
+                let mut prefix = String::new();
+                let mut components = path.split('/').peekable();
+                while let Some(component) = components.next() {
+                    if components.peek().is_none() {
+                        break;
+                    }
+                    if !prefix.is_empty() {
+                        prefix.push('/');
+                    }
+                    prefix.push_str(component);
+                    directories.insert(prefix.clone());
+                }
+            }
+
+            prop_assert_eq!(parsed.files().len(), paths.len());
+            prop_assert_eq!(parsed.implicit_directory_count(), directories.len());
+            prop_assert_eq!(parsed.total_entry_count(), paths.len() + directories.len());
+        }
     }
 }
