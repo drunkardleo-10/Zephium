@@ -5,6 +5,67 @@ use zephium_extension_package::{ExtensionReleaseCatalogDigest, ExtensionReleaseC
 
 use crate::BundledCatalogInventoryDigest;
 
+/// Structural identity persisted for one exact product catalog generation.
+///
+/// Reconstructing this value from durable metadata performs no authentication.
+/// [`crate::BundledPackageAuthority::recognize_generation`] must match every
+/// field against product-sealed active or rollback provisioning before recovery
+/// treats the metadata as naming a known generation.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct BundledCatalogGenerationAnchor {
+    authority: ExtensionAuthorityId,
+    revision: ExtensionReleaseCatalogRevision,
+    catalog_length: u64,
+    catalog_digest: ExtensionReleaseCatalogDigest,
+    inventory_digest: BundledCatalogInventoryDigest,
+}
+
+impl BundledCatalogGenerationAnchor {
+    /// Reconstructs structural fields read from authenticated durable state.
+    ///
+    /// Possession of this value is not catalog, rollback, or activation authority.
+    pub const fn from_parts(
+        authority: ExtensionAuthorityId,
+        revision: ExtensionReleaseCatalogRevision,
+        catalog_length: u64,
+        catalog_digest: ExtensionReleaseCatalogDigest,
+        inventory_digest: BundledCatalogInventoryDigest,
+    ) -> Self {
+        Self {
+            authority,
+            revision,
+            catalog_length,
+            catalog_digest,
+            inventory_digest,
+        }
+    }
+
+    /// Returns the trust-domain and epoch identity.
+    pub const fn authority(self) -> ExtensionAuthorityId {
+        self.authority
+    }
+
+    /// Returns the exact release-catalog revision.
+    pub const fn revision(self) -> ExtensionReleaseCatalogRevision {
+        self.revision
+    }
+
+    /// Returns the exact canonical catalog byte length.
+    pub const fn catalog_length(self) -> u64 {
+        self.catalog_length
+    }
+
+    /// Returns SHA-256 of exact canonical catalog bytes.
+    pub const fn catalog_digest(self) -> ExtensionReleaseCatalogDigest {
+        self.catalog_digest
+    }
+
+    /// Returns the redundant deterministic package-inventory digest.
+    pub const fn inventory_digest(self) -> BundledCatalogInventoryDigest {
+        self.inventory_digest
+    }
+}
+
 /// Durable structural high-water mark for a bundled catalog authority.
 ///
 /// Adapters may reconstruct this value from authenticated durable state. The

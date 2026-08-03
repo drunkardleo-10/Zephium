@@ -1,14 +1,16 @@
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{
-    ApiPermissionName, ExtensionCompatibilityLevel, ExtensionCompatibilityTargetId,
-    ExtensionManifestDeclaration, ExtensionManifestDigest, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionPackageRevision, ExtensionUnmodeledDeclarationName,
-    MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_UNMODELED_DECLARATIONS,
+    ApiPermissionName, ExtensionAuthorityId, ExtensionCompatibilityLevel,
+    ExtensionCompatibilityTargetId, ExtensionManifestDeclaration, ExtensionManifestDigest,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision,
+    ExtensionUnmodeledDeclarationName, MAX_EXTENSION_API_PERMISSIONS,
+    MAX_EXTENSION_UNMODELED_DECLARATIONS,
 };
 use zephium_extension_package::{
     admit_extension_manifest, CanonicalExtensionTreeIndex, ExtensionManifestCompatibilityPolicy,
     ExtensionManifestCompatibilitySubject, ExtensionPackageAdmissionPolicyDigest,
-    ExtensionReleaseAdmissionPolicy, ExtensionReleaseLicenseRule,
+    ExtensionReleaseAdmissionPolicy, ExtensionReleaseCatalog, ExtensionReleaseCatalogDigest,
+    ExtensionReleaseCatalogRevision, ExtensionReleaseLicenseRule,
 };
 
 use super::*;
@@ -19,7 +21,14 @@ const POLICY_BYTE: u8 = 2;
 struct Fixture {
     manifest: Vec<u8>,
     tree: CanonicalExtensionTreeIndex,
+    catalog_bytes: Vec<u8>,
     catalog: AdmittedBundledCatalog,
+}
+
+struct RollbackFixture {
+    manifest: Vec<u8>,
+    tree: CanonicalExtensionTreeIndex,
+    catalog: AdmittedRollbackBundledCatalog,
 }
 
 struct UniformPolicy {
@@ -97,6 +106,44 @@ fn make_fixture(
     Fixture {
         manifest: manifest.to_vec(),
         tree,
+        catalog_bytes,
+        catalog,
+    }
+}
+
+fn make_rollback_fixture(
+    manifest: &[u8],
+    authority_byte: u8,
+    key_byte: u8,
+    package_revision: u64,
+    rollback_revision: u64,
+) -> RollbackFixture {
+    let rollback = make_fixture(
+        manifest,
+        authority_byte,
+        key_byte,
+        package_revision,
+        rollback_revision,
+        rollback_revision,
+    );
+    let active = make_fixture(
+        manifest,
+        authority_byte,
+        key_byte,
+        package_revision,
+        rollback_revision + 1,
+        rollback_revision + 1,
+    );
+    let catalog = BundledPackageAuthority::admit_fixture_rollback_catalog(
+        &active.catalog_bytes,
+        release_policy(),
+        &rollback.catalog_bytes,
+        release_policy(),
+    )
+    .unwrap();
+    RollbackFixture {
+        manifest: rollback.manifest,
+        tree: rollback.tree,
         catalog,
     }
 }
@@ -122,14 +169,64 @@ fn profile(
     compatibility_target: &str,
     level: ExtensionCompatibilityLevel,
 ) -> SealedManifestProfile {
+    profile_for_catalog(
+        fixture.catalog.catalog(),
+        fixture.catalog.authority(),
+        fixture.catalog.revision(),
+        fixture.catalog.catalog_length(),
+        fixture.catalog.catalog_digest(),
+        fixture.catalog.inventory_digest(),
+        &fixture.tree,
+        &fixture.manifest,
+        runtime_target,
+        compatibility_target,
+        level,
+    )
+}
+
+fn rollback_profile(
+    fixture: &RollbackFixture,
+    runtime_target: ProductExtensionRuntimeTarget,
+    compatibility_target: &str,
+    level: ExtensionCompatibilityLevel,
+) -> SealedManifestProfile {
+    profile_for_catalog(
+        fixture.catalog.catalog(),
+        fixture.catalog.authority(),
+        fixture.catalog.revision(),
+        fixture.catalog.catalog_length(),
+        fixture.catalog.catalog_digest(),
+        fixture.catalog.inventory_digest(),
+        &fixture.tree,
+        &fixture.manifest,
+        runtime_target,
+        compatibility_target,
+        level,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_for_catalog(
+    catalog: &ExtensionReleaseCatalog,
+    catalog_authority: ExtensionAuthorityId,
+    catalog_revision: ExtensionReleaseCatalogRevision,
+    catalog_length: u64,
+    catalog_digest: ExtensionReleaseCatalogDigest,
+    inventory_digest: BundledCatalogInventoryDigest,
+    tree: &CanonicalExtensionTreeIndex,
+    manifest: &[u8],
+    runtime_target: ProductExtensionRuntimeTarget,
+    compatibility_target: &str,
+    level: ExtensionCompatibilityLevel,
+) -> SealedManifestProfile {
     let compatibility_target = target(compatibility_target);
     let policy = UniformPolicy {
         target: compatibility_target.clone(),
         level,
     };
-    let package = &fixture.catalog.catalog().packages()[0];
-    let binding = package.bind_tree_index(&fixture.tree).unwrap();
-    let admitted = admit_extension_manifest(binding, &fixture.manifest, &policy).unwrap();
+    let package = &catalog.packages()[0];
+    let binding = package.bind_tree_index(tree).unwrap();
+    let admitted = admit_extension_manifest(binding, manifest, &policy).unwrap();
     let rows = admitted
         .descriptor()
         .compatibility()
@@ -145,19 +242,20 @@ fn profile(
     SealedManifestProfile {
         runtime_target,
         catalog: SealedManifestCatalogAnchor {
-            authority: fixture.catalog.authority(),
-            revision: fixture.catalog.revision(),
-            digest: fixture.catalog.catalog_digest(),
-            inventory_digest: fixture.catalog.inventory_digest(),
+            authority: catalog_authority,
+            revision: catalog_revision,
+            length: catalog_length,
+            digest: catalog_digest,
+            inventory_digest,
         },
         package: SealedManifestPackageAnchor {
             key: package.identity().key(),
             revision: package.identity().revision(),
             identity: package.identity().clone(),
-            tree_index_digest: fixture.tree.index_sha256(),
-            tree_index_length: fixture.tree.index_bytes(),
-            tree_digest: fixture.tree.tree_sha256(),
-            manifest_digest: fixture.tree.manifest_sha256(),
+            tree_index_digest: tree.index_sha256(),
+            tree_index_length: tree.index_bytes(),
+            tree_digest: tree.tree_sha256(),
+            manifest_digest: tree.manifest_sha256(),
             compatibility_target,
             compatibility_digest: admitted.descriptor().compatibility_digest(),
             admission_digest: admitted.admission_digest(),
@@ -171,8 +269,40 @@ fn authority(profile: SealedManifestProfile) -> ProductExtensionManifestAuthorit
         .unwrap()
 }
 
+fn authority_with_rollback(
+    active_profiles: Vec<SealedManifestProfile>,
+    rollback_profiles: Vec<SealedManifestProfile>,
+) -> ProductExtensionManifestAuthority {
+    let active_catalog = active_profiles[0].catalog;
+    let mut rollback_catalogs = rollback_profiles
+        .iter()
+        .map(|profile| profile.catalog)
+        .collect::<Vec<_>>();
+    rollback_catalogs.sort_unstable();
+    rollback_catalogs.dedup();
+    let mut profiles = rollback_profiles;
+    profiles.extend(active_profiles);
+    profiles.sort_unstable_by_key(|profile| {
+        (profile.catalog, profile.runtime_target, profile.package.key)
+    });
+    ProductExtensionManifestAuthority::from_sealed_provisioning(
+        SealedManifestAuthorityProvisioning {
+            active_catalog,
+            rollback_catalogs: rollback_catalogs.into_boxed_slice(),
+            profiles: profiles.into_boxed_slice(),
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn production_authority_is_explicitly_unprovisioned() {
+    assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION, 32);
+    assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES, 32);
+    assert_eq!(
+        MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_ACROSS_GENERATIONS,
+        96
+    );
     assert!(matches!(
         ProductExtensionManifestAuthority::product(),
         Err(ProductExtensionManifestAuthorityError::Unprovisioned)
@@ -242,6 +372,7 @@ fn exact_backend_profile_mints_deterministic_nonforgeable_witness() {
     );
     assert_eq!(first.catalog_authority(), fixture.catalog.authority());
     assert_eq!(first.catalog_revision(), fixture.catalog.revision());
+    assert_eq!(first.catalog_length(), fixture.catalog.catalog_length());
     assert_eq!(first.catalog_digest(), fixture.catalog.catalog_digest());
     assert_eq!(
         first.catalog_inventory_digest(),
@@ -261,6 +392,7 @@ fn exact_backend_profile_mints_deterministic_nonforgeable_witness() {
     assert_eq!(
         first.retained_bytes(),
         first
+            .data
             .manifest
             .retained_bytes()
             .checked_add(WITNESS_ACCOUNTING_OVERHEAD)
@@ -268,6 +400,147 @@ fn exact_backend_profile_mints_deterministic_nonforgeable_witness() {
     );
     assert!(first.retained_bytes() <= MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES);
     assert!(authority.retained_bytes() <= MAX_PRODUCT_EXTENSION_MANIFEST_AUTHORITY_RETAINED_BYTES);
+}
+
+#[test]
+fn rollback_manifest_admission_is_generation_exact_and_type_distinct() {
+    let manifest = br#"{"manifest_version":3,"name":"Rollback","version":"1"}"#;
+    let rollback = make_rollback_fixture(manifest, 1, 3, 1, 1);
+    let active = make_fixture(manifest, 1, 3, 1, 2, 2);
+    let authority = authority_with_rollback(
+        vec![profile(
+            &active,
+            ProductExtensionRuntimeTarget::MacosNative,
+            MACOS_NATIVE_COMPATIBILITY_TARGET,
+            ExtensionCompatibilityLevel::Compatible,
+        )],
+        vec![rollback_profile(
+            &rollback,
+            ProductExtensionRuntimeTarget::MacosNative,
+            MACOS_NATIVE_COMPATIBILITY_TARGET,
+            ExtensionCompatibilityLevel::Compatible,
+        )],
+    );
+
+    let admitted = authority
+        .admit_rollback_manifest(
+            &rollback.catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            rollback.catalog.catalog().packages()[0].identity().key(),
+            &rollback.tree,
+            &rollback.manifest,
+        )
+        .unwrap();
+    assert_eq!(admitted.catalog_revision().get(), 1);
+    assert_eq!(admitted.catalog_length(), rollback.catalog.catalog_length());
+    assert_eq!(admitted.catalog_digest(), rollback.catalog.catalog_digest());
+    assert_eq!(
+        admitted.catalog_inventory_digest(),
+        rollback.catalog.inventory_digest()
+    );
+    assert_eq!(admitted.tree_index_digest(), rollback.tree.index_sha256());
+    assert_eq!(
+        admitted.runtime_target(),
+        ProductExtensionRuntimeTarget::MacosNative
+    );
+    assert!(admitted.retained_bytes() <= MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES);
+
+    let active_admitted = authority
+        .admit_manifest(
+            &active.catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            key(&active),
+            &active.tree,
+            &active.manifest,
+        )
+        .unwrap();
+    assert_eq!(active_admitted.catalog_revision().get(), 2);
+}
+
+#[test]
+fn two_rollback_profiles_are_selected_by_exact_catalog_generation() {
+    let first = make_rollback_fixture(
+        br#"{"manifest_version":3,"name":"First","version":"1"}"#,
+        1,
+        3,
+        1,
+        1,
+    );
+    let second = make_rollback_fixture(
+        br#"{"manifest_version":3,"name":"Second","version":"1"}"#,
+        1,
+        3,
+        1,
+        2,
+    );
+    let active = make_fixture(
+        br#"{"manifest_version":3,"name":"Active","version":"1"}"#,
+        1,
+        3,
+        1,
+        3,
+        3,
+    );
+    let authority = authority_with_rollback(
+        vec![profile(
+            &active,
+            ProductExtensionRuntimeTarget::MacosNative,
+            MACOS_NATIVE_COMPATIBILITY_TARGET,
+            ExtensionCompatibilityLevel::Compatible,
+        )],
+        vec![
+            rollback_profile(
+                &first,
+                ProductExtensionRuntimeTarget::MacosNative,
+                MACOS_NATIVE_COMPATIBILITY_TARGET,
+                ExtensionCompatibilityLevel::Compatible,
+            ),
+            rollback_profile(
+                &second,
+                ProductExtensionRuntimeTarget::MacosNative,
+                MACOS_NATIVE_COMPATIBILITY_TARGET,
+                ExtensionCompatibilityLevel::Degraded,
+            ),
+        ],
+    );
+
+    let first_admitted = authority
+        .admit_rollback_manifest(
+            &first.catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            first.catalog.catalog().packages()[0].identity().key(),
+            &first.tree,
+            &first.manifest,
+        )
+        .unwrap();
+    let second_admitted = authority
+        .admit_rollback_manifest(
+            &second.catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            second.catalog.catalog().packages()[0].identity().key(),
+            &second.tree,
+            &second.manifest,
+        )
+        .unwrap();
+    assert_eq!(first_admitted.catalog_revision().get(), 1);
+    assert_eq!(second_admitted.catalog_revision().get(), 2);
+    assert_ne!(
+        first_admitted.admission_digest(),
+        second_admitted.admission_digest()
+    );
+
+    assert_eq!(
+        authority
+            .admit_rollback_manifest(
+                &first.catalog,
+                ProductExtensionRuntimeTarget::MacosNative,
+                first.catalog.catalog().packages()[0].identity().key(),
+                &second.tree,
+                &second.manifest,
+            )
+            .unwrap_err(),
+        ProductExtensionManifestAdmissionError::TreeIndexMismatch
+    );
 }
 
 #[test]
@@ -452,6 +725,21 @@ fn catalog_authority_revision_digest_and_inventory_are_redundantly_checked() {
             )
             .unwrap_err(),
         ProductExtensionManifestAdmissionError::CatalogDigestMismatch
+    );
+
+    let mut wrong_length_profile = exact_profile.clone();
+    wrong_length_profile.catalog.length += 1;
+    assert_eq!(
+        authority(wrong_length_profile)
+            .admit_manifest(
+                &fixture.catalog,
+                ProductExtensionRuntimeTarget::MacosNative,
+                key(&fixture),
+                &fixture.tree,
+                &fixture.manifest,
+            )
+            .unwrap_err(),
+        ProductExtensionManifestAdmissionError::CatalogLengthMismatch
     );
 
     let inventory_source = make_fixture(&fixture.manifest, 1, 4, 1, 1, 1);
@@ -695,6 +983,15 @@ fn duplicate_noncanonical_unassessed_and_target_mismatched_policy_data_fail_conf
     unassessed[0].level = ExtensionCompatibilityLevel::Unassessed;
     assert!(matches!(
         SealedManifestCompatibilityPolicy::new(profile.policy.target.clone(), unassessed.into()),
+        Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
+    ));
+
+    let mut invalid_catalog_length = profile.clone();
+    invalid_catalog_length.catalog.length = 0;
+    assert!(matches!(
+        ProductExtensionManifestAuthority::from_sealed_profiles(
+            vec![invalid_catalog_length].into_boxed_slice()
+        ),
         Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
     ));
 
@@ -953,7 +1250,7 @@ fn profile_table_is_nonempty_bounded_canonical_and_duplicate_free() {
         Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
     ));
 
-    let too_many = (0..=MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES)
+    let too_many = (0..=MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_ACROSS_GENERATIONS)
         .map(|index| {
             let mut candidate = profile(
                 &fixture,
@@ -977,6 +1274,149 @@ fn profile_table_is_nonempty_bounded_canonical_and_duplicate_free() {
         ProductExtensionManifestAuthority::from_sealed_profiles(too_many.into_boxed_slice()),
         Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
     ));
+
+    let too_many_for_one_generation = (0..=MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION)
+        .map(|index| {
+            let mut candidate = profile(
+                &fixture,
+                ProductExtensionRuntimeTarget::MacosNative,
+                MACOS_NATIVE_COMPATIBILITY_TARGET,
+                ExtensionCompatibilityLevel::Compatible,
+            );
+            candidate.package.key = ExtensionPackageKey::from_bytes([index as u8; 32]);
+            candidate.package.identity = ExtensionPackageIdentity::new(
+                candidate.package.identity.authority(),
+                candidate.package.key,
+                candidate.package.revision,
+                candidate.package.identity.payload(),
+                candidate.package.manifest_digest,
+                candidate.package.tree_digest,
+            );
+            candidate
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        ProductExtensionManifestAuthority::from_sealed_profiles(
+            too_many_for_one_generation.into_boxed_slice()
+        ),
+        Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
+    ));
+}
+
+#[test]
+fn manifest_generation_configuration_is_closed_ordered_unique_and_complete() {
+    let first = make_rollback_fixture(
+        br#"{"manifest_version":3,"name":"First","version":"1"}"#,
+        1,
+        3,
+        1,
+        1,
+    );
+    let second = make_rollback_fixture(
+        br#"{"manifest_version":3,"name":"Second","version":"1"}"#,
+        1,
+        3,
+        1,
+        2,
+    );
+    let active = make_fixture(
+        br#"{"manifest_version":3,"name":"Active","version":"1"}"#,
+        1,
+        3,
+        1,
+        3,
+        3,
+    );
+    let foreign = make_rollback_fixture(
+        br#"{"manifest_version":3,"name":"Foreign","version":"1"}"#,
+        9,
+        3,
+        1,
+        1,
+    );
+    let active_profile = profile(
+        &active,
+        ProductExtensionRuntimeTarget::MacosNative,
+        MACOS_NATIVE_COMPATIBILITY_TARGET,
+        ExtensionCompatibilityLevel::Compatible,
+    );
+    let first_profile = rollback_profile(
+        &first,
+        ProductExtensionRuntimeTarget::MacosNative,
+        MACOS_NATIVE_COMPATIBILITY_TARGET,
+        ExtensionCompatibilityLevel::Compatible,
+    );
+    let second_profile = rollback_profile(
+        &second,
+        ProductExtensionRuntimeTarget::MacosNative,
+        MACOS_NATIVE_COMPATIBILITY_TARGET,
+        ExtensionCompatibilityLevel::Compatible,
+    );
+    let foreign_profile = rollback_profile(
+        &foreign,
+        ProductExtensionRuntimeTarget::MacosNative,
+        MACOS_NATIVE_COMPATIBILITY_TARGET,
+        ExtensionCompatibilityLevel::Compatible,
+    );
+
+    let active_catalog = active_profile.catalog;
+    let rejects = |rollback_catalogs: Vec<SealedManifestCatalogAnchor>,
+                   mut profiles: Vec<SealedManifestProfile>| {
+        profiles.sort_unstable_by_key(|profile| {
+            (profile.catalog, profile.runtime_target, profile.package.key)
+        });
+        assert!(matches!(
+            ProductExtensionManifestAuthority::from_sealed_provisioning(
+                SealedManifestAuthorityProvisioning {
+                    active_catalog,
+                    rollback_catalogs: rollback_catalogs.into_boxed_slice(),
+                    profiles: profiles.into_boxed_slice(),
+                },
+            ),
+            Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
+        ));
+    };
+
+    rejects(
+        vec![foreign_profile.catalog],
+        vec![foreign_profile.clone(), active_profile.clone()],
+    );
+    rejects(
+        vec![second_profile.catalog, first_profile.catalog],
+        vec![
+            first_profile.clone(),
+            second_profile.clone(),
+            active_profile.clone(),
+        ],
+    );
+    rejects(
+        vec![first_profile.catalog, first_profile.catalog],
+        vec![first_profile.clone(), active_profile.clone()],
+    );
+    rejects(
+        vec![
+            first_profile.catalog,
+            second_profile.catalog,
+            second_profile.catalog,
+        ],
+        vec![
+            first_profile.clone(),
+            second_profile.clone(),
+            active_profile.clone(),
+        ],
+    );
+    rejects(vec![first_profile.catalog], vec![active_profile.clone()]);
+    rejects(
+        vec![first_profile.catalog],
+        vec![second_profile, active_profile.clone()],
+    );
+
+    let mut duplicate_digest = first_profile.catalog;
+    duplicate_digest.revision = ExtensionReleaseCatalogRevision::new(2).unwrap();
+    rejects(
+        vec![first_profile.catalog, duplicate_digest],
+        vec![first_profile, active_profile],
+    );
 }
 
 #[test]
@@ -1020,14 +1460,15 @@ fn aggregate_authority_retained_memory_is_hard_bounded() {
         rows.into_boxed_slice(),
     )
     .unwrap();
-    let projected = AUTHORITY_ACCOUNTING_OVERHEAD
-        + MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES * std::mem::size_of::<SealedManifestProfile>()
-        + MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES
+    let projected = GENERATION_ACCOUNTING_OVERHEAD
+        + MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION
+            * std::mem::size_of::<SealedManifestProfile>()
+        + MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION
             * (PROFILE_ACCOUNTING_OVERHEAD + large_policy.retained_bytes);
-    assert!(projected > MAX_PRODUCT_EXTENSION_MANIFEST_AUTHORITY_RETAINED_BYTES);
+    assert!(projected > MAX_PRODUCT_EXTENSION_MANIFEST_GENERATION_RETAINED_BYTES);
 
     let fixture = minimal_fixture();
-    let profiles = (0..MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES)
+    let profiles = (0..MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION)
         .map(|index| {
             let mut candidate = profile(
                 &fixture,

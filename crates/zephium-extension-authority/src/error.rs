@@ -12,6 +12,9 @@ pub enum BundledCatalogAdmissionError {
     /// Compiled product anchor and product policy disagree or exceed a bound.
     #[error("bundled extension product authority configuration is invalid")]
     InvalidProductConfiguration,
+    /// No explicitly approved rollback generation can match the request.
+    #[error("bundled extension rollback catalog is not product-provisioned")]
+    RollbackCatalogNotProvisioned,
     /// Exact catalog length differs from the signed-release anchor.
     #[error("bundled extension catalog length does not match the product anchor")]
     CatalogLengthMismatch,

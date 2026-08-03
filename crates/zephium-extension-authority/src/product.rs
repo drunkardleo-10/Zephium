@@ -1,6 +1,7 @@
-//! Product-sealed bundled catalog admission.
+//! Product-sealed active and explicitly approved rollback catalog admission.
 
 use std::fmt;
+use std::mem::size_of;
 
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{ExtensionAuthorityId, ExtensionPackagePayloadIdentity};
@@ -13,7 +14,7 @@ use zephium_extension_package::{
 use crate::inventory::digest_catalog_inventory;
 use crate::{
     BundledCatalogAdmissionError, BundledCatalogCheckpoint, BundledCatalogDisposition,
-    BundledCatalogInventoryDigest,
+    BundledCatalogGenerationAnchor, BundledCatalogInventoryDigest,
 };
 
 // Stable logical reserve for the witness fields, allocator indirection, and
@@ -21,10 +22,35 @@ use crate::{
 // separately; the compile-time assertion below prevents the wrapper itself
 // from silently outgrowing this reserve.
 const ADMITTED_CATALOG_ACCOUNTING_OVERHEAD: usize = 256;
+const PACKAGE_AUTHORITY_ACCOUNTING_OVERHEAD: usize = 512;
+const CATALOG_GENERATION_ACCOUNTING_OVERHEAD: usize = 256;
+
+/// Maximum explicitly approved rollback catalogs retained by one product build.
+pub const MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS: usize = 2;
+
+/// Maximum active and rollback bundled-catalog generations in one product build.
+pub const MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS: usize =
+    1 + MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS;
+
+/// Maximum logical memory retained by the product bundled-catalog authority.
+///
+/// The per-generation reserve is derived from the parser's exact catalog-byte
+/// ceiling. In practice the authority retains only bounded policy rows and
+/// fixed-size anchors, but charging the larger parser ceiling keeps this bound
+/// valid if the policy representation grows without silently making the
+/// product authority unbounded.
+pub const MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES: usize =
+    PACKAGE_AUTHORITY_ACCOUNTING_OVERHEAD
+        + MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS
+            * (MAX_EXTENSION_RELEASE_CATALOG_BYTES + CATALOG_GENERATION_ACCOUNTING_OVERHEAD);
 
 /// Maximum logical memory retained by one admitted bundled-catalog witness.
 pub const MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES: usize =
     MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES + ADMITTED_CATALOG_ACCOUNTING_OVERHEAD;
+
+/// Maximum logical memory retained by one admitted rollback-catalog witness.
+pub const MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES: usize =
+    MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES;
 
 /// Availability of the product-sealed bundled extension authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,24 +66,36 @@ pub enum BundledProductAuthorityStatus {
     InvalidProvisioning,
 }
 
+/// Product-sealed role of an exact recognized bundled-catalog generation.
+///
+/// This is a classification result, not an admission, repository-recording,
+/// materialization, or activation capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "active and rollback catalog generations have different authority"]
+pub enum ProductBundledCatalogGenerationRole {
+    /// The only generation allowed to mint a monotonic repository witness.
+    Active,
+    /// An explicitly approved generation usable only through rollback APIs.
+    Rollback,
+}
+
 /// Product-owned authentication boundary for bundled extension catalogs.
 ///
 /// This type has no public anchor, policy, or trust-provider constructor. The
 /// only production constructor reads product-sealed compile-time state.
 pub struct BundledPackageAuthority {
-    anchor: SealedBundledCatalogAnchor,
-    policy: ExtensionReleaseAdmissionPolicy,
+    active: SealedBundledCatalogGeneration,
+    rollback: Box<[SealedBundledCatalogGeneration]>,
+    retained_bytes: usize,
 }
 
 impl BundledPackageAuthority {
     /// Opens the product-sealed authority or explicitly reports that this
     /// build has no approved bundled extension package anchor.
     pub fn product() -> Result<Self, BundledCatalogAdmissionError> {
-        let anchor = SEALED_PRODUCT_BUNDLED_CATALOG_ANCHOR
+        let (active, rollback) = sealed_product_bundled_catalog_generations()
             .ok_or(BundledCatalogAdmissionError::Unprovisioned)?;
-        let policy = sealed_product_admission_policy()
-            .ok_or(BundledCatalogAdmissionError::InvalidProductConfiguration)?;
-        Self::from_sealed_parts(anchor, policy)
+        Self::from_sealed_generations(active, rollback)
     }
 
     /// Reports whether product-sealed anchor and policy material is configured.
@@ -83,69 +121,132 @@ impl BundledPackageAuthority {
         &self,
         catalog_bytes: &[u8],
     ) -> Result<AdmittedBundledCatalog, BundledCatalogAdmissionError> {
-        if catalog_bytes.len() != self.anchor.catalog_length {
-            return Err(BundledCatalogAdmissionError::CatalogLengthMismatch);
-        }
-        let observed_digest = ExtensionReleaseCatalogDigest::from_bytes(<[u8; 32]>::from(
-            Sha256::digest(catalog_bytes),
-        ));
-        if observed_digest != self.anchor.catalog_digest {
-            return Err(BundledCatalogAdmissionError::CatalogDigestMismatch);
-        }
-
-        let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
-            .map_err(BundledCatalogAdmissionError::Catalog)?;
-        if catalog.authority() != self.anchor.authority {
-            return Err(BundledCatalogAdmissionError::AuthorityMismatch);
-        }
-        if catalog.revision() != self.anchor.catalog_revision {
-            return Err(BundledCatalogAdmissionError::RevisionMismatch);
-        }
-        if catalog.admission_policy_sha256() != self.anchor.admission_policy_digest {
-            return Err(BundledCatalogAdmissionError::PolicyMismatch);
-        }
-        catalog
-            .bind_admission_policy(&self.policy)
-            .map_err(BundledCatalogAdmissionError::Catalog)?;
-        if catalog
-            .packages()
-            .iter()
-            .any(|package| package.payload() != ExtensionPackagePayloadIdentity::BundledTree)
-        {
-            return Err(BundledCatalogAdmissionError::UnsupportedPayload);
-        }
-
-        let inventory_digest = digest_catalog_inventory(&catalog)
-            .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
-        if inventory_digest != self.anchor.inventory_digest {
-            return Err(BundledCatalogAdmissionError::InventoryMismatch);
-        }
-        let retained_bytes = catalog
-            .retained_bytes()
-            .checked_add(ADMITTED_CATALOG_ACCOUNTING_OVERHEAD)
-            .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
-        if retained_bytes > MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES {
-            return Err(BundledCatalogAdmissionError::RetainedBytesExceeded);
-        }
-
-        Ok(AdmittedBundledCatalog {
-            catalog,
-            inventory_digest,
-            retained_bytes,
-        })
+        self.active
+            .admit(catalog_bytes)
+            .map(|data| AdmittedBundledCatalog { data })
     }
 
+    /// Authenticates one exact explicitly approved rollback catalog.
+    ///
+    /// Rollback admission is deliberately a different operation and returns a
+    /// different non-forgeable witness. That witness has no checkpoint or
+    /// monotonic-disposition projection, so it cannot lower the repository's
+    /// durable catalog high-water through the ordinary record API.
+    pub fn admit_rollback_catalog(
+        &self,
+        catalog_bytes: &[u8],
+    ) -> Result<AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError> {
+        if self.rollback.is_empty() {
+            return Err(BundledCatalogAdmissionError::RollbackCatalogNotProvisioned);
+        }
+        if !self
+            .rollback
+            .iter()
+            .any(|generation| generation.anchor.catalog_length == catalog_bytes.len())
+        {
+            return Err(BundledCatalogAdmissionError::CatalogLengthMismatch);
+        }
+        let observed_digest =
+            ExtensionReleaseCatalogDigest::from_bytes(Sha256::digest(catalog_bytes).into());
+        let generation = self
+            .rollback
+            .iter()
+            .find(|generation| {
+                generation.anchor.catalog_length == catalog_bytes.len()
+                    && generation.anchor.catalog_digest == observed_digest
+            })
+            .ok_or(BundledCatalogAdmissionError::CatalogDigestMismatch)?;
+        generation
+            .admit_prehashed(catalog_bytes, observed_digest)
+            .map(|data| AdmittedRollbackBundledCatalog {
+                data,
+                _seal: RollbackCatalogWitnessSeal(()),
+            })
+    }
+
+    /// Returns the authority's explicit logical retained-memory charge.
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Recognizes exact recovered metadata against the sealed generation set.
+    ///
+    /// All persisted fields, including exact canonical byte length and both
+    /// digests, must match. The returned role remains non-authoritative; exact
+    /// bytes still require [`Self::admit_catalog`] or
+    /// [`Self::admit_rollback_catalog`] before use.
+    pub fn recognize_generation(
+        &self,
+        candidate: &BundledCatalogGenerationAnchor,
+    ) -> Option<ProductBundledCatalogGenerationRole> {
+        if self.active.anchor.matches_structural(candidate) {
+            return Some(ProductBundledCatalogGenerationRole::Active);
+        }
+        self.rollback
+            .iter()
+            .any(|generation| generation.anchor.matches_structural(candidate))
+            .then_some(ProductBundledCatalogGenerationRole::Rollback)
+    }
+
+    #[cfg(test)]
     fn from_sealed_parts(
         anchor: SealedBundledCatalogAnchor,
         policy: ExtensionReleaseAdmissionPolicy,
     ) -> Result<Self, BundledCatalogAdmissionError> {
-        if anchor.catalog_length == 0
-            || anchor.catalog_length > MAX_EXTENSION_RELEASE_CATALOG_BYTES
-            || anchor.admission_policy_digest != policy.digest()
+        Self::from_sealed_generations(
+            SealedBundledCatalogGeneration { anchor, policy },
+            Box::new([]),
+        )
+    }
+
+    fn from_sealed_generations(
+        active: SealedBundledCatalogGeneration,
+        rollback: Box<[SealedBundledCatalogGeneration]>,
+    ) -> Result<Self, BundledCatalogAdmissionError> {
+        if rollback.len() > MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS {
+            return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+        }
+        active.validate_configuration()?;
+        for generation in &rollback {
+            generation.validate_configuration()?;
+        }
+        if rollback
+            .windows(2)
+            .any(|pair| pair[0].anchor.catalog_revision >= pair[1].anchor.catalog_revision)
+            || rollback.iter().any(|generation| {
+                generation.anchor.authority != active.anchor.authority
+                    || generation.anchor.catalog_revision >= active.anchor.catalog_revision
+            })
         {
             return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
         }
-        Ok(Self { anchor, policy })
+        if rollback.iter().enumerate().any(|(index, generation)| {
+            generation.anchor.catalog_digest == active.anchor.catalog_digest
+                || rollback[index + 1..]
+                    .iter()
+                    .any(|later| later.anchor.catalog_digest == generation.anchor.catalog_digest)
+        }) {
+            return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+        }
+
+        let retained_bytes = rollback.iter().try_fold(
+            PACKAGE_AUTHORITY_ACCOUNTING_OVERHEAD
+                .checked_add(active.retained_bytes()?)
+                .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?,
+            |total, generation| {
+                total
+                    .checked_add(generation.retained_bytes()?)
+                    .ok_or(BundledCatalogAdmissionError::AccountingOverflow)
+            },
+        )?;
+        if retained_bytes > MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES {
+            return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+        }
+        Ok(Self {
+            active,
+            rollback,
+            retained_bytes,
+        })
     }
 
     #[cfg(test)]
@@ -168,6 +269,25 @@ impl BundledPackageAuthority {
         };
         Self::from_sealed_parts(anchor, policy)?.admit_catalog(catalog_bytes)
     }
+
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_rollback_catalog(
+        active_catalog_bytes: &[u8],
+        active_policy: ExtensionReleaseAdmissionPolicy,
+        rollback_catalog_bytes: &[u8],
+        rollback_policy: ExtensionReleaseAdmissionPolicy,
+    ) -> Result<AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError> {
+        let active = SealedBundledCatalogGeneration {
+            anchor: anchor_for_fixture(active_catalog_bytes)?,
+            policy: active_policy,
+        };
+        let rollback = SealedBundledCatalogGeneration {
+            anchor: anchor_for_fixture(rollback_catalog_bytes)?,
+            policy: rollback_policy,
+        };
+        Self::from_sealed_generations(active, vec![rollback].into_boxed_slice())?
+            .admit_rollback_catalog(rollback_catalog_bytes)
+    }
 }
 
 /// Authenticated, semantically admitted metadata for one bundled catalog.
@@ -178,7 +298,12 @@ impl BundledPackageAuthority {
 /// repository layer must establish all of those independently.
 #[must_use = "admitted metadata must be checkpointed or deliberately discarded"]
 pub struct AdmittedBundledCatalog {
+    data: AdmittedCatalogData,
+}
+
+pub(crate) struct AdmittedCatalogData {
     catalog: ExtensionReleaseCatalog,
+    catalog_length: u64,
     inventory_digest: BundledCatalogInventoryDigest,
     retained_bytes: usize,
 }
@@ -192,10 +317,11 @@ impl fmt::Debug for AdmittedBundledCatalog {
             .debug_struct("AdmittedBundledCatalog")
             .field("authority", &self.authority())
             .field("revision", &self.revision())
+            .field("catalog_length", &self.catalog_length())
             .field("catalog_digest", &self.catalog_digest())
-            .field("inventory_digest", &self.inventory_digest)
-            .field("package_count", &self.catalog.packages().len())
-            .field("retained_bytes", &self.retained_bytes)
+            .field("inventory_digest", &self.inventory_digest())
+            .field("package_count", &self.catalog().packages().len())
+            .field("retained_bytes", &self.retained_bytes())
             .finish()
     }
 }
@@ -203,32 +329,37 @@ impl fmt::Debug for AdmittedBundledCatalog {
 impl AdmittedBundledCatalog {
     /// Returns authenticated, structurally parsed catalog metadata.
     pub const fn catalog(&self) -> &ExtensionReleaseCatalog {
-        &self.catalog
+        &self.data.catalog
     }
 
     /// Returns the trust-domain and epoch identity.
     pub const fn authority(&self) -> ExtensionAuthorityId {
-        self.catalog.authority()
+        self.data.catalog.authority()
     }
 
     /// Returns the authenticated catalog revision.
     pub const fn revision(&self) -> ExtensionReleaseCatalogRevision {
-        self.catalog.revision()
+        self.data.catalog.revision()
     }
 
     /// Returns SHA-256 of exact authenticated canonical catalog bytes.
     pub const fn catalog_digest(&self) -> ExtensionReleaseCatalogDigest {
-        self.catalog.digest()
+        self.data.catalog.digest()
+    }
+
+    /// Returns the exact authenticated canonical catalog byte length.
+    pub const fn catalog_length(&self) -> u64 {
+        self.data.catalog_length
     }
 
     /// Returns the redundant deterministic package-inventory digest.
     pub const fn inventory_digest(&self) -> BundledCatalogInventoryDigest {
-        self.inventory_digest
+        self.data.inventory_digest
     }
 
     /// Returns the explicit logical retained-memory charge.
     pub const fn retained_bytes(&self) -> usize {
-        self.retained_bytes
+        self.data.retained_bytes
     }
 
     /// Creates the structural checkpoint projection suitable for durable state.
@@ -239,7 +370,20 @@ impl AdmittedBundledCatalog {
             self.authority(),
             self.revision(),
             self.catalog_digest(),
-            self.inventory_digest,
+            self.inventory_digest(),
+        )
+    }
+
+    /// Returns the exact structural generation projection for durable metadata.
+    ///
+    /// This projection is not an admission or activation capability.
+    pub const fn generation_anchor(&self) -> BundledCatalogGenerationAnchor {
+        BundledCatalogGenerationAnchor::from_parts(
+            self.authority(),
+            self.revision(),
+            self.catalog_length(),
+            self.catalog_digest(),
+            self.inventory_digest(),
         )
     }
 
@@ -252,7 +396,142 @@ impl AdmittedBundledCatalog {
             floor.classify(&self.checkpoint())
         })
     }
+
+    pub(crate) const fn data(&self) -> &AdmittedCatalogData {
+        &self.data
+    }
 }
+
+/// Authenticated metadata for one explicitly approved rollback catalog.
+///
+/// This capability is deliberately distinct from [`AdmittedBundledCatalog`].
+/// It has no durable checkpoint or monotonic-disposition API and cannot be
+/// passed to the repository's active-catalog recording method. It is also
+/// non-serializable, non-cloneable, and has no public constructor.
+///
+/// ```compile_fail
+/// use zephium_extension_authority::AdmittedRollbackBundledCatalog;
+/// fn require_clone<T: Clone>() {}
+/// fn duplicate() {
+///     require_clone::<AdmittedRollbackBundledCatalog>();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_authority::AdmittedRollbackBundledCatalog;
+/// fn forge() -> AdmittedRollbackBundledCatalog {
+///     AdmittedRollbackBundledCatalog {}
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_authority::AdmittedRollbackBundledCatalog;
+/// fn lower_high_water(rollback: &AdmittedRollbackBundledCatalog) {
+///     let _ = rollback.checkpoint();
+/// }
+/// ```
+#[must_use = "rollback metadata must be materialized for explicit recovery or discarded"]
+pub struct AdmittedRollbackBundledCatalog {
+    data: AdmittedCatalogData,
+    _seal: RollbackCatalogWitnessSeal,
+}
+
+impl fmt::Debug for AdmittedRollbackBundledCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedRollbackBundledCatalog")
+            .field("authority", &self.authority())
+            .field("revision", &self.revision())
+            .field("catalog_length", &self.catalog_length())
+            .field("catalog_digest", &self.catalog_digest())
+            .field("inventory_digest", &self.inventory_digest())
+            .field("package_count", &self.catalog().packages().len())
+            .field("retained_bytes", &self.retained_bytes())
+            .finish()
+    }
+}
+
+impl AdmittedRollbackBundledCatalog {
+    /// Returns authenticated, structurally parsed rollback-catalog metadata.
+    pub const fn catalog(&self) -> &ExtensionReleaseCatalog {
+        &self.data.catalog
+    }
+
+    /// Returns the shared trust-domain and epoch identity.
+    pub const fn authority(&self) -> ExtensionAuthorityId {
+        self.data.catalog.authority()
+    }
+
+    /// Returns the exact explicitly approved rollback revision.
+    pub const fn revision(&self) -> ExtensionReleaseCatalogRevision {
+        self.data.catalog.revision()
+    }
+
+    /// Returns SHA-256 of exact authenticated canonical rollback-catalog bytes.
+    pub const fn catalog_digest(&self) -> ExtensionReleaseCatalogDigest {
+        self.data.catalog.digest()
+    }
+
+    /// Returns the exact authenticated canonical rollback-catalog byte length.
+    pub const fn catalog_length(&self) -> u64 {
+        self.data.catalog_length
+    }
+
+    /// Returns the deterministic package-inventory digest.
+    pub const fn inventory_digest(&self) -> BundledCatalogInventoryDigest {
+        self.data.inventory_digest
+    }
+
+    /// Returns the explicit logical retained-memory charge.
+    pub const fn retained_bytes(&self) -> usize {
+        self.data.retained_bytes
+    }
+
+    /// Returns the exact structural rollback-generation projection.
+    ///
+    /// This projection has no monotonic checkpoint authority.
+    pub const fn generation_anchor(&self) -> BundledCatalogGenerationAnchor {
+        BundledCatalogGenerationAnchor::from_parts(
+            self.authority(),
+            self.revision(),
+            self.catalog_length(),
+            self.catalog_digest(),
+            self.inventory_digest(),
+        )
+    }
+
+    pub(crate) const fn data(&self) -> &AdmittedCatalogData {
+        &self.data
+    }
+}
+
+impl AdmittedCatalogData {
+    pub(crate) const fn catalog(&self) -> &ExtensionReleaseCatalog {
+        &self.catalog
+    }
+
+    pub(crate) const fn authority(&self) -> ExtensionAuthorityId {
+        self.catalog.authority()
+    }
+
+    pub(crate) const fn revision(&self) -> ExtensionReleaseCatalogRevision {
+        self.catalog.revision()
+    }
+
+    pub(crate) const fn catalog_digest(&self) -> ExtensionReleaseCatalogDigest {
+        self.catalog.digest()
+    }
+
+    pub(crate) const fn catalog_length(&self) -> u64 {
+        self.catalog_length
+    }
+
+    pub(crate) const fn inventory_digest(&self) -> BundledCatalogInventoryDigest {
+        self.inventory_digest
+    }
+}
+
+struct RollbackCatalogWitnessSeal(());
 
 #[derive(Clone, Copy)]
 struct SealedBundledCatalogAnchor {
@@ -264,18 +543,149 @@ struct SealedBundledCatalogAnchor {
     inventory_digest: BundledCatalogInventoryDigest,
 }
 
+impl SealedBundledCatalogAnchor {
+    fn matches_structural(&self, candidate: &BundledCatalogGenerationAnchor) -> bool {
+        u64::try_from(self.catalog_length).is_ok_and(|length| {
+            candidate.authority() == self.authority
+                && candidate.revision() == self.catalog_revision
+                && candidate.catalog_length() == length
+                && candidate.catalog_digest() == self.catalog_digest
+                && candidate.inventory_digest() == self.inventory_digest
+        })
+    }
+}
+
+struct SealedBundledCatalogGeneration {
+    anchor: SealedBundledCatalogAnchor,
+    policy: ExtensionReleaseAdmissionPolicy,
+}
+
+impl SealedBundledCatalogGeneration {
+    fn validate_configuration(&self) -> Result<(), BundledCatalogAdmissionError> {
+        if self.anchor.catalog_length == 0
+            || self.anchor.catalog_length > MAX_EXTENSION_RELEASE_CATALOG_BYTES
+            || self.anchor.admission_policy_digest != self.policy.digest()
+        {
+            return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+        }
+        Ok(())
+    }
+
+    fn retained_bytes(&self) -> Result<usize, BundledCatalogAdmissionError> {
+        self.policy.license_rules().iter().try_fold(
+            size_of::<Self>()
+                .checked_add(CATALOG_GENERATION_ACCOUNTING_OVERHEAD)
+                .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?,
+            |total, rule| {
+                total
+                    .checked_add(size_of_val(rule))
+                    .and_then(|bytes| bytes.checked_add(rule.expression().len()))
+                    .ok_or(BundledCatalogAdmissionError::AccountingOverflow)
+            },
+        )
+    }
+
+    fn admit(
+        &self,
+        catalog_bytes: &[u8],
+    ) -> Result<AdmittedCatalogData, BundledCatalogAdmissionError> {
+        if catalog_bytes.len() != self.anchor.catalog_length {
+            return Err(BundledCatalogAdmissionError::CatalogLengthMismatch);
+        }
+        let observed_digest =
+            ExtensionReleaseCatalogDigest::from_bytes(Sha256::digest(catalog_bytes).into());
+        self.admit_prehashed(catalog_bytes, observed_digest)
+    }
+
+    fn admit_prehashed(
+        &self,
+        catalog_bytes: &[u8],
+        observed_digest: ExtensionReleaseCatalogDigest,
+    ) -> Result<AdmittedCatalogData, BundledCatalogAdmissionError> {
+        if observed_digest != self.anchor.catalog_digest {
+            return Err(BundledCatalogAdmissionError::CatalogDigestMismatch);
+        }
+        let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
+            .map_err(BundledCatalogAdmissionError::Catalog)?;
+        if catalog.authority() != self.anchor.authority {
+            return Err(BundledCatalogAdmissionError::AuthorityMismatch);
+        }
+        if catalog.revision() != self.anchor.catalog_revision {
+            return Err(BundledCatalogAdmissionError::RevisionMismatch);
+        }
+        if catalog.admission_policy_sha256() != self.anchor.admission_policy_digest {
+            return Err(BundledCatalogAdmissionError::PolicyMismatch);
+        }
+        catalog
+            .bind_admission_policy(&self.policy)
+            .map_err(BundledCatalogAdmissionError::Catalog)?;
+        if catalog
+            .packages()
+            .iter()
+            .any(|package| package.payload() != ExtensionPackagePayloadIdentity::BundledTree)
+        {
+            return Err(BundledCatalogAdmissionError::UnsupportedPayload);
+        }
+        let inventory_digest = digest_catalog_inventory(&catalog)
+            .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
+        if inventory_digest != self.anchor.inventory_digest {
+            return Err(BundledCatalogAdmissionError::InventoryMismatch);
+        }
+        let retained_bytes = catalog
+            .retained_bytes()
+            .checked_add(ADMITTED_CATALOG_ACCOUNTING_OVERHEAD)
+            .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
+        if retained_bytes > MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES {
+            return Err(BundledCatalogAdmissionError::RetainedBytesExceeded);
+        }
+        Ok(AdmittedCatalogData {
+            catalog,
+            catalog_length: u64::try_from(catalog_bytes.len())
+                .map_err(|_| BundledCatalogAdmissionError::AccountingOverflow)?,
+            inventory_digest,
+            retained_bytes,
+        })
+    }
+}
+
 // Deliberately absent until exact approved package, license, corresponding
 // source, and redistribution artifacts are bound into a signed Zephium build.
 // This private compile-time slot is the only production trust root; it must
 // never be populated from runtime configuration, an environment variable, or
 // caller-provided bytes.
-const SEALED_PRODUCT_BUNDLED_CATALOG_ANCHOR: Option<SealedBundledCatalogAnchor> = None;
-
-fn sealed_product_admission_policy() -> Option<ExtensionReleaseAdmissionPolicy> {
-    // The policy and anchor must land atomically once the reviewed release
-    // artifact exists. Returning `None` preserves an explicit fail-closed build.
+fn sealed_product_bundled_catalog_generations() -> Option<(
+    SealedBundledCatalogGeneration,
+    Box<[SealedBundledCatalogGeneration]>,
+)> {
+    // Active and rollback generations, including each exact per-generation
+    // policy, must land atomically once reviewed release artifacts exist.
+    // Returning `None` preserves an explicit fail-closed production build.
     None
 }
+
+#[cfg(test)]
+fn anchor_for_fixture(
+    catalog_bytes: &[u8],
+) -> Result<SealedBundledCatalogAnchor, BundledCatalogAdmissionError> {
+    let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
+        .map_err(BundledCatalogAdmissionError::Catalog)?;
+    Ok(SealedBundledCatalogAnchor {
+        catalog_length: catalog_bytes.len(),
+        catalog_digest: ExtensionReleaseCatalogDigest::from_bytes(
+            Sha256::digest(catalog_bytes).into(),
+        ),
+        authority: catalog.authority(),
+        catalog_revision: catalog.revision(),
+        admission_policy_digest: catalog.admission_policy_sha256(),
+        inventory_digest: digest_catalog_inventory(&catalog)
+            .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?,
+    })
+}
+
+const _: () = assert!(MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS == 2);
+const _: () = assert!(MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS == 3);
+const _: () =
+    assert!(MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS == 1 + MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS);
 
 #[cfg(test)]
 mod tests {
@@ -354,8 +764,17 @@ mod tests {
         BundledPackageAuthority::from_sealed_parts(anchor_for(bytes), policy(POLICY_BYTE)).unwrap()
     }
 
+    fn generation_for(bytes: &[u8], policy_digest: u8) -> SealedBundledCatalogGeneration {
+        SealedBundledCatalogGeneration {
+            anchor: anchor_for(bytes),
+            policy: policy(policy_digest),
+        }
+    }
+
     #[test]
     fn production_authority_is_explicitly_unprovisioned() {
+        assert_eq!(MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS, 2);
+        assert_eq!(MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS, 3);
         assert!(matches!(
             BundledPackageAuthority::product(),
             Err(BundledCatalogAdmissionError::Unprovisioned)
@@ -392,12 +811,232 @@ mod tests {
     }
 
     #[test]
+    fn active_and_two_exact_rollback_generations_are_distinct_capabilities() {
+        let rollback_one = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            1,
+            3,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let rollback_two = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            2,
+            4,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let active = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            3,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let authority = BundledPackageAuthority::from_sealed_generations(
+            generation_for(&active, POLICY_BYTE),
+            vec![
+                generation_for(&rollback_one, 3),
+                generation_for(&rollback_two, 4),
+            ]
+            .into_boxed_slice(),
+        )
+        .unwrap();
+
+        let admitted_active = authority.admit_catalog(&active).unwrap();
+        let admitted_one = authority.admit_rollback_catalog(&rollback_one).unwrap();
+        let admitted_two = authority.admit_rollback_catalog(&rollback_two).unwrap();
+        assert_eq!(admitted_active.revision().get(), 3);
+        assert_eq!(admitted_one.revision().get(), 1);
+        assert_eq!(admitted_two.revision().get(), 2);
+        assert_ne!(admitted_one.catalog_digest(), admitted_two.catalog_digest());
+        assert!(
+            admitted_one.retained_bytes() <= MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES
+        );
+        assert!(authority.retained_bytes() <= MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES);
+
+        assert_eq!(
+            authority.admit_catalog(&rollback_two).unwrap_err(),
+            BundledCatalogAdmissionError::CatalogDigestMismatch
+        );
+        assert_eq!(
+            authority.admit_rollback_catalog(&active).unwrap_err(),
+            BundledCatalogAdmissionError::CatalogDigestMismatch
+        );
+
+        let active_anchor = admitted_active.generation_anchor();
+        let rollback_anchor = admitted_one.generation_anchor();
+        assert_eq!(
+            active_anchor.catalog_length(),
+            u64::try_from(active.len()).unwrap()
+        );
+        assert_eq!(
+            rollback_anchor.catalog_length(),
+            u64::try_from(rollback_one.len()).unwrap()
+        );
+        assert_eq!(
+            authority.recognize_generation(&active_anchor),
+            Some(ProductBundledCatalogGenerationRole::Active)
+        );
+        assert_eq!(
+            authority.recognize_generation(&rollback_anchor),
+            Some(ProductBundledCatalogGenerationRole::Rollback)
+        );
+
+        let invented = [
+            BundledCatalogGenerationAnchor::from_parts(
+                ExtensionAuthorityId::from_bytes([9; 32]),
+                admitted_one.revision(),
+                u64::try_from(rollback_one.len()).unwrap(),
+                admitted_one.catalog_digest(),
+                admitted_one.inventory_digest(),
+            ),
+            BundledCatalogGenerationAnchor::from_parts(
+                admitted_one.authority(),
+                ExtensionReleaseCatalogRevision::new(2).unwrap(),
+                u64::try_from(rollback_one.len()).unwrap(),
+                admitted_one.catalog_digest(),
+                admitted_one.inventory_digest(),
+            ),
+            BundledCatalogGenerationAnchor::from_parts(
+                admitted_one.authority(),
+                admitted_one.revision(),
+                u64::try_from(rollback_one.len() + 1).unwrap(),
+                admitted_one.catalog_digest(),
+                admitted_one.inventory_digest(),
+            ),
+            BundledCatalogGenerationAnchor::from_parts(
+                admitted_one.authority(),
+                admitted_one.revision(),
+                u64::try_from(rollback_one.len()).unwrap(),
+                ExtensionReleaseCatalogDigest::from_bytes([9; 32]),
+                admitted_one.inventory_digest(),
+            ),
+            BundledCatalogGenerationAnchor::from_parts(
+                admitted_one.authority(),
+                admitted_one.revision(),
+                u64::try_from(rollback_one.len()).unwrap(),
+                admitted_one.catalog_digest(),
+                BundledCatalogInventoryDigest::from_bytes([9; 32]),
+            ),
+        ];
+        assert!(invented
+            .iter()
+            .all(|anchor| authority.recognize_generation(anchor).is_none()));
+    }
+
+    #[test]
+    fn generation_configuration_is_same_epoch_ordered_unique_and_bounded() {
+        let oldest = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            1,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let middle = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            2,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let active = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            3,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let foreign = catalog_bytes_with(
+            9,
+            1,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+
+        let invalid = |rollback: Vec<SealedBundledCatalogGeneration>| {
+            assert!(matches!(
+                BundledPackageAuthority::from_sealed_generations(
+                    generation_for(&active, POLICY_BYTE),
+                    rollback.into_boxed_slice(),
+                ),
+                Err(BundledCatalogAdmissionError::InvalidProductConfiguration)
+            ));
+        };
+        invalid(vec![generation_for(&foreign, POLICY_BYTE)]);
+        invalid(vec![
+            generation_for(&middle, POLICY_BYTE),
+            generation_for(&oldest, POLICY_BYTE),
+        ]);
+        invalid(vec![
+            generation_for(&oldest, POLICY_BYTE),
+            generation_for(&oldest, POLICY_BYTE),
+        ]);
+        invalid(vec![generation_for(&active, POLICY_BYTE)]);
+        invalid(vec![
+            generation_for(&oldest, POLICY_BYTE),
+            generation_for(&middle, POLICY_BYTE),
+            generation_for(&middle, POLICY_BYTE),
+        ]);
+
+        let mut duplicate_digest = generation_for(&middle, POLICY_BYTE);
+        duplicate_digest.anchor.catalog_digest = anchor_for(&oldest).catalog_digest;
+        invalid(vec![generation_for(&oldest, POLICY_BYTE), duplicate_digest]);
+    }
+
+    #[test]
+    fn rollback_generation_requires_its_exact_bytes_and_policy() {
+        let rollback = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            1,
+            3,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        let active = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            2,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#)],
+        );
+        assert!(matches!(
+            BundledPackageAuthority::from_sealed_generations(
+                generation_for(&active, POLICY_BYTE),
+                vec![generation_for(&rollback, POLICY_BYTE)].into_boxed_slice(),
+            ),
+            Err(BundledCatalogAdmissionError::InvalidProductConfiguration)
+        ));
+
+        let authority = BundledPackageAuthority::from_sealed_generations(
+            generation_for(&active, POLICY_BYTE),
+            vec![generation_for(&rollback, 3)].into_boxed_slice(),
+        )
+        .unwrap();
+        let mut changed = rollback.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        assert_eq!(
+            authority.admit_rollback_catalog(&changed).unwrap_err(),
+            BundledCatalogAdmissionError::CatalogDigestMismatch
+        );
+    }
+
+    #[test]
+    fn active_only_authority_refuses_rollback_admission_explicitly() {
+        let bytes = catalog_bytes();
+        assert_eq!(
+            authority_for(&bytes)
+                .admit_rollback_catalog(&bytes)
+                .unwrap_err(),
+            BundledCatalogAdmissionError::RollbackCatalogNotProvisioned
+        );
+    }
+
+    #[test]
     fn exact_fixture_is_admitted_as_metadata_only() {
         let bytes = catalog_bytes();
         let admitted = authority_for(&bytes).admit_catalog(&bytes).unwrap();
         assert_eq!(admitted.catalog().packages().len(), 1);
         assert_eq!(admitted.authority().bytes(), [AUTHORITY_BYTE; 32]);
         assert_eq!(admitted.revision().get(), 1);
+        assert_eq!(
+            admitted.catalog_length(),
+            u64::try_from(bytes.len()).unwrap()
+        );
         assert_eq!(
             admitted.retained_bytes(),
             admitted.catalog().retained_bytes() + ADMITTED_CATALOG_ACCOUNTING_OVERHEAD
