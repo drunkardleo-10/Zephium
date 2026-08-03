@@ -9,7 +9,11 @@
 //!
 //! The values produced here remain structural until a release or repository
 //! authority authenticates their exact bytes. In particular, parsing a
-//! catalog never makes its packages trusted by itself.
+//! catalog never makes its packages trusted by itself. Manifest admission
+//! additionally requires an exact authenticated release/tree binding and an
+//! explicit product compatibility decision for every typed or unmodeled
+//! declaration. Unknown top-level declarations remain runtime-blocking
+//! authority; they are never silently treated as compatible.
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
@@ -18,6 +22,7 @@ mod chromium;
 mod digest;
 mod json;
 mod limits;
+mod manifest;
 mod relative_path;
 mod release;
 mod tree;
@@ -27,6 +32,14 @@ pub use chromium::{
 };
 pub use json::{parse_bounded_json, BoundedJsonError, BoundedJsonLimits, BoundedJsonValue};
 pub use limits::*;
+pub use manifest::{
+    admit_extension_manifest, AdmittedExtensionManifest, ExtensionContentScriptResources,
+    ExtensionDeclaredResourcePattern, ExtensionManifestAdmissionDigest,
+    ExtensionManifestAdmissionError, ExtensionManifestCompatibilityPolicy,
+    ExtensionManifestCompatibilitySubject, ExtensionManifestIcon, ExtensionManifestMetadata,
+    ExtensionManifestResource, ExtensionManifestResourcePlan, ExtensionOverrideResource,
+    ExtensionWebAccessibleAudience, ExtensionWebAccessibleResourceGroup,
+};
 pub use relative_path::{PortableRelativePath, PortableRelativePathError};
 pub use release::{
     ExpectedChromiumIdentity, ExtensionPackageAdmissionPolicyDigest,
