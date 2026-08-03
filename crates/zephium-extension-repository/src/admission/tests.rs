@@ -184,16 +184,19 @@ fn records_replays_and_advances_one_exact_authority_history() {
     let second_witness = TestCatalogWitness::new(&second);
 
     let mut repository = harness.open();
+    assert!(repository._materialization.is_some());
     assert_eq!(
         repository.record_with_fault(&first_witness, &first, FaultPoint::None),
         Ok(BundledCatalogRecordOutcome::Recorded)
     );
     assert_eq!(repository.state.generation, 1);
+    assert!(repository._materialization.is_none());
     assert_eq!(
         repository.record_with_fault(&first_witness, &first, FaultPoint::None),
         Ok(BundledCatalogRecordOutcome::IdempotentReplay)
     );
     assert_eq!(repository.state.generation, 1);
+    assert!(repository._materialization.is_none());
     assert_eq!(
         repository.record_with_fault(&second_witness, &second, FaultPoint::None),
         Ok(BundledCatalogRecordOutcome::Recorded)
@@ -204,6 +207,7 @@ fn records_replays_and_advances_one_exact_authority_history() {
     let recovered = harness.open();
     assert_eq!(recovered.state.generation, 2);
     assert_eq!(recovered.state.package_line_high_waters.len(), 1);
+    assert!(recovered._materialization.is_some());
 }
 
 #[test]

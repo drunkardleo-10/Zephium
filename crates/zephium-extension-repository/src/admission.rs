@@ -54,7 +54,7 @@ pub struct ExtensionRepository {
     journals: PrivateDirectory,
     state: RepositoryState,
     state_bytes: Vec<u8>,
-    _materialization: MaterializationRuntime,
+    _materialization: Option<MaterializationRuntime>,
     sealed: bool,
 }
 
@@ -72,7 +72,7 @@ impl ExtensionRepository {
             journals: opened.journals,
             state: opened.state,
             state_bytes: opened.state_bytes,
-            _materialization: opened.materialization,
+            _materialization: Some(opened.materialization),
             sealed: false,
         })
     }
@@ -164,6 +164,12 @@ impl ExtensionRepository {
         }
         self.state = next_state;
         self.state_bytes = next_bytes;
+        // Materialization recovery is bound to one exact catalog checkpoint.
+        // A newer catalog floor may change the package rows that are eligible
+        // for activation, so retain no live runtime opened under the previous
+        // checkpoint. The next materialization operation must recover and
+        // rebind it against `self.state.checkpoint()` before doing any work.
+        self._materialization = None;
         Ok(BundledCatalogRecordOutcome::Recorded)
     }
 
