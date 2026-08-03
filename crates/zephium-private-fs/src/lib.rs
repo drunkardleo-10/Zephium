@@ -5,8 +5,11 @@
 //! recovery, garbage-collection, or package-admission policy.
 //!
 //! Phase-one namespace activation is available only on macOS and Linux, where
-//! child operations are descriptor-relative. Other Unix targets and Windows
-//! fail closed until their native adapters have passed dedicated live tests.
+//! child operations are descriptor-relative. Linux additionally requires a
+//! readable `/proc/self/fd` so exact spelling can be proven from live file
+//! descriptors even on case-folding filesystems. Missing or restricted procfs
+//! fails closed. Other Unix targets and Windows fail closed until their native
+//! adapters have passed dedicated live tests.
 //!
 //! The boundary excludes unprivileged operating-system principals that have no
 //! delegated access and rejects untrusted package contents. Root/administrator,
@@ -30,7 +33,7 @@ pub use component::{PrivateComponent, PrivateComponentError};
 pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_NAME_BYTES};
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
-pub use namespace::{ByteLimit, LockedPrivateNamespace, PrivateDirectory};
+pub use namespace::{ByteLimit, LockedPrivateNamespace, PrivateChildKind, PrivateDirectory};
 
 /// Hard ceiling for any allocation or write accepted by the in-memory API.
 ///

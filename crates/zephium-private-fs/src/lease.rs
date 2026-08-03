@@ -74,16 +74,20 @@ impl NamespaceLease {
         Ok(guard)
     }
 
-    pub(crate) fn is_reserved(&self, component: &PrivateComponent) -> bool {
-        self.is_reserved_lock(component) || self.is_reserved_lock_staging(component)
+    pub(crate) fn is_reserved_name(&self, name: &str) -> bool {
+        self.is_reserved_lock_name(name) || self.is_reserved_lock_staging_name(name)
     }
 
-    pub(crate) fn is_reserved_lock(&self, component: &PrivateComponent) -> bool {
-        component == &self.reserved_lock
+    pub(crate) fn is_reserved_lock_name(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case(self.reserved_lock.as_str())
     }
 
-    pub(crate) fn is_reserved_lock_staging(&self, component: &PrivateComponent) -> bool {
-        component == &self.reserved_lock_staging
+    pub(crate) fn is_canonical_reserved_lock_name(&self, name: &str) -> bool {
+        name == self.reserved_lock.as_str()
+    }
+
+    pub(crate) fn is_reserved_lock_staging_name(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case(self.reserved_lock_staging.as_str())
     }
 
     pub(crate) fn verify_authority(&self) -> Result<(), PrivateFsError> {

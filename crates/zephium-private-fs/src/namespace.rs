@@ -6,7 +6,7 @@ use std::sync::{Arc, MutexGuard};
 use crate::identity::{DirectoryIdentity, FileIdentity};
 use crate::lease::NamespaceLease;
 use crate::platform::{self, OpenPurpose};
-use crate::{PrivateComponent, PrivateFsError, MAX_IN_MEMORY_FILE_BYTES};
+use crate::{PrivateComponent, PrivateEntryName, PrivateFsError, MAX_IN_MEMORY_FILE_BYTES};
 
 const MAX_INVENTORY_ENTRIES: usize = 4_096;
 const LOCK_COMPONENT_NAME: &str = ".zephium-private-fs-lock-v1";
@@ -37,6 +37,7 @@ struct DirectoryCore {
     path: PathBuf,
     handle: File,
     identity: DirectoryIdentity,
+    child_name: Option<OwnedChildName>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -45,13 +46,73 @@ enum DirectoryRole {
     Child,
 }
 
+#[derive(Clone, Copy)]
+enum ChildName<'a> {
+    Control(&'a PrivateComponent),
+    Entry(&'a PrivateEntryName),
+}
+
+impl<'a> ChildName<'a> {
+    fn as_str(self) -> &'a str {
+        match self {
+            Self::Control(component) => component.as_str(),
+            Self::Entry(name) => name.as_str(),
+        }
+    }
+
+    fn to_owned_name(self) -> OwnedChildName {
+        match self {
+            Self::Control(component) => OwnedChildName::Control(component.clone()),
+            Self::Entry(name) => OwnedChildName::Entry(name.clone()),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum OwnedChildName {
+    Control(PrivateComponent),
+    Entry(PrivateEntryName),
+}
+
+impl OwnedChildName {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Control(component) => component.as_str(),
+            Self::Entry(name) => name.as_str(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ChildDirectoryMode {
+    OpenExisting,
+    CreateOrOpen,
+    CreateNew,
+}
+
+/// Exact kind and opaque identity of one inspected private child entry.
+///
+/// This is an observation, not an open file or directory capability. The
+/// parent lease remains responsible for serializing later operations, and a
+/// caller must not treat an identity as proof that the entry is unchanged
+/// after this method returns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivateChildKind {
+    /// A verified single-link private regular file.
+    RegularFile(FileIdentity),
+    /// A verified private directory.
+    Directory(DirectoryIdentity),
+}
+
 /// Held, identity-bound private directory.
 ///
 /// Caller-provided paths never enter this API after admission. On supported
 /// platforms, every child operation is resolved relative to the held directory
-/// descriptor and accepts only one [`PrivateComponent`]. Every directory also
-/// retains the root namespace lease, lock, quarantine state, and operation
-/// mutex, so a child cannot outlive or bypass its authority.
+/// descriptor. Protocol internals accept only [`PrivateComponent`], while
+/// authenticated payload entries accept only [`PrivateEntryName`]; no raw path
+/// strings cross the public boundary. Every directory also retains the root
+/// namespace lease, lock, quarantine state, and operation mutex, so a child
+/// cannot outlive or bypass its authority.
 pub struct PrivateDirectory {
     core: DirectoryCore,
     lease: Arc<NamespaceLease>,
@@ -73,10 +134,71 @@ impl PrivateDirectory {
         &self,
         component: &PrivateComponent,
     ) -> Result<Self, PrivateFsError> {
+        self.child_directory(
+            ChildName::Control(component),
+            ChildDirectoryMode::CreateOrOpen,
+        )
+    }
+
+    /// Opens one existing private protocol child directory without creating it.
+    ///
+    /// Absence returns [`PrivateFsError::NotFound`]. Existing hostile node
+    /// kinds, permissions, ACLs, links, and identity races fail closed.
+    pub fn open_private_child(&self, component: &PrivateComponent) -> Result<Self, PrivateFsError> {
+        self.child_directory(
+            ChildName::Control(component),
+            ChildDirectoryMode::OpenExisting,
+        )
+    }
+
+    /// Creates one new private protocol child directory.
+    ///
+    /// [`PrivateFsError::AlreadyExists`] is returned only after an existing
+    /// directory under that name has itself passed private-directory admission.
+    /// An existing hostile node is [`PrivateFsError::Unsafe`].
+    pub fn create_new_private_child(
+        &self,
+        component: &PrivateComponent,
+    ) -> Result<Self, PrivateFsError> {
+        self.child_directory(ChildName::Control(component), ChildDirectoryMode::CreateNew)
+    }
+
+    /// Creates or admits one case-preserving payload child directory.
+    pub fn create_entry_child(&self, name: &PrivateEntryName) -> Result<Self, PrivateFsError> {
+        self.child_directory(ChildName::Entry(name), ChildDirectoryMode::CreateOrOpen)
+    }
+
+    /// Opens one existing case-preserving payload child without creating it.
+    ///
+    /// Absence returns [`PrivateFsError::NotFound`].
+    pub fn open_entry_child(&self, name: &PrivateEntryName) -> Result<Self, PrivateFsError> {
+        self.child_directory(ChildName::Entry(name), ChildDirectoryMode::OpenExisting)
+    }
+
+    /// Creates one new case-preserving payload child directory.
+    ///
+    /// [`PrivateFsError::AlreadyExists`] is returned only for a safely admitted
+    /// existing directory. An existing file, link, special node, unsafe mode,
+    /// or unsafe ACL is [`PrivateFsError::Unsafe`].
+    pub fn create_new_entry_child(&self, name: &PrivateEntryName) -> Result<Self, PrivateFsError> {
+        self.child_directory(ChildName::Entry(name), ChildDirectoryMode::CreateNew)
+    }
+
+    fn child_directory(
+        &self,
+        name: ChildName<'_>,
+        mode: ChildDirectoryMode,
+    ) -> Result<Self, PrivateFsError> {
         let _operation = self.begin_operation()?;
-        self.reject_reserved(component)?;
+        self.reject_reserved_name(name)?;
         self.precheck_unlocked()?;
-        let created = match self.create_directory_unlocked(component) {
+        if matches!(mode, ChildDirectoryMode::OpenExisting) {
+            let child = self.lease.observe(self.open_child_unlocked(name))?;
+            self.precheck_unlocked()?;
+            return Ok(child);
+        }
+
+        let created = match self.create_directory_unlocked(name) {
             Ok(created) => created,
             Err(PrivateFsError::SettlementUnknown) => {
                 return self
@@ -91,15 +213,24 @@ impl PrivateDirectory {
         if created {
             let settlement = (|| {
                 platform::sync_directory(&self.core.handle)?;
-                let child = self.open_child_unlocked(component)?;
+                let child = self.open_child_unlocked(name)?;
                 self.verify_boundary_unlocked()?;
                 Ok(child)
             })();
             return self.lease.settle_after_commit(settlement);
         }
-        let child = self.lease.observe(self.open_child_unlocked(component))?;
+
+        let observed = match self.open_child_unlocked(name) {
+            Err(PrivateFsError::NotFound) => Err(PrivateFsError::IdentityAmbiguous),
+            outcome => outcome,
+        };
+        let child = self.lease.observe(observed)?;
         self.precheck_unlocked()?;
-        Ok(child)
+        if matches!(mode, ChildDirectoryMode::CreateNew) {
+            Err(PrivateFsError::AlreadyExists)
+        } else {
+            Ok(child)
+        }
     }
 
     /// Lists a bounded, sorted snapshot of portable direct-child names.
@@ -131,13 +262,69 @@ impl PrivateDirectory {
         if self.role == DirectoryRole::Root {
             if entries
                 .iter()
-                .any(|entry| self.lease.is_reserved_lock_staging(entry))
+                .any(|entry| self.lease.is_reserved_lock_staging_name(entry.as_str()))
             {
                 // Staging is required to be absent when activation settles.
                 // Never hide residue that appeared after that admission point.
                 return Err(PrivateFsError::Unsafe);
             }
-            entries.retain(|entry| !self.lease.is_reserved_lock(entry));
+            if entries.iter().any(|entry| {
+                self.lease.is_reserved_lock_name(entry.as_str())
+                    && !self.lease.is_canonical_reserved_lock_name(entry.as_str())
+            }) {
+                return Err(PrivateFsError::Unsafe);
+            }
+            entries.retain(|entry| !self.lease.is_canonical_reserved_lock_name(entry.as_str()));
+        }
+        if entries.len() > max_entries {
+            return Err(PrivateFsError::BoundExceeded);
+        }
+        entries.sort_unstable();
+        self.precheck_unlocked()?;
+        Ok(entries)
+    }
+
+    /// Lists a bounded, byte-sorted snapshot of direct payload entry names.
+    ///
+    /// Exact spelling is preserved. Node kinds are not trusted by enumeration;
+    /// callers use [`Self::inspect_entry`] or a typed open/read method before
+    /// consuming an entry. At the root, the exact canonical lock is hidden,
+    /// while staging residue or a differently cased lock alias fails closed.
+    pub fn list_entry_names(
+        &self,
+        max_entries: usize,
+    ) -> Result<Vec<PrivateEntryName>, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        if max_entries == 0 || max_entries > MAX_INVENTORY_ENTRIES {
+            return Err(PrivateFsError::BoundExceeded);
+        }
+        self.precheck_unlocked()?;
+        let mut entries = platform::list_names(
+            &self.core.handle,
+            &self.core.path,
+            max_entries.saturating_add(if self.role == DirectoryRole::Root {
+                2
+            } else {
+                0
+            }),
+        )?
+        .into_iter()
+        .map(|name| PrivateEntryName::new(name).map_err(|_| PrivateFsError::Unsafe))
+        .collect::<Result<Vec<_>, _>>()?;
+        if self.role == DirectoryRole::Root {
+            if entries
+                .iter()
+                .any(|entry| self.lease.is_reserved_lock_staging_name(entry.as_str()))
+            {
+                return Err(PrivateFsError::Unsafe);
+            }
+            if entries.iter().any(|entry| {
+                self.lease.is_reserved_lock_name(entry.as_str())
+                    && !self.lease.is_canonical_reserved_lock_name(entry.as_str())
+            }) {
+                return Err(PrivateFsError::Unsafe);
+            }
+            entries.retain(|entry| !self.lease.is_canonical_reserved_lock_name(entry.as_str()));
         }
         if entries.len() > max_entries {
             return Err(PrivateFsError::BoundExceeded);
@@ -153,10 +340,21 @@ impl PrivateDirectory {
     /// reserved root-lock reference is an error rather than an affirmative
     /// result.
     pub fn regular_exists(&self, component: &PrivateComponent) -> Result<bool, PrivateFsError> {
+        self.regular_exists_named(ChildName::Control(component))
+    }
+
+    /// Returns whether a verified case-preserving regular payload entry exists.
+    ///
+    /// Absence is `false`; every present non-regular or unsafe node is an error.
+    pub fn entry_regular_exists(&self, name: &PrivateEntryName) -> Result<bool, PrivateFsError> {
+        self.regular_exists_named(ChildName::Entry(name))
+    }
+
+    fn regular_exists_named(&self, name: ChildName<'_>) -> Result<bool, PrivateFsError> {
         let _operation = self.begin_operation()?;
-        self.reject_reserved(component)?;
+        self.reject_reserved_name(name)?;
         self.precheck_unlocked()?;
-        let exists = self.open_optional_regular_unlocked(component, OpenPurpose::Read)?;
+        let exists = self.open_optional_regular_unlocked(name, OpenPurpose::Read)?;
         self.precheck_unlocked()?;
         Ok(exists.is_some())
     }
@@ -166,14 +364,59 @@ impl PrivateDirectory {
         &self,
         component: &PrivateComponent,
     ) -> Result<Option<FileIdentity>, PrivateFsError> {
+        self.regular_identity_named(ChildName::Control(component))
+    }
+
+    /// Returns the opaque identity of an optional verified regular payload entry.
+    pub fn entry_regular_identity(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<Option<FileIdentity>, PrivateFsError> {
+        self.regular_identity_named(ChildName::Entry(name))
+    }
+
+    fn regular_identity_named(
+        &self,
+        name: ChildName<'_>,
+    ) -> Result<Option<FileIdentity>, PrivateFsError> {
         let _operation = self.begin_operation()?;
-        self.reject_reserved(component)?;
+        self.reject_reserved_name(name)?;
         self.precheck_unlocked()?;
         let identity = self
-            .open_optional_regular_unlocked(component, OpenPurpose::Read)?
+            .open_optional_regular_unlocked(name, OpenPurpose::Read)?
             .map(|verified| verified.identity);
         self.precheck_unlocked()?;
         Ok(identity)
+    }
+
+    /// Inspects one optional payload entry without following links.
+    ///
+    /// On Unix this is descriptor-relative and nonblocking. A symlink,
+    /// hard-linked regular file, FIFO, socket, device, unsafe permission or
+    /// ACL, or identity race is rejected rather than reported as a kind.
+    pub fn inspect_entry(
+        &self,
+        name: &PrivateEntryName,
+    ) -> Result<Option<PrivateChildKind>, PrivateFsError> {
+        let _operation = self.begin_operation()?;
+        let name = ChildName::Entry(name);
+        self.reject_reserved_name(name)?;
+        self.precheck_unlocked()?;
+        let inspected = self.lease.observe(platform::inspect_child(
+            &self.core.handle,
+            &self.core.path,
+            name.as_str(),
+        ))?;
+        let inspected = inspected.map(|kind| match kind {
+            platform::RawChildKind::Regular(identity) => {
+                PrivateChildKind::RegularFile(FileIdentity(identity))
+            }
+            platform::RawChildKind::Directory(identity) => {
+                PrivateChildKind::Directory(DirectoryIdentity(identity))
+            }
+        });
+        self.precheck_unlocked()?;
+        Ok(inspected)
     }
 
     /// Reads one optional regular child without exceeding `limit`.
@@ -186,11 +429,30 @@ impl PrivateDirectory {
         component: &PrivateComponent,
         limit: ByteLimit,
     ) -> Result<Option<Vec<u8>>, PrivateFsError> {
+        self.read_bounded_regular_named(ChildName::Control(component), limit)
+    }
+
+    /// Reads one optional regular payload entry without exceeding `limit`.
+    ///
+    /// The exact case-preserving name and open identity are revalidated after
+    /// the bounded read. Empty files are returned as empty vectors.
+    pub fn read_bounded_entry_regular(
+        &self,
+        name: &PrivateEntryName,
+        limit: ByteLimit,
+    ) -> Result<Option<Vec<u8>>, PrivateFsError> {
+        self.read_bounded_regular_named(ChildName::Entry(name), limit)
+    }
+
+    fn read_bounded_regular_named(
+        &self,
+        name: ChildName<'_>,
+        limit: ByteLimit,
+    ) -> Result<Option<Vec<u8>>, PrivateFsError> {
         let _operation = self.begin_operation()?;
-        self.reject_reserved(component)?;
+        self.reject_reserved_name(name)?;
         self.precheck_unlocked()?;
-        let Some(mut verified) =
-            self.open_optional_regular_unlocked(component, OpenPurpose::Read)?
+        let Some(mut verified) = self.open_optional_regular_unlocked(name, OpenPurpose::Read)?
         else {
             self.precheck_unlocked()?;
             return Ok(None);
@@ -215,7 +477,7 @@ impl PrivateDirectory {
         self.lease.observe(platform::revalidate_regular(
             &self.core.handle,
             &self.core.path,
-            component.as_str(),
+            name.as_str(),
             &verified.file,
             verified.identity.0,
         ))?;
@@ -235,35 +497,74 @@ impl PrivateDirectory {
         bytes: &[u8],
         limit: ByteLimit,
     ) -> Result<FileIdentity, PrivateFsError> {
+        self.write_new_synced_named(ChildName::Control(component), bytes, limit)
+    }
+
+    /// Creates, writes, and durably settles one new regular payload entry.
+    ///
+    /// This is create-new only and never overwrites an existing node. Any
+    /// failure after creation may have committed and therefore quarantines the
+    /// shared lease with [`PrivateFsError::SettlementUnknown`].
+    pub fn write_new_entry_synced(
+        &self,
+        name: &PrivateEntryName,
+        bytes: &[u8],
+        limit: ByteLimit,
+    ) -> Result<FileIdentity, PrivateFsError> {
+        self.write_new_synced_named(ChildName::Entry(name), bytes, limit)
+    }
+
+    fn write_new_synced_named(
+        &self,
+        name: ChildName<'_>,
+        bytes: &[u8],
+        limit: ByteLimit,
+    ) -> Result<FileIdentity, PrivateFsError> {
         let _operation = self.begin_operation()?;
-        self.reject_reserved(component)?;
+        self.reject_reserved_name(name)?;
         if bytes.len() > limit.get() {
             return Err(PrivateFsError::BoundExceeded);
         }
         self.precheck_unlocked()?;
-        let (mut file, identity) = match platform::create_new_regular(
-            &self.core.handle,
-            &self.core.path,
-            component.as_str(),
-        ) {
-            Ok(created) => created,
-            Err(PrivateFsError::SettlementUnknown) => {
-                return self
-                    .lease
-                    .settle_after_commit(Err(PrivateFsError::SettlementUnknown));
-            }
-            Err(error) => {
-                self.precheck_unlocked()?;
-                return Err(error);
-            }
-        };
+        let (mut file, identity) =
+            match platform::create_new_regular(&self.core.handle, &self.core.path, name.as_str()) {
+                Ok(created) => {
+                    if platform::verify_exact_name(&created.0, name.as_str()).is_err() {
+                        return self
+                            .lease
+                            .settle_after_commit(Err(PrivateFsError::SettlementUnknown));
+                    }
+                    created
+                }
+                Err(PrivateFsError::SettlementUnknown) => {
+                    return self
+                        .lease
+                        .settle_after_commit(Err(PrivateFsError::SettlementUnknown));
+                }
+                Err(PrivateFsError::AlreadyExists) => {
+                    let inspected = self.lease.observe(platform::inspect_child(
+                        &self.core.handle,
+                        &self.core.path,
+                        name.as_str(),
+                    ))?;
+                    if inspected.is_none() {
+                        return self.lease.observe(Err(PrivateFsError::IdentityAmbiguous));
+                    }
+                    self.precheck_unlocked()?;
+                    return Err(PrivateFsError::AlreadyExists);
+                }
+                Err(error) => {
+                    self.precheck_unlocked()?;
+                    return Err(error);
+                }
+            };
         let settlement = (|| {
             file.write_all(bytes).map_err(|_| PrivateFsError::Io)?;
             file.sync_all().map_err(|_| PrivateFsError::Io)?;
             platform::revalidate_regular(
                 &self.core.handle,
                 &self.core.path,
-                component.as_str(),
+                name.as_str(),
                 &file,
                 identity,
             )?;
@@ -285,8 +586,8 @@ impl PrivateDirectory {
         let _operation = self.begin_operation()?;
         self.reject_reserved(component)?;
         self.precheck_unlocked()?;
-        let Some(verified) =
-            self.open_optional_regular_unlocked(component, OpenPurpose::Mutation)?
+        let Some(verified) = self
+            .open_optional_regular_unlocked(ChildName::Control(component), OpenPurpose::Mutation)?
         else {
             self.precheck_unlocked()?;
             return Ok(false);
@@ -331,7 +632,7 @@ impl PrivateDirectory {
         }
         self.precheck_unlocked()?;
         let source_file = self
-            .open_optional_regular_unlocked(source, OpenPurpose::Mutation)?
+            .open_optional_regular_unlocked(ChildName::Control(source), OpenPurpose::Mutation)?
             .ok_or(PrivateFsError::Unsafe)?;
         source_file
             .file
@@ -344,9 +645,10 @@ impl PrivateDirectory {
             &source_file.file,
             source_file.identity.0,
         ))?;
-        if let Some(destination_file) =
-            self.open_optional_regular_unlocked(destination, OpenPurpose::Mutation)?
-        {
+        if let Some(destination_file) = self.open_optional_regular_unlocked(
+            ChildName::Control(destination),
+            OpenPurpose::Mutation,
+        )? {
             drop(destination_file);
         }
         if let Err(error) = self.atomic_replace_unlocked(source, destination) {
@@ -373,7 +675,7 @@ impl PrivateDirectory {
         }
         self.precheck_unlocked()?;
         let source_file = self
-            .open_optional_regular_unlocked(source, OpenPurpose::Mutation)?
+            .open_optional_regular_unlocked(ChildName::Control(source), OpenPurpose::Mutation)?
             .ok_or(PrivateFsError::Unsafe)?;
         source_file
             .file
@@ -405,12 +707,8 @@ impl PrivateDirectory {
         self.lease.begin()
     }
 
-    fn create_directory_unlocked(
-        &self,
-        component: &PrivateComponent,
-    ) -> Result<bool, PrivateFsError> {
-        let result =
-            platform::create_directory(&self.core.handle, &self.core.path, component.as_str());
+    fn create_directory_unlocked(&self, name: ChildName<'_>) -> Result<bool, PrivateFsError> {
+        let result = platform::create_directory(&self.core.handle, &self.core.path, name.as_str());
         #[cfg(test)]
         if matches!(&result, Ok(true))
             && self.lease.take_committed_mutation_fault(
@@ -481,7 +779,11 @@ impl PrivateDirectory {
     }
 
     fn reject_reserved(&self, component: &PrivateComponent) -> Result<(), PrivateFsError> {
-        if self.role == DirectoryRole::Root && self.lease.is_reserved(component) {
+        self.reject_reserved_name(ChildName::Control(component))
+    }
+
+    fn reject_reserved_name(&self, name: ChildName<'_>) -> Result<(), PrivateFsError> {
+        if self.role == DirectoryRole::Root && self.lease.is_reserved_name(name.as_str()) {
             return Err(PrivateFsError::ReservedComponent);
         }
         Ok(())
@@ -496,14 +798,16 @@ impl PrivateDirectory {
         verify_core_boundary(&self.core)
     }
 
-    fn open_child_unlocked(&self, component: &PrivateComponent) -> Result<Self, PrivateFsError> {
+    fn open_child_unlocked(&self, name: ChildName<'_>) -> Result<Self, PrivateFsError> {
         let (handle, identity) =
-            platform::open_child_directory(&self.core.handle, &self.core.path, component.as_str())?;
+            platform::open_child_directory(&self.core.handle, &self.core.path, name.as_str())?;
+        platform::verify_exact_name(&handle, name.as_str())?;
         Ok(Self {
             core: DirectoryCore {
-                path: self.core.path.join(component.as_str()),
+                path: self.core.path.join(name.as_str()),
                 handle,
                 identity: DirectoryIdentity(identity),
+                child_name: Some(name.to_owned_name()),
             },
             lease: Arc::clone(&self.lease),
             role: DirectoryRole::Child,
@@ -512,15 +816,16 @@ impl PrivateDirectory {
 
     fn open_optional_regular_unlocked(
         &self,
-        component: &PrivateComponent,
+        name: ChildName<'_>,
         purpose: OpenPurpose,
     ) -> Result<Option<VerifiedRegular>, PrivateFsError> {
-        match self.lease.observe(platform::open_regular(
-            &self.core.handle,
-            &self.core.path,
-            component.as_str(),
-            purpose,
-        )) {
+        let opened =
+            platform::open_regular(&self.core.handle, &self.core.path, name.as_str(), purpose)
+                .and_then(|(file, identity)| {
+                    platform::verify_exact_name(&file, name.as_str())?;
+                    Ok((file, identity))
+                });
+        match self.lease.observe(opened) {
             Ok((file, identity)) => Ok(Some(VerifiedRegular {
                 file,
                 identity: FileIdentity(identity),
@@ -532,7 +837,7 @@ impl PrivateDirectory {
 
     fn ensure_absent_unlocked(&self, component: &PrivateComponent) -> Result<(), PrivateFsError> {
         if self
-            .open_optional_regular_unlocked(component, OpenPurpose::Read)?
+            .open_optional_regular_unlocked(ChildName::Control(component), OpenPurpose::Read)?
             .is_some()
         {
             return Err(PrivateFsError::IdentityAmbiguous);
@@ -549,7 +854,7 @@ impl PrivateDirectory {
         let settlement = (|| {
             platform::sync_directory(&self.core.handle)?;
             let destination_file = self
-                .open_optional_regular_unlocked(destination, OpenPurpose::Read)?
+                .open_optional_regular_unlocked(ChildName::Control(destination), OpenPurpose::Read)?
                 .ok_or(PrivateFsError::IdentityAmbiguous)?;
             if source_file.identity != destination_file.identity {
                 return Err(PrivateFsError::IdentityAmbiguous);
@@ -678,6 +983,7 @@ fn admit_root(path: PathBuf) -> Result<DirectoryCore, PrivateFsError> {
         path,
         handle,
         identity: DirectoryIdentity(identity),
+        child_name: None,
     })
 }
 
@@ -705,10 +1011,25 @@ fn open_lock_regular(
         name.as_str(),
         OpenPurpose::Lock,
     )?;
+    platform::verify_exact_name(&file, name.as_str())?;
     Ok(VerifiedRegular {
         file,
         identity: FileIdentity(identity),
     })
+}
+
+fn revalidate_exact_lock_regular(
+    directory: &DirectoryCore,
+    name: &PrivateComponent,
+    regular: &VerifiedRegular,
+) -> Result<(), PrivateFsError> {
+    platform::revalidate_regular(
+        &directory.handle,
+        &directory.path,
+        name.as_str(),
+        &regular.file,
+        regular.identity.0,
+    )
 }
 
 fn open_required_lock_regular(
@@ -727,47 +1048,23 @@ fn admit_existing_lock(
     lock_staging_name: &PrivateComponent,
     mut lock: VerifiedRegular,
 ) -> Result<VerifiedRegular, PrivateFsError> {
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_name.as_str(),
-        &lock.file,
-        lock.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_name, &lock)?;
     if !platform::lock_exclusive(&lock.file) {
         return Err(PrivateFsError::LockUnavailable);
     }
     // The descriptor-relative lock entry and root identity must still bind to
     // the held handles after flock succeeds, before the shared lease exists.
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_name.as_str(),
-        &lock.file,
-        lock.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_name, &lock)?;
     if read_lock_content(&mut lock.file)? != LOCK_FILE_CONTENT {
         return Err(PrivateFsError::Unsafe);
     }
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_name.as_str(),
-        &lock.file,
-        lock.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_name, &lock)?;
     verify_core_boundary(directory)?;
     inspect_and_cleanup_lock_staging(directory, lock_name, &mut lock, lock_staging_name)?;
     if read_lock_content(&mut lock.file)? != LOCK_FILE_CONTENT {
         return Err(PrivateFsError::Unsafe);
     }
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_name.as_str(),
-        &lock.file,
-        lock.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_name, &lock)?;
     Ok(lock)
 }
 
@@ -781,13 +1078,20 @@ fn initialize_or_recover_lock(
         &directory.path,
         lock_staging_name.as_str(),
     ) {
-        Ok((file, identity)) => (
-            VerifiedRegular {
-                file,
-                identity: FileIdentity(identity),
-            },
-            true,
-        ),
+        Ok((file, identity)) => {
+            if platform::verify_exact_name(&file, lock_staging_name.as_str()).is_err() {
+                // Create-new has committed. If the exact directory-entry name
+                // cannot be proven, callers must not infer what residue exists.
+                return Err(PrivateFsError::SettlementUnknown);
+            }
+            (
+                VerifiedRegular {
+                    file,
+                    identity: FileIdentity(identity),
+                },
+                true,
+            )
+        }
         Err(PrivateFsError::AlreadyExists) => {
             // The staging entry may have been atomically published between the
             // canonical miss and this observation. Prefer the canonical entry
@@ -851,23 +1155,11 @@ fn prepare_staged_lock(
     staging: &mut VerifiedRegular,
     mutated: &mut bool,
 ) -> Result<(), PrivateFsError> {
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        staging_name.as_str(),
-        &staging.file,
-        staging.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, staging_name, staging)?;
     if !platform::lock_exclusive(&staging.file) {
         return Err(PrivateFsError::LockUnavailable);
     }
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        staging_name.as_str(),
-        &staging.file,
-        staging.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, staging_name, staging)?;
 
     let bytes = read_lock_content(&mut staging.file)?;
     if bytes != LOCK_FILE_CONTENT {
@@ -887,13 +1179,7 @@ fn prepare_staged_lock(
             .map_err(|_| PrivateFsError::Io)?;
     }
     staging.file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        staging_name.as_str(),
-        &staging.file,
-        staging.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, staging_name, staging)?;
     if read_lock_content(&mut staging.file)? != LOCK_FILE_CONTENT {
         return Err(PrivateFsError::IdentityAmbiguous);
     }
@@ -907,24 +1193,12 @@ fn settle_published_lock(
     mut lock: VerifiedRegular,
 ) -> Result<VerifiedRegular, PrivateFsError> {
     let settlement = (|| {
-        platform::revalidate_regular(
-            &directory.handle,
-            &directory.path,
-            lock_name.as_str(),
-            &lock.file,
-            lock.identity.0,
-        )?;
+        revalidate_exact_lock_regular(directory, lock_name, &lock)?;
         platform::sync_directory(&directory.handle)?;
         if read_lock_content(&mut lock.file)? != LOCK_FILE_CONTENT {
             return Err(PrivateFsError::IdentityAmbiguous);
         }
-        platform::revalidate_regular(
-            &directory.handle,
-            &directory.path,
-            lock_name.as_str(),
-            &lock.file,
-            lock.identity.0,
-        )?;
+        revalidate_exact_lock_regular(directory, lock_name, &lock)?;
         verify_core_boundary(directory)?;
         inspect_and_cleanup_lock_staging(directory, lock_name, &mut lock, lock_staging_name)?;
         Ok(lock)
@@ -943,31 +1217,13 @@ fn inspect_and_cleanup_lock_staging(
         Err(PrivateFsError::NotFound) => return Ok(()),
         Err(error) => return Err(error),
     };
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_staging_name.as_str(),
-        &staging.file,
-        staging.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_staging_name, &staging)?;
     if !platform::lock_exclusive(&staging.file) {
         return Err(PrivateFsError::LockUnavailable);
     }
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_staging_name.as_str(),
-        &staging.file,
-        staging.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_staging_name, &staging)?;
     let bytes = read_lock_content(&mut staging.file)?;
-    platform::revalidate_regular(
-        &directory.handle,
-        &directory.path,
-        lock_staging_name.as_str(),
-        &staging.file,
-        staging.identity.0,
-    )?;
+    revalidate_exact_lock_regular(directory, lock_staging_name, &staging)?;
     if bytes != LOCK_FILE_CONTENT && !LOCK_FILE_CONTENT.starts_with(&bytes) {
         return Err(PrivateFsError::Unsafe);
     }
@@ -987,13 +1243,7 @@ fn inspect_and_cleanup_lock_staging(
             Err(PrivateFsError::NotFound) => {}
             Ok(_) | Err(_) => return Err(PrivateFsError::IdentityAmbiguous),
         }
-        platform::revalidate_regular(
-            &directory.handle,
-            &directory.path,
-            lock_name.as_str(),
-            &lock.file,
-            lock.identity.0,
-        )?;
+        revalidate_exact_lock_regular(directory, lock_name, lock)?;
         if read_lock_content(&mut lock.file)? != LOCK_FILE_CONTENT {
             return Err(PrivateFsError::IdentityAmbiguous);
         }
@@ -1045,10 +1295,18 @@ fn verify_core_boundary(directory: &DirectoryCore) -> Result<(), PrivateFsError>
     if !platform::same_open_identity(&directory.handle, directory.identity.0) {
         return Err(PrivateFsError::IdentityAmbiguous);
     }
+    if let Some(child_name) = &directory.child_name {
+        platform::verify_exact_name(&directory.handle, child_name.as_str())
+            .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
+    }
     let (current, identity) =
         platform::open_directory(&directory.path).map_err(|_| PrivateFsError::IdentityAmbiguous)?;
     if identity != directory.identity.0 || !platform::same_open_identity(&current, identity) {
         return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    if let Some(child_name) = &directory.child_name {
+        platform::verify_exact_name(&current, child_name.as_str())
+            .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
     }
     Ok(())
 }
@@ -1237,6 +1495,29 @@ mod tests {
         assert!(parent.path().join("mkdir-fault-test/objects").is_dir());
         assert_eq!(
             namespace.directory.list_components(8),
+            Err(PrivateFsError::Quarantined)
+        );
+    }
+
+    #[test]
+    fn ambiguous_entry_child_creation_stickily_quarantines_the_lease() {
+        let (parent, namespace) = test_namespace("entry-mkdir-fault-test");
+        let child = PrivateEntryName::new("Objects With Case").unwrap();
+        namespace
+            .directory
+            .lease
+            .inject_committed_mutation_fault(CommittedMutationFault::CreateDirectory);
+
+        assert_eq!(
+            namespace.directory.create_new_entry_child(&child).err(),
+            Some(PrivateFsError::SettlementUnknown)
+        );
+        assert!(parent
+            .path()
+            .join("entry-mkdir-fault-test/Objects With Case")
+            .is_dir());
+        assert_eq!(
+            namespace.directory.list_entry_names(8),
             Err(PrivateFsError::Quarantined)
         );
     }

@@ -1,10 +1,10 @@
 use std::fs::{File, Metadata};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{FileType, Mode, OFlags};
 
 use crate::PrivateFsError;
 
@@ -12,6 +12,12 @@ use crate::PrivateFsError;
 pub(crate) struct RawIdentity {
     device: u64,
     inode: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawChildKind {
+    Regular(RawIdentity),
+    Directory(RawIdentity),
 }
 
 #[derive(Clone, Copy)]
@@ -124,7 +130,11 @@ pub(crate) fn revalidate_regular(
     {
         return Err(PrivateFsError::IdentityAmbiguous);
     }
-    Ok(())
+    // Every admitted child name is exact, including lowercase protocol names.
+    // Keep this proof in the central revalidation primitive so mutation and
+    // failed-mutation settlement cannot accidentally level down to identity
+    // alone on a case-folding filesystem.
+    verify_exact_name(file, name).map_err(|_| PrivateFsError::IdentityAmbiguous)
 }
 
 pub(crate) fn create_directory(
@@ -146,6 +156,113 @@ pub(crate) fn open_child_directory(
     name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
     open_relative_directory(parent, name)
+}
+
+pub(crate) fn inspect_child(
+    parent: &File,
+    parent_path: &Path,
+    name: &str,
+) -> Result<Option<RawChildKind>, PrivateFsError> {
+    let observed = match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(observed) => observed,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(PrivateFsError::Unsafe),
+    };
+    inspect_observed_child(parent, parent_path, name, &observed).map(Some)
+}
+
+fn inspect_observed_child(
+    parent: &File,
+    parent_path: &Path,
+    name: &str,
+    observed: &rustix::fs::Stat,
+) -> Result<RawChildKind, PrivateFsError> {
+    let expected = raw_stat_identity(observed)?;
+    match FileType::from_raw_mode(observed.st_mode) {
+        FileType::RegularFile => {
+            let (file, identity) = match open_regular(parent, parent_path, name, OpenPurpose::Read)
+            {
+                Err(PrivateFsError::NotFound) => {
+                    return Err(PrivateFsError::IdentityAmbiguous);
+                }
+                outcome => outcome,
+            }?;
+            if identity != expected {
+                return Err(PrivateFsError::IdentityAmbiguous);
+            }
+            verify_exact_name(&file, name)?;
+            drop(file);
+            Ok(RawChildKind::Regular(identity))
+        }
+        FileType::Directory => {
+            let (directory, identity) = match open_child_directory(parent, parent_path, name) {
+                Err(PrivateFsError::NotFound) => {
+                    return Err(PrivateFsError::IdentityAmbiguous);
+                }
+                outcome => outcome,
+            }?;
+            if identity != expected {
+                return Err(PrivateFsError::IdentityAmbiguous);
+            }
+            verify_exact_name(&directory, name)?;
+            drop(directory);
+            Ok(RawChildKind::Directory(identity))
+        }
+        _ => Err(PrivateFsError::Unsafe),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn verify_exact_name(file: &File, expected: &str) -> Result<(), PrivateFsError> {
+    match super::macos_acl::has_exact_final_component(file.as_raw_fd(), expected) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(PrivateFsError::Unsafe),
+        Err(()) => Err(PrivateFsError::IdentityAmbiguous),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_exact_name(file: &File, expected: &str) -> Result<(), PrivateFsError> {
+    const MAX_PROC_FD_TARGET_BYTES: usize = 4_096;
+
+    let descriptor_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+    let mut target = [0_u8; MAX_PROC_FD_TARGET_BYTES];
+    let length = rustix::fs::readlinkat_raw(rustix::fs::CWD, descriptor_path.as_str(), &mut target)
+        .map_err(|error| {
+            if [
+                rustix::io::Errno::NOENT,
+                rustix::io::Errno::ACCESS,
+                rustix::io::Errno::PERM,
+                rustix::io::Errno::NOSYS,
+                rustix::io::Errno::RANGE,
+            ]
+            .contains(&error)
+            {
+                // A missing or restricted procfs means this platform cannot
+                // prove exact case-folded entry spelling. Refuse the primitive
+                // instead of silently weakening it.
+                PrivateFsError::PrimitiveUnavailable
+            } else {
+                // The caller supplied a live owned descriptor; unexpected
+                // descriptor/procfs failures make its binding ambiguous.
+                PrivateFsError::IdentityAmbiguous
+            }
+        })?;
+    if length == target.len() {
+        return Err(PrivateFsError::PrimitiveUnavailable);
+    }
+    let target = &target[..length];
+    let actual = target.rsplit(|byte| *byte == b'/').next().unwrap_or(target);
+    if actual == expected.as_bytes() {
+        Ok(())
+    } else {
+        Err(PrivateFsError::Unsafe)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn verify_exact_name(_file: &File, _expected: &str) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
 }
 
 pub(crate) fn list_names(
@@ -380,6 +497,17 @@ fn relative_regular_identity(directory: &File, name: &str) -> Result<RawIdentity
     Ok(raw_identity(&metadata))
 }
 
+#[allow(clippy::unnecessary_cast)]
+fn raw_stat_identity(stat: &rustix::fs::Stat) -> Result<RawIdentity, PrivateFsError> {
+    // rustix exposes target-native dev_t/ino_t widths. Both are nonnegative
+    // kernel identifiers no wider than the u64 representation used by
+    // `MetadataExt`; the casts are intentionally portable across Unix ABIs.
+    Ok(RawIdentity {
+        device: stat.st_dev as u64,
+        inode: stat.st_ino as u64,
+    })
+}
+
 fn open_relative_directory(
     parent: &File,
     name: &str,
@@ -387,7 +515,7 @@ fn open_relative_directory(
     let descriptor = rustix::fs::openat(
         parent,
         name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(map_child_open_error)?;
@@ -402,7 +530,7 @@ fn open_relative_directory(
     let second = rustix::fs::openat(
         parent,
         name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
@@ -444,6 +572,73 @@ mod tests {
         assert_eq!(
             map_failed_create(rustix::io::Errno::EXIST, &handle, "present", true),
             PrivateFsError::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn inspection_rejects_identity_replacement_after_nofollow_observation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = parent.path().join("Observed File");
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let handle = File::open(parent.path()).unwrap();
+        let observed = rustix::fs::statat(
+            &handle,
+            "Observed File",
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+
+        std::fs::rename(&original, parent.path().join("Held Original")).unwrap();
+        std::fs::write(&original, b"replacement").unwrap();
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(
+            inspect_observed_child(&handle, parent.path(), "Observed File", &observed),
+            Err(PrivateFsError::IdentityAmbiguous)
+        );
+    }
+
+    #[test]
+    fn exact_name_probe_binds_the_live_descriptor_final_component() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = parent.path().join("Exact CASE Name");
+        std::fs::write(&path, b"value").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = File::open(path).unwrap();
+
+        assert_eq!(verify_exact_name(&file, "Exact CASE Name"), Ok(()));
+        assert_eq!(
+            verify_exact_name(&file, "exact case name"),
+            Err(PrivateFsError::Unsafe)
+        );
+    }
+
+    #[test]
+    fn regular_revalidation_rejects_a_case_renamed_held_inode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let exact = "source.bin";
+        let alias = "Source.BIN";
+        let exact_path = parent.path().join(exact);
+        std::fs::write(&exact_path, b"value").unwrap();
+        std::fs::set_permissions(&exact_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let parent_handle = File::open(parent.path()).unwrap();
+        let (file, identity) =
+            open_regular(&parent_handle, parent.path(), exact, OpenPurpose::Mutation).unwrap();
+
+        std::fs::rename(&exact_path, parent.path().join(alias)).unwrap();
+        assert_eq!(
+            revalidate_regular(&parent_handle, parent.path(), exact, &file, identity),
+            Err(PrivateFsError::IdentityAmbiguous)
         );
     }
 }

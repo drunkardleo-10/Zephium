@@ -29,6 +29,25 @@ pub(super) fn has_no_extended_acl(fd: RawFd) -> bool {
     false
 }
 
+/// Resolves the kernel-owned path for one live descriptor and compares only
+/// its final component with the authenticated ASCII spelling.
+pub(super) fn has_exact_final_component(fd: RawFd, expected: &str) -> Result<bool, ()> {
+    use std::ffi::CStr;
+
+    let mut path = [0_i8; libc::PATH_MAX as usize];
+    // SAFETY: `fd` is borrowed from a live `File`. `F_GETPATH` writes at most
+    // `PATH_MAX` bytes to this correctly sized writable buffer and terminates
+    // the result with NUL on success.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } == -1 {
+        return Err(());
+    }
+    // SAFETY: successful `F_GETPATH` guarantees a NUL-terminated path inside
+    // the fixed-size output buffer above.
+    let path = unsafe { CStr::from_ptr(path.as_ptr()) }.to_bytes();
+    let actual = path.rsplit(|byte| *byte == b'/').next().unwrap_or(path);
+    Ok(actual == expected.as_bytes())
+}
+
 struct OwnedAcl(Acl);
 
 impl Drop for OwnedAcl {

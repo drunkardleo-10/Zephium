@@ -40,6 +40,16 @@ pub(crate) struct RawIdentity {
     file_id: [u8; 16],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// The common namespace layer must be able to describe successful inspection,
+// while the current Windows backend deliberately refuses namespace admission
+// before either successful variant can be constructed.
+#[allow(dead_code)]
+pub(crate) enum RawChildKind {
+    Regular(RawIdentity),
+    Directory(RawIdentity),
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum OpenPurpose {
     Read,
@@ -159,6 +169,20 @@ pub(crate) fn open_child_directory(
     name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
     open_directory(&parent_path.join(name))
+}
+
+pub(crate) fn inspect_child(
+    _parent: &File,
+    _parent_path: &Path,
+    _name: &str,
+) -> Result<Option<RawChildKind>, PrivateFsError> {
+    // Keep the new entry-inspection surface behind the same unavailable NT
+    // descriptor-relative adapter gate as namespace activation.
+    Err(PrivateFsError::PrimitiveUnavailable)
+}
+
+pub(crate) fn verify_exact_name(_file: &File, _expected: &str) -> Result<(), PrivateFsError> {
+    Err(PrivateFsError::PrimitiveUnavailable)
 }
 
 pub(crate) fn list_names(

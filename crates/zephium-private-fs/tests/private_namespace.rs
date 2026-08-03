@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use zephium_private_fs::PrivateComponent;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use zephium_private_fs::{ByteLimit, MAX_IN_MEMORY_FILE_BYTES};
+use zephium_private_fs::{ByteLimit, PrivateChildKind, PrivateEntryName, MAX_IN_MEMORY_FILE_BYTES};
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -19,6 +19,11 @@ const LOCK_MARKER: &[u8] = b"zephium-private-fs\nlock-format=1\n";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn component(value: &str) -> PrivateComponent {
     PrivateComponent::new(value).unwrap()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn entry_name(value: &str) -> PrivateEntryName {
+    PrivateEntryName::new(value).unwrap()
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -446,6 +451,324 @@ fn creates_and_admits_private_child_directories() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn control_children_distinguish_open_create_or_open_and_create_new() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let child_name = component("objects");
+
+    assert_eq!(
+        directory.open_private_child(&child_name).err(),
+        Some(PrivateFsError::NotFound)
+    );
+    assert!(!root.join(child_name.as_str()).exists());
+
+    let created = directory.create_new_private_child(&child_name).unwrap();
+    let identity = created.identity();
+    assert_eq!(
+        directory
+            .open_private_child(&child_name)
+            .unwrap()
+            .identity(),
+        identity
+    );
+    assert_eq!(
+        directory
+            .create_private_child(&child_name)
+            .unwrap()
+            .identity(),
+        identity
+    );
+    assert_eq!(
+        directory.create_new_private_child(&child_name).err(),
+        Some(PrivateFsError::AlreadyExists)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn entry_children_distinguish_open_create_modes_and_hostile_existing_nodes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let child_name = entry_name("Objects With CASE");
+
+    assert_eq!(
+        directory.open_entry_child(&child_name).err(),
+        Some(PrivateFsError::NotFound)
+    );
+    assert!(!root.join(child_name.as_str()).exists());
+
+    let created = directory.create_new_entry_child(&child_name).unwrap();
+    let identity = created.identity();
+    assert_eq!(
+        directory.open_entry_child(&child_name).unwrap().identity(),
+        identity
+    );
+    assert_eq!(
+        directory
+            .create_entry_child(&child_name)
+            .unwrap()
+            .identity(),
+        identity
+    );
+    assert_eq!(
+        directory.create_new_entry_child(&child_name).err(),
+        Some(PrivateFsError::AlreadyExists)
+    );
+
+    let hostile_file = entry_name("Existing File");
+    write_private_file(&root.join(hostile_file.as_str()), b"not a directory");
+    assert_eq!(
+        directory.create_new_entry_child(&hostile_file).err(),
+        Some(PrivateFsError::Unsafe)
+    );
+
+    let public_directory = entry_name("Public Directory");
+    fs::create_dir(root.join(public_directory.as_str())).unwrap();
+    fs::set_permissions(
+        root.join(public_directory.as_str()),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(
+        directory.create_new_entry_child(&public_directory).err(),
+        Some(PrivateFsError::Unsafe)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn case_preserving_entry_files_list_inspect_and_round_trip_with_bounds() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let payload_name = entry_name("Payload Files");
+    let payload = directory.create_new_entry_child(&payload_name).unwrap();
+    let manifest = entry_name("Manifest.JSON");
+    let script = entry_name("A Script File.js");
+    let limit = ByteLimit::new(32).unwrap();
+
+    let manifest_identity = payload
+        .write_new_entry_synced(&manifest, b"manifest", limit)
+        .unwrap();
+    payload
+        .write_new_entry_synced(&script, b"script", limit)
+        .unwrap();
+    assert!(payload.entry_regular_exists(&manifest).unwrap());
+    assert_eq!(
+        payload.entry_regular_identity(&manifest).unwrap(),
+        Some(manifest_identity)
+    );
+    assert_eq!(
+        payload.inspect_entry(&manifest).unwrap(),
+        Some(PrivateChildKind::RegularFile(manifest_identity))
+    );
+    assert_eq!(
+        directory.inspect_entry(&payload_name).unwrap(),
+        Some(PrivateChildKind::Directory(payload.identity()))
+    );
+    assert_eq!(
+        payload
+            .read_bounded_entry_regular(&manifest, limit)
+            .unwrap(),
+        Some(b"manifest".to_vec())
+    );
+    assert_eq!(
+        payload.read_bounded_entry_regular(&manifest, ByteLimit::new(7).unwrap()),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert_eq!(
+        payload.write_new_entry_synced(
+            &entry_name("Too Large"),
+            b"12345",
+            ByteLimit::new(4).unwrap()
+        ),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert!(!root.join("Payload Files/Too Large").exists());
+
+    assert_eq!(
+        payload.list_entry_names(8).unwrap(),
+        vec![script.clone(), manifest.clone()]
+    );
+    assert_eq!(
+        payload.list_entry_names(1),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert_eq!(
+        payload.list_entry_names(0),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert_eq!(
+        payload.list_entry_names(4_097),
+        Err(PrivateFsError::BoundExceeded)
+    );
+    assert_eq!(directory.list_entry_names(8).unwrap(), vec![payload_name]);
+
+    let missing = entry_name("Missing File");
+    assert!(!payload.entry_regular_exists(&missing).unwrap());
+    assert_eq!(payload.entry_regular_identity(&missing).unwrap(), None);
+    assert_eq!(payload.inspect_entry(&missing).unwrap(), None);
+    assert_eq!(
+        payload.read_bounded_entry_regular(&missing, limit).unwrap(),
+        None
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn entry_operations_never_admit_a_case_alias_on_case_insensitive_storage() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let exact_directory = entry_name("Case Sensitive Folder");
+    let alias_directory = entry_name("case sensitive folder");
+    let child = directory.create_new_entry_child(&exact_directory).unwrap();
+    let exact_file = entry_name("Manifest.JSON");
+    let alias_file = entry_name("manifest.json");
+    let limit = ByteLimit::new(32).unwrap();
+    child
+        .write_new_entry_synced(&exact_file, b"manifest", limit)
+        .unwrap();
+
+    let aliases_resolve = root.join(alias_directory.as_str()).is_dir()
+        && root
+            .join(exact_directory.as_str())
+            .join(alias_file.as_str())
+            .is_file();
+    if aliases_resolve {
+        assert_eq!(
+            directory.open_entry_child(&alias_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            directory.create_entry_child(&alias_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            directory.create_new_entry_child(&alias_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            directory.inspect_entry(&alias_directory),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.entry_regular_exists(&alias_file),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.entry_regular_identity(&alias_file),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.read_bounded_entry_regular(&alias_file, limit),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.inspect_entry(&alias_file),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.write_new_entry_synced(&alias_file, b"alias", limit),
+            Err(PrivateFsError::Unsafe)
+        );
+    } else {
+        assert_eq!(
+            directory.open_entry_child(&alias_directory).err(),
+            Some(PrivateFsError::NotFound)
+        );
+        assert_eq!(directory.inspect_entry(&alias_directory).unwrap(), None);
+        assert!(!child.entry_regular_exists(&alias_file).unwrap());
+        assert_eq!(child.entry_regular_identity(&alias_file).unwrap(), None);
+        assert_eq!(
+            child
+                .read_bounded_entry_regular(&alias_file, limit)
+                .unwrap(),
+            None
+        );
+        assert_eq!(child.inspect_entry(&alias_file).unwrap(), None);
+    }
+    assert_eq!(
+        directory.list_entry_names(8).unwrap(),
+        vec![exact_directory]
+    );
+    assert_eq!(child.list_entry_names(8).unwrap(), vec![exact_file]);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn control_operations_never_admit_a_case_alias_on_case_insensitive_storage() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let exact_directory = component("controlcase");
+    let alias_directory = "ControlCase";
+    fs::create_dir(root.join(alias_directory)).unwrap();
+    fs::set_permissions(
+        root.join(alias_directory),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+
+    let payload = component("payload");
+    let child = directory.create_new_private_child(&payload).unwrap();
+    let exact_file = component("state.bin");
+    let alias_file = "State.BIN";
+    let limit = ByteLimit::new(32).unwrap();
+    write_private_file(&root.join(payload.as_str()).join(alias_file), b"state");
+
+    let aliases_resolve = root.join(exact_directory.as_str()).is_dir()
+        && root
+            .join(payload.as_str())
+            .join(exact_file.as_str())
+            .is_file();
+    if aliases_resolve {
+        assert_eq!(
+            directory.open_private_child(&exact_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            directory.create_private_child(&exact_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            directory.create_new_private_child(&exact_directory).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.regular_exists(&exact_file),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.regular_identity(&exact_file),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.read_bounded_regular(&exact_file, limit),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            child.write_new_synced(&exact_file, b"alias", limit),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(directory.list_components(8), Err(PrivateFsError::Unsafe));
+        assert_eq!(child.list_components(8), Err(PrivateFsError::Unsafe));
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn rejects_symlinks_hardlinks_and_nonprivate_modes() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -473,6 +796,66 @@ fn rejects_symlinks_hardlinks_and_nonprivate_modes() {
     fs::set_permissions(root.join("public.bin"), fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(
         directory.read_bounded_regular(&component("public.bin"), limit),
+        Err(PrivateFsError::Unsafe)
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn entry_inspection_rejects_links_special_nodes_and_unsafe_modes_without_blocking() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::net::UnixListener;
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+
+    let linked = entry_name("Linked Entry");
+    symlink("missing", root.join(linked.as_str())).unwrap();
+    assert_eq!(
+        directory.inspect_entry(&linked),
+        Err(PrivateFsError::Unsafe)
+    );
+
+    let primary = entry_name("Primary Entry");
+    let alias = entry_name("Alias Entry");
+    write_private_file(&root.join(primary.as_str()), b"value");
+    fs::hard_link(root.join(primary.as_str()), root.join(alias.as_str())).unwrap();
+    assert_eq!(
+        directory.inspect_entry(&primary),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(directory.inspect_entry(&alias), Err(PrivateFsError::Unsafe));
+
+    let public_file = entry_name("Public Entry");
+    fs::write(root.join(public_file.as_str()), b"value").unwrap();
+    fs::set_permissions(
+        root.join(public_file.as_str()),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert_eq!(
+        directory.inspect_entry(&public_file),
+        Err(PrivateFsError::Unsafe)
+    );
+
+    let fifo = entry_name("Hostile FIFO");
+    let status = std::process::Command::new("mkfifo")
+        .arg(root.join(fifo.as_str()))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(directory.inspect_entry(&fifo), Err(PrivateFsError::Unsafe));
+
+    let socket = entry_name("Hostile Socket");
+    let _listener = match UnixListener::bind(root.join(socket.as_str())) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to create hostile socket fixture: {error}"),
+    };
+    assert_eq!(
+        directory.inspect_entry(&socket),
         Err(PrivateFsError::Unsafe)
     );
 }
@@ -557,6 +940,132 @@ fn root_lock_component_is_reserved_from_every_caller_role() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn lock_case_aliases_are_never_admitted_as_canonical_entries() {
+    for reserved in [LOCK_NAME, LOCK_STAGING_NAME] {
+        let parent = private_parent();
+        let root = namespace_root(parent.path());
+        create_private_root(&root);
+
+        let alias = reserved.to_ascii_uppercase();
+        let bytes = if reserved == LOCK_NAME {
+            LOCK_MARKER
+        } else {
+            &LOCK_MARKER[..LOCK_MARKER.len() / 2]
+        };
+        write_private_file(&root.join(&alias), bytes);
+
+        // This live assertion is meaningful only when the backing filesystem
+        // resolves differently cased names to the same directory entry.
+        if !root.join(reserved).exists() {
+            continue;
+        }
+        assert_eq!(
+            LockedPrivateNamespace::open_or_create(&root).err(),
+            Some(PrivateFsError::Unsafe)
+        );
+        assert_eq!(fs::read(root.join(alias)).unwrap(), bytes);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn post_activation_lock_aliases_are_visible_hostile_inventory() {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    for reserved in [LOCK_NAME, LOCK_STAGING_NAME] {
+        let parent = private_parent();
+        let root = namespace_root(parent.path());
+        let namespace = open(&root);
+        let alias_path = root.join(reserved.to_ascii_uppercase());
+        let mut alias = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&alias_path)
+        {
+            Ok(alias) => alias,
+            // The canonical lock already occupies every case alias on a
+            // case-insensitive volume. The pre-activation test above covers
+            // that live path; this test deterministically exercises distinct
+            // aliases on case-sensitive storage.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("failed to create lock alias fixture: {error}"),
+        };
+        alias.write_all(LOCK_MARKER).unwrap();
+        alias.sync_all().unwrap();
+        fs::set_permissions(&alias_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(
+            namespace.directory().list_components(8),
+            Err(PrivateFsError::Unsafe)
+        );
+        assert_eq!(
+            namespace.directory().list_entry_names(8),
+            Err(PrivateFsError::Unsafe)
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn root_lock_names_are_reserved_from_every_entry_operation_and_listing() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let directory = namespace.directory();
+    let limit = ByteLimit::new(16).unwrap();
+
+    for reserved in [
+        entry_name(LOCK_NAME),
+        entry_name(&LOCK_NAME.to_ascii_uppercase()),
+        entry_name(LOCK_STAGING_NAME),
+        entry_name(&LOCK_STAGING_NAME.to_ascii_uppercase()),
+    ] {
+        assert_eq!(
+            directory.open_entry_child(&reserved).err(),
+            Some(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.create_entry_child(&reserved).err(),
+            Some(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.create_new_entry_child(&reserved).err(),
+            Some(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.entry_regular_exists(&reserved),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.entry_regular_identity(&reserved),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.inspect_entry(&reserved),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.read_bounded_entry_regular(&reserved, limit),
+            Err(PrivateFsError::ReservedComponent)
+        );
+        assert_eq!(
+            directory.write_new_entry_synced(&reserved, b"x", limit),
+            Err(PrivateFsError::ReservedComponent)
+        );
+    }
+    assert!(directory.list_entry_names(8).unwrap().is_empty());
+
+    write_private_file(
+        &root.join(LOCK_STAGING_NAME),
+        b"unexpected live staging residue",
+    );
+    assert_eq!(directory.list_entry_names(8), Err(PrivateFsError::Unsafe));
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn lock_path_identity_mutation_quarantines_the_lease() {
     let parent = private_parent();
     let root = namespace_root(parent.path());
@@ -591,6 +1100,34 @@ fn child_keeps_the_root_lock_lease_alive_after_namespace_drop() {
     child
         .write_new_synced(
             &component("value.bin"),
+            b"value",
+            ByteLimit::new(16).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        LockedPrivateNamespace::open_or_create(&root).err().unwrap(),
+        PrivateFsError::LockUnavailable
+    );
+    drop(child);
+    assert!(LockedPrivateNamespace::open_or_create(&root).is_ok());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn entry_child_keeps_the_root_lock_lease_alive_after_namespace_drop() {
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let child = {
+        let namespace = open(&root);
+        namespace
+            .directory()
+            .create_new_entry_child(&entry_name("Payload Objects"))
+            .unwrap()
+    };
+
+    child
+        .write_new_entry_synced(
+            &entry_name("Value.BIN"),
             b"value",
             ByteLimit::new(16).unwrap(),
         )
@@ -659,6 +1196,12 @@ fn fifo_nonblocking_probe_child() {
         namespace
             .directory()
             .read_bounded_regular(&component("hostile.fifo"), ByteLimit::new(16).unwrap()),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(
+        namespace
+            .directory()
+            .inspect_entry(&entry_name("hostile.fifo")),
         Err(PrivateFsError::Unsafe)
     );
 }
