@@ -7,7 +7,7 @@ use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_C
 use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsError};
 
 use crate::codec;
-use crate::materialization::MaterializationRuntime;
+use crate::materialization::{self, MaterializationRuntime};
 use crate::names::{state_file, state_stage};
 use crate::recovery::open_repository;
 use crate::state::{
@@ -54,7 +54,7 @@ pub struct ExtensionRepository {
     journals: PrivateDirectory,
     state: RepositoryState,
     state_bytes: Vec<u8>,
-    _materialization: Option<MaterializationRuntime>,
+    materialization: Option<MaterializationRuntime>,
     sealed: bool,
 }
 
@@ -72,7 +72,7 @@ impl ExtensionRepository {
             journals: opened.journals,
             state: opened.state,
             state_bytes: opened.state_bytes,
-            _materialization: Some(opened.materialization),
+            materialization: Some(opened.materialization),
             sealed: false,
         })
     }
@@ -105,7 +105,11 @@ impl ExtensionRepository {
             exact_catalog_bytes.len(),
         )?;
         let catalog_digest = candidate.catalog_sha256;
-        let plan = plan_record(&self.state, witness.catalog(), candidate)?;
+        let plan = plan_record(&self.state, witness.catalog(), candidate.clone())?;
+
+        if matches!(&plan, RecordPlan::Advance(_)) {
+            self.validate_materialization_advance(candidate)?;
+        }
 
         if let Err(error) =
             ensure_catalog_object(&self.catalogs, catalog_digest, exact_catalog_bytes)
@@ -169,8 +173,34 @@ impl ExtensionRepository {
         // for activation, so retain no live runtime opened under the previous
         // checkpoint. The next materialization operation must recover and
         // rebind it against `self.state.checkpoint()` before doing any work.
-        self._materialization = None;
+        self.materialization = None;
         Ok(BundledCatalogRecordOutcome::Recorded)
+    }
+
+    fn validate_materialization_advance(
+        &mut self,
+        candidate: StoredCatalogCheckpoint,
+    ) -> Result<(), ExtensionRepositoryError> {
+        if self.materialization.is_none() {
+            let reopened = materialization::open_or_recover(
+                self._namespace.directory(),
+                &self.catalogs,
+                self.state.checkpoint(),
+                true,
+                materialization::FaultPoint::None,
+            );
+            let reopened = match reopened {
+                Ok(runtime) => runtime,
+                Err(error) => return Err(self.prejournal_error(error)),
+            };
+            self.materialization = Some(reopened);
+        }
+        let validation = self
+            .materialization
+            .as_ref()
+            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)
+            .and_then(|runtime| materialization::validate_catalog_advance(runtime, &candidate));
+        validation.map_err(|error| self.prejournal_error(error))
     }
 
     fn prejournal_error(&mut self, error: ExtensionRepositoryError) -> ExtensionRepositoryError {

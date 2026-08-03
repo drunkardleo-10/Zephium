@@ -15,7 +15,7 @@ use zephium_extension_package::{
 };
 
 use crate::codec;
-use crate::state::Digest32;
+use crate::state::{Digest32, StoredCatalogCheckpoint};
 use crate::ExtensionRepositoryError;
 
 pub(crate) const PACKAGE_RECORD_SCHEMA_VERSION: u32 = 1;
@@ -39,6 +39,16 @@ pub(crate) struct CatalogAnchor {
 }
 
 impl CatalogAnchor {
+    pub(crate) const fn from_high_water(checkpoint: &StoredCatalogCheckpoint) -> Self {
+        Self {
+            authority_id: checkpoint.authority_id,
+            revision: checkpoint.revision,
+            catalog_length: checkpoint.catalog_length,
+            catalog_sha256: checkpoint.catalog_sha256,
+            inventory_sha256: checkpoint.inventory_sha256,
+        }
+    }
+
     fn validate(self) -> Result<(), ExtensionRepositoryError> {
         if ExtensionReleaseCatalogRevision::new(self.revision).is_none()
             || self.catalog_length == 0

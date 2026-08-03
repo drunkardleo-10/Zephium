@@ -7,6 +7,9 @@ use zephium_extension_package::ExtensionReleaseCatalog;
 use zephium_private_fs::{ByteLimit, LockedPrivateNamespace, PrivateDirectory};
 
 use super::*;
+use crate::materialization::{
+    package_record_fixture, MaterializationBuildIntent, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+};
 
 struct Harness {
     _temporary: TempDir,
@@ -184,19 +187,19 @@ fn records_replays_and_advances_one_exact_authority_history() {
     let second_witness = TestCatalogWitness::new(&second);
 
     let mut repository = harness.open();
-    assert!(repository._materialization.is_some());
+    assert!(repository.materialization.is_some());
     assert_eq!(
         repository.record_with_fault(&first_witness, &first, FaultPoint::None),
         Ok(BundledCatalogRecordOutcome::Recorded)
     );
     assert_eq!(repository.state.generation, 1);
-    assert!(repository._materialization.is_none());
+    assert!(repository.materialization.is_none());
     assert_eq!(
         repository.record_with_fault(&first_witness, &first, FaultPoint::None),
         Ok(BundledCatalogRecordOutcome::IdempotentReplay)
     );
     assert_eq!(repository.state.generation, 1);
-    assert!(repository._materialization.is_none());
+    assert!(repository.materialization.is_none());
     assert_eq!(
         repository.record_with_fault(&second_witness, &second, FaultPoint::None),
         Ok(BundledCatalogRecordOutcome::Recorded)
@@ -207,7 +210,93 @@ fn records_replays_and_advances_one_exact_authority_history() {
     let recovered = harness.open();
     assert_eq!(recovered.state.generation, 2);
     assert_eq!(recovered.state.package_line_high_waters.len(), 1);
-    assert!(recovered._materialization.is_some());
+    assert!(recovered.materialization.is_some());
+}
+
+#[test]
+fn build_intent_blocks_only_catalog_advancement_before_any_candidate_mutation() {
+    let harness = Harness::new();
+    let first = one_package_catalog(1, 1, 1, 0);
+    let first_witness = TestCatalogWitness::new(&first);
+    let second = one_package_catalog(1, 2, 2, 1);
+    let second_witness = TestCatalogWitness::new(&second);
+
+    let mut repository = harness.open();
+    record(&mut repository, &first_witness, &first);
+    drop(repository);
+
+    let mut repository = harness.open();
+    let package = package_record_fixture(42);
+    let intent = MaterializationBuildIntent {
+        schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+        generation: 1,
+        package_record_id: package.record_id().unwrap(),
+        package_record: package,
+    };
+    let runtime = repository.materialization.as_mut().unwrap();
+    runtime._state.generation = 1;
+    runtime._state.build_intent = Some(intent.clone());
+    runtime._build_intent = Some(intent);
+
+    assert_eq!(
+        repository.record_with_fault(&first_witness, &first, FaultPoint::None),
+        Ok(BundledCatalogRecordOutcome::IdempotentReplay),
+        "an exact replay cannot strand or mutate the in-flight build"
+    );
+    assert_eq!(
+        repository.record_with_fault(&second_witness, &second, FaultPoint::None),
+        Err(ExtensionRepositoryError::CatalogAdvanceBlockedByBuild)
+    );
+    assert_eq!(repository.state.generation, 1);
+    assert!(!repository.sealed);
+    assert!(!repository
+        .catalogs
+        .regular_exists(&catalog_file(codec::digest(&second)))
+        .unwrap());
+    assert!(repository.journals.list_components(1).unwrap().is_empty());
+
+    let runtime = repository.materialization.as_mut().unwrap();
+    runtime._state.generation = 0;
+    runtime._state.build_intent = None;
+    runtime._build_intent = None;
+    assert_eq!(
+        repository.record_with_fault(&second_witness, &second, FaultPoint::None),
+        Ok(BundledCatalogRecordOutcome::Recorded)
+    );
+}
+
+#[test]
+fn inconsistent_live_roots_seal_while_clean_interlock_conflicts_do_not() {
+    let harness = Harness::new();
+    let first = one_package_catalog(1, 1, 1, 0);
+    let second = one_package_catalog(1, 2, 2, 1);
+    let first_witness = TestCatalogWitness::new(&first);
+    let second_witness = TestCatalogWitness::new(&second);
+    let mut repository = harness.open();
+    record(&mut repository, &first_witness, &first);
+    drop(repository);
+
+    let mut repository = harness.open();
+    let runtime = repository.materialization.as_mut().unwrap();
+    runtime._state.generation = 1;
+    runtime._state.current_catalog_set_id = Some(Digest32::from_bytes([90; 32]));
+    assert_eq!(
+        repository.record_with_fault(&second_witness, &second, FaultPoint::None),
+        Err(ExtensionRepositoryError::SettlementAmbiguous)
+    );
+    assert!(repository.sealed);
+    assert!(!repository
+        .catalogs
+        .regular_exists(&catalog_file(codec::digest(&second)))
+        .unwrap());
+    drop(repository);
+
+    let mut clean = harness.open();
+    assert_eq!(
+        clean.prejournal_error(ExtensionRepositoryError::CatalogAdvanceBlockedByLiveGeneration),
+        ExtensionRepositoryError::CatalogAdvanceBlockedByLiveGeneration
+    );
+    assert!(!clean.sealed);
 }
 
 #[test]

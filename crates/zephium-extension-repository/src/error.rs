@@ -33,6 +33,12 @@ pub enum ExtensionRepositoryError {
     /// The repository generation cannot advance without leaving its durable range.
     #[error("extension repository generation is exhausted")]
     GenerationExhausted,
+    /// A package build must settle or be durably aborted before catalog advance.
+    #[error("catalog advance is blocked by an extension package build")]
+    CatalogAdvanceBlockedByBuild,
+    /// A live selected or owner-pinned package is incompatible with catalog advance.
+    #[error("catalog advance is blocked by a live extension generation")]
+    CatalogAdvanceBlockedByLiveGeneration,
     /// Canonical durable state or a referenced catalog object is corrupt.
     #[error("extension repository durable state is corrupt")]
     StateCorrupt,

@@ -146,13 +146,7 @@ pub(crate) fn is_pristine_for_outer_initialization(
 }
 
 fn catalog_anchor_from_high_water(checkpoint: &StoredCatalogCheckpoint) -> CatalogAnchor {
-    CatalogAnchor {
-        authority_id: checkpoint.authority_id,
-        revision: checkpoint.revision,
-        catalog_length: checkpoint.catalog_length,
-        catalog_sha256: checkpoint.catalog_sha256,
-        inventory_sha256: checkpoint.inventory_sha256,
-    }
+    CatalogAnchor::from_high_water(checkpoint)
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
