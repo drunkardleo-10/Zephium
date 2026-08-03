@@ -11,10 +11,11 @@ use crate::{
 /// Canonical cross-platform package-relative resource path.
 ///
 /// The grammar is intentionally narrower than any one host filesystem. Paths
-/// are ASCII, use `/` separators, reject Windows device names and characters,
-/// and have no normalization aliases. A collection must additionally reject
-/// duplicate [`PortableRelativePath::collision_key`] values so the same
-/// package has one inventory on case-sensitive and case-insensitive hosts.
+/// are ASCII, use `/` separators, reject URL delimiters/escapes and Windows
+/// device names and characters, and have no normalization aliases. Package
+/// collections must additionally reject duplicate
+/// [`PortableRelativePath::collision_key`] values so the same package has one
+/// inventory on case-sensitive and case-insensitive hosts.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PortableRelativePath(Box<str>);
 
@@ -148,7 +149,7 @@ fn validate_component(component: &str) -> Result<(), PortableRelativePathError> 
         byte.is_ascii_control()
             || matches!(
                 *byte,
-                b'\\' | b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*'
+                b'\\' | b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*' | b'%' | b'#'
             )
     }) {
         return Err(PortableRelativePathError::ForbiddenCharacter);
@@ -206,7 +207,8 @@ pub enum PortableRelativePathError {
         /// Maximum depth.
         max: usize,
     },
-    /// A component contains a control or non-portable filesystem character.
+    /// A component contains a control, URL delimiter/escape, or non-portable
+    /// filesystem character.
     ForbiddenCharacter,
     /// A component ends in a dot or space and aliases on Windows.
     AmbiguousComponentEnding,
@@ -235,9 +237,9 @@ impl fmt::Display for PortableRelativePathError {
                 formatter,
                 "extension resource path has depth {depth}; maximum is {max}"
             ),
-            Self::ForbiddenCharacter => {
-                formatter.write_str("extension resource path contains a forbidden character")
-            }
+            Self::ForbiddenCharacter => formatter.write_str(
+                "extension resource path contains a forbidden filesystem or URL character",
+            ),
             Self::AmbiguousComponentEnding => formatter.write_str(
                 "extension resource path component has an ambiguous trailing dot or space",
             ),
@@ -281,6 +283,10 @@ mod tests {
             r"a\b",
             "a:b",
             "a?.js",
+            "a#fragment.js",
+            "%2e%2e/secret.js",
+            "images/%2Fsecret.png",
+            "images/%73ecret.png",
             "trailing. ",
             "con",
             "NUL.txt",
@@ -288,6 +294,27 @@ mod tests {
             "emoji-😀.js",
         ] {
             assert!(PortableRelativePath::parse(path).is_err(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_every_source_form_that_a_url_layer_can_decode_or_strip() {
+        let normalized = url::Url::parse("zephium-extension://abcdefghijkl/a/%2e%2e/secret.js")
+            .expect("hostile extension URL parses");
+        assert_eq!(normalized.path(), "/secret.js");
+
+        for path in [
+            "a/%2e%2e/secret.js",
+            "a/%2E./secret.js",
+            "a/%2fsecret.js",
+            "a/%5csecret.js",
+            "a/file.js#ignored",
+        ] {
+            assert_eq!(
+                PortableRelativePath::parse(path),
+                Err(PortableRelativePathError::ForbiddenCharacter),
+                "accepted URL-ambiguous path {path:?}",
+            );
         }
     }
 
