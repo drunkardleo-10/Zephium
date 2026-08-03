@@ -6257,6 +6257,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-extension-authority"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "thiserror 2.0.18",
+ "zephium-core",
+ "zephium-extension-package",
+]
+
+[[package]]
 name = "zephium-extension-package"
 version = "0.1.0"
 dependencies = [

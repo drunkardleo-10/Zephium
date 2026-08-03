@@ -1,0 +1,11 @@
+[package]
+name = "zephium-extension-authority"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sha2 = "=0.10.9"
+thiserror.workspace = true
+zephium-core = { path = "../zephium-core", version = "=0.1.0" }
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
