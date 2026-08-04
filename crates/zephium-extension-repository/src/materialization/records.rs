@@ -161,7 +161,7 @@ pub(crate) enum StoredRuntimeTarget {
 }
 
 impl StoredRuntimeTarget {
-    const fn product_target(self) -> ProductExtensionRuntimeTarget {
+    pub(crate) const fn product_target(self) -> ProductExtensionRuntimeTarget {
         match self {
             Self::MacosNative => ProductExtensionRuntimeTarget::MacosNative,
             Self::MacosCompatibility => ProductExtensionRuntimeTarget::MacosCompatibility,
@@ -322,7 +322,7 @@ impl CatalogSetRecord {
         self.canonical_bytes().map(|bytes| codec::digest(&bytes))
     }
 
-    fn validate(&self) -> Result<(), ExtensionRepositoryError> {
+    pub(crate) fn validate(&self) -> Result<(), ExtensionRepositoryError> {
         if self.schema_version != CATALOG_SET_RECORD_SCHEMA_VERSION {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }

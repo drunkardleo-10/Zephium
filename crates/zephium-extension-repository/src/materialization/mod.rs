@@ -6,6 +6,7 @@
 //! grant, runtime lease, or native-runtime mutation. Opening a repository
 //! recovers only bounded metadata and live sealed tree-root identities.
 
+mod catalog_set;
 mod cleanup;
 mod interlock;
 mod names;
@@ -21,6 +22,10 @@ mod storage;
 mod transaction;
 mod tree_writer;
 
+pub(crate) use catalog_set::{
+    derive_active_catalog_set, derive_rollback_catalog_set, VerifiedActiveCatalogSet,
+    VerifiedRollbackCatalogSet,
+};
 pub(crate) use cleanup::{reconcile_build_stages_for_abort, CleanupError};
 pub(crate) use interlock::validate_catalog_advance;
 pub(crate) use objects::{
@@ -48,7 +53,18 @@ pub(crate) use state::{
 };
 pub(crate) use transaction::{
     abort_package_build, begin_active_package_build, begin_rollback_package_build,
-    complete_active_package, complete_rollback_package, MaterializationTransitionError,
+    complete_active_package, complete_rollback_package, promote_active_catalog_set,
+    promote_rollback_catalog_set, rollback_to_previous_catalog_set,
+    stage_active_catalog_set_candidate, stage_rollback_catalog_set_candidate,
+    MaterializationTransitionError,
+};
+// Kept crate-private until the package-lease layer can supply the activation
+// authority that must precede durable owner retention.
+#[allow(unused_imports)]
+pub(crate) use transaction::{
+    add_owner_package_pin, plan_current_catalog_package_pin, plan_owner_package_pin_removal,
+    remove_owner_package_pin, CurrentCatalogPackagePinProof, OwnerPackagePinIdentity,
+    OwnerPackagePinPlan, OwnerPackagePinRemovalPlan, OwnerPackagePinRemovalProof,
 };
 
 #[cfg(all(
@@ -59,6 +75,21 @@ pub(crate) use transaction::{
 pub(crate) use objects::{
     publish_or_reuse_active_package_at_fault, ObjectPublicationFaultPoint,
     VerifiedActivePackageClosure,
+};
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use transaction::stage_active_catalog_set_candidate_at_fault;
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use transaction::{
+    add_owner_package_pin_at_fault, promote_active_catalog_set_at_fault,
+    remove_owner_package_pin_at_fault, rollback_to_previous_catalog_set_at_fault,
 };
 #[cfg(all(
     test,

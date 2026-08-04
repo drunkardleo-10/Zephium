@@ -15,6 +15,7 @@
 compile_error!("the internal repository E2E authority is forbidden in optimized builds");
 
 mod admission;
+mod catalog_selection;
 mod codec;
 mod error;
 mod materialization;
@@ -25,6 +26,11 @@ mod storage;
 mod writer;
 
 pub use admission::{BundledCatalogRecordOutcome, ExtensionRepository};
+pub use catalog_selection::{
+    BundledCatalogSetError, BundledCatalogSetIdentity, BundledCatalogSetPromotionOutcome,
+    BundledCatalogSetRollbackOutcome, BundledCatalogSetStageOutcome,
+    BundledPackageRuntimeSelection,
+};
 pub use error::ExtensionRepositoryError;
 pub use materialization::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,

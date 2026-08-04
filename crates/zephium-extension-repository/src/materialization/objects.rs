@@ -28,7 +28,10 @@ use super::policy::{
     validate_package_anchor_consistency, PackagePolicyError,
 };
 use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
-use super::records::{PackageRecord, StoredPayloadIdentity, MAX_PACKAGE_RECORD_BYTES};
+use super::records::{
+    CatalogSetRecord, PackageRecord, StoredPayloadIdentity, MAX_CATALOG_SET_RECORD_BYTES,
+    MAX_PACKAGE_RECORD_BYTES,
+};
 use super::runtime::MaterializationRuntime;
 use super::source::{
     BundledReleaseByteSource, BundledReleasePackageSourceIdentity, BundledReleaseResource,
@@ -489,6 +492,121 @@ pub(crate) fn verify_completed_rollback_package(
         trees_parent: verified.trees_parent,
         prepared,
     }))
+}
+
+/// Exact-CAS publishes one already authority-prepared catalog selection.
+///
+/// The caller must retain the nominal active or rollback admission witnesses;
+/// this structural helper only verifies completed-record bindings and the
+/// sealed content-addressed final. A newly published final remains inert until
+/// a separate journaled state transition selects it.
+pub(super) fn publish_or_reuse_catalog_set_record(
+    runtime: &mut MaterializationRuntime,
+    record: &CatalogSetRecord,
+) -> Result<Digest32, PackageObjectError> {
+    runtime
+        ._state
+        .validate()
+        .map_err(|_| PackageObjectError::BuildStateMismatch)?;
+    record
+        .validate()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    if runtime._state.build_intent.is_some()
+        || runtime._build_intent.is_some()
+        || runtime._build_stage.is_some()
+        || !runtime._record_stages.is_empty()
+    {
+        return Err(PackageObjectError::BuildStateMismatch);
+    }
+    for row in &record.packages {
+        if runtime
+            ._state
+            .completed_package_record_ids
+            .binary_search(&row.package_record_id)
+            .is_err()
+        {
+            return Err(PackageObjectError::BuildStateMismatch);
+        }
+        let package = runtime
+            ._package_records
+            .get(&row.package_record_id)
+            .ok_or(PackageObjectError::BuildStateMismatch)?;
+        if package.catalog != record.catalog
+            || package.package.package_key != row.package_key
+            || package.manifest.runtime_target != row.runtime_target
+        {
+            return Err(PackageObjectError::ExactMismatch);
+        }
+    }
+
+    let bytes = record
+        .canonical_bytes()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    let record_id = record
+        .record_id()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    if bytes.len() > MAX_CATALOG_SET_RECORD_BYTES
+        || Digest32::from_bytes(Sha256::digest(&bytes).into()) != record_id
+    {
+        return Err(PackageObjectError::ExactMismatch);
+    }
+
+    let inventory = inspect_record_capacity(&runtime._records)?;
+    let existing = runtime._catalog_sets.get(&record_id);
+    if existing.is_some_and(|stored| stored != record) {
+        return Err(PackageObjectError::Collision);
+    }
+    let missing = existing.is_none();
+    if missing
+        && (checked_add(inventory.catalog_set_count, 1)? > names::MAX_FINAL_CATALOG_SET_RECORDS
+            || checked_add(inventory.entries, 1)? > names::MAX_RECORD_ENTRIES)
+    {
+        return Err(PackageObjectError::CapacityExhausted);
+    }
+    ensure_bytes_regular_object(
+        &runtime._records,
+        &names::catalog_set_record_stage(record_id),
+        &names::catalog_set_record(record_id),
+        &bytes,
+        RegularExpectation {
+            length: u64::try_from(bytes.len()).map_err(|_| PackageObjectError::ExactMismatch)?,
+            sha256: record_id.bytes(),
+            exact_bytes: Some(&bytes),
+        },
+        missing,
+    )?;
+    runtime._catalog_sets.insert(record_id, record.clone());
+    Ok(record_id)
+}
+
+/// Read-only exact verification of one already published catalog-set final.
+pub(super) fn verify_existing_catalog_set_record(
+    runtime: &MaterializationRuntime,
+    record: &CatalogSetRecord,
+) -> Result<(), PackageObjectError> {
+    record
+        .validate()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    let bytes = record
+        .canonical_bytes()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    let record_id = record
+        .record_id()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    if runtime._catalog_sets.get(&record_id) != Some(record) {
+        return Err(PackageObjectError::ExactMismatch);
+    }
+    verify_required_regular(
+        &runtime._records,
+        &names::catalog_set_record(record_id),
+        RegularExpectation {
+            length: u64::try_from(bytes.len()).map_err(|_| PackageObjectError::ExactMismatch)?,
+            sha256: record_id.bytes(),
+            exact_bytes: Some(&bytes),
+        },
+        true,
+    )
+    .map_err(map_final_object_error)
 }
 
 struct PreparedPackageView<'prepared> {

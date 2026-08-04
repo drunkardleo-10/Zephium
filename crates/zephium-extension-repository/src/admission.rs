@@ -10,7 +10,7 @@ use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsErro
 
 use crate::codec;
 use crate::materialization::{self, MaterializationRuntime};
-use crate::names::{state_file, state_stage};
+use crate::names::{catalog_file, state_file, state_stage};
 use crate::recovery::open_repository;
 use crate::state::{
     validate_catalog_lines, Digest32, PackageLineHighWater, RecoveryCheckpoint, RepositoryState,
@@ -18,7 +18,7 @@ use crate::state::{
     MAX_PACKAGE_LINE_HIGH_WATERS, MAX_STATE_BYTES,
 };
 use crate::storage::{
-    atomic_write_control, ensure_catalog_object, publish_journal, write_checkpoint,
+    atomic_write_control, ensure_catalog_object, publish_journal, read_required, write_checkpoint,
 };
 use crate::ExtensionRepositoryError;
 
@@ -26,13 +26,9 @@ use crate::ExtensionRepositoryError;
 use zephium_private_fs::PrivateComponent;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-use crate::names::{
-    self, catalog_file, catalog_stage, checkpoint_stage, journal_file, journal_stage,
-};
+use crate::names::{self, catalog_stage, checkpoint_stage, journal_file, journal_stage};
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 use crate::state::MAX_CHECKPOINT_BYTES;
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-use crate::storage::read_required;
 
 /// Result of durably recording one authenticated bundled catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +175,85 @@ impl ExtensionRepository {
         let digest = Digest32::from_bytes(admitted.catalog_digest().bytes());
         ensure_catalog_object(&self.catalogs, digest, exact_catalog_bytes)
             .map_err(|error| self.prejournal_error(error))
+    }
+
+    /// Read-only proof that the exact active catalog is already the durable
+    /// high-water and its authenticated object was previously published.
+    pub(crate) fn writer_validate_active_catalog_materialized(
+        &mut self,
+        admitted: &AdmittedBundledCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<bool, ExtensionRepositoryError> {
+        if self.sealed {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        validate_exact_catalog(admitted, exact_catalog_bytes)?;
+        self.state.validate()?;
+        let candidate = StoredCatalogCheckpoint::from_admitted(
+            admitted.checkpoint(),
+            exact_catalog_bytes.len(),
+        )?;
+        if self.state.checkpoint() != Some(&candidate) {
+            return Ok(false);
+        }
+        validate_catalog_lines(&self.state, admitted.catalog())?;
+        self.writer_validate_catalog_object(candidate.catalog_sha256, exact_catalog_bytes)
+    }
+
+    /// Read-only proof that the exact explicitly approved rollback catalog was
+    /// previously published beneath the active high-water.
+    pub(crate) fn writer_validate_rollback_catalog_materialized(
+        &mut self,
+        admitted: &AdmittedRollbackBundledCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<bool, ExtensionRepositoryError> {
+        if self.sealed {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        validate_exact_rollback_catalog(admitted, exact_catalog_bytes)?;
+        self.state.validate()?;
+        let Some(current) = self.state.checkpoint() else {
+            return Ok(false);
+        };
+        if current.authority_id != Digest32::from_bytes(admitted.authority().bytes()) {
+            return Err(ExtensionRepositoryError::AuthorityMismatch);
+        }
+        if admitted.revision().get() > current.revision {
+            return Err(ExtensionRepositoryError::RollbackCatalogAboveHighWater);
+        }
+        if admitted.revision().get() == current.revision
+            && (Digest32::from_bytes(admitted.catalog_digest().bytes()) != current.catalog_sha256
+                || Digest32::from_bytes(admitted.inventory_digest().bytes())
+                    != current.inventory_sha256
+                || admitted.catalog_length() != current.catalog_length)
+        {
+            return Err(ExtensionRepositoryError::CatalogEquivocation);
+        }
+        self.writer_validate_catalog_object(
+            Digest32::from_bytes(admitted.catalog_digest().bytes()),
+            exact_catalog_bytes,
+        )
+    }
+
+    fn writer_validate_catalog_object(
+        &mut self,
+        digest: Digest32,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<bool, ExtensionRepositoryError> {
+        let name = catalog_file(digest);
+        let exists = self
+            .catalogs
+            .regular_exists(&name)
+            .map_err(|error| self.prejournal_error(error.into()))?;
+        if !exists {
+            return Ok(false);
+        }
+        let stored = read_required(&self.catalogs, &name, MAX_EXTENSION_RELEASE_CATALOG_BYTES)
+            .map_err(|error| self.prejournal_error(error))?;
+        if stored != exact_catalog_bytes {
+            return Err(self.prejournal_error(ExtensionRepositoryError::StateCorrupt));
+        }
+        Ok(true)
     }
 
     pub(crate) fn writer_stage_active_catalog_candidate(

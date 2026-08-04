@@ -190,6 +190,7 @@ mod tests {
                 profile_id: ProfileId::from(1),
                 install_id: ExtensionInstallId::from(1),
                 package_record_id: package_id,
+                incarnation: 1,
             }],
             ..MaterializationState::default()
         };
@@ -225,6 +226,7 @@ mod tests {
             profile_id: ProfileId::from(1),
             install_id: ExtensionInstallId::from(1),
             package_record_id: package_id,
+            incarnation: 1,
         }];
         assert_eq!(
             collect_live_catalogs_from(&state, &None, &BTreeMap::new(), &BTreeMap::new()),

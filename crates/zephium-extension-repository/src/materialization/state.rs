@@ -11,8 +11,8 @@ use super::records::PackageRecord;
 use crate::state::Digest32;
 use crate::ExtensionRepositoryError;
 
-pub(crate) const MATERIALIZATION_STATE_SCHEMA_VERSION: u32 = 1;
-pub(crate) const MATERIALIZATION_JOURNAL_SCHEMA_VERSION: u32 = 1;
+pub(crate) const MATERIALIZATION_STATE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const MATERIALIZATION_JOURNAL_SCHEMA_VERSION: u32 = 2;
 pub(crate) const MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub(crate) const MAX_MATERIALIZATION_STATE_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_MATERIALIZATION_CHECKPOINT_BYTES: usize = 16 * 1024;
@@ -91,6 +91,7 @@ impl MaterializationState {
             || self.package_pins.len() > MAX_DURABLE_PACKAGE_PINS
             || !strictly_sorted(&self.completed_package_record_ids)
             || !package_pin_shape_is_bounded(&self.package_pins)
+            || !package_pin_incarnations_are_valid(&self.package_pins, self.generation)
             || self.package_pins.windows(2).any(|pair| {
                 (pair[0].profile_id, pair[0].install_id) >= (pair[1].profile_id, pair[1].install_id)
             })
@@ -162,6 +163,12 @@ pub(crate) struct DurablePackagePin {
     pub(crate) profile_id: ProfileId,
     pub(crate) install_id: ExtensionInstallId,
     pub(crate) package_record_id: Digest32,
+    /// Unique durable incarnation of this owner pin.
+    ///
+    /// This is the state generation committed by the add transition. Removing
+    /// and later re-adding the same owner/record therefore cannot make an old
+    /// removal capability valid again.
+    pub(crate) incarnation: u64,
 }
 
 /// Durable reconciliation identity for one interrupted materialization.
@@ -218,6 +225,18 @@ fn package_pin_shape_is_bounded(pins: &[DurablePackagePin]) -> bool {
         }
     }
     true
+}
+
+fn package_pin_incarnations_are_valid(pins: &[DurablePackagePin], state_generation: u64) -> bool {
+    let mut incarnations = pins.iter().map(|pin| pin.incarnation).collect::<Vec<_>>();
+    if incarnations
+        .iter()
+        .any(|incarnation| *incarnation == 0 || *incarnation > state_generation)
+    {
+        return false;
+    }
+    incarnations.sort_unstable();
+    incarnations.windows(2).all(|pair| pair[0] != pair[1])
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -314,6 +333,7 @@ mod tests {
             profile_id: ProfileId::from(1),
             install_id: ExtensionInstallId::from(1),
             package_record_id: digest(1),
+            incarnation: 1,
         });
         assert_eq!(
             state.validate(),
@@ -375,6 +395,7 @@ mod tests {
         );
 
         completed.completed_package_record_ids = vec![digest(9)];
+        completed.generation = MAX_DURABLE_PACKAGE_PINS as u64 + 1;
         completed.package_pins = (0..=MAX_DURABLE_PACKAGE_PINS)
             .map(|index| DurablePackagePin {
                 profile_id: ProfileId::from(
@@ -384,6 +405,7 @@ mod tests {
                     (index % MAX_EXTENSION_INSTALLS_PER_PROFILE + 1) as u128,
                 ),
                 package_record_id: digest(9),
+                incarnation: index as u64 + 1,
             })
             .collect();
         assert_eq!(
@@ -395,18 +417,20 @@ mod tests {
     #[test]
     fn package_pin_owners_are_unique_but_may_share_one_record() {
         let mut state = MaterializationState {
-            generation: 1,
+            generation: 2,
             completed_package_record_ids: vec![digest(7)],
             package_pins: vec![
                 DurablePackagePin {
                     profile_id: ProfileId::from(1),
                     install_id: ExtensionInstallId::from(1),
                     package_record_id: digest(7),
+                    incarnation: 1,
                 },
                 DurablePackagePin {
                     profile_id: ProfileId::from(1),
                     install_id: ExtensionInstallId::from(2),
                     package_record_id: digest(7),
+                    incarnation: 2,
                 },
             ],
             ..MaterializationState::default()
@@ -422,7 +446,7 @@ mod tests {
     #[test]
     fn owner_pins_enforce_profile_and_per_profile_install_caps() {
         let base = MaterializationState {
-            generation: 1,
+            generation: MAX_DURABLE_PACKAGE_PINS as u64 + 1,
             completed_package_record_ids: vec![digest(7)],
             ..MaterializationState::default()
         };
@@ -432,6 +456,7 @@ mod tests {
                 profile_id: ProfileId::from(1),
                 install_id: ExtensionInstallId::from((index + 1) as u128),
                 package_record_id: digest(7),
+                incarnation: index as u64 + 1,
             })
             .collect();
         assert_eq!(
@@ -445,6 +470,7 @@ mod tests {
                 profile_id: ProfileId::from((index + 1) as u128),
                 install_id: ExtensionInstallId::from(1),
                 package_record_id: digest(7),
+                incarnation: index as u64 + 1,
             })
             .collect();
         assert_eq!(
@@ -456,7 +482,7 @@ mod tests {
     #[test]
     fn maximum_owner_pin_state_fits_the_bounded_duplicate_safe_codec() {
         let state = MaterializationState {
-            generation: 1,
+            generation: MAX_DURABLE_PACKAGE_PINS as u64,
             completed_package_record_ids: vec![digest(9)],
             package_pins: (0..MAX_DURABLE_PACKAGE_PINS)
                 .map(|index| DurablePackagePin {
@@ -467,6 +493,7 @@ mod tests {
                         (index % MAX_EXTENSION_INSTALLS_PER_PROFILE + 1) as u128,
                     ),
                     package_record_id: digest(9),
+                    incarnation: index as u64 + 1,
                 })
                 .collect(),
             ..MaterializationState::default()

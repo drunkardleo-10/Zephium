@@ -419,7 +419,7 @@ impl ExtensionRepository {
         self.finish_transition(abort_package_build(runtime, stages_absent))
     }
 
-    fn finish_transition<Committed>(
+    pub(crate) fn finish_transition<Committed>(
         &mut self,
         transition: Result<Committed, MaterializationTransitionError>,
     ) -> Result<(), BundledPackageMaterializationError> {
@@ -483,7 +483,7 @@ impl ExtensionRepository {
     }
 }
 
-fn map_preparation_error(error: PreparationError) -> BundledPackageMaterializationError {
+pub(crate) fn map_preparation_error(error: PreparationError) -> BundledPackageMaterializationError {
     match error {
         PreparationError::CatalogLengthMismatch | PreparationError::CatalogDigestMismatch => {
             BundledPackageMaterializationError::CatalogBytesMismatch
@@ -518,7 +518,7 @@ fn map_preparation_error(error: PreparationError) -> BundledPackageMaterializati
     }
 }
 
-fn map_object_error(error: PackageObjectError) -> BundledPackageMaterializationError {
+pub(crate) fn map_object_error(error: PackageObjectError) -> BundledPackageMaterializationError {
     match error {
         PackageObjectError::CapacityExhausted => {
             BundledPackageMaterializationError::CapacityExhausted
@@ -571,7 +571,7 @@ const fn preflight_error_requires_sealing(error: PackageObjectError, had_intent:
     }
 }
 
-const fn publication_error_requires_sealing(error: PackageObjectError) -> bool {
+pub(crate) const fn publication_error_requires_sealing(error: PackageObjectError) -> bool {
     match error {
         PackageObjectError::BuildStateMismatch
         | PackageObjectError::CapacityExhausted
@@ -583,7 +583,7 @@ const fn publication_error_requires_sealing(error: PackageObjectError) -> bool {
     }
 }
 
-const fn completed_error_requires_sealing(error: PackageObjectError) -> bool {
+pub(crate) const fn completed_error_requires_sealing(error: PackageObjectError) -> bool {
     match error {
         PackageObjectError::Filesystem(error) => filesystem_error_requires_sealing(error),
         PackageObjectError::Source(_) => false,

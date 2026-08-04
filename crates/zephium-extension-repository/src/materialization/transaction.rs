@@ -6,8 +6,16 @@
 //! sealed-root handles, or build-stage projections from surviving a durable
 //! state change.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use zephium_core::extensions::ExtensionPackageKey;
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
+use zephium_extension_package::MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES;
 use zephium_private_fs::{ByteLimit, DirectoryIdentity, FileIdentity, PrivateFsError};
 
+use super::catalog_set::{
+    CatalogSetTransitionProof, VerifiedActiveCatalogSet, VerifiedRollbackCatalogSet,
+};
 use super::cleanup::{BuildStagesAbsent, CleanupError};
 use super::names::{self, RecordNameKind, TreeNameKind};
 use super::objects::{
@@ -18,13 +26,13 @@ use super::policy::{
     next_durable_generation, validate_completed_tree_budget, validate_package_anchor_consistency,
 };
 use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
-use super::records::PackageRecord;
+use super::records::{CatalogAnchor, CatalogSetRecord, PackageRecord, StoredRuntimePlatformFamily};
 use super::runtime::MaterializationRuntime;
 use super::state::{
-    MaterializationBuildIntent, MaterializationCheckpoint, MaterializationJournal,
-    MaterializationState, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
-    MATERIALIZATION_JOURNAL_SCHEMA_VERSION, MAX_MATERIALIZATION_JOURNAL_BYTES,
-    MAX_MATERIALIZATION_STATE_BYTES,
+    DurablePackagePin, MaterializationBuildIntent, MaterializationCheckpoint,
+    MaterializationJournal, MaterializationState, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+    MATERIALIZATION_JOURNAL_SCHEMA_VERSION, MAX_DRAIN_CATALOG_SELECTIONS,
+    MAX_MATERIALIZATION_JOURNAL_BYTES, MAX_MATERIALIZATION_STATE_BYTES,
 };
 use super::storage::{read_required_control, remove_required_control, write_checkpoint};
 use crate::codec;
@@ -82,6 +90,608 @@ pub(crate) fn begin_active_package_build(
         prepared.record(),
         TransitionFaultPoint::None,
     )
+}
+
+/// Selects one freshly authenticated active catalog set as the sole candidate.
+pub(crate) fn stage_active_catalog_set_candidate(
+    runtime: MaterializationRuntime,
+    catalog_set: VerifiedActiveCatalogSet,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    stage_catalog_set_candidate_with_fault(
+        runtime,
+        catalog_set.into_transition_proof(),
+        TransitionFaultPoint::None,
+    )
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn stage_active_catalog_set_candidate_at_fault(
+    runtime: MaterializationRuntime,
+    catalog_set: VerifiedActiveCatalogSet,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    stage_catalog_set_candidate_with_fault(runtime, catalog_set.into_transition_proof(), fault)
+}
+
+/// Selects one freshly authenticated rollback catalog set as the sole
+/// candidate without converting its rollback authority into active authority.
+pub(crate) fn stage_rollback_catalog_set_candidate(
+    runtime: MaterializationRuntime,
+    catalog_set: VerifiedRollbackCatalogSet,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    stage_catalog_set_candidate_with_fault(
+        runtime,
+        catalog_set.into_transition_proof(),
+        TransitionFaultPoint::None,
+    )
+}
+
+fn stage_catalog_set_candidate_with_fault<Prepared>(
+    runtime: MaterializationRuntime,
+    catalog_set: CatalogSetTransitionProof<Prepared>,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.build_intent.is_some() || runtime._build_intent.is_some() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    validate_catalog_set_transition_proof(&runtime, &catalog_set)?;
+    let slots = [
+        runtime._state.candidate_catalog_set_id,
+        runtime._state.current_catalog_set_id,
+        runtime._state.previous_catalog_set_id,
+    ];
+    if runtime._state.candidate_catalog_set_id.is_some()
+        || slots.contains(&Some(catalog_set.record_id))
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+
+    let mut next = runtime._state.clone();
+    next.generation = next_generation(runtime._state.generation)?;
+    next.candidate_catalog_set_id = Some(catalog_set.record_id);
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    validate_next_state_references(&runtime, &next)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+/// Atomically promotes one exact active candidate to current.
+pub(crate) fn promote_active_catalog_set(
+    runtime: MaterializationRuntime,
+    catalog_set: VerifiedActiveCatalogSet,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    promote_catalog_set_with_fault(
+        runtime,
+        catalog_set.into_transition_proof(),
+        TransitionFaultPoint::None,
+    )
+}
+
+/// Atomically promotes one exact explicitly approved rollback candidate while
+/// retaining the nominal rollback witness through the commit.
+pub(crate) fn promote_rollback_catalog_set(
+    runtime: MaterializationRuntime,
+    catalog_set: VerifiedRollbackCatalogSet,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    promote_catalog_set_with_fault(
+        runtime,
+        catalog_set.into_transition_proof(),
+        TransitionFaultPoint::None,
+    )
+}
+
+fn promote_catalog_set_with_fault<Prepared>(
+    runtime: MaterializationRuntime,
+    catalog_set: CatalogSetTransitionProof<Prepared>,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.build_intent.is_some() || runtime._build_intent.is_some() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    validate_catalog_set_transition_proof(&runtime, &catalog_set)?;
+    if runtime._state.candidate_catalog_set_id != Some(catalog_set.record_id) {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+
+    let mut next = runtime._state.clone();
+    next.generation = next_generation(runtime._state.generation)?;
+    next.candidate_catalog_set_id = None;
+    next.previous_catalog_set_id = runtime._state.current_catalog_set_id;
+    next.current_catalog_set_id = Some(catalog_set.record_id);
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    validate_next_state_references(&runtime, &next)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+/// Atomically swaps an explicitly approved rollback set with the current set.
+/// A candidate must not exist, so rollback cannot accidentally discard a
+/// separately prepared generation.
+pub(crate) fn rollback_to_previous_catalog_set(
+    runtime: MaterializationRuntime,
+    rollback: VerifiedRollbackCatalogSet,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    rollback_to_previous_catalog_set_with_fault(runtime, rollback, TransitionFaultPoint::None)
+}
+
+fn rollback_to_previous_catalog_set_with_fault(
+    runtime: MaterializationRuntime,
+    rollback: VerifiedRollbackCatalogSet,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.build_intent.is_some() || runtime._build_intent.is_some() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let rollback = rollback.into_transition_proof();
+    validate_catalog_set_transition_proof(&runtime, &rollback)?;
+    let current = runtime
+        ._state
+        .current_catalog_set_id
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if runtime._state.candidate_catalog_set_id.is_some()
+        || runtime._state.previous_catalog_set_id != Some(rollback.record_id)
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+
+    let mut next = runtime._state.clone();
+    next.generation = next_generation(runtime._state.generation)?;
+    next.current_catalog_set_id = Some(rollback.record_id);
+    next.previous_catalog_set_id = Some(current);
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    validate_next_state_references(&runtime, &next)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+/// Exact, non-serializable proof that a package is selected by the recovered
+/// current catalog set. It is structural input to the later lease layer and is
+/// not itself profile or activation authority.
+#[must_use = "a current package proof must be pinned or deliberately discarded"]
+#[allow(dead_code)]
+pub(crate) struct CurrentCatalogPackagePinProof {
+    state_generation: u64,
+    records_parent: DirectoryIdentity,
+    current_catalog_set_id: Digest32,
+    package_key: Digest32,
+    package_record_id: Digest32,
+    pin_incarnation: u64,
+    profile_id: ProfileId,
+    install_id: ExtensionInstallId,
+}
+
+/// Exact durable identity of one owner pin incarnation.
+///
+/// The package record alone is insufficient for compare-and-swap removal: an
+/// owner may release and later reacquire the same record. The incarnation is
+/// the generation committed by the add transition and survives recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OwnerPackagePinIdentity {
+    pub(crate) package_record_id: Digest32,
+    pub(crate) incarnation: u64,
+}
+
+/// Exact owner-pin admission result. A replay carries no transition proof, so
+/// it cannot accidentally create a no-op durable generation.
+#[allow(dead_code)]
+pub(crate) enum OwnerPackagePinPlan {
+    /// The owner is absent; consume this proof in the exact add transition.
+    Add {
+        proof: CurrentCatalogPackagePinProof,
+        pin: OwnerPackagePinIdentity,
+    },
+    /// The owner already names the same current package record.
+    IdempotentReplay { pin: OwnerPackagePinIdentity },
+}
+
+#[allow(dead_code)]
+pub(crate) fn plan_current_catalog_package_pin(
+    runtime: &MaterializationRuntime,
+    expected_current: Digest32,
+    package_key: ExtensionPackageKey,
+    profile_id: ProfileId,
+    install_id: ExtensionInstallId,
+) -> Result<OwnerPackagePinPlan, MaterializationTransitionError> {
+    validate_runtime(runtime)?;
+    require_no_object_stages(runtime)?;
+    if runtime._state.current_catalog_set_id != Some(expected_current)
+        || runtime._state.build_intent.is_some()
+        || runtime._build_intent.is_some()
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let set = runtime
+        ._catalog_sets
+        .get(&expected_current)
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    let key = Digest32::from_bytes(package_key.bytes());
+    let row = set
+        .packages
+        .binary_search_by_key(&key, |row| row.package_key)
+        .ok()
+        .and_then(|index| set.packages.get(index))
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    validate_catalog_set_completed_projection(runtime, set)?;
+    let owner = (profile_id, install_id);
+    match runtime
+        ._state
+        .package_pins
+        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+    {
+        Ok(index)
+            if runtime._state.package_pins[index].package_record_id == row.package_record_id =>
+        {
+            let existing = runtime._state.package_pins[index];
+            return Ok(OwnerPackagePinPlan::IdempotentReplay {
+                pin: OwnerPackagePinIdentity {
+                    package_record_id: existing.package_record_id,
+                    incarnation: existing.incarnation,
+                },
+            });
+        }
+        Ok(_) => return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous)),
+        Err(_) => {}
+    }
+    let pin = OwnerPackagePinIdentity {
+        package_record_id: row.package_record_id,
+        incarnation: next_generation(runtime._state.generation)?,
+    };
+    Ok(OwnerPackagePinPlan::Add {
+        proof: CurrentCatalogPackagePinProof {
+            state_generation: runtime._state.generation,
+            records_parent: runtime._records.identity(),
+            current_catalog_set_id: expected_current,
+            package_key: key,
+            package_record_id: row.package_record_id,
+            pin_incarnation: pin.incarnation,
+            profile_id,
+            install_id,
+        },
+        pin,
+    })
+}
+
+/// Adds one exact owner/package pin. Existing owners are never replaced in
+/// place; callers must explicitly remove the exact old record after runtime
+/// drain and then recover before adding another.
+#[allow(dead_code)]
+pub(crate) fn add_owner_package_pin(
+    runtime: MaterializationRuntime,
+    proof: CurrentCatalogPackagePinProof,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    add_owner_package_pin_with_fault(runtime, proof, TransitionFaultPoint::None)
+}
+
+fn add_owner_package_pin_with_fault(
+    runtime: MaterializationRuntime,
+    proof: CurrentCatalogPackagePinProof,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.generation != proof.state_generation
+        || runtime._records.identity() != proof.records_parent
+        || runtime._state.current_catalog_set_id != Some(proof.current_catalog_set_id)
+        || next_generation(runtime._state.generation)? != proof.pin_incarnation
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let set = runtime
+        ._catalog_sets
+        .get(&proof.current_catalog_set_id)
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if !set.packages.iter().any(|row| {
+        row.package_key == proof.package_key && row.package_record_id == proof.package_record_id
+    }) {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let owner = (proof.profile_id, proof.install_id);
+    let mut next = runtime._state.clone();
+    let insertion = next
+        .package_pins
+        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+        .map_or_else(Ok, |_| {
+            Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous))
+        })?;
+    next.package_pins.insert(
+        insertion,
+        DurablePackagePin {
+            profile_id: proof.profile_id,
+            install_id: proof.install_id,
+            package_record_id: proof.package_record_id,
+            incarnation: proof.pin_incarnation,
+        },
+    );
+    next.generation = proof.pin_incarnation;
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    validate_next_state_references(&runtime, &next)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+/// Linear proof for removing exactly one owner/package mapping.
+#[allow(dead_code)]
+pub(crate) struct OwnerPackagePinRemovalProof {
+    state_generation: u64,
+    records_parent: DirectoryIdentity,
+    profile_id: ProfileId,
+    install_id: ExtensionInstallId,
+    package_record_id: Digest32,
+    pin_incarnation: u64,
+}
+
+/// Read-only exact removal plan. Absence is a truthful replay and carries no
+/// transition capability.
+#[allow(dead_code)]
+pub(crate) enum OwnerPackagePinRemovalPlan {
+    /// The exact owner/record mapping is present.
+    Remove(OwnerPackagePinRemovalProof),
+    /// The owner is already absent.
+    IdempotentReplay,
+}
+
+#[allow(dead_code)]
+pub(crate) fn plan_owner_package_pin_removal(
+    runtime: &MaterializationRuntime,
+    profile_id: ProfileId,
+    install_id: ExtensionInstallId,
+    expected_pin: OwnerPackagePinIdentity,
+) -> Result<OwnerPackagePinRemovalPlan, MaterializationTransitionError> {
+    validate_runtime(runtime)?;
+    require_no_object_stages(runtime)?;
+    if runtime._state.build_intent.is_some() || runtime._build_intent.is_some() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let owner = (profile_id, install_id);
+    let index = match runtime
+        ._state
+        .package_pins
+        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+    {
+        Ok(index) => index,
+        Err(_) => return Ok(OwnerPackagePinRemovalPlan::IdempotentReplay),
+    };
+    let pin = runtime._state.package_pins[index];
+    if pin.package_record_id != expected_pin.package_record_id
+        || pin.incarnation != expected_pin.incarnation
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    Ok(OwnerPackagePinRemovalPlan::Remove(
+        OwnerPackagePinRemovalProof {
+            state_generation: runtime._state.generation,
+            records_parent: runtime._records.identity(),
+            profile_id,
+            install_id,
+            package_record_id: expected_pin.package_record_id,
+            pin_incarnation: expected_pin.incarnation,
+        },
+    ))
+}
+
+#[allow(dead_code)]
+pub(crate) fn remove_owner_package_pin(
+    runtime: MaterializationRuntime,
+    proof: OwnerPackagePinRemovalProof,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    remove_owner_package_pin_with_fault(runtime, proof, TransitionFaultPoint::None)
+}
+
+fn remove_owner_package_pin_with_fault(
+    runtime: MaterializationRuntime,
+    proof: OwnerPackagePinRemovalProof,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.build_intent.is_some()
+        || runtime._build_intent.is_some()
+        || runtime._state.generation != proof.state_generation
+        || runtime._records.identity() != proof.records_parent
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let owner = (proof.profile_id, proof.install_id);
+    let mut next = runtime._state.clone();
+    let index = next
+        .package_pins
+        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if next.package_pins[index].package_record_id != proof.package_record_id
+        || next.package_pins[index].incarnation != proof.pin_incarnation
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    next.package_pins.remove(index);
+    next.generation = next_generation(runtime._state.generation)?;
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    validate_next_state_references(&runtime, &next)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn promote_active_catalog_set_at_fault(
+    runtime: MaterializationRuntime,
+    catalog_set: VerifiedActiveCatalogSet,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    promote_catalog_set_with_fault(runtime, catalog_set.into_transition_proof(), fault)
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn rollback_to_previous_catalog_set_at_fault(
+    runtime: MaterializationRuntime,
+    rollback: VerifiedRollbackCatalogSet,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    rollback_to_previous_catalog_set_with_fault(runtime, rollback, fault)
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn add_owner_package_pin_at_fault(
+    runtime: MaterializationRuntime,
+    proof: CurrentCatalogPackagePinProof,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    add_owner_package_pin_with_fault(runtime, proof, fault)
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn remove_owner_package_pin_at_fault(
+    runtime: MaterializationRuntime,
+    proof: OwnerPackagePinRemovalProof,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    remove_owner_package_pin_with_fault(runtime, proof, fault)
+}
+
+fn validate_catalog_set_transition_proof<Prepared>(
+    runtime: &MaterializationRuntime,
+    proof: &CatalogSetTransitionProof<Prepared>,
+) -> Result<(), MaterializationTransitionError> {
+    if proof.state_generation != runtime._state.generation
+        || proof.records_parent != runtime._records.identity()
+        || proof.record.record_id().ok() != Some(proof.record_id)
+        || runtime._catalog_sets.get(&proof.record_id) != Some(&proof.record)
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    validate_catalog_set_completed_projection(runtime, &proof.record)
+}
+
+fn validate_catalog_set_completed_projection(
+    runtime: &MaterializationRuntime,
+    catalog_set: &CatalogSetRecord,
+) -> Result<(), MaterializationTransitionError> {
+    catalog_set
+        .validate()
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    for row in &catalog_set.packages {
+        if runtime
+            ._state
+            .completed_package_record_ids
+            .binary_search(&row.package_record_id)
+            .is_err()
+        {
+            return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        }
+        let package = runtime
+            ._package_records
+            .get(&row.package_record_id)
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        if package.catalog != catalog_set.catalog
+            || package.package.package_key != row.package_key
+            || package.manifest.runtime_target != row.runtime_target
+        {
+            return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        }
+    }
+    Ok(())
+}
+
+fn validate_next_state_references(
+    runtime: &MaterializationRuntime,
+    state: &MaterializationState,
+) -> Result<(), MaterializationTransitionError> {
+    state
+        .validate()
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    let mut selected = BTreeSet::new();
+    let mut live_family = None;
+    for catalog_set_id in state.catalog_pin_ids() {
+        let set = runtime
+            ._catalog_sets
+            .get(&catalog_set_id)
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        validate_catalog_set_completed_projection(runtime, set)?;
+        for row in &set.packages {
+            bind_transition_platform_family(
+                &mut live_family,
+                row.runtime_target.platform_family(),
+            )?;
+            selected.insert(row.package_record_id);
+        }
+    }
+
+    let mut drain_selections = BTreeMap::<CatalogAnchor, BTreeMap<Digest32, Digest32>>::new();
+    let mut drain_tree_bytes = 0_u64;
+    for pin in &state.package_pins {
+        let package = runtime
+            ._package_records
+            .get(&pin.package_record_id)
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        bind_transition_platform_family(
+            &mut live_family,
+            package.manifest.runtime_target.platform_family(),
+        )?;
+        if selected.contains(&pin.package_record_id) {
+            continue;
+        }
+        let drain_package_count = {
+            let packages = drain_selections.entry(package.catalog).or_default();
+            match packages.entry(package.package.package_key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(pin.package_record_id);
+                    drain_tree_bytes = drain_tree_bytes
+                        .checked_add(package.tree_index.tree_bytes)
+                        .ok_or_else(|| {
+                            before_journal(ExtensionRepositoryError::RecoveryAmbiguous)
+                        })?;
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if *entry.get() == pin.package_record_id => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+                }
+            }
+            packages.len()
+        };
+        if drain_selections.len() > MAX_DRAIN_CATALOG_SELECTIONS
+            || drain_package_count > super::records::MAX_CATALOG_SET_PACKAGES
+            || drain_tree_bytes > MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES
+        {
+            return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        }
+    }
+    Ok(())
+}
+
+fn bind_transition_platform_family(
+    observed: &mut Option<StoredRuntimePlatformFamily>,
+    candidate: StoredRuntimePlatformFamily,
+) -> Result<(), MaterializationTransitionError> {
+    if observed.is_some_and(|family| family != candidate) {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    *observed = Some(candidate);
+    Ok(())
 }
 
 pub(crate) fn begin_rollback_package_build(

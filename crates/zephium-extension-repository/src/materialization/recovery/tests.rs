@@ -661,6 +661,7 @@ fn only_live_roots_require_current_product_generation_recognition() {
         profile_id: ProfileId::from(1),
         install_id: ExtensionInstallId::from(1),
         package_record_id: ids.package_id,
+        incarnation: 1,
     }];
     replace_settled_state(&handles, &state);
     drop(handles);
@@ -760,6 +761,7 @@ fn owner_scoped_package_pins_retain_only_completed_package_roots() {
             profile_id: ProfileId::from(1),
             install_id: ExtensionInstallId::from(1),
             package_record_id: ids.package_id,
+            incarnation: 1,
         }],
         ..MaterializationState::default()
     };
@@ -1706,18 +1708,20 @@ fn owner_drain_is_one_catalog_sized_selection() {
     let mut completed = vec![first_ids.package_id, second_ids.package_id];
     completed.sort_unstable();
     let state = MaterializationState {
-        generation: 1,
+        generation: 2,
         completed_package_record_ids: completed,
         package_pins: vec![
             DurablePackagePin {
                 profile_id: ProfileId::from(1),
                 install_id: ExtensionInstallId::from(1),
                 package_record_id: first_ids.package_id,
+                incarnation: 1,
             },
             DurablePackagePin {
                 profile_id: ProfileId::from(1),
                 install_id: ExtensionInstallId::from(2),
                 package_record_id: second_ids.package_id,
+                incarnation: 2,
             },
         ],
         ..MaterializationState::default()
@@ -1753,10 +1757,11 @@ fn owner_drain_is_one_catalog_sized_selection() {
             profile_id: ProfileId::from(1),
             install_id: ExtensionInstallId::from(index as u128 + 1),
             package_record_id: *package_record_id,
+            incarnation: index as u64 + 1,
         })
         .collect();
     let state = MaterializationState {
-        generation: 1,
+        generation: package_ids.len() as u64,
         completed_package_record_ids: package_ids,
         package_pins,
         ..MaterializationState::default()
