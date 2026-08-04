@@ -3,9 +3,10 @@
 use std::fmt;
 
 use crate::{
-    ExtensionPackageAccess, ExtensionPackageAccessError, ExtensionRuntimeNativeRootVisitor,
-    ExtensionRuntimeResource, ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget,
-    ExtensionRuntimeVisitorError, MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
+    ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessError,
+    ExtensionPackageAccessPort, ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeResource,
+    ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
 /// A closed, redacted runtime lifecycle failure.
@@ -259,6 +260,111 @@ impl fmt::Debug for ExtensionRuntimeActivationBuildRefusal {
             .debug_struct("ExtensionRuntimeActivationBuildRefusal")
             .field("reason", &self.reason)
             .field("access", &"[redacted]")
+            .field("lifecycle", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Why persisted native-ownership uncertainty could not be reconstructed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ExtensionRuntimeRecoveryBuildError {
+    /// Delegated package access failed its bounded construction checks.
+    PackageAccess(ExtensionPackageAccessBuildError),
+    /// The combined recovery owner exceeded its bounded accounting contract.
+    OwnerAccounting(ExtensionRuntimeActivationBuildError),
+}
+
+impl fmt::Display for ExtensionRuntimeRecoveryBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PackageAccess(error) => error.fmt(formatter),
+            Self::OwnerAccounting(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ExtensionRuntimeRecoveryBuildError {}
+
+/// A failed reconstruction of one conservatively persisted native owner.
+///
+/// No ordinary [`ExtensionPackageAccess`] escapes this refusal while native
+/// ownership remains unresolved. It instead preserves the exact raw delegated
+/// provider, target, manifest descriptor, and passive lifecycle proxy supplied
+/// by the service. No ownership-changing lifecycle callback has run and no
+/// input is released or replaced. The caller must keep its external native
+/// reservation and durable package pin held on both success and refusal. A
+/// refusal is an opaque fail-closed quarantine: dropping it may destroy these
+/// process-local wrappers, but provider and lifecycle destructors must remain
+/// passive and the durable pin must survive for a later process to reconcile.
+///
+/// The refusal cannot be cloned:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryBuildRefusal;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionRuntimeRecoveryBuildRefusal>();
+/// ```
+///
+/// It cannot be shared across threads:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryBuildRefusal;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<ExtensionRuntimeRecoveryBuildRefusal>();
+/// ```
+///
+/// It cannot cross a serialization boundary:
+///
+/// ```compile_fail
+/// use serde::Serialize;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryBuildRefusal;
+/// fn requires_serialize<T: Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeRecoveryBuildRefusal>();
+/// ```
+///
+/// It cannot be reconstructed from serialized data:
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryBuildRefusal;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionRuntimeRecoveryBuildRefusal>();
+/// ```
+///
+/// Its captive delegated provider cannot be extracted:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryBuildRefusal;
+/// fn escape(refusal: ExtensionRuntimeRecoveryBuildRefusal) {
+///     let _ = refusal.into_parts();
+/// }
+/// ```
+#[must_use = "the refusal retains delegated package and recovery lifecycle state"]
+pub struct ExtensionRuntimeRecoveryBuildRefusal {
+    reason: ExtensionRuntimeRecoveryBuildError,
+    target: ExtensionRuntimeTarget,
+    _manifest: ExtensionRuntimeResource,
+    _provider: Box<dyn ExtensionPackageAccessPort>,
+    _lifecycle: Box<dyn ExtensionRuntimeLifecyclePort>,
+}
+
+impl ExtensionRuntimeRecoveryBuildRefusal {
+    /// Returns the stable construction refusal reason.
+    #[must_use]
+    pub const fn reason(&self) -> ExtensionRuntimeRecoveryBuildError {
+        self.reason
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoveryBuildRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeRecoveryBuildRefusal")
+            .field("reason", &self.reason)
+            .field("target", &self.target)
+            .field("manifest", &"[redacted]")
+            .field("provider", &"[redacted]")
             .field("lifecycle", &"[redacted]")
             .finish()
     }
@@ -813,6 +919,58 @@ pub struct ExtensionRuntimeUncertainOwner {
 }
 
 impl ExtensionRuntimeUncertainOwner {
+    /// Reconstructs conservative native-ownership uncertainty after restart.
+    ///
+    /// This constructor is deliberately non-authorizing. The caller must have
+    /// reauthenticated and durably pinned the exact package, loaded an
+    /// unresolved ownership row from its bounded durable journal, and created
+    /// a passive lifecycle proxy bound to that row's exact native incarnation.
+    /// The separate service/engine native-resource reservation must already be
+    /// held and must remain held for every returned state.
+    ///
+    /// Construction invokes only the provider and lifecycle ports'
+    /// side-effect-free retained-memory queries; no ownership-changing
+    /// lifecycle callback runs. The returned value cannot activate code or
+    /// expose package access, and its only settlement operation is
+    /// [`Self::reconcile`]. The external native reservation remains held on
+    /// both success and refusal. A caller that cannot prove the persisted
+    /// identity join must retain its durable package pin and fail closed
+    /// instead of constructing this value.
+    pub fn try_from_persisted_uncertainty(
+        target: ExtensionRuntimeTarget,
+        manifest: ExtensionRuntimeResource,
+        provider: Box<dyn ExtensionPackageAccessPort>,
+        lifecycle: Box<dyn ExtensionRuntimeLifecyclePort>,
+    ) -> Result<Self, ExtensionRuntimeRecoveryBuildRefusal> {
+        let access =
+            match ExtensionPackageAccess::from_delegated_provider(target, manifest, provider) {
+                Ok(access) => access,
+                Err(refusal) => {
+                    return Err(ExtensionRuntimeRecoveryBuildRefusal {
+                        reason: ExtensionRuntimeRecoveryBuildError::PackageAccess(refusal.reason()),
+                        target,
+                        _manifest: manifest,
+                        _provider: refusal.into_provider(),
+                        _lifecycle: lifecycle,
+                    });
+                }
+            };
+        match ExtensionRuntimeActivationRequest::try_new(access, lifecycle) {
+            Ok(request) => Ok(Self { core: request.core }),
+            Err(refusal) => {
+                let reason = ExtensionRuntimeRecoveryBuildError::OwnerAccounting(refusal.reason());
+                let (access, lifecycle) = refusal.into_parts();
+                Err(ExtensionRuntimeRecoveryBuildRefusal {
+                    reason,
+                    target,
+                    _manifest: manifest,
+                    _provider: access.into_provider(),
+                    _lifecycle: lifecycle,
+                })
+            }
+        }
+    }
+
     /// Returns the selected runtime family without exposing package access.
     #[must_use]
     pub const fn target(&self) -> ExtensionRuntimeTarget {
@@ -916,6 +1074,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{Cursor, Read};
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -1051,6 +1210,42 @@ mod tests {
         }
     }
 
+    struct RecoveryConstructionProbeLifecycle {
+        retained_queries: Arc<AtomicUsize>,
+        ownership_callbacks: Arc<AtomicUsize>,
+    }
+
+    impl ExtensionRuntimeLifecyclePort for RecoveryConstructionProbeLifecycle {
+        fn retained_bytes(&self) -> usize {
+            self.retained_queries.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+
+        fn activate(
+            &mut self,
+            _access: &mut ExtensionPackageAccessView<'_>,
+        ) -> ExtensionRuntimeActivationDisposition {
+            self.ownership_callbacks.fetch_add(1, Ordering::Relaxed);
+            ExtensionRuntimeActivationDisposition::Activated
+        }
+
+        fn retire(
+            &mut self,
+            _access: &mut ExtensionPackageAccessView<'_>,
+        ) -> ExtensionRuntimeRetirementDisposition {
+            self.ownership_callbacks.fetch_add(1, Ordering::Relaxed);
+            ExtensionRuntimeRetirementDisposition::Retired
+        }
+
+        fn reconcile_ownership(
+            &mut self,
+            _access: &mut ExtensionPackageAccessView<'_>,
+        ) -> ExtensionRuntimeOwnershipDisposition {
+            self.ownership_callbacks.fetch_add(1, Ordering::Relaxed);
+            ExtensionRuntimeOwnershipDisposition::Absent
+        }
+    }
+
     fn request(
         identity: u64,
         activations: impl IntoIterator<Item = ExtensionRuntimeActivationDisposition>,
@@ -1084,10 +1279,17 @@ mod tests {
         (request, recovered, calls)
     }
 
-    fn identity_access(identity: u64, recovered: &RecoveredIdentities) -> ExtensionPackageAccess {
+    fn identity_provider_inputs(
+        identity: u64,
+        recovered: &RecoveredIdentities,
+    ) -> (
+        ExtensionRuntimeTarget,
+        ExtensionRuntimeResource,
+        Box<dyn ExtensionPackageAccessPort>,
+    ) {
         let manifest = ExtensionRuntimeResource::try_new([identity as u8; 32], 0)
             .expect("manifest descriptor");
-        ExtensionPackageAccess::from_delegated_provider(
+        (
             ExtensionRuntimeTarget::Compatibility,
             manifest,
             Box::new(IdentityProvider {
@@ -1095,7 +1297,11 @@ mod tests {
                 recovered: Arc::clone(recovered),
             }),
         )
-        .expect("access")
+    }
+
+    fn identity_access(identity: u64, recovered: &RecoveredIdentities) -> ExtensionPackageAccess {
+        let (target, manifest, provider) = identity_provider_inputs(identity, recovered);
+        ExtensionPackageAccess::from_delegated_provider(target, manifest, provider).expect("access")
     }
 
     fn recover_identity_provider(access: ExtensionPackageAccess) -> Box<IdentityProvider> {
@@ -1429,6 +1635,166 @@ mod tests {
     }
 
     #[test]
+    fn persisted_uncertainty_can_only_reconcile_and_never_activates() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (target, manifest, provider) = identity_provider_inputs(51, &recovered);
+        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
+            target,
+            manifest,
+            provider,
+            Box::new(ScriptedLifecycle {
+                activations: VecDeque::new(),
+                retirements: [ExtensionRuntimeRetirementDisposition::Retired]
+                    .into_iter()
+                    .collect(),
+                reconciliations: [ExtensionRuntimeOwnershipDisposition::Owned]
+                    .into_iter()
+                    .collect(),
+                calls: Arc::clone(&calls),
+                retained_bytes: 1024,
+            }),
+        )
+        .expect("persisted uncertainty must fit the owner budget");
+        assert!(calls.lock().expect("lock").is_empty());
+        assert!(recovered.lock().expect("lock").is_empty());
+
+        let owner = match uncertain.reconcile() {
+            ExtensionRuntimeReconciliationSettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(*calls.lock().expect("lock"), vec!["reconcile"]);
+        let access = match owner.into_retirement_request().settle() {
+            ExtensionRuntimeRetirementSettlement::Retired(access) => access,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let provider = recover_identity_provider(access);
+        assert_eq!(provider.identity, 51);
+        drop(provider);
+        assert_eq!(*recovered.lock().expect("lock"), vec![51]);
+        assert_eq!(*calls.lock().expect("lock"), vec!["reconcile", "retire"]);
+
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (target, manifest, provider) = identity_provider_inputs(52, &recovered);
+        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
+            target,
+            manifest,
+            provider,
+            Box::new(ScriptedLifecycle {
+                activations: VecDeque::new(),
+                retirements: VecDeque::new(),
+                reconciliations: [ExtensionRuntimeOwnershipDisposition::Absent]
+                    .into_iter()
+                    .collect(),
+                calls: Arc::clone(&calls),
+                retained_bytes: 1024,
+            }),
+        )
+        .expect("persisted uncertainty must fit the owner budget");
+        let access = match uncertain.reconcile() {
+            ExtensionRuntimeReconciliationSettlement::Absent(access) => access,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(*calls.lock().expect("lock"), vec!["reconcile"]);
+        let provider = recover_identity_provider(access);
+        assert_eq!(provider.identity, 52);
+        drop(provider);
+        assert_eq!(*recovered.lock().expect("lock"), vec![52]);
+    }
+
+    #[test]
+    fn persisted_uncertainty_construction_only_queries_accounting() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let (target, manifest, provider) = identity_provider_inputs(57, &recovered);
+        let retained_queries = Arc::new(AtomicUsize::new(0));
+        let ownership_callbacks = Arc::new(AtomicUsize::new(0));
+        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
+            target,
+            manifest,
+            provider,
+            Box::new(RecoveryConstructionProbeLifecycle {
+                retained_queries: Arc::clone(&retained_queries),
+                ownership_callbacks: Arc::clone(&ownership_callbacks),
+            }),
+        )
+        .expect("bounded persisted uncertainty must be constructible");
+        assert_eq!(retained_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(ownership_callbacks.load(Ordering::Relaxed), 0);
+        drop(uncertain);
+        assert_eq!(ownership_callbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(*recovered.lock().expect("lock"), vec![57]);
+    }
+
+    #[test]
+    fn persisted_uncertainty_accounting_refusal_quarantines_both_inputs() {
+        let recovered_access = Arc::new(Mutex::new(Vec::new()));
+        let recovered_lifecycle = Arc::new(Mutex::new(Vec::new()));
+        let (target, manifest, provider) = identity_provider_inputs(53, &recovered_access);
+        let refusal = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
+            target,
+            manifest,
+            provider,
+            Box::new(BudgetLifecycle {
+                identity: 54,
+                retained_bytes: usize::MAX,
+                recovered: Arc::clone(&recovered_lifecycle),
+            }),
+        )
+        .expect_err("overflowing recovery owner accounting must fail closed");
+        assert_eq!(
+            refusal.reason(),
+            ExtensionRuntimeRecoveryBuildError::OwnerAccounting(
+                ExtensionRuntimeActivationBuildError::RetainedBytesOverflow
+            )
+        );
+        let debug = format!("{refusal:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("IdentityProvider"));
+        assert!(recovered_access.lock().expect("lock").is_empty());
+        assert!(recovered_lifecycle.lock().expect("lock").is_empty());
+        drop(refusal);
+        assert_eq!(*recovered_access.lock().expect("lock"), vec![53]);
+        assert_eq!(*recovered_lifecycle.lock().expect("lock"), vec![54]);
+    }
+
+    #[test]
+    fn persisted_uncertainty_access_refusal_keeps_provider_captive() {
+        let recovered_access = Arc::new(Mutex::new(Vec::new()));
+        let recovered_lifecycle = Arc::new(Mutex::new(Vec::new()));
+        let manifest = ExtensionRuntimeResource::try_new(
+            [55; 32],
+            crate::MAX_EXTENSION_RUNTIME_MANIFEST_BYTES + 1,
+        )
+        .expect("resource ceiling is larger than manifest ceiling");
+        let refusal = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
+            ExtensionRuntimeTarget::Compatibility,
+            manifest,
+            Box::new(IdentityProvider {
+                identity: 55,
+                recovered: Arc::clone(&recovered_access),
+            }),
+            Box::new(BudgetLifecycle {
+                identity: 56,
+                retained_bytes: 0,
+                recovered: Arc::clone(&recovered_lifecycle),
+            }),
+        )
+        .expect_err("oversized recovery manifest must fail closed");
+        assert_eq!(
+            refusal.reason(),
+            ExtensionRuntimeRecoveryBuildError::PackageAccess(
+                ExtensionPackageAccessBuildError::ManifestTooLarge
+            )
+        );
+        assert!(recovered_access.lock().expect("lock").is_empty());
+        assert!(recovered_lifecycle.lock().expect("lock").is_empty());
+        drop(refusal);
+        assert_eq!(*recovered_access.lock().expect("lock"), vec![55]);
+        assert_eq!(*recovered_lifecycle.lock().expect("lock"), vec![56]);
+    }
+
+    #[test]
     fn retirement_uncertainty_can_reconcile_back_to_owned() {
         let (request, recovered, calls) = request(
             15,
@@ -1567,6 +1933,26 @@ mod tests {
         };
         drop(uncertain);
         assert_eq!(*calls.lock().expect("lock"), vec!["activate"]);
+
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (target, manifest, provider) = identity_provider_inputs(50, &recovered);
+        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
+            target,
+            manifest,
+            provider,
+            Box::new(ScriptedLifecycle {
+                activations: VecDeque::new(),
+                retirements: VecDeque::new(),
+                reconciliations: VecDeque::new(),
+                calls: Arc::clone(&calls),
+                retained_bytes: 1024,
+            }),
+        )
+        .expect("persisted uncertainty must fit the owner budget");
+        drop(uncertain);
+        assert!(calls.lock().expect("lock").is_empty());
+        assert_eq!(*recovered.lock().expect("lock"), vec![50]);
     }
 
     #[test]

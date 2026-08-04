@@ -4,7 +4,9 @@
 //! neither authorizes extension packages nor owns durable repository pins. A
 //! package service must complete those checks before constructing delegated
 //! access and may recover that access only from settlements or cancellations
-//! whose state already proves native ownership absent.
+//! whose state already proves native ownership absent. Persisted uncertainty
+//! may be reconstructed only into the reconciliation-only state; it never
+//! creates activation authority or exposes package access.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -27,6 +29,7 @@ pub use lifecycle::{
     ExtensionRuntimeActivationRequest, ExtensionRuntimeActivationSettlement,
     ExtensionRuntimeFailure, ExtensionRuntimeLifecyclePort, ExtensionRuntimeOwner,
     ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeReconciliationSettlement,
+    ExtensionRuntimeRecoveryBuildError, ExtensionRuntimeRecoveryBuildRefusal,
     ExtensionRuntimeRetirementDisposition, ExtensionRuntimeRetirementRequest,
     ExtensionRuntimeRetirementSettlement, ExtensionRuntimeUncertainOwner,
 };
