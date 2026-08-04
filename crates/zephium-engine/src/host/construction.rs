@@ -3,7 +3,8 @@ use super::dispatch::with_profile_exit;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
 use super::navigation::bounded_title;
 use super::permits::{
-    queue_navigation_commit, queue_navigation_completion, queue_navigation_failure, EventPermit,
+    queue_navigation_authority_invalidation, queue_navigation_commit, queue_navigation_completion,
+    queue_navigation_failure, EventPermit,
 };
 use super::profiles::bind_profile_persistence_class;
 #[cfg(target_os = "windows")]
@@ -563,6 +564,8 @@ impl EngineHost {
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
         let load_navigation = navigation.clone();
+        let extension_document_permits_pending =
+            self.extension_document_authority.pending_presence();
         let presentation_permit = Arc::new(AtomicBool::new(false));
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
@@ -927,12 +930,19 @@ impl EngineHost {
             };
             match transition {
                 NavigationTransition::Started(epoch) => {
+                    if extension_document_permits_pending.load(Ordering::Acquire) {
+                        queue_navigation_authority_invalidation(id, &load_permit, &load_navigation);
+                    }
                     if load_navigation.is_current(epoch) {
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
                 }
-                NavigationTransition::Redirected(_) => {}
+                NavigationTransition::Redirected(_) => {
+                    if extension_document_permits_pending.load(Ordering::Acquire) {
+                        queue_navigation_authority_invalidation(id, &load_permit, &load_navigation);
+                    }
+                }
                 NavigationTransition::Committed(epoch) => {
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content

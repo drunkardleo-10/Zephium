@@ -6,7 +6,7 @@
 //! identity to one non-wrapping Zephium epoch and makes `Committed` the only
 //! transition that can authorize rendered content/chrome attribution.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wry::{NavigationEvent, NavigationEventPhase, NavigationId};
@@ -19,9 +19,14 @@ pub(crate) struct NavigationEpochTracker {
     state: Arc<Mutex<NavigationEpochState>>,
 }
 
-#[derive(Debug)]
 struct NavigationEpochState {
     current: Option<CurrentNavigation>,
+    // Monotonic within this physical tracker and deliberately not restored
+    // when a provisional navigation fails. Document-scoped capabilities can
+    // therefore prove that no navigation attempt occurred since issuance,
+    // even if the same committed epoch becomes visible again.
+    activity: Option<NavigationActivity>,
+    document_operations: Option<DocumentOperationGeneration>,
     revoked: bool,
 }
 
@@ -51,6 +56,41 @@ struct CommittedNavigation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NavigationEpoch(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NavigationActivity(u64);
+
+/// Non-rearmable operation generation for one currently committed document.
+///
+/// Clones share one terminal bit. A main-frame navigation attempt revokes the
+/// bit synchronously inside the native callback's tracker transition, before
+/// any host-queue work can be reordered or coalesced. Restoring a previous
+/// committed epoch lets the next permit lazily create a fresh generation;
+/// the old one never re-arms. Ordinary browsing therefore allocates none.
+#[derive(Clone)]
+pub(crate) struct DocumentOperationGeneration {
+    active: Arc<AtomicBool>,
+}
+
+impl DocumentOperationGeneration {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn revoke(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.active, &other.active)
+    }
+}
 
 impl NavigationEpoch {
     pub(crate) const fn presentation_id(self) -> NavigationPresentationId {
@@ -83,6 +123,8 @@ impl NavigationEpochTracker {
         Self {
             state: Arc::new(Mutex::new(NavigationEpochState {
                 current: None,
+                activity: None,
+                document_operations: None,
                 revoked: false,
             })),
         }
@@ -142,9 +184,16 @@ impl NavigationEpochTracker {
             // retire this tracker instead of panicking in a native callback.
             state.revoked = true;
             state.current = None;
+            if let Some(generation) = state.document_operations.take() {
+                generation.revoke();
+            }
             return None;
         };
         let epoch = NavigationEpoch(next);
+        if let Some(generation) = state.document_operations.take() {
+            generation.revoke();
+        }
+        state.activity = Some(NavigationActivity(next));
         state.current = Some(CurrentNavigation {
             epoch,
             target: target.to_owned(),
@@ -287,10 +336,17 @@ impl NavigationEpochTracker {
                 {
                     return None;
                 }
+                let first_commit = current.phase != TrackedNavigationPhase::Committed;
                 current.target = target;
                 current.phase = TrackedNavigationPhase::Committed;
                 current.request = None;
-                Some(NavigationTransition::Committed(current.epoch))
+                let epoch = current.epoch;
+                if first_commit {
+                    if let Some(generation) = state.document_operations.take() {
+                        generation.revoke();
+                    }
+                }
+                Some(NavigationTransition::Committed(epoch))
             }
             NavigationEventPhase::Finished => {
                 let current = state.current.as_mut()?;
@@ -349,6 +405,9 @@ impl NavigationEpochTracker {
             request: None,
             previous_committed: None,
         });
+        if let Some(generation) = state.document_operations.take() {
+            generation.revoke();
+        }
         restored
     }
 
@@ -400,6 +459,47 @@ impl NavigationEpochTracker {
                     && current.epoch == epoch
                     && current.target == target
             })
+    }
+
+    /// Captures the newest attempted main-frame navigation in this physical
+    /// view generation. Unlike `current`, this never rolls back to a restored
+    /// document after provisional failure.
+    pub(crate) fn activity_snapshot(&self) -> Option<NavigationActivity> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (!state.revoked).then_some(state.activity).flatten()
+    }
+
+    pub(crate) fn matches_activity(&self, activity: NavigationActivity) -> bool {
+        self.activity_snapshot() == Some(activity)
+    }
+
+    /// Returns the exact live operation generation only when the same
+    /// committed epoch and canonical URL are still current.
+    pub(crate) fn document_operation_snapshot(
+        &self,
+        epoch: NavigationEpoch,
+        target: &str,
+    ) -> Option<DocumentOperationGeneration> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked
+            || !state.current.as_ref().is_some_and(|current| {
+                current.phase == TrackedNavigationPhase::Committed
+                    && current.epoch == epoch
+                    && current.target == target
+            })
+        {
+            return None;
+        }
+        if state.document_operations.is_none() {
+            state.document_operations = Some(DocumentOperationGeneration::new());
+        }
+        state.document_operations.as_ref().cloned()
     }
 
     pub(crate) fn is_current(&self, epoch: NavigationEpoch) -> bool {
@@ -457,7 +557,12 @@ impl NavigationEpochTracker {
         if !same_document_origin(&current.target, &source) {
             return false;
         }
-        current.target = source;
+        if current.target != source {
+            current.target = source;
+            if let Some(generation) = state.document_operations.take() {
+                generation.revoke();
+            }
+        }
         true
     }
 
@@ -468,6 +573,9 @@ impl NavigationEpochTracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.revoked = true;
         state.current = None;
+        if let Some(generation) = state.document_operations.take() {
+            generation.revoke();
+        }
     }
 }
 
@@ -723,6 +831,46 @@ mod tests {
         let replacement = tracker.begin("https://replacement.test/").unwrap();
         assert!(!tracker.fail_synchronous(failing));
         assert!(tracker.is_current(replacement));
+    }
+
+    #[test]
+    fn navigation_activity_never_rolls_back_with_a_restored_document() {
+        let tracker = NavigationEpochTracker::new();
+        let visible = commit(
+            &tracker,
+            91,
+            "https://example.test/visible",
+            "https://example.test/visible",
+        );
+        let visible_activity = tracker.activity_snapshot().unwrap();
+
+        let provisional = tracker.begin("https://example.test/provisional").unwrap();
+        assert_eq!(
+            tracker.observe_navigation(&event(
+                92,
+                NavigationEventPhase::Started,
+                "https://example.test/provisional",
+            )),
+            Some(NavigationTransition::Started(provisional))
+        );
+        let provisional_activity = tracker.activity_snapshot().unwrap();
+        assert_ne!(visible_activity, provisional_activity);
+        assert_eq!(
+            tracker.observe_navigation(&event(
+                92,
+                NavigationEventPhase::Failed,
+                "https://example.test/provisional",
+            )),
+            Some(NavigationTransition::Failed {
+                failed: provisional,
+                restored: Some(visible),
+                request: None,
+            })
+        );
+
+        assert_eq!(tracker.current_committed(), Some(visible));
+        assert!(!tracker.matches_activity(visible_activity));
+        assert!(tracker.matches_activity(provisional_activity));
     }
 
     #[test]

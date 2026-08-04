@@ -124,6 +124,7 @@ enum HostTaskKey {
     Source(ItemId),
     Title(ItemId),
     NavigationCommit(ItemId),
+    ExtensionPermitInvalidation(ItemId),
     NavigationSettlement(ItemId),
     Discard(ItemId),
     #[cfg(target_os = "windows")]
@@ -218,6 +219,7 @@ pub(crate) fn install(
             private_runtime,
             views: HashMap::new(),
             native_resources: NativeResourceLedger::default(),
+            extension_document_authority: super::extensions::ExtensionDocumentAuthority::default(),
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),
@@ -415,6 +417,21 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::NavigationCommit(id)),
+        f,
+    )
+}
+
+/// A Started transition is an ordering barrier for extension document
+/// permits. Its key intentionally does not use the globally coalesced commit
+/// slot: adjacent duplicates may collapse, but no intervening redemption or
+/// settlement can be crossed by a later start/commit.
+pub(super) fn with_extension_permit_invalidation<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::ExtensionPermitInvalidation(id)),
         f,
     )
 }
@@ -1320,6 +1337,51 @@ mod tests {
         assert_eq!(pending[0].key, Some(HostTaskKey::Source(id)));
         assert_eq!(pending[1].key, Some(HostTaskKey::NavigationSettlement(id)));
         assert_eq!(pending[2].key, Some(HostTaskKey::Discard(id)));
+    }
+
+    #[test]
+    fn extension_permit_invalidation_never_crosses_an_intervening_operation() {
+        let id = ItemId::from(7);
+        let invalidation = HostTaskKey::ExtensionPermitInvalidation(id);
+        let mut pending = VecDeque::new();
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, invalidation)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::Normal)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, invalidation)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(
+                HostTaskPriority::Lifecycle,
+                HostTaskKey::NavigationCommit(id)
+            )
+        ));
+
+        assert_eq!(pending.len(), 4);
+        assert_eq!(pending[0].key, Some(invalidation));
+        assert_eq!(pending[1].key, None);
+        assert_eq!(pending[2].key, Some(invalidation));
+        assert_eq!(pending[3].key, Some(HostTaskKey::NavigationCommit(id)));
+
+        // Back-to-back redirects may collapse without crossing work.
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, invalidation)
+        ));
+        assert_eq!(pending.len(), 5);
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, invalidation)
+        ));
+        assert_eq!(pending.len(), 5);
+        assert_eq!(pending[4].key, Some(invalidation));
     }
 
     #[test]

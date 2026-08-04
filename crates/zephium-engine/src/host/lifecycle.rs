@@ -67,6 +67,9 @@ impl EngineHost {
     }
 
     pub(crate) fn close(&mut self, id: ItemId) {
+        // Revoke browser-document authority before the native view can begin
+        // teardown or its logical id can be reused by a replacement.
+        self.extension_document_authority.revoke_item(id);
         let profile = self
             .partitions
             .get(&id)
@@ -176,6 +179,9 @@ impl EngineHost {
     }
 
     fn shutdown_common(&mut self) {
+        // Shutdown is a terminal authority barrier, including runtimes that
+        // currently have no tab-scoped grant rows.
+        self.extension_document_authority.revoke_all();
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {
             self.close(id);

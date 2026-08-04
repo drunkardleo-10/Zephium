@@ -571,6 +571,9 @@ impl EngineHost {
         ) {
             return;
         }
+        // Durable erasure tombstones the profile and synchronously retires
+        // every transient runtime/document authority before native cleanup.
+        self.extension_document_authority.revoke_profile(profile);
         #[cfg(target_os = "windows")]
         self.pending_profile_recovery.remove(&profile);
 
@@ -900,6 +903,9 @@ impl EngineHost {
 
     #[cfg(target_os = "windows")]
     fn retire_profile_process_views(&mut self, profile: ProfileId) -> Vec<ItemId> {
+        // A browser-process generation loss invalidates all native extension
+        // owners and activeTab rows associated with the same profile.
+        self.extension_document_authority.revoke_profile(profile);
         let mut ids: Vec<ItemId> = self
             .partitions
             .iter()

@@ -135,6 +135,21 @@ impl EngineHost {
             });
         }
 
+        if let Some((committed, url)) = source_navigation.committed_snapshot() {
+            if committed == epoch {
+                // The identity-bearing commit is the earliest point at which
+                // a retained activeTab origin may move to a new document. Do
+                // this before any native hide/stage operation can pump.
+                self.extension_document_authority.on_committed_document(
+                    id,
+                    source_permit,
+                    source_navigation,
+                    epoch,
+                    &url,
+                );
+            }
+        }
+
         if let Some(view) = self.views.get_mut(&id) {
             // Change the Rust-owned authority before any native call can pump
             // callbacks. A re-entrant acknowledgement for the previous epoch
@@ -343,6 +358,16 @@ impl EngineHost {
             }
             announce
         };
+        // A same-document History API/hash observation can update the exact
+        // URL inside the committed epoch. Preserve the origin grant, but
+        // consume permits tied to the prior URL before emitting chrome facts.
+        self.extension_document_authority.on_committed_document(
+            id,
+            &event_permit,
+            &navigation,
+            epoch,
+            &url,
+        );
         let previous = self.navigation_snapshots.entry(id).or_default();
         for event in navigation_observation_events(id, previous, Some(&url), history) {
             event_permit.emit(&self.sink, event);

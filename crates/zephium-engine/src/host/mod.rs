@@ -2,6 +2,7 @@ mod construction;
 mod content_rules;
 mod discard;
 mod dispatch;
+mod extensions;
 mod lifecycle;
 mod navigation;
 mod page_ops;
@@ -25,6 +26,7 @@ pub(crate) use scripts::protected_script_specs_for_native_probe;
 
 #[cfg(target_os = "windows")]
 use dispatch::queue_windows_cleanup_debt;
+use extensions::ExtensionDocumentAuthority;
 use permits::{EventPermit, Sink};
 use profiles::ProfilePersistenceClass;
 use resources::{NativeResourceLease, NativeResourceLedger};
@@ -339,6 +341,7 @@ pub(crate) struct EngineHost {
     private_runtime: zephium_core::webview2::RuntimeGeneration,
     views: HashMap<ItemId, ObservedView>,
     native_resources: NativeResourceLedger,
+    extension_document_authority: ExtensionDocumentAuthority,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
     partitions: HashMap<ItemId, Partition>,

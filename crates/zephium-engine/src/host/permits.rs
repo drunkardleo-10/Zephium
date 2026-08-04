@@ -7,7 +7,9 @@ use zephium_core::ports::engine::EngineEvent;
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 
-use super::dispatch::{with_navigation_commit, with_navigation_settlement};
+use super::dispatch::{
+    with_extension_permit_invalidation, with_navigation_commit, with_navigation_settlement,
+};
 
 #[derive(Clone)]
 pub(super) struct Sink(crate::EngineEventIngressSink);
@@ -164,6 +166,38 @@ pub(super) fn queue_navigation_commit(
         permit.revoke();
         navigation.revoke();
         eprintln!("security: committed-document presentation gate was not admitted");
+    }
+}
+
+/// A provisional main-frame transition permanently consumes every one-shot
+/// document permit issued before it. Its dedicated queue key never crosses an
+/// intervening operation. The navigation tracker's synchronous, non-rearmable
+/// operation generation remains the primary authority barrier even if host
+/// settlement is delayed or refused.
+pub(super) fn queue_navigation_authority_invalidation(
+    id: ItemId,
+    permit: &EventPermit,
+    navigation: &NavigationEpochTracker,
+) {
+    if permit.active_token().is_none() {
+        return;
+    }
+    let queued_permit = permit.clone();
+    let queued_navigation = navigation.clone();
+    let admitted = with_extension_permit_invalidation(id, move |host| {
+        host.invalidate_extension_document_permits_for_navigation(
+            id,
+            &queued_permit,
+            &queued_navigation,
+        );
+    });
+    if !admitted {
+        // Losing this mutation could make an old permit valid again after a
+        // provisional failure restores its document. Retire the entire native
+        // generation instead of accepting that replay window.
+        permit.revoke();
+        navigation.revoke();
+        eprintln!("security: extension document-permit invalidation was not admitted");
     }
 }
 
