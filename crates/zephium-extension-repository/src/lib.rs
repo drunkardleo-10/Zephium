@@ -50,8 +50,8 @@ pub use materialization::{
 };
 pub use package_lease::{
     ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
-    BundledCurrentCatalogSet, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
-    BundledPackageLeaseReleaseOutcome, BundledPackageResourceError, RollbackBundledPackageLease,
-    RollbackBundledPackageReleaseRequest,
+    BundledCurrentCatalogSet, BundledCurrentManifestBindings, BundledManifestBindingsError,
+    BundledPackageLeaseError, BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
+    BundledPackageResourceError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
 };
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

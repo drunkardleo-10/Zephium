@@ -41,6 +41,7 @@ pub(super) fn snapshot_error_requires_poison(error: &SnapshotLoadError) -> bool 
         | SnapshotLoadError::PackageNotSelected
         | SnapshotLoadError::WrongRole
         | SnapshotLoadError::EligibilityMismatch
+        | SnapshotLoadError::InstallPackageMismatch
         | SnapshotLoadError::AccountingOverflow => false,
     }
 }
@@ -101,7 +102,9 @@ pub(super) fn map_snapshot_error(error: SnapshotLoadError) -> BundledPackageLeas
         SnapshotLoadError::StaleSelection => BundledPackageLeaseError::StaleSelection,
         SnapshotLoadError::PackageNotSelected => BundledPackageLeaseError::PackageNotSelected,
         SnapshotLoadError::WrongRole => BundledPackageLeaseError::WrongCatalogRole,
-        SnapshotLoadError::EligibilityMismatch => BundledPackageLeaseError::EligibilityMismatch,
+        SnapshotLoadError::EligibilityMismatch | SnapshotLoadError::InstallPackageMismatch => {
+            BundledPackageLeaseError::EligibilityMismatch
+        }
         SnapshotLoadError::PackageNotMaterialized => {
             BundledPackageLeaseError::PackageNotMaterialized
         }

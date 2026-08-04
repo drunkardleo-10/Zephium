@@ -45,6 +45,14 @@ use super::tree_writer::{
 use crate::operation::with_external_callback;
 use crate::state::Digest32;
 
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+static COMPLETED_PACKAGE_VERIFICATION_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Stable, path-free failure while publishing or verifying package objects.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum PackageObjectError {
@@ -717,6 +725,12 @@ fn verify_completed_package(
     capacity: PackageObjectCapacity,
     prepared: PreparedPackageView<'_>,
 ) -> Result<VerifiedCompletedObjects, PackageObjectError> {
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    COMPLETED_PACKAGE_VERIFICATION_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     validate_completed_capacity_and_state(runtime, &capacity, &prepared)?;
     validate_prepared_package(&prepared)?;
     let package_record_bytes = canonical_package_record_bytes(&capacity, &prepared)?;
@@ -728,6 +742,24 @@ fn verify_completed_package(
         records_parent: capacity.records_parent,
         trees_parent: capacity.trees_parent,
     })
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn reset_completed_package_verification_count() {
+    COMPLETED_PACKAGE_VERIFICATION_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn completed_package_verification_count() -> usize {
+    COMPLETED_PACKAGE_VERIFICATION_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn intent_preflight(

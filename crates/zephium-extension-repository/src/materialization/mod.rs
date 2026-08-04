@@ -46,11 +46,18 @@ pub(crate) use objects::{
     verify_completed_rollback_package, PackageObjectError, PackageObjectIntentDisposition,
 };
 pub(crate) use package_lease::{
-    current_catalog_set_projection, load_active_package_snapshot, load_rollback_package_snapshot,
+    current_catalog_set_projection, load_active_manifest_bindings, load_active_package_snapshot,
+    load_rollback_manifest_bindings, load_rollback_package_snapshot,
     validated_resumable_build_in_progress, CurrentCatalogSetProjection,
     PackageLeaseRepositoryIdentity, SnapshotLoadError, SnapshotObjectPhase,
     VerifiedActivePackageSnapshot, VerifiedCatalogRole, VerifiedRollbackPackageSnapshot,
 };
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use package_lease::{repository_package_io_count, reset_repository_package_io_count};
 pub(crate) use prepare::{
     open_product_manifest_authority, prepare_active_package, prepare_rollback_package,
     PreparationError, PreparedActivePackage, PreparedRollbackPackage,
@@ -94,7 +101,8 @@ pub(crate) use transaction::{
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) use objects::{
-    publish_or_reuse_active_package_at_fault, ObjectPublicationFaultPoint,
+    completed_package_verification_count, publish_or_reuse_active_package_at_fault,
+    reset_completed_package_verification_count, ObjectPublicationFaultPoint,
     VerifiedActivePackageClosure,
 };
 #[cfg(all(

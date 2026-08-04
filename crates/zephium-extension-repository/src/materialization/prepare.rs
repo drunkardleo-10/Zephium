@@ -191,6 +191,52 @@ pub(crate) fn prepare_active_package<S: BundledReleaseByteSource>(
         BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
             .ok_or(PreparationError::AccountingOverflow)?;
     let loaded = load_package_bytes(catalog.catalog(), catalog_source, package_key, source)?;
+    prepare_active_loaded(
+        catalog,
+        manifest_authority,
+        runtime_target,
+        package_key,
+        loaded,
+    )
+}
+
+pub(crate) fn prepare_active_package_from_preparsed(
+    catalog: &AdmittedBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    tree_index: CanonicalExtensionTreeIndex,
+    tree_index_bytes: Box<[u8]>,
+    manifest_bytes: Box<[u8]>,
+) -> Result<PreparedActivePackage, PreparationError> {
+    let catalog_source =
+        BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
+            .ok_or(PreparationError::AccountingOverflow)?;
+    let loaded = bind_preparsed_package_bytes(
+        catalog.catalog(),
+        catalog_source,
+        package_key,
+        tree_index,
+        tree_index_bytes,
+        manifest_bytes,
+    )?;
+    prepare_active_loaded(
+        catalog,
+        manifest_authority,
+        runtime_target,
+        package_key,
+        loaded,
+    )
+}
+
+fn prepare_active_loaded(
+    catalog: &AdmittedBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    loaded: LoadedPackageBytes,
+) -> Result<PreparedActivePackage, PreparationError> {
+    let catalog_source = loaded.package_source.catalog();
     let manifest = manifest_authority
         .admit_manifest(
             catalog,
@@ -243,6 +289,52 @@ pub(crate) fn prepare_rollback_package<S: BundledReleaseByteSource>(
         BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
             .ok_or(PreparationError::AccountingOverflow)?;
     let loaded = load_package_bytes(catalog.catalog(), catalog_source, package_key, source)?;
+    prepare_rollback_loaded(
+        catalog,
+        manifest_authority,
+        runtime_target,
+        package_key,
+        loaded,
+    )
+}
+
+pub(crate) fn prepare_rollback_package_from_preparsed(
+    catalog: &AdmittedRollbackBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    tree_index: CanonicalExtensionTreeIndex,
+    tree_index_bytes: Box<[u8]>,
+    manifest_bytes: Box<[u8]>,
+) -> Result<PreparedRollbackPackage, PreparationError> {
+    let catalog_source =
+        BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
+            .ok_or(PreparationError::AccountingOverflow)?;
+    let loaded = bind_preparsed_package_bytes(
+        catalog.catalog(),
+        catalog_source,
+        package_key,
+        tree_index,
+        tree_index_bytes,
+        manifest_bytes,
+    )?;
+    prepare_rollback_loaded(
+        catalog,
+        manifest_authority,
+        runtime_target,
+        package_key,
+        loaded,
+    )
+}
+
+fn prepare_rollback_loaded(
+    catalog: &AdmittedRollbackBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    loaded: LoadedPackageBytes,
+) -> Result<PreparedRollbackPackage, PreparationError> {
+    let catalog_source = loaded.package_source.catalog();
     let manifest = manifest_authority
         .admit_rollback_manifest(
             catalog,
@@ -298,21 +390,7 @@ fn load_package_bytes<S: BundledReleaseByteSource>(
     package_key: ExtensionPackageKey,
     source: &mut S,
 ) -> Result<LoadedPackageBytes, PreparationError> {
-    let package = catalog
-        .package(package_key)
-        .ok_or(PreparationError::PackageMissing)?;
-    if package.payload() != ExtensionPackagePayloadIdentity::BundledTree {
-        return Err(PreparationError::UnsupportedPayload);
-    }
-    let package_row = digest_package_row(package)
-        .map_err(|_| PreparationError::AccountingOverflow)?
-        .bytes();
-    let package_source = BundledReleasePackageSourceIdentity::from_package(
-        catalog_source,
-        package.identity(),
-        package_row,
-    )
-    .ok_or(PreparationError::AccountingOverflow)?;
+    let (package, package_source) = exact_package_source(catalog, catalog_source, package_key)?;
 
     let tree_index_bytes = read_exact_resource(
         source,
@@ -351,6 +429,88 @@ fn load_package_bytes<S: BundledReleaseByteSource>(
         tree_index_bytes,
         manifest_bytes,
     })
+}
+
+fn bind_preparsed_package_bytes(
+    catalog: &ExtensionReleaseCatalog,
+    catalog_source: BundledReleaseCatalogSourceIdentity,
+    package_key: ExtensionPackageKey,
+    tree_index: CanonicalExtensionTreeIndex,
+    tree_index_bytes: Box<[u8]>,
+    manifest_bytes: Box<[u8]>,
+) -> Result<LoadedPackageBytes, PreparationError> {
+    // Repository lease/bootstrap reads already parsed these exact canonical
+    // bytes once. Rebind the retained bytes, parsed index, admitted catalog,
+    // and manifest here without repeating parser work or accepting a public
+    // caller-supplied witness.
+    let (package, package_source) = exact_package_source(catalog, catalog_source, package_key)?;
+    let index_length =
+        u64::try_from(tree_index_bytes.len()).map_err(|_| PreparationError::AccountingOverflow)?;
+    if index_length == 0
+        || index_length > MAX_EXTENSION_TREE_INDEX_BYTES as u64
+        || index_length != tree_index.index_bytes()
+    {
+        return Err(PreparationError::ResourceLengthMismatch);
+    }
+    if <[u8; 32]>::from(Sha256::digest(&tree_index_bytes)) != tree_index.index_sha256().bytes() {
+        return Err(PreparationError::ResourceDigestMismatch);
+    }
+    package
+        .bind_tree_index(&tree_index)
+        .map_err(map_tree_binding_error)?;
+
+    let manifest = tree_index
+        .files()
+        .iter()
+        .find(|file| file.path().as_str() == "manifest.json")
+        .ok_or(PreparationError::TreeIndexBinding)?;
+    let manifest_length =
+        u64::try_from(manifest_bytes.len()).map_err(|_| PreparationError::AccountingOverflow)?;
+    if manifest_length == 0
+        || manifest_length > MAX_EXTENSION_MANIFEST_BYTES as u64
+        || manifest_length != manifest.length()
+    {
+        return Err(PreparationError::ResourceLengthMismatch);
+    }
+    if <[u8; 32]>::from(Sha256::digest(&manifest_bytes)) != manifest.sha256() {
+        return Err(PreparationError::ResourceDigestMismatch);
+    }
+
+    Ok(LoadedPackageBytes {
+        package_source,
+        tree_index,
+        tree_index_bytes,
+        manifest_bytes,
+    })
+}
+
+fn exact_package_source(
+    catalog: &ExtensionReleaseCatalog,
+    catalog_source: BundledReleaseCatalogSourceIdentity,
+    package_key: ExtensionPackageKey,
+) -> Result<
+    (
+        &ExtensionReleasePackage,
+        BundledReleasePackageSourceIdentity,
+    ),
+    PreparationError,
+> {
+    let package = catalog
+        .package(package_key)
+        .ok_or(PreparationError::PackageMissing)?;
+    if package.payload() != ExtensionPackagePayloadIdentity::BundledTree {
+        return Err(PreparationError::UnsupportedPayload);
+    }
+    let package_row = digest_package_row(package)
+        .map_err(|_| PreparationError::AccountingOverflow)?
+        .bytes();
+    let package_source = BundledReleasePackageSourceIdentity::from_package(
+        catalog_source,
+        package.identity(),
+        package_row,
+    )
+    .ok_or(PreparationError::AccountingOverflow)?;
+    Ok((package, package_source))
 }
 
 fn read_exact_resource<S: BundledReleaseByteSource>(

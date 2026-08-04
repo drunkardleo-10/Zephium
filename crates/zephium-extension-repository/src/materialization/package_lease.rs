@@ -1,24 +1,24 @@
 //! Fresh repository-owned package admission for runtime leases.
 
-use std::io::{Cursor, Read};
 use std::mem::size_of;
 use std::sync::Arc;
 
-use sha2::Digest;
 use thiserror::Error;
 use zephium_core::extensions::{
-    ExtensionManifestDescriptor, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionRuntimeEligibility,
+    ExtensionGrantCohortError, ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
+    ExtensionInstall, ExtensionInstallCatalog, ExtensionManifestDescriptor,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionRuntimeEligibility,
 };
 use zephium_extension_authority::{
-    BundledCatalogAdmissionError, BundledPackageAuthority, ProductAdmittedExtensionManifest,
+    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError,
+    BundledPackageAuthority, ProductAdmittedExtensionManifest,
     ProductAdmittedRollbackExtensionManifest, ProductBundledCatalogGenerationRole,
-    ProductExtensionManifestAdmissionError, ProductExtensionManifestAuthorityError,
-    MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ProductExtensionManifestAdmissionError, ProductExtensionManifestAuthority,
+    ProductExtensionManifestAuthorityError, MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 use zephium_extension_package::{
-    CanonicalExtensionTreeIndex, ExtensionReleaseCatalogRevision, PortableRelativePath,
-    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
+    CanonicalExtensionTreeIndex, ExtensionReleaseCatalog, ExtensionReleaseCatalogRevision,
+    PortableRelativePath, MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
 };
 use zephium_private_fs::{DirectoryIdentity, SealedPrivateDirectory};
 
@@ -29,21 +29,25 @@ use super::objects::{
     verify_completed_rollback_package, PackageObjectError, PackageObjectIntentDisposition,
 };
 use super::prepare::{
-    open_product_manifest_authority, prepare_active_package, prepare_rollback_package,
-    PreparationError,
+    open_product_manifest_authority, prepare_active_package_from_preparsed,
+    prepare_rollback_package_from_preparsed, PreparationError,
 };
 use super::records::{
     CatalogSetRecord, PackageRecord, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
 };
-use super::source::{
-    BundledReleaseByteSource, BundledReleasePackageSourceIdentity, BundledReleaseResource,
-    BundledReleaseResourceKind, BundledReleaseSourceError,
-};
 use super::storage::read_required_sealed_record;
 use super::tree_reader::{with_verified_tree_resource, TreeResourceError};
 use super::{MaterializationRuntime, MAX_MATERIALIZATION_STATE_BYTES};
-use crate::state::{digest_package_row, Digest32};
+use crate::state::Digest32;
 use crate::ExtensionRepositoryError;
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+static REPOSITORY_PACKAGE_IO_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Hard logical ceiling for one shared immutable lease snapshot.
 pub(crate) const MAX_PACKAGE_LEASE_SNAPSHOT_RETAINED_BYTES: usize =
@@ -146,6 +150,8 @@ pub(crate) enum SnapshotLoadError {
     WrongRole,
     #[error("runtime eligibility differs from the admitted package")]
     EligibilityMismatch,
+    #[error("the supplied install package differs from the admitted package")]
+    InstallPackageMismatch,
     #[error("package is not completely materialized")]
     PackageNotMaterialized,
     #[error("durable package objects differ from their authenticated identity")]
@@ -330,17 +336,23 @@ pub(crate) fn load_active_package_snapshot(
     let catalog = authority
         .admit_catalog(exact_catalog_bytes)
         .map_err(SnapshotLoadError::CatalogAdmission)?;
-    let (record_id, durable_record, source) =
-        load_package_source(runtime, current, eligibility.package().key(), &catalog)?;
+    require_eligibility_package(catalog.catalog(), eligibility)?;
+    let LoadedRepositoryPackage {
+        record_id,
+        record: durable_record,
+        index,
+        index_bytes,
+        manifest_bytes,
+    } = load_repository_package(runtime, current, eligibility.package().key())?;
     let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
-    let mut source = source;
-    let prepared = prepare_active_package(
+    let prepared = prepare_active_package_from_preparsed(
         &catalog,
-        exact_catalog_bytes,
         &manifest_authority,
         durable_record.manifest.runtime_target.product_target(),
         eligibility.package().key(),
-        &mut source,
+        index,
+        index_bytes,
+        manifest_bytes,
     )
     .map_err(map_preparation_error)?;
     require_eligibility(
@@ -394,6 +406,39 @@ pub(crate) fn load_active_package_snapshot(
     })
 }
 
+pub(crate) fn load_active_manifest_bindings(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    exact_catalog_bytes: &[u8],
+    installs: &ExtensionInstallCatalog,
+) -> Result<ExtensionGrantManifestBindings, SnapshotLoadError> {
+    if current.role != VerifiedCatalogRole::Active {
+        return Err(SnapshotLoadError::WrongRole);
+    }
+    let authority =
+        BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
+    let catalog = authority
+        .admit_catalog(exact_catalog_bytes)
+        .map_err(SnapshotLoadError::CatalogAdmission)?;
+    require_catalog_anchor(current, catalog.generation_anchor())?;
+    if installs.installs().is_empty() {
+        return finish_manifest_bindings(Vec::new());
+    }
+    let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
+    let mut bindings = Vec::with_capacity(installs.installs().len());
+    for install in installs.installs() {
+        let manifest = load_active_manifest_from_admitted(
+            runtime,
+            current,
+            &catalog,
+            &manifest_authority,
+            install,
+        )?;
+        bindings.push(ExtensionGrantManifestBinding::new(install.id(), manifest));
+    }
+    finish_manifest_bindings(bindings)
+}
+
 pub(crate) fn load_rollback_package_snapshot(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
@@ -408,17 +453,23 @@ pub(crate) fn load_rollback_package_snapshot(
     let catalog = authority
         .admit_rollback_catalog(exact_catalog_bytes)
         .map_err(SnapshotLoadError::CatalogAdmission)?;
-    let (record_id, durable_record, source) =
-        load_package_source(runtime, current, eligibility.package().key(), &catalog)?;
+    require_eligibility_package(catalog.catalog(), eligibility)?;
+    let LoadedRepositoryPackage {
+        record_id,
+        record: durable_record,
+        index,
+        index_bytes,
+        manifest_bytes,
+    } = load_repository_package(runtime, current, eligibility.package().key())?;
     let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
-    let mut source = source;
-    let prepared = prepare_rollback_package(
+    let prepared = prepare_rollback_package_from_preparsed(
         &catalog,
-        exact_catalog_bytes,
         &manifest_authority,
         durable_record.manifest.runtime_target.product_target(),
         eligibility.package().key(),
-        &mut source,
+        index,
+        index_bytes,
+        manifest_bytes,
     )
     .map_err(map_preparation_error)?;
     require_eligibility(
@@ -472,37 +523,193 @@ pub(crate) fn load_rollback_package_snapshot(
     })
 }
 
-trait CatalogView {
-    fn catalog(&self) -> &zephium_extension_package::ExtensionReleaseCatalog;
-    fn generation_anchor(&self) -> zephium_extension_authority::BundledCatalogGenerationAnchor;
+pub(crate) fn load_rollback_manifest_bindings(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    exact_catalog_bytes: &[u8],
+    installs: &ExtensionInstallCatalog,
+) -> Result<ExtensionGrantManifestBindings, SnapshotLoadError> {
+    if current.role != VerifiedCatalogRole::Rollback {
+        return Err(SnapshotLoadError::WrongRole);
+    }
+    let authority =
+        BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
+    let catalog = authority
+        .admit_rollback_catalog(exact_catalog_bytes)
+        .map_err(SnapshotLoadError::CatalogAdmission)?;
+    require_catalog_anchor(current, catalog.generation_anchor())?;
+    if installs.installs().is_empty() {
+        return finish_manifest_bindings(Vec::new());
+    }
+    let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
+    let mut bindings = Vec::with_capacity(installs.installs().len());
+    for install in installs.installs() {
+        let manifest = load_rollback_manifest_from_admitted(
+            runtime,
+            current,
+            &catalog,
+            &manifest_authority,
+            install,
+        )?;
+        bindings.push(ExtensionGrantManifestBinding::new(install.id(), manifest));
+    }
+    finish_manifest_bindings(bindings)
 }
 
-impl CatalogView for zephium_extension_authority::AdmittedBundledCatalog {
-    fn catalog(&self) -> &zephium_extension_package::ExtensionReleaseCatalog {
-        zephium_extension_authority::AdmittedBundledCatalog::catalog(self)
+// Manifest bootstrap deliberately stops after exact catalog/package-record,
+// tree-index, and manifest admission. Full tree closure verification belongs
+// only to lease acquisition; running it here would make one profile cohort
+// load proportional to every byte of every installed package.
+fn load_active_manifest_from_admitted(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    catalog: &AdmittedBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    install: &ExtensionInstall,
+) -> Result<Arc<ExtensionManifestDescriptor>, SnapshotLoadError> {
+    require_install_package(catalog.catalog(), install)?;
+    let LoadedRepositoryPackage {
+        record_id,
+        record: durable_record,
+        index,
+        index_bytes,
+        manifest_bytes,
+    } = load_repository_package(runtime, current, install.package().key())
+        .map_err(map_bootstrap_package_load_error)?;
+    let prepared = prepare_active_package_from_preparsed(
+        catalog,
+        manifest_authority,
+        durable_record.manifest.runtime_target.product_target(),
+        install.package().key(),
+        index,
+        index_bytes,
+        manifest_bytes,
+    )
+    .map_err(map_preparation_error)?;
+    if prepared.record() != &durable_record || prepared.record().record_id()? != record_id {
+        return Err(SnapshotLoadError::DurableMismatch);
     }
+    let (_index, manifest) = prepared.into_lease_parts();
+    if manifest.package_identity() != install.package() {
+        return Err(SnapshotLoadError::DurableMismatch);
+    }
+    Ok(Arc::new(manifest.descriptor().clone()))
+}
 
-    fn generation_anchor(&self) -> zephium_extension_authority::BundledCatalogGenerationAnchor {
-        zephium_extension_authority::AdmittedBundledCatalog::generation_anchor(self)
+fn load_rollback_manifest_from_admitted(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    catalog: &AdmittedRollbackBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    install: &ExtensionInstall,
+) -> Result<Arc<ExtensionManifestDescriptor>, SnapshotLoadError> {
+    require_install_package(catalog.catalog(), install)?;
+    let LoadedRepositoryPackage {
+        record_id,
+        record: durable_record,
+        index,
+        index_bytes,
+        manifest_bytes,
+    } = load_repository_package(runtime, current, install.package().key())
+        .map_err(map_bootstrap_package_load_error)?;
+    let prepared = prepare_rollback_package_from_preparsed(
+        catalog,
+        manifest_authority,
+        durable_record.manifest.runtime_target.product_target(),
+        install.package().key(),
+        index,
+        index_bytes,
+        manifest_bytes,
+    )
+    .map_err(map_preparation_error)?;
+    if prepared.record() != &durable_record || prepared.record().record_id()? != record_id {
+        return Err(SnapshotLoadError::DurableMismatch);
+    }
+    let (_index, manifest) = prepared.into_lease_parts();
+    if manifest.package_identity() != install.package() {
+        return Err(SnapshotLoadError::DurableMismatch);
+    }
+    Ok(Arc::new(manifest.descriptor().clone()))
+}
+
+// Caller-owned install identity is rejected before any repository package I/O.
+// Once this succeeds, a missing current-set row or a different admitted
+// package witness is repository incoherence rather than a clean caller error.
+fn require_install_package(
+    catalog: &ExtensionReleaseCatalog,
+    install: &ExtensionInstall,
+) -> Result<(), SnapshotLoadError> {
+    let package = catalog
+        .package(install.package().key())
+        .ok_or(SnapshotLoadError::PackageNotSelected)?;
+    if package.identity() != install.package() {
+        return Err(SnapshotLoadError::InstallPackageMismatch);
+    }
+    Ok(())
+}
+
+fn require_eligibility_package(
+    catalog: &ExtensionReleaseCatalog,
+    eligibility: &ExtensionRuntimeEligibility,
+) -> Result<(), SnapshotLoadError> {
+    let package = catalog
+        .package(eligibility.package().key())
+        .ok_or(SnapshotLoadError::PackageNotSelected)?;
+    if package.identity() != eligibility.package() {
+        return Err(SnapshotLoadError::EligibilityMismatch);
+    }
+    Ok(())
+}
+
+fn map_bootstrap_package_load_error(error: SnapshotLoadError) -> SnapshotLoadError {
+    match error {
+        SnapshotLoadError::PackageNotSelected => SnapshotLoadError::DurableMismatch,
+        other => other,
     }
 }
 
-impl CatalogView for zephium_extension_authority::AdmittedRollbackBundledCatalog {
-    fn catalog(&self) -> &zephium_extension_package::ExtensionReleaseCatalog {
-        zephium_extension_authority::AdmittedRollbackBundledCatalog::catalog(self)
+fn require_catalog_anchor(
+    current: &CurrentCatalogSetProjection,
+    admitted: zephium_extension_authority::BundledCatalogGenerationAnchor,
+) -> Result<(), SnapshotLoadError> {
+    if current.generation_anchor()? != admitted {
+        return Err(SnapshotLoadError::DurableMismatch);
     }
-
-    fn generation_anchor(&self) -> zephium_extension_authority::BundledCatalogGenerationAnchor {
-        zephium_extension_authority::AdmittedRollbackBundledCatalog::generation_anchor(self)
-    }
+    Ok(())
 }
 
-fn load_package_source(
+fn finish_manifest_bindings(
+    bindings: Vec<ExtensionGrantManifestBinding>,
+) -> Result<ExtensionGrantManifestBindings, SnapshotLoadError> {
+    ExtensionGrantManifestBindings::new(bindings).map_err(|error| match error {
+        ExtensionGrantCohortError::TooManyBindings { .. }
+        | ExtensionGrantCohortError::AccountingOverflow
+        | ExtensionGrantCohortError::RetainedBytesExceeded { .. } => {
+            SnapshotLoadError::AccountingOverflow
+        }
+        ExtensionGrantCohortError::DuplicateBinding(_)
+        | ExtensionGrantCohortError::IncompleteBindings
+        | ExtensionGrantCohortError::ManifestPackageMismatch(_)
+        | ExtensionGrantCohortError::TooManyAuthorities { .. }
+        | ExtensionGrantCohortError::DuplicateAuthority(_)
+        | ExtensionGrantCohortError::UnknownAuthority
+        | ExtensionGrantCohortError::AuthorityMismatch(_) => SnapshotLoadError::DurableMismatch,
+    })
+}
+
+struct LoadedRepositoryPackage {
+    record_id: Digest32,
+    record: PackageRecord,
+    index: CanonicalExtensionTreeIndex,
+    index_bytes: Box<[u8]>,
+    manifest_bytes: Box<[u8]>,
+}
+
+fn load_repository_package(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
     package_key: ExtensionPackageKey,
-    catalog: &impl CatalogView,
-) -> Result<(Digest32, PackageRecord, RepositoryPackageSource), SnapshotLoadError> {
+) -> Result<LoadedRepositoryPackage, SnapshotLoadError> {
     if runtime._state.current_catalog_set_id != Some(current.identity)
         || runtime._root.identity() != current.repository.root
         || runtime._records.identity() != current.repository.records
@@ -513,6 +720,12 @@ fn load_package_source(
     let row = current
         .package_row(package_key)
         .ok_or(SnapshotLoadError::PackageNotSelected)?;
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    REPOSITORY_PACKAGE_IO_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let record_bytes = read_required_sealed_record(
         &runtime._records,
         &package_record(row.package_record_id),
@@ -565,79 +778,31 @@ fn load_package_source(
     .map_err(map_tree_resource)?
     .map_err(|_| SnapshotLoadError::DurableMismatch)?;
 
-    let package = catalog
-        .catalog()
-        .package(package_key)
-        .ok_or(SnapshotLoadError::PackageNotSelected)?;
-    let catalog_source = super::source::BundledReleaseCatalogSourceIdentity::from_generation(
-        catalog.generation_anchor(),
-    )
-    .ok_or(SnapshotLoadError::AccountingOverflow)?;
-    let row_digest = digest_package_row(package)?.bytes();
-    let expected_source = BundledReleasePackageSourceIdentity::from_package(
-        catalog_source,
-        package.identity(),
-        row_digest,
-    )
-    .ok_or(SnapshotLoadError::DurableMismatch)?;
-    Ok((
-        row.package_record_id,
+    Ok(LoadedRepositoryPackage {
+        record_id: row.package_record_id,
         record,
-        RepositoryPackageSource {
-            expected_source,
-            index_bytes: index_bytes.into_boxed_slice(),
-            manifest_bytes: manifest_bytes.into_boxed_slice(),
-        },
-    ))
+        index,
+        index_bytes: index_bytes.into_boxed_slice(),
+        manifest_bytes: manifest_bytes.into_boxed_slice(),
+    })
 }
 
-struct RepositoryPackageSource {
-    expected_source: BundledReleasePackageSourceIdentity,
-    index_bytes: Box<[u8]>,
-    manifest_bytes: Box<[u8]>,
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn reset_repository_package_io_count() {
+    REPOSITORY_PACKAGE_IO_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
-impl BundledReleaseByteSource for RepositoryPackageSource {
-    fn with_resource<T, E, F>(
-        &mut self,
-        resource: BundledReleaseResource<'_>,
-        callback: F,
-    ) -> Result<Result<T, E>, BundledReleaseSourceError>
-    where
-        F: FnOnce(&mut dyn Read) -> Result<T, E>,
-    {
-        if resource.package() != self.expected_source {
-            return Err(BundledReleaseSourceError::Unsafe);
-        }
-        let bytes = match resource.kind() {
-            BundledReleaseResourceKind::TreeIndex { length, sha256 }
-                if length == self.index_bytes.len() as u64
-                    && sha256.bytes()
-                        == <[u8; 32]>::from(sha2::Sha256::digest(&self.index_bytes)) =>
-            {
-                &self.index_bytes
-            }
-            BundledReleaseResourceKind::TreeFile {
-                target,
-                length,
-                sha256,
-            } if target.as_str() == "manifest.json"
-                && length == self.manifest_bytes.len() as u64
-                && sha256 == <[u8; 32]>::from(sha2::Sha256::digest(&self.manifest_bytes)) =>
-            {
-                &self.manifest_bytes
-            }
-            BundledReleaseResourceKind::TreeIndex { .. }
-            | BundledReleaseResourceKind::TreeFile { .. } => {
-                return Err(BundledReleaseSourceError::IdentityAmbiguous)
-            }
-            BundledReleaseResourceKind::LegalNotice { .. } => {
-                return Err(BundledReleaseSourceError::UnsupportedResource)
-            }
-        };
-        let mut reader = Cursor::new(bytes.as_ref());
-        Ok(callback(&mut reader))
-    }
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn repository_package_io_count() -> usize {
+    REPOSITORY_PACKAGE_IO_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn require_eligibility(

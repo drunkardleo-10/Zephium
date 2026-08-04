@@ -10,6 +10,7 @@ use zephium_core::extensions::{
     ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionInstall,
     ExtensionInstallCatalog, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionPackageIdentity,
     ExtensionPackageKey, ExtensionRuntimeEligibility,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
@@ -27,20 +28,22 @@ use super::api::{
 };
 use super::repository::{arm_post_pin_reverify_hook, arm_release_planning_error_hook};
 use crate::materialization::{
-    add_owner_package_pin, begin_rollback_package_build,
+    add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
     install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
     open_product_manifest_authority, plan_current_catalog_package_pin,
     plan_owner_package_pin_removal, preflight_package_object_capacity, prepare_rollback_package,
-    remove_owner_package_pin, MaterializationTransitionError, OwnerPackagePinPlan,
-    OwnerPackagePinRemovalPlan, PackageObjectIntentDisposition,
+    remove_owner_package_pin, repository_package_io_count,
+    reset_completed_package_verification_count, reset_repository_package_io_count,
+    MaterializationTransitionError, OwnerPackagePinPlan, OwnerPackagePinRemovalPlan,
+    PackageObjectIntentDisposition,
 };
 use crate::state::Digest32;
 use crate::{
     BundledCatalogSetIdentity, BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome,
-    BundledPackageMaterializationOutcome, BundledPackageRuntimeSelection, BundledReleaseByteSource,
-    BundledReleaseCatalogSourceIdentity, BundledReleasePackageSourceIdentity,
-    BundledReleaseResource, BundledReleaseResourceKind, BundledReleaseSourceError,
-    ExtensionRepository, ExtensionRepositoryError,
+    BundledManifestBindingsError, BundledPackageMaterializationOutcome,
+    BundledPackageRuntimeSelection, BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
+    BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,
+    BundledReleaseSourceError, ExtensionRepository, ExtensionRepositoryError,
 };
 
 use crate::repository_e2e_fixture as fixture;
@@ -416,6 +419,238 @@ impl EligibilityFixture {
     }
 }
 
+fn install_catalog(
+    install_id: ExtensionInstallId,
+    package: ExtensionPackageIdentity,
+    desired_enabled: bool,
+) -> ExtensionInstallCatalog {
+    ExtensionInstallCatalog::from_persisted(
+        ExtensionInstallCatalogRevision::INITIAL,
+        Some(install_id),
+        vec![ExtensionInstall::from_persisted(
+            install_id,
+            ExtensionInstallRevision::INITIAL,
+            package,
+            desired_enabled,
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
+    let (active, rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let empty = ExtensionInstallCatalog::from_persisted(
+        ExtensionInstallCatalogRevision::INITIAL,
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.authenticate_current_bundled_manifest_bindings(&empty),
+        Err(BundledManifestBindingsError::NoCurrentSelection)
+    ));
+
+    let active_current = establish_active(&mut repository, &active);
+    let active_fixture =
+        EligibilityFixture::active(&active, ProfileId::from(101), ExtensionInstallId::from(103));
+    let active_eligibility = active_fixture.eligibility();
+    let selected = active_eligibility.package();
+    let mismatched = ExtensionPackageIdentity::new(
+        selected.authority(),
+        selected.key(),
+        selected.revision(),
+        selected.payload(),
+        ExtensionManifestDigest::from_bytes([0xA5; 32]),
+        selected.tree_sha256(),
+    );
+    let stale_manifest = ExtensionManifestDescriptor::new(
+        mismatched.clone(),
+        active_eligibility.manifest().version().number(),
+        active_eligibility.manifest().declarations().clone(),
+        active_eligibility.manifest().compatibility_target().clone(),
+        active_eligibility.manifest().compatibility().to_vec(),
+    )
+    .unwrap();
+    let stale_fixture = EligibilityFixture::from_descriptor(
+        ProfileId::from(105),
+        ExtensionInstallId::from(106),
+        Arc::new(stale_manifest),
+    );
+    reset_completed_package_verification_count();
+    reset_repository_package_io_count();
+    let stale_eligibility = stale_fixture.eligibility();
+    assert!(matches!(
+        repository.acquire_active_bundled_package_lease(active_current, &stale_eligibility),
+        Err(BundledPackageLeaseError::EligibilityMismatch)
+    ));
+    assert_eq!(repository_package_io_count(), 0);
+    assert_eq!(completed_package_verification_count(), 0);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+
+    let disabled = install_catalog(
+        ExtensionInstallId::from(107),
+        active_eligibility.package().clone(),
+        false,
+    );
+    reset_completed_package_verification_count();
+    let before = harness.snapshot();
+    let empty_bindings = repository
+        .authenticate_current_bundled_manifest_bindings(&empty)
+        .unwrap();
+    assert_eq!(
+        empty_bindings.current_catalog_set(),
+        BundledCurrentCatalogSet {
+            identity: active_current,
+            role: BundledCatalogGenerationRole::Active,
+        }
+    );
+    assert!(empty_bindings.bindings().is_empty());
+
+    let active_bindings = repository
+        .authenticate_current_bundled_manifest_bindings(&disabled)
+        .unwrap();
+    assert_eq!(
+        active_bindings.current_catalog_set(),
+        BundledCurrentCatalogSet {
+            identity: active_current,
+            role: BundledCatalogGenerationRole::Active,
+        }
+    );
+    assert_eq!(active_bindings.bindings().len(), 1);
+    assert_eq!(
+        active_bindings
+            .bindings()
+            .get(ExtensionInstallId::from(107)),
+        Some(active_eligibility.manifest())
+    );
+    assert_eq!(harness.snapshot(), before);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+
+    assert!(matches!(
+        repository.authenticate_current_bundled_manifest_bindings(&install_catalog(
+            ExtensionInstallId::from(109),
+            mismatched.clone(),
+            true,
+        )),
+        Err(BundledManifestBindingsError::InstallPackageMismatch)
+    ));
+    let absent = ExtensionPackageIdentity::new(
+        selected.authority(),
+        ExtensionPackageKey::from_bytes([0x5A; 32]),
+        selected.revision(),
+        selected.payload(),
+        selected.manifest_sha256(),
+        selected.tree_sha256(),
+    );
+    assert!(matches!(
+        repository.authenticate_current_bundled_manifest_bindings(&install_catalog(
+            ExtensionInstallId::from(113),
+            absent,
+            true,
+        )),
+        Err(BundledManifestBindingsError::PackageNotSelected)
+    ));
+    assert_eq!(harness.snapshot(), before);
+    assert!(!repository.writer_is_sealed());
+    assert_eq!(completed_package_verification_count(), 0);
+
+    let lease = repository
+        .acquire_active_bundled_package_lease(active_current, &active_fixture.eligibility())
+        .unwrap();
+    assert!(completed_package_verification_count() > 0);
+    let mut release = lease.into_release_request();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_harness = Harness::new();
+    let mut repository = rollback_harness.open();
+    let rollback_current = establish_rollback(&mut repository, &active, &rollback);
+    let rollback_fixture = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(127),
+        ExtensionInstallId::from(131),
+    );
+    let rollback_eligibility = rollback_fixture.eligibility();
+    let rollback_catalog = install_catalog(
+        ExtensionInstallId::from(137),
+        rollback_eligibility.package().clone(),
+        false,
+    );
+    reset_completed_package_verification_count();
+    let rollback_before = rollback_harness.snapshot();
+    let rollback_bindings = repository
+        .authenticate_current_bundled_manifest_bindings(&rollback_catalog)
+        .unwrap();
+    assert_eq!(
+        rollback_bindings.current_catalog_set(),
+        BundledCurrentCatalogSet {
+            identity: rollback_current,
+            role: BundledCatalogGenerationRole::Rollback,
+        }
+    );
+    assert_eq!(
+        rollback_bindings
+            .bindings()
+            .get(ExtensionInstallId::from(137)),
+        Some(rollback_eligibility.manifest())
+    );
+    assert_eq!(rollback_harness.snapshot(), rollback_before);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+    assert!(!repository.writer_is_sealed());
+    assert_eq!(completed_package_verification_count(), 0);
+
+    let corrupt_harness = Harness::new();
+    let mut repository = corrupt_harness.open();
+    establish_active(&mut repository, &active);
+    let corrupt_fixture =
+        EligibilityFixture::active(&active, ProfileId::from(139), ExtensionInstallId::from(149));
+    let corrupt_catalog = install_catalog(
+        ExtensionInstallId::from(151),
+        corrupt_fixture.eligibility().package().clone(),
+        true,
+    );
+    corrupt_harness.corrupt_manifest_same_length();
+    reset_repository_package_io_count();
+    assert!(matches!(
+        repository.authenticate_current_bundled_manifest_bindings(&install_catalog(
+            ExtensionInstallId::from(150),
+            mismatched,
+            true,
+        )),
+        Err(BundledManifestBindingsError::InstallPackageMismatch)
+    ));
+    assert_eq!(repository_package_io_count(), 0);
+    assert!(!repository.writer_is_sealed());
+    assert!(matches!(
+        repository.authenticate_current_bundled_manifest_bindings(&corrupt_catalog),
+        Err(BundledManifestBindingsError::DurableObjectMismatch)
+    ));
+    assert!(repository_package_io_count() > 0);
+    assert!(repository.writer_is_sealed());
+}
+
 #[test]
 fn active_public_lifecycle_is_exact_and_replay_is_byte_for_byte_read_only() {
     let (active, _rollback) = catalogs();
@@ -560,6 +795,14 @@ fn resource_callback_reentry_is_explicit_non_poisoning_and_drain_safe() {
                 ))
             ));
             assert!(matches!(
+                repository.authenticate_current_bundled_manifest_bindings(
+                    first_owner.cohort.install_catalog()
+                ),
+                Err(BundledManifestBindingsError::Repository(
+                    ExtensionRepositoryError::CallbackReentry
+                ))
+            ));
+            assert!(matches!(
                 second
                     .with_resource_reader::<(), std::io::Error>(&nested_manifest, |_reader| Ok(())),
                 Err(BundledPackageResourceError::CallbackReentry)
@@ -573,6 +816,14 @@ fn resource_callback_reentry_is_explicit_non_poisoning_and_drain_safe() {
         .unwrap();
     assert_eq!(first_byte, fixture::MANIFEST_BYTES[0]);
     assert!(!repository.writer_is_sealed());
+    assert_eq!(
+        repository
+            .authenticate_current_bundled_manifest_bindings(first_owner.cohort.install_catalog())
+            .unwrap()
+            .current_catalog_set()
+            .identity(),
+        current
+    );
     assert_eq!(
         repository
             .current_bundled_catalog_set()
@@ -866,6 +1117,13 @@ fn coherent_unrelated_build_intent_and_stage_are_retryable_and_read_only() {
             role: BundledCatalogGenerationRole::Active,
         })
     );
+    assert_eq!(harness.snapshot(), before);
+    assert!(!repository.writer_is_sealed());
+    assert!(matches!(
+        repository
+            .authenticate_current_bundled_manifest_bindings(release_owner.cohort.install_catalog()),
+        Err(BundledManifestBindingsError::BuildInProgress)
+    ));
     assert_eq!(harness.snapshot(), before);
     assert!(!repository.writer_is_sealed());
 

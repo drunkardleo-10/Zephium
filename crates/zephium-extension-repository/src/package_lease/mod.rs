@@ -1,6 +1,7 @@
 //! Opaque authenticated package leases and exact owner-pin release authority.
 
 mod api;
+mod manifest_bindings;
 mod policy;
 mod repository;
 mod resource;
@@ -12,6 +13,7 @@ pub use api::{
     BundledPackageLeaseReleaseOutcome, BundledPackageResourceError, RollbackBundledPackageLease,
     RollbackBundledPackageReleaseRequest,
 };
+pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
 pub(crate) use runtime::PackageLeaseRuntime;
 
 #[cfg(test)]
