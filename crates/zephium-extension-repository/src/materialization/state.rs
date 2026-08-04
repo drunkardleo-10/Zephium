@@ -103,6 +103,9 @@ impl MaterializationState {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
         if let Some(intent) = &self.build_intent {
+            if self.generation == MAX_DURABLE_GENERATION {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
             intent.validate(self.generation)?;
             if self
                 .completed_package_record_ids
@@ -312,6 +315,26 @@ mod tests {
             install_id: ExtensionInstallId::from(1),
             package_record_id: digest(1),
         });
+        assert_eq!(
+            state.validate(),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+    }
+
+    #[test]
+    fn terminal_generation_cannot_strand_a_build_intent() {
+        let package_record = super::super::records::tests::package_record_fixture(31);
+        let package_record_id = package_record.record_id().unwrap();
+        let state = MaterializationState {
+            generation: MAX_DURABLE_GENERATION,
+            build_intent: Some(MaterializationBuildIntent {
+                schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+                generation: MAX_DURABLE_GENERATION,
+                package_record_id,
+                package_record,
+            }),
+            ..MaterializationState::default()
+        };
         assert_eq!(
             state.validate(),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)

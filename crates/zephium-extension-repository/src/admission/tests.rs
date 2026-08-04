@@ -266,6 +266,68 @@ fn build_intent_blocks_only_catalog_advancement_before_any_candidate_mutation() 
 }
 
 #[test]
+fn catalog_candidate_staging_rejects_invalid_authority_without_touching_a_build() {
+    let harness = Harness::new();
+    let current = one_package_catalog(1, 2, 2, 0);
+    let current_witness = TestCatalogWitness::new(&current);
+    let stale = one_package_catalog(1, 1, 1, 0);
+    let stale_witness = TestCatalogWitness::new(&stale);
+    let foreign = one_package_catalog(9, 3, 3, 1);
+    let foreign_witness = TestCatalogWitness::new(&foreign);
+    let candidate = one_package_catalog(1, 3, 3, 1);
+    let candidate_witness = TestCatalogWitness::new(&candidate);
+
+    let mut repository = harness.open();
+    record(&mut repository, &current_witness, &current);
+    drop(repository);
+
+    let mut repository = harness.open();
+    let package = package_record_fixture(43);
+    let intent = MaterializationBuildIntent {
+        schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+        generation: 1,
+        package_record_id: package.record_id().unwrap(),
+        package_record: package,
+    };
+    let runtime = repository.materialization.as_mut().unwrap();
+    runtime._state.generation = 1;
+    runtime._state.build_intent = Some(intent.clone());
+    runtime._build_intent = Some(intent.clone());
+
+    assert_eq!(
+        repository.stage_catalog_candidate_view(&stale_witness, &stale),
+        Err(ExtensionRepositoryError::CatalogRollback)
+    );
+    assert_eq!(
+        repository.stage_catalog_candidate_view(&foreign_witness, &foreign),
+        Err(ExtensionRepositoryError::AuthorityMismatch)
+    );
+    assert!(!repository
+        .catalogs
+        .regular_exists(&catalog_file(codec::digest(&stale)))
+        .unwrap());
+    assert!(!repository
+        .catalogs
+        .regular_exists(&catalog_file(codec::digest(&foreign)))
+        .unwrap());
+
+    assert_eq!(
+        repository.stage_catalog_candidate_view(&candidate_witness, &candidate),
+        Ok(())
+    );
+    assert!(repository
+        .catalogs
+        .regular_exists(&catalog_file(codec::digest(&candidate)))
+        .unwrap());
+    assert_eq!(repository.state.generation, 1);
+    assert_eq!(
+        repository.materialization.as_ref().unwrap()._build_intent,
+        Some(intent)
+    );
+    assert!(repository.journals.list_components(1).unwrap().is_empty());
+}
+
+#[test]
 fn inconsistent_live_roots_seal_while_clean_interlock_conflicts_do_not() {
     let harness = Harness::new();
     let first = one_package_catalog(1, 1, 1, 0);
@@ -479,6 +541,7 @@ fn every_transition_boundary_recovers_to_one_exact_generation_and_seals_the_old_
         (FaultPoint::AfterJournal, 1),
         (FaultPoint::AfterState, 1),
         (FaultPoint::AfterCheckpoint, 1),
+        (FaultPoint::AfterJournalRetirement, 1),
     ] {
         let harness = Harness::new();
         let bytes = one_package_catalog(1, 1, 1, 0);

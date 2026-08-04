@@ -15,6 +15,7 @@ use zephium_private_fs::{
 };
 
 use super::names::{self, RecordNameKind, RecordObjectKind, TreeNameKind};
+use super::policy::{validate_completed_tree_budget, validate_package_anchor_consistency};
 use super::records::{
     CatalogAnchor, CatalogSetRecord, PackageRecord, StoredLegalArtifactKind, StoredPayloadIdentity,
     StoredRuntimePlatformFamily, StoredRuntimeTarget, MAX_CATALOG_SET_PACKAGES,
@@ -25,9 +26,8 @@ use super::runtime::{
 };
 use super::state::{
     MaterializationCheckpoint, MaterializationJournal, MaterializationState,
-    MAX_COMPLETED_PACKAGE_RECORDS, MAX_DRAIN_CATALOG_SELECTIONS,
-    MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
-    MAX_MATERIALIZATION_STATE_BYTES, MAX_RETAINED_CATALOG_SELECTIONS,
+    MAX_DRAIN_CATALOG_SELECTIONS, MAX_MATERIALIZATION_CHECKPOINT_BYTES,
+    MAX_MATERIALIZATION_JOURNAL_BYTES, MAX_MATERIALIZATION_STATE_BYTES,
 };
 use super::storage::{
     map_initialization_fs, read_required_control, read_required_sealed_record,
@@ -39,26 +39,6 @@ use crate::storage::{
     atomic_write_control, map_recovery_fs, read_required_recovery as read_catalog_object,
 };
 use crate::ExtensionRepositoryError;
-
-// Three selected catalog generations plus one bounded drain/cache selection.
-// A set chooses one backend per package; it never materializes all backend
-// profiles. The aggregate physical ceiling is therefore four catalog budgets.
-const _: () = assert!(MAX_CATALOG_SET_PACKAGES > 0);
-const _: () = assert!(MAX_COMPLETED_PACKAGE_RECORDS.is_multiple_of(MAX_CATALOG_SET_PACKAGES));
-const _: () = assert!(
-    MAX_COMPLETED_PACKAGE_RECORDS / MAX_CATALOG_SET_PACKAGES == MAX_RETAINED_CATALOG_SELECTIONS
-);
-const MAX_COMPLETED_TREE_BYTES: u64 = checked_mul_u64(
-    MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES,
-    (MAX_COMPLETED_PACKAGE_RECORDS / MAX_CATALOG_SET_PACKAGES) as u64,
-);
-
-const fn checked_mul_u64(left: u64, right: u64) -> u64 {
-    match left.checked_mul(right) {
-        Some(value) => value,
-        None => panic!("completed materialization tree budget overflow"),
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FaultPoint {
@@ -150,7 +130,7 @@ fn catalog_anchor_from_high_water(checkpoint: &StoredCatalogCheckpoint) -> Catal
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-fn open_or_recover_test_fixture(
+pub(super) fn open_or_recover_test_fixture(
     repository_root: &PrivateDirectory,
     materialization_exists: bool,
     fault: FaultPoint,
@@ -1111,7 +1091,8 @@ fn validate_state_references(
         .build_intent
         .as_ref()
         .map(|intent| &intent.package_record);
-    validate_package_anchor_consistency(completed_packages.iter().copied().chain(intent_package))?;
+    validate_package_anchor_consistency(completed_packages.iter().copied().chain(intent_package))
+        .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
 
     let catalog_set_ids = state.catalog_pin_ids().into_iter().collect::<BTreeSet<_>>();
     let mut package_record_ids = state
@@ -1242,65 +1223,21 @@ fn validate_completed_package_closure<'a>(
     Ok(packages)
 }
 
-fn validate_package_anchor_consistency<'a>(
-    packages: impl IntoIterator<Item = &'a PackageRecord>,
+fn validate_completed_budget(
+    state: &MaterializationState,
+    packages: &BTreeMap<Digest32, PackageRecord>,
 ) -> Result<(), ExtensionRepositoryError> {
-    let mut catalog_anchors = BTreeMap::new();
-    let mut package_row_anchors = BTreeMap::new();
-    let mut tree_index_anchors = BTreeMap::new();
-    let mut tree_anchors = BTreeMap::new();
-    let mut manifest_lengths = BTreeMap::new();
-    let mut legal_lengths = BTreeMap::new();
-    let mut archive_lengths = BTreeMap::new();
-    for package in packages {
-        if !insert_consistent(
-            &mut catalog_anchors,
-            package.catalog.catalog_sha256,
-            package.catalog,
-        ) || !insert_consistent(
-            &mut package_row_anchors,
-            package.package.package_row_sha256,
-            package.package,
-        ) || !insert_consistent(
-            &mut tree_index_anchors,
-            package.tree_index.index_sha256,
-            package.tree_index,
-        ) || !insert_consistent(
-            &mut tree_anchors,
-            package.tree_index.tree_sha256,
-            package.tree_index,
-        ) || !insert_consistent(
-            &mut manifest_lengths,
-            package.manifest.manifest_sha256,
-            package.manifest.manifest_length,
-        ) || !insert_consistent(
-            &mut legal_lengths,
-            package.legal.sha256,
-            package.legal.length,
-        ) {
-            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-        }
-        if let StoredPayloadIdentity::AcquiredZip { length, sha256 } = package.package.payload {
-            if !insert_consistent(&mut archive_lengths, sha256, length) {
-                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn insert_consistent<Key, Value>(anchors: &mut BTreeMap<Key, Value>, key: Key, value: Value) -> bool
-where
-    Key: Ord,
-    Value: Copy + Eq,
-{
-    match anchors.entry(key) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(value);
-            true
-        }
-        std::collections::btree_map::Entry::Occupied(entry) => *entry.get() == value,
-    }
+    let selected = state
+        .completed_package_record_ids
+        .iter()
+        .map(|package_id| {
+            packages
+                .get(package_id)
+                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_completed_tree_budget(selected)
+        .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)
 }
 
 struct ReferencedCatalogSetRoots<'a> {
@@ -1412,28 +1349,6 @@ fn validate_build_inventory(
         if *digest != expected {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
-    }
-    Ok(())
-}
-
-fn validate_completed_budget(
-    state: &MaterializationState,
-    packages: &BTreeMap<Digest32, PackageRecord>,
-) -> Result<(), ExtensionRepositoryError> {
-    let mut completed_tree_ids = BTreeSet::new();
-    let mut completed_tree_bytes = 0_u64;
-    for package_id in &state.completed_package_record_ids {
-        let package = packages
-            .get(package_id)
-            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-        if completed_tree_ids.insert(package.tree_index.tree_sha256) {
-            completed_tree_bytes = completed_tree_bytes
-                .checked_add(package.tree_index.tree_bytes)
-                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-        }
-    }
-    if completed_tree_bytes > MAX_COMPLETED_TREE_BYTES {
-        return Err(ExtensionRepositoryError::RecoveryAmbiguous);
     }
     Ok(())
 }

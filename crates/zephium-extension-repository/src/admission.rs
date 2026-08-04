@@ -2,7 +2,9 @@
 
 use std::cmp::Ordering;
 
-use zephium_extension_authority::{AdmittedBundledCatalog, BundledCatalogCheckpoint};
+use zephium_extension_authority::{
+    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogCheckpoint,
+};
 use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_CATALOG_BYTES};
 use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsError};
 
@@ -11,7 +13,7 @@ use crate::materialization::{self, MaterializationRuntime};
 use crate::names::{state_file, state_stage};
 use crate::recovery::open_repository;
 use crate::state::{
-    validate_catalog_lines, PackageLineHighWater, RecoveryCheckpoint, RepositoryState,
+    validate_catalog_lines, Digest32, PackageLineHighWater, RecoveryCheckpoint, RepositoryState,
     StoredCatalogCheckpoint, TransitionJournal, JOURNAL_SCHEMA_VERSION, MAX_JOURNAL_BYTES,
     MAX_PACKAGE_LINE_HIGH_WATERS, MAX_STATE_BYTES,
 };
@@ -28,7 +30,7 @@ use crate::names::{
     self, catalog_file, catalog_stage, checkpoint_stage, journal_file, journal_stage,
 };
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-use crate::state::{Digest32, MAX_CHECKPOINT_BYTES};
+use crate::state::MAX_CHECKPOINT_BYTES;
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 use crate::storage::read_required;
 
@@ -88,6 +90,127 @@ impl ExtensionRepository {
         exact_catalog_bytes: &[u8],
     ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
         self.record_view(admitted, exact_catalog_bytes, FaultPoint::None)
+    }
+
+    pub(crate) const fn writer_is_sealed(&self) -> bool {
+        self.sealed
+    }
+
+    pub(crate) fn writer_materialization(
+        &mut self,
+    ) -> Result<&MaterializationRuntime, ExtensionRepositoryError> {
+        if self.sealed {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        if self.materialization.is_none() {
+            self.writer_recover_materialization()?;
+        }
+        self.materialization
+            .as_ref()
+            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)
+    }
+
+    pub(crate) fn writer_take_materialization(
+        &mut self,
+    ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
+        let _ = self.writer_materialization()?;
+        self.materialization
+            .take()
+            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)
+    }
+
+    pub(crate) fn writer_recover_materialization(
+        &mut self,
+    ) -> Result<(), ExtensionRepositoryError> {
+        if self.sealed {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        self.materialization = None;
+        match materialization::open_or_recover(
+            self._namespace.directory(),
+            &self.catalogs,
+            self.state.checkpoint(),
+            true,
+            materialization::FaultPoint::None,
+        ) {
+            Ok(runtime) => {
+                self.materialization = Some(runtime);
+                Ok(())
+            }
+            Err(error) => Err(self.prejournal_error(error)),
+        }
+    }
+
+    pub(crate) fn writer_seal(&mut self) {
+        self.materialization = None;
+        self.sealed = true;
+    }
+
+    pub(crate) fn writer_ensure_rollback_catalog(
+        &mut self,
+        admitted: &AdmittedRollbackBundledCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<(), ExtensionRepositoryError> {
+        if self.sealed {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        validate_exact_rollback_catalog(admitted, exact_catalog_bytes)?;
+        if let Err(error) = self.state.validate() {
+            return Err(self.prejournal_error(error));
+        }
+        let current = self
+            .state
+            .checkpoint()
+            .ok_or(ExtensionRepositoryError::StateCorrupt)?;
+        if current.authority_id != Digest32::from_bytes(admitted.authority().bytes()) {
+            return Err(ExtensionRepositoryError::AuthorityMismatch);
+        }
+        if admitted.revision().get() > current.revision {
+            return Err(ExtensionRepositoryError::RollbackCatalogAboveHighWater);
+        }
+        if admitted.revision().get() == current.revision
+            && (Digest32::from_bytes(admitted.catalog_digest().bytes()) != current.catalog_sha256
+                || Digest32::from_bytes(admitted.inventory_digest().bytes())
+                    != current.inventory_sha256
+                || admitted.catalog_length() != current.catalog_length)
+        {
+            return Err(ExtensionRepositoryError::CatalogEquivocation);
+        }
+        let digest = Digest32::from_bytes(admitted.catalog_digest().bytes());
+        ensure_catalog_object(&self.catalogs, digest, exact_catalog_bytes)
+            .map_err(|error| self.prejournal_error(error))
+    }
+
+    pub(crate) fn writer_stage_active_catalog_candidate(
+        &mut self,
+        admitted: &AdmittedBundledCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<(), ExtensionRepositoryError> {
+        self.stage_catalog_candidate_view(admitted, exact_catalog_bytes)
+    }
+
+    fn stage_catalog_candidate_view(
+        &mut self,
+        admitted: &impl CatalogWitnessView,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<(), ExtensionRepositoryError> {
+        if self.sealed {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        validate_exact_catalog(admitted, exact_catalog_bytes)?;
+        let candidate = StoredCatalogCheckpoint::from_admitted(
+            admitted.checkpoint(),
+            exact_catalog_bytes.len(),
+        )?;
+        if let Err(error) = plan_record(&self.state, admitted.catalog(), candidate.clone()) {
+            return Err(self.prejournal_error(error));
+        }
+        ensure_catalog_object(
+            &self.catalogs,
+            candidate.catalog_sha256,
+            exact_catalog_bytes,
+        )
+        .map_err(|error| self.prejournal_error(error))
     }
 
     fn record_view(
@@ -166,6 +289,7 @@ impl ExtensionRepository {
         {
             return Err(self.seal_ambiguous());
         }
+        self.fail_if(fault, FaultPoint::AfterJournalRetirement)?;
         self.state = next_state;
         self.state_bytes = next_bytes;
         // Materialization recovery is bound to one exact catalog checkpoint.
@@ -215,7 +339,7 @@ impl ExtensionRepository {
             // observing durable namespace damage. This is a clean pre-journal
             // failure, so preserve the precise diagnosis while sealing the
             // instance until a fresh open performs full read-only preflight.
-            self.sealed = true;
+            self.writer_seal();
             return error;
         }
         if matches!(
@@ -231,7 +355,7 @@ impl ExtensionRepository {
                     | PrivateFsError::AlreadyExists
             )
         ) {
-            self.sealed = true;
+            self.writer_seal();
             ExtensionRepositoryError::SettlementAmbiguous
         } else {
             error
@@ -239,7 +363,7 @@ impl ExtensionRepository {
     }
 
     fn seal_ambiguous(&mut self) -> ExtensionRepositoryError {
-        self.sealed = true;
+        self.writer_seal();
         ExtensionRepositoryError::SettlementAmbiguous
     }
 
@@ -250,7 +374,7 @@ impl ExtensionRepository {
     ) -> Result<(), ExtensionRepositoryError> {
         #[cfg(test)]
         if configured == reached {
-            self.sealed = true;
+            self.writer_seal();
             return Err(ExtensionRepositoryError::InjectedCrash);
         }
         #[cfg(not(test))]
@@ -267,6 +391,7 @@ impl ExtensionRepository {
     ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
         self.record_view(witness, exact_catalog_bytes, fault)
     }
+
 }
 
 trait CatalogWitnessView {
@@ -369,13 +494,36 @@ fn validate_exact_catalog(
     Ok(())
 }
 
+fn validate_exact_rollback_catalog(
+    admitted: &AdmittedRollbackBundledCatalog,
+    bytes: &[u8],
+) -> Result<(), ExtensionRepositoryError> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_EXTENSION_RELEASE_CATALOG_BYTES
+        || u64::try_from(bytes.len()).ok() != Some(admitted.catalog_length())
+    {
+        return Err(ExtensionRepositoryError::CatalogBytesMismatch);
+    }
+    let parsed = ExtensionReleaseCatalog::parse_canonical(bytes)
+        .map_err(|_| ExtensionRepositoryError::CatalogBytesMismatch)?;
+    if &parsed != admitted.catalog()
+        || parsed.authority() != admitted.authority()
+        || parsed.revision() != admitted.revision()
+        || parsed.digest() != admitted.catalog_digest()
+    {
+        return Err(ExtensionRepositoryError::CatalogBytesMismatch);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FaultPoint {
+pub(crate) enum FaultPoint {
     None,
     AfterCatalogObject,
     AfterJournal,
     AfterState,
     AfterCheckpoint,
+    AfterJournalRetirement,
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]

@@ -15,6 +15,9 @@ pub enum ExtensionRepositoryError {
     /// The catalog revision is below the durable authority high-water mark.
     #[error("extension catalog revision is below the durable high-water mark")]
     CatalogRollback,
+    /// An explicit rollback catalog is newer than the durable authority floor.
+    #[error("extension rollback catalog revision is above the durable high-water mark")]
+    RollbackCatalogAboveHighWater,
     /// The catalog revision is unchanged but its authenticated identity differs.
     #[error("extension catalog revision has an equivocal identity")]
     CatalogEquivocation,

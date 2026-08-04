@@ -1,0 +1,1196 @@
+//! Typed crash-durable materialization state transitions.
+//!
+//! Every operation consumes the recovered runtime. A caller must perform a
+//! fresh recovery after success, after a pre-journal failure that left bounded
+//! residue, and after any ambiguous settlement. This prevents derived maps,
+//! sealed-root handles, or build-stage projections from surviving a durable
+//! state change.
+
+use zephium_private_fs::{ByteLimit, DirectoryIdentity, FileIdentity, PrivateFsError};
+
+use super::cleanup::{BuildStagesAbsent, CleanupError};
+use super::names::{self, RecordNameKind, TreeNameKind};
+use super::objects::{
+    PackageObjectCapacity, PackageObjectError, VerifiedActivePackageClosure,
+    VerifiedRollbackPackageClosure,
+};
+use super::policy::{
+    next_durable_generation, validate_completed_tree_budget, validate_package_anchor_consistency,
+};
+use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
+use super::records::PackageRecord;
+use super::runtime::MaterializationRuntime;
+use super::state::{
+    MaterializationBuildIntent, MaterializationCheckpoint, MaterializationJournal,
+    MaterializationState, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+    MATERIALIZATION_JOURNAL_SCHEMA_VERSION, MAX_MATERIALIZATION_JOURNAL_BYTES,
+    MAX_MATERIALIZATION_STATE_BYTES,
+};
+use super::storage::{read_required_control, remove_required_control, write_checkpoint};
+use crate::codec;
+use crate::state::Digest32;
+use crate::storage::atomic_write_control;
+use crate::ExtensionRepositoryError;
+
+/// Failure phase for one consuming materialization transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaterializationTransitionError {
+    /// The final journal was not submitted to the no-replace publication
+    /// primitive. Fresh recovery is still required before another operation.
+    Clean(ExtensionRepositoryError),
+    /// The namespace was quarantined, the final journal may be durable, or a
+    /// simulated process loss invalidated this live repository instance.
+    MustSeal(ExtensionRepositoryError),
+}
+
+/// Linear acknowledgement that one transition fully settled.
+///
+/// The value carries no runtime authority. Its only purpose is to make callers
+/// explicitly reopen rather than accidentally continue with stale projections.
+#[must_use = "a settled materialization transition requires fresh recovery"]
+pub(crate) struct MaterializationTransitionCommitted {
+    _generation: u64,
+    _seal: TransitionCommitSeal,
+}
+
+struct TransitionCommitSeal;
+
+/// Writer-owned crash frontier used only by structural tests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransitionFaultPoint {
+    None,
+    AfterJournalStage,
+    AfterJournalPublication,
+    AfterState,
+    AfterCheckpoint,
+    AfterJournalRetirement,
+}
+
+/// Durably starts one exact package build.
+///
+/// Two successor generations are reserved up front: one for the intent and
+/// one for either completion or abort. The record is not a durable completion
+/// root until a typed verified closure is consumed by a completion operation.
+pub(crate) fn begin_active_package_build(
+    runtime: MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: &PreparedActivePackage,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    begin_package_build_with_fault(
+        runtime,
+        capacity,
+        prepared.record(),
+        TransitionFaultPoint::None,
+    )
+}
+
+pub(crate) fn begin_rollback_package_build(
+    runtime: MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: &PreparedRollbackPackage,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    begin_package_build_with_fault(
+        runtime,
+        capacity,
+        prepared.record(),
+        TransitionFaultPoint::None,
+    )
+}
+
+fn begin_package_build_with_fault(
+    runtime: MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared_record: &PackageRecord,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.build_intent.is_some() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let (preflight_generation, records_parent, trees_parent, record) =
+        capacity.into_begin_parts().map_err(map_begin_proof_error)?;
+    if runtime._state.generation != preflight_generation
+        || runtime._records.identity() != records_parent
+        || runtime._trees.identity() != trees_parent
+        || &record != prepared_record
+    {
+        return Err(must_seal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    record
+        .validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    let record_id = record
+        .record_id()
+        .map_err(MaterializationTransitionError::Clean)?;
+    if runtime
+        ._state
+        .completed_package_record_ids
+        .binary_search(&record_id)
+        .is_ok()
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    validate_candidate_policy(&runtime, &record)?;
+
+    let successor = next_generation(runtime._state.generation)?;
+    let mut next = runtime._state.clone();
+    next.generation = successor;
+    next.build_intent = Some(MaterializationBuildIntent {
+        schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+        generation: successor,
+        package_record_id: record_id,
+        package_record: record,
+    });
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+/// Durably clears one interrupted build after all writer stages were removed.
+///
+/// Partially published content-addressed finals remain inert and may be reused
+/// by a later exact build. This operation never removes or rewrites a final.
+pub(crate) fn abort_package_build(
+    runtime: MaterializationRuntime,
+    stages_absent: BuildStagesAbsent,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    abort_package_build_with_fault(runtime, stages_absent, TransitionFaultPoint::None)
+}
+
+pub(super) fn abort_package_build_with_fault(
+    runtime: MaterializationRuntime,
+    stages_absent: BuildStagesAbsent,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    stages_absent
+        .validate(&runtime)
+        .map_err(map_cleanup_error)?;
+    if runtime._state.build_intent.is_none() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let mut next = runtime._state.clone();
+    next.generation = next_generation(runtime._state.generation)?;
+    next.build_intent = None;
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+/// Completes an ordinary active package without erasing its authority type.
+pub(crate) fn complete_active_package(
+    runtime: MaterializationRuntime,
+    closure: VerifiedActivePackageClosure,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    complete_active_package_with_fault(runtime, closure, TransitionFaultPoint::None)
+}
+
+pub(crate) fn complete_active_package_with_fault(
+    runtime: MaterializationRuntime,
+    closure: VerifiedActivePackageClosure,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    let (
+        generation,
+        record_id,
+        record,
+        _tree_root,
+        records_parent,
+        trees_parent,
+        stages_absent,
+        _active_authority,
+    ) = closure.into_completion_parts();
+    complete_package_build(
+        runtime,
+        CompletionPlan {
+            intent_generation: generation,
+            record_id,
+            record,
+            records_parent,
+            trees_parent,
+            stages_absent,
+        },
+        fault,
+    )
+}
+
+/// Completes an explicitly authorized rollback package without converting its
+/// witness into an ordinary active capability.
+pub(crate) fn complete_rollback_package(
+    runtime: MaterializationRuntime,
+    closure: VerifiedRollbackPackageClosure,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    complete_rollback_package_with_fault(runtime, closure, TransitionFaultPoint::None)
+}
+
+pub(super) fn complete_rollback_package_with_fault(
+    runtime: MaterializationRuntime,
+    closure: VerifiedRollbackPackageClosure,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    let (
+        generation,
+        record_id,
+        record,
+        _tree_root,
+        records_parent,
+        trees_parent,
+        stages_absent,
+        _rollback_authority,
+    ) = closure.into_completion_parts();
+    complete_package_build(
+        runtime,
+        CompletionPlan {
+            intent_generation: generation,
+            record_id,
+            record,
+            records_parent,
+            trees_parent,
+            stages_absent,
+        },
+        fault,
+    )
+}
+
+struct CompletionPlan {
+    intent_generation: u64,
+    record_id: Digest32,
+    record: PackageRecord,
+    records_parent: DirectoryIdentity,
+    trees_parent: DirectoryIdentity,
+    stages_absent: BuildStagesAbsent,
+}
+
+fn complete_package_build(
+    runtime: MaterializationRuntime,
+    plan: CompletionPlan,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    let CompletionPlan {
+        intent_generation,
+        record_id,
+        record,
+        records_parent,
+        trees_parent,
+        stages_absent,
+    } = plan;
+    validate_runtime(&runtime)?;
+    if runtime._records.identity() != records_parent || runtime._trees.identity() != trees_parent {
+        return Err(must_seal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    stages_absent
+        .validate(&runtime)
+        .map_err(map_cleanup_error)?;
+    let intent = runtime
+        ._state
+        .build_intent
+        .as_ref()
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if runtime._state.generation != intent_generation
+        || intent.generation != intent_generation
+        || intent.package_record_id != record_id
+        || intent.package_record != record
+        || record.record_id().ok() != Some(record_id)
+        || runtime
+            ._state
+            .completed_package_record_ids
+            .binary_search(&record_id)
+            .is_ok()
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    validate_candidate_policy(&runtime, &record)?;
+
+    let mut next = runtime._state.clone();
+    next.generation = next_generation(runtime._state.generation)?;
+    let insertion = next
+        .completed_package_record_ids
+        .binary_search(&record_id)
+        .map_or_else(Ok, |_| {
+            Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous))
+        })?;
+    next.completed_package_record_ids
+        .insert(insertion, record_id);
+    next.build_intent = None;
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    commit_state_transition(runtime, next, fault)
+}
+
+fn validate_candidate_policy(
+    runtime: &MaterializationRuntime,
+    candidate: &PackageRecord,
+) -> Result<(), MaterializationTransitionError> {
+    let mut completed = Vec::with_capacity(
+        runtime
+            ._state
+            .completed_package_record_ids
+            .len()
+            .saturating_add(1),
+    );
+    for record_id in &runtime._state.completed_package_record_ids {
+        completed.push(
+            runtime
+                ._package_records
+                .get(record_id)
+                .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?,
+        );
+    }
+    completed.push(candidate);
+    validate_package_anchor_consistency(completed.iter().copied())
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    validate_completed_tree_budget(completed)
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))
+}
+
+fn validate_runtime(
+    runtime: &MaterializationRuntime,
+) -> Result<(), MaterializationTransitionError> {
+    runtime
+        ._state
+        .validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    let canonical = codec::encode(&runtime._state, MAX_MATERIALIZATION_STATE_BYTES)
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if canonical != runtime._state_bytes || runtime._state.build_intent != runtime._build_intent {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    Ok(())
+}
+
+fn require_no_object_stages(
+    runtime: &MaterializationRuntime,
+) -> Result<(), MaterializationTransitionError> {
+    if runtime._build_stage.is_some() || !runtime._record_stages.is_empty() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    for entry in runtime
+        ._trees
+        .list_components(names::MAX_TREE_ENTRIES)
+        .map_err(map_prepublication_fs)?
+    {
+        let (_, kind) = names::parse_tree_name(entry.as_str())
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        if matches!(kind, TreeNameKind::Stage(_)) {
+            return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        }
+    }
+    for entry in runtime
+        ._records
+        .list_components(names::MAX_RECORD_ENTRIES)
+        .map_err(map_prepublication_fs)?
+    {
+        let (_, kind) = names::parse_record_name(entry.as_str())
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        if matches!(
+            kind,
+            RecordNameKind::Package { stage: true }
+                | RecordNameKind::CatalogSet { stage: true }
+                | RecordNameKind::TreeIndex { stage: true }
+                | RecordNameKind::Legal { stage: true }
+        ) {
+            return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        }
+    }
+    Ok(())
+}
+
+fn next_generation(current: u64) -> Result<u64, MaterializationTransitionError> {
+    next_durable_generation(current)
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::GenerationExhausted))
+}
+
+fn commit_state_transition(
+    runtime: MaterializationRuntime,
+    next_state: MaterializationState,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    let prepared = prepare_transition(&runtime._state, &runtime._state_bytes, next_state)?;
+
+    require_empty_journal_inventory(&runtime)?;
+    let journal_stage_identity = write_journal_stage(&runtime, &prepared)?;
+    verify_journal_stage(&runtime, &prepared)?;
+    fail_before_publication(fault, TransitionFaultPoint::AfterJournalStage)?;
+
+    // From this call onward, the final journal may be durable. No error can
+    // truthfully authorize continued use of this repository instance.
+    let published_identity = runtime
+        ._journals
+        .publish_noreplace_verified_regular(&prepared.stage_name, &prepared.journal_name)
+        .map_err(|_| must_seal(ExtensionRepositoryError::SettlementAmbiguous))?;
+    if published_identity != journal_stage_identity {
+        return Err(must_seal(ExtensionRepositoryError::SettlementAmbiguous));
+    }
+    verify_published_journal(&runtime, &prepared)
+        .map_err(|_| must_seal(ExtensionRepositoryError::SettlementAmbiguous))?;
+    fail_after_publication(fault, TransitionFaultPoint::AfterJournalPublication)?;
+
+    atomic_write_control(
+        &runtime._root,
+        &names::state_file(),
+        &names::state_stage(),
+        &prepared.next_state_bytes,
+        MAX_MATERIALIZATION_STATE_BYTES,
+    )
+    .map_err(|_| must_seal(ExtensionRepositoryError::SettlementAmbiguous))?;
+    fail_after_publication(fault, TransitionFaultPoint::AfterState)?;
+
+    write_checkpoint(
+        &runtime._root,
+        MaterializationCheckpoint::new(prepared.next_state.generation, prepared.next_state_sha256),
+    )
+    .map_err(|_| must_seal(ExtensionRepositoryError::SettlementAmbiguous))?;
+    fail_after_publication(fault, TransitionFaultPoint::AfterCheckpoint)?;
+
+    remove_required_control(&runtime._journals, &prepared.journal_name)
+        .map_err(|_| must_seal(ExtensionRepositoryError::SettlementAmbiguous))?;
+    fail_after_publication(fault, TransitionFaultPoint::AfterJournalRetirement)?;
+    if !runtime
+        ._journals
+        .list_components(names::MAX_MATERIALIZATION_JOURNAL_ENTRIES)
+        .map_err(|_| must_seal(ExtensionRepositoryError::SettlementAmbiguous))?
+        .is_empty()
+    {
+        return Err(must_seal(ExtensionRepositoryError::SettlementAmbiguous));
+    }
+
+    Ok(MaterializationTransitionCommitted {
+        _generation: prepared.next_state.generation,
+        _seal: TransitionCommitSeal,
+    })
+}
+
+#[derive(Debug)]
+struct PreparedTransition {
+    next_state: MaterializationState,
+    next_state_bytes: Vec<u8>,
+    next_state_sha256: Digest32,
+    journal_bytes: Vec<u8>,
+    stage_name: zephium_private_fs::PrivateComponent,
+    journal_name: zephium_private_fs::PrivateComponent,
+}
+
+fn prepare_transition(
+    current_state: &MaterializationState,
+    current_state_bytes: &[u8],
+    next_state: MaterializationState,
+) -> Result<PreparedTransition, MaterializationTransitionError> {
+    current_state
+        .validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    let canonical_current = codec::encode(current_state, MAX_MATERIALIZATION_STATE_BYTES)
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if canonical_current != current_state_bytes {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    next_state
+        .validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    if next_state.generation != next_generation(current_state.generation)? {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+
+    let next_state_bytes = codec::encode(&next_state, MAX_MATERIALIZATION_STATE_BYTES)
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    let next_state_sha256 = codec::digest(&next_state_bytes);
+    let journal = MaterializationJournal {
+        schema_version: MATERIALIZATION_JOURNAL_SCHEMA_VERSION,
+        generation: next_state.generation,
+        previous_state_sha256: codec::digest(current_state_bytes),
+        next_state_sha256,
+        next_state: next_state.clone(),
+    };
+    journal
+        .validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    let journal_bytes = codec::encode(&journal, MAX_MATERIALIZATION_JOURNAL_BYTES)
+        .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    let journal_sha256 = codec::digest(&journal_bytes);
+    let stage_name = names::journal_stage(next_state.generation, journal_sha256)
+        .map_err(MaterializationTransitionError::Clean)?;
+    let journal_name = names::journal_file(next_state.generation, journal_sha256)
+        .map_err(MaterializationTransitionError::Clean)?;
+
+    Ok(PreparedTransition {
+        next_state,
+        next_state_bytes,
+        next_state_sha256,
+        journal_bytes,
+        stage_name,
+        journal_name,
+    })
+}
+
+fn require_empty_journal_inventory(
+    runtime: &MaterializationRuntime,
+) -> Result<(), MaterializationTransitionError> {
+    let entries = runtime
+        ._journals
+        .list_components(names::MAX_MATERIALIZATION_JOURNAL_ENTRIES)
+        .map_err(map_prepublication_fs)?;
+    if !entries.is_empty() {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    Ok(())
+}
+
+fn write_journal_stage(
+    runtime: &MaterializationRuntime,
+    prepared: &PreparedTransition,
+) -> Result<FileIdentity, MaterializationTransitionError> {
+    runtime
+        ._journals
+        .write_new_synced(
+            &prepared.stage_name,
+            &prepared.journal_bytes,
+            ByteLimit::new(MAX_MATERIALIZATION_JOURNAL_BYTES).map_err(map_prepublication_fs)?,
+        )
+        .map_err(map_journal_stage_fs)
+}
+
+fn verify_journal_stage(
+    runtime: &MaterializationRuntime,
+    prepared: &PreparedTransition,
+) -> Result<(), MaterializationTransitionError> {
+    let stored = read_required_control(
+        &runtime._journals,
+        &prepared.stage_name,
+        MAX_MATERIALIZATION_JOURNAL_BYTES,
+    )
+    .map_err(|error| match error {
+        ExtensionRepositoryError::FileSystem(error) if fs_error_is_terminal(error) => {
+            must_seal(ExtensionRepositoryError::FileSystem(error))
+        }
+        other => before_journal(other),
+    })?;
+    if stored != prepared.journal_bytes {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    Ok(())
+}
+
+fn verify_published_journal(
+    runtime: &MaterializationRuntime,
+    prepared: &PreparedTransition,
+) -> Result<(), ExtensionRepositoryError> {
+    let stored = read_required_control(
+        &runtime._journals,
+        &prepared.journal_name,
+        MAX_MATERIALIZATION_JOURNAL_BYTES,
+    )?;
+    if stored != prepared.journal_bytes {
+        return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+    }
+    Ok(())
+}
+
+fn fail_before_publication(
+    configured: TransitionFaultPoint,
+    reached: TransitionFaultPoint,
+) -> Result<(), MaterializationTransitionError> {
+    #[cfg(test)]
+    if configured == reached {
+        return Err(must_seal(ExtensionRepositoryError::InjectedCrash));
+    }
+    #[cfg(not(test))]
+    let _ = (configured, reached);
+    Ok(())
+}
+
+fn fail_after_publication(
+    configured: TransitionFaultPoint,
+    reached: TransitionFaultPoint,
+) -> Result<(), MaterializationTransitionError> {
+    #[cfg(test)]
+    if configured == reached {
+        return Err(must_seal(ExtensionRepositoryError::InjectedCrash));
+    }
+    #[cfg(not(test))]
+    let _ = (configured, reached);
+    Ok(())
+}
+
+const fn before_journal(error: ExtensionRepositoryError) -> MaterializationTransitionError {
+    MaterializationTransitionError::Clean(error)
+}
+
+const fn must_seal(error: ExtensionRepositoryError) -> MaterializationTransitionError {
+    MaterializationTransitionError::MustSeal(error)
+}
+
+fn map_prepublication_fs(error: PrivateFsError) -> MaterializationTransitionError {
+    if fs_error_is_terminal(error) {
+        must_seal(ExtensionRepositoryError::FileSystem(error))
+    } else {
+        before_journal(match error {
+            PrivateFsError::AlreadyExists
+            | PrivateFsError::BoundExceeded
+            | PrivateFsError::Unsafe => ExtensionRepositoryError::RecoveryAmbiguous,
+            other => ExtensionRepositoryError::FileSystem(other),
+        })
+    }
+}
+
+fn map_journal_stage_fs(error: PrivateFsError) -> MaterializationTransitionError {
+    // A terminal create/write result may have left durable stage residue and a
+    // quarantined lease. Consuming the runtime plus this category forces a
+    // fresh recovery instead of relying on every caller to notice the subtype.
+    map_prepublication_fs(error)
+}
+
+fn map_begin_proof_error(_error: PackageObjectError) -> MaterializationTransitionError {
+    // A capacity token is produced by an immediately preceding bounded
+    // preflight. Any disagreement at this private handoff is stale-runtime or
+    // programmer corruption, never a user/source failure.
+    must_seal(ExtensionRepositoryError::RecoveryAmbiguous)
+}
+
+fn map_cleanup_error(error: CleanupError) -> MaterializationTransitionError {
+    match error {
+        CleanupError::BuildStateMismatch | CleanupError::ExactMismatch => {
+            must_seal(ExtensionRepositoryError::RecoveryAmbiguous)
+        }
+        CleanupError::SettlementAmbiguous => {
+            must_seal(ExtensionRepositoryError::SettlementAmbiguous)
+        }
+        CleanupError::Filesystem(error) if fs_error_is_terminal(error) => {
+            must_seal(ExtensionRepositoryError::FileSystem(error))
+        }
+        CleanupError::Filesystem(error) => {
+            before_journal(ExtensionRepositoryError::FileSystem(error))
+        }
+    }
+}
+
+const fn fs_error_is_terminal(error: PrivateFsError) -> bool {
+    matches!(
+        error,
+        PrivateFsError::IdentityAmbiguous
+            | PrivateFsError::SettlementUnknown
+            | PrivateFsError::Quarantined
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::materialization::state::MAX_DURABLE_GENERATION;
+
+    fn encoded(state: &MaterializationState) -> Vec<u8> {
+        codec::encode(state, MAX_MATERIALIZATION_STATE_BYTES).unwrap()
+    }
+
+    #[test]
+    fn preparation_binds_one_exact_successor_and_both_state_digests() {
+        let current = MaterializationState::default();
+        let current_bytes = encoded(&current);
+        let next = MaterializationState {
+            generation: 1,
+            ..MaterializationState::default()
+        };
+
+        let prepared = prepare_transition(&current, &current_bytes, next.clone()).unwrap();
+        let journal: MaterializationJournal = codec::decode_materialization(
+            &prepared.journal_bytes,
+            MAX_MATERIALIZATION_JOURNAL_BYTES,
+        )
+        .unwrap();
+        assert_eq!(prepared.next_state, next);
+        assert_eq!(journal.previous_state_sha256, codec::digest(&current_bytes));
+        assert_eq!(
+            journal.next_state_sha256,
+            codec::digest(&prepared.next_state_bytes)
+        );
+        assert_eq!(journal.next_state, next);
+    }
+
+    #[test]
+    fn preparation_rejects_stale_runtime_bytes_and_non_successors() {
+        let current = MaterializationState::default();
+        let stale_bytes = encoded(&MaterializationState {
+            generation: 1,
+            ..MaterializationState::default()
+        });
+        let successor = MaterializationState {
+            generation: 1,
+            ..MaterializationState::default()
+        };
+        assert_eq!(
+            prepare_transition(&current, &stale_bytes, successor).unwrap_err(),
+            before_journal(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+
+        let skipped = MaterializationState {
+            generation: 2,
+            ..MaterializationState::default()
+        };
+        assert_eq!(
+            prepare_transition(&current, &encoded(&current), skipped).unwrap_err(),
+            before_journal(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+    }
+
+    #[test]
+    fn generation_exhaustion_is_a_clean_prepublication_failure() {
+        let current = MaterializationState {
+            generation: MAX_DURABLE_GENERATION,
+            ..MaterializationState::default()
+        };
+        let next = current.clone();
+        assert_eq!(
+            prepare_transition(&current, &encoded(&current), next).unwrap_err(),
+            before_journal(ExtensionRepositoryError::GenerationExhausted)
+        );
+    }
+
+    #[test]
+    fn terminal_stage_failures_are_structurally_ambiguous() {
+        for error in [
+            PrivateFsError::IdentityAmbiguous,
+            PrivateFsError::SettlementUnknown,
+            PrivateFsError::Quarantined,
+        ] {
+            assert_eq!(
+                map_journal_stage_fs(error),
+                must_seal(ExtensionRepositoryError::FileSystem(error))
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    mod native {
+        use std::collections::BTreeSet;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use tempfile::TempDir;
+        use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory};
+
+        use super::*;
+        use crate::materialization::cleanup::prove_build_stages_absent;
+        use crate::materialization::names::{
+            self, MAX_MATERIALIZATION_JOURNAL_ENTRIES, MAX_MATERIALIZATION_ROOT_ENTRIES,
+            MAX_RECORD_ENTRIES, MAX_TREE_ENTRIES,
+        };
+        use crate::materialization::objects::{
+            preflight_package_object_capacity, PackageObjectIntentDisposition,
+        };
+        use crate::materialization::records::tests::package_record_fixture;
+        use crate::materialization::recovery::{
+            open_or_recover_test_fixture, FaultPoint as RecoveryFaultPoint,
+        };
+        use crate::materialization::state::MAX_MATERIALIZATION_CHECKPOINT_BYTES;
+        use crate::materialization::storage::read_required_control;
+
+        struct NativeHarness {
+            namespace: Option<LockedPrivateNamespace>,
+            temporary: TempDir,
+        }
+
+        impl NativeHarness {
+            fn new() -> (Self, MaterializationRuntime) {
+                #[cfg(target_os = "macos")]
+                let temporary = tempfile::tempdir_in("/private/tmp").unwrap();
+                #[cfg(target_os = "linux")]
+                let temporary = tempfile::tempdir_in("/tmp").unwrap();
+                fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+                let namespace =
+                    LockedPrivateNamespace::open_or_create(temporary.path().join("repository"))
+                        .unwrap();
+                let runtime = open_or_recover_test_fixture(
+                    namespace.directory(),
+                    false,
+                    RecoveryFaultPoint::None,
+                )
+                .unwrap();
+                (
+                    Self {
+                        namespace: Some(namespace),
+                        temporary,
+                    },
+                    runtime,
+                )
+            }
+
+            fn repository_root(&self) -> &PrivateDirectory {
+                self.namespace
+                    .as_ref()
+                    .expect("native test namespace remains open")
+                    .directory()
+            }
+
+            fn recover(&self) -> MaterializationRuntime {
+                open_or_recover_test_fixture(self.repository_root(), true, RecoveryFaultPoint::None)
+                    .unwrap()
+            }
+        }
+
+        impl Drop for NativeHarness {
+            fn drop(&mut self) {
+                drop(self.namespace.take());
+                make_fixture_tree_removable(self.temporary.path());
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct DurableFrontier {
+            state_generation: u64,
+            checkpoint_generation: u64,
+            intent_generation: Option<u64>,
+            journal_stages: usize,
+            journal_finals: usize,
+        }
+
+        fn observe_frontier(harness: &NativeHarness) -> DurableFrontier {
+            let root = harness
+                .repository_root()
+                .open_private_child(&names::materialization_directory())
+                .unwrap();
+            assert!(!root.regular_exists(&names::state_stage()).unwrap());
+            assert!(!root.regular_exists(&names::checkpoint_stage()).unwrap());
+
+            let state_bytes =
+                read_required_control(&root, &names::state_file(), MAX_MATERIALIZATION_STATE_BYTES)
+                    .unwrap();
+            let state: MaterializationState =
+                codec::decode_materialization(&state_bytes, MAX_MATERIALIZATION_STATE_BYTES)
+                    .unwrap();
+            assert_eq!(state_bytes, encoded(&state));
+
+            let checkpoint_bytes = read_required_control(
+                &root,
+                &names::checkpoint_file(),
+                MAX_MATERIALIZATION_CHECKPOINT_BYTES,
+            )
+            .unwrap();
+            let checkpoint: MaterializationCheckpoint = codec::decode_materialization(
+                &checkpoint_bytes,
+                MAX_MATERIALIZATION_CHECKPOINT_BYTES,
+            )
+            .unwrap();
+
+            let trees = root.open_private_child(&names::trees_directory()).unwrap();
+            let records = root
+                .open_private_child(&names::records_directory())
+                .unwrap();
+            let journals = root
+                .open_private_child(&names::journals_directory())
+                .unwrap();
+            assert!(trees.list_components(MAX_TREE_ENTRIES).unwrap().is_empty());
+            assert!(records
+                .list_components(MAX_RECORD_ENTRIES)
+                .unwrap()
+                .is_empty());
+
+            let mut journal_stages = 0_usize;
+            let mut journal_finals = 0_usize;
+            for entry in journals
+                .list_components(MAX_MATERIALIZATION_JOURNAL_ENTRIES)
+                .unwrap()
+            {
+                let (_, _, stage) = names::parse_journal_name(entry.as_str()).unwrap();
+                if stage {
+                    journal_stages += 1;
+                } else {
+                    journal_finals += 1;
+                }
+            }
+
+            DurableFrontier {
+                state_generation: state.generation,
+                checkpoint_generation: checkpoint.generation,
+                intent_generation: state.build_intent.as_ref().map(|intent| intent.generation),
+                journal_stages,
+                journal_finals,
+            }
+        }
+
+        fn assert_recovered_shape(
+            runtime: &MaterializationRuntime,
+            record: &PackageRecord,
+            generation: u64,
+            intent_generation: Option<u64>,
+            disposition: PackageObjectIntentDisposition,
+        ) {
+            assert_eq!(runtime._state.generation, generation);
+            assert_eq!(runtime._state_bytes, encoded(&runtime._state));
+            assert_eq!(runtime._state.build_intent, runtime._build_intent);
+            match (runtime._build_intent.as_ref(), intent_generation) {
+                (None, None) => {}
+                (Some(intent), Some(expected_generation)) => {
+                    assert_eq!(intent.generation, expected_generation);
+                    assert_eq!(intent.package_record, *record);
+                    assert_eq!(intent.package_record_id, record.record_id().unwrap());
+                }
+                (observed, expected) => {
+                    panic!("intent mismatch: observed={observed:?}, expected={expected:?}")
+                }
+            }
+            assert!(runtime
+                ._journals
+                .list_components(MAX_MATERIALIZATION_JOURNAL_ENTRIES)
+                .unwrap()
+                .is_empty());
+            assert!(runtime
+                ._trees
+                .list_components(MAX_TREE_ENTRIES)
+                .unwrap()
+                .is_empty());
+            assert!(runtime
+                ._records
+                .list_components(MAX_RECORD_ENTRIES)
+                .unwrap()
+                .is_empty());
+            assert!(runtime._build_stage.is_none());
+            assert!(runtime._record_stages.is_empty());
+            assert!(!runtime._root.regular_exists(&names::state_stage()).unwrap());
+            assert!(!runtime
+                ._root
+                .regular_exists(&names::checkpoint_stage())
+                .unwrap());
+
+            let root_entries = runtime
+                ._root
+                .list_components(MAX_MATERIALIZATION_ROOT_ENTRIES)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.as_str().to_owned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                root_entries,
+                BTreeSet::from([
+                    "journals".to_owned(),
+                    "records".to_owned(),
+                    "recovery-checkpoint.json".to_owned(),
+                    "state.json".to_owned(),
+                    "trees".to_owned(),
+                ])
+            );
+            assert_eq!(
+                preflight_package_object_capacity(runtime, record)
+                    .unwrap()
+                    .intent_disposition(),
+                disposition
+            );
+        }
+
+        fn injected_crash(
+            result: Result<MaterializationTransitionCommitted, MaterializationTransitionError>,
+        ) {
+            match result {
+                Err(MaterializationTransitionError::MustSeal(
+                    ExtensionRepositoryError::InjectedCrash,
+                )) => {}
+                Err(error) => panic!("unexpected transition error: {error:?}"),
+                Ok(_) => panic!("fault boundary unexpectedly committed without interruption"),
+            }
+        }
+
+        #[test]
+        fn begin_transition_recovers_every_native_crash_frontier() {
+            let record = package_record_fixture(41);
+            let cases = [
+                (
+                    TransitionFaultPoint::AfterJournalStage,
+                    DurableFrontier {
+                        state_generation: 0,
+                        checkpoint_generation: 0,
+                        intent_generation: None,
+                        journal_stages: 1,
+                        journal_finals: 0,
+                    },
+                    0,
+                    None,
+                    PackageObjectIntentDisposition::RequiresCommit,
+                ),
+                (
+                    TransitionFaultPoint::AfterJournalPublication,
+                    DurableFrontier {
+                        state_generation: 0,
+                        checkpoint_generation: 0,
+                        intent_generation: None,
+                        journal_stages: 0,
+                        journal_finals: 1,
+                    },
+                    1,
+                    Some(1),
+                    PackageObjectIntentDisposition::AlreadyCommitted,
+                ),
+                (
+                    TransitionFaultPoint::AfterState,
+                    DurableFrontier {
+                        state_generation: 1,
+                        checkpoint_generation: 0,
+                        intent_generation: Some(1),
+                        journal_stages: 0,
+                        journal_finals: 1,
+                    },
+                    1,
+                    Some(1),
+                    PackageObjectIntentDisposition::AlreadyCommitted,
+                ),
+                (
+                    TransitionFaultPoint::AfterCheckpoint,
+                    DurableFrontier {
+                        state_generation: 1,
+                        checkpoint_generation: 1,
+                        intent_generation: Some(1),
+                        journal_stages: 0,
+                        journal_finals: 1,
+                    },
+                    1,
+                    Some(1),
+                    PackageObjectIntentDisposition::AlreadyCommitted,
+                ),
+                (
+                    TransitionFaultPoint::AfterJournalRetirement,
+                    DurableFrontier {
+                        state_generation: 1,
+                        checkpoint_generation: 1,
+                        intent_generation: Some(1),
+                        journal_stages: 0,
+                        journal_finals: 0,
+                    },
+                    1,
+                    Some(1),
+                    PackageObjectIntentDisposition::AlreadyCommitted,
+                ),
+            ];
+
+            for (fault, expected_frontier, generation, intent, disposition) in cases {
+                let (harness, runtime) = NativeHarness::new();
+                let capacity = preflight_package_object_capacity(&runtime, &record).unwrap();
+                injected_crash(begin_package_build_with_fault(
+                    runtime, capacity, &record, fault,
+                ));
+                assert_eq!(observe_frontier(&harness), expected_frontier);
+
+                let recovered = harness.recover();
+                assert_recovered_shape(&recovered, &record, generation, intent, disposition);
+                drop(recovered);
+            }
+        }
+
+        #[test]
+        fn abort_transition_recovers_every_native_crash_frontier() {
+            let record = package_record_fixture(51);
+            let cases = [
+                (
+                    TransitionFaultPoint::AfterJournalStage,
+                    DurableFrontier {
+                        state_generation: 1,
+                        checkpoint_generation: 1,
+                        intent_generation: Some(1),
+                        journal_stages: 1,
+                        journal_finals: 0,
+                    },
+                    1,
+                    Some(1),
+                    PackageObjectIntentDisposition::AlreadyCommitted,
+                ),
+                (
+                    TransitionFaultPoint::AfterJournalPublication,
+                    DurableFrontier {
+                        state_generation: 1,
+                        checkpoint_generation: 1,
+                        intent_generation: Some(1),
+                        journal_stages: 0,
+                        journal_finals: 1,
+                    },
+                    2,
+                    None,
+                    PackageObjectIntentDisposition::RequiresCommit,
+                ),
+                (
+                    TransitionFaultPoint::AfterState,
+                    DurableFrontier {
+                        state_generation: 2,
+                        checkpoint_generation: 1,
+                        intent_generation: None,
+                        journal_stages: 0,
+                        journal_finals: 1,
+                    },
+                    2,
+                    None,
+                    PackageObjectIntentDisposition::RequiresCommit,
+                ),
+                (
+                    TransitionFaultPoint::AfterCheckpoint,
+                    DurableFrontier {
+                        state_generation: 2,
+                        checkpoint_generation: 2,
+                        intent_generation: None,
+                        journal_stages: 0,
+                        journal_finals: 1,
+                    },
+                    2,
+                    None,
+                    PackageObjectIntentDisposition::RequiresCommit,
+                ),
+                (
+                    TransitionFaultPoint::AfterJournalRetirement,
+                    DurableFrontier {
+                        state_generation: 2,
+                        checkpoint_generation: 2,
+                        intent_generation: None,
+                        journal_stages: 0,
+                        journal_finals: 0,
+                    },
+                    2,
+                    None,
+                    PackageObjectIntentDisposition::RequiresCommit,
+                ),
+            ];
+
+            for (fault, expected_frontier, generation, intent, disposition) in cases {
+                let (harness, initial) = NativeHarness::new();
+                let capacity = preflight_package_object_capacity(&initial, &record).unwrap();
+                let committed = begin_package_build_with_fault(
+                    initial,
+                    capacity,
+                    &record,
+                    TransitionFaultPoint::None,
+                )
+                .unwrap();
+                drop(committed);
+
+                let durable_intent = harness.recover();
+                assert_recovered_shape(
+                    &durable_intent,
+                    &record,
+                    1,
+                    Some(1),
+                    PackageObjectIntentDisposition::AlreadyCommitted,
+                );
+                let stages_absent = prove_build_stages_absent(&durable_intent).unwrap();
+                injected_crash(abort_package_build_with_fault(
+                    durable_intent,
+                    stages_absent,
+                    fault,
+                ));
+                assert_eq!(observe_frontier(&harness), expected_frontier);
+
+                let recovered = harness.recover();
+                assert_recovered_shape(&recovered, &record, generation, intent, disposition);
+                drop(recovered);
+            }
+        }
+
+        fn make_fixture_tree_removable(path: &std::path::Path) {
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                return;
+            };
+            if metadata.is_dir() {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        make_fixture_tree_removable(&entry.path());
+                    }
+                }
+            } else if !metadata.file_type().is_symlink() {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+}
