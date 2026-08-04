@@ -62,7 +62,11 @@ pub use manifest::{
     MAX_EXTENSION_SANDBOX_RESOURCES, MAX_EXTENSION_UNMODELED_DECLARATIONS,
     MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
 };
-pub use runtime::{ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial};
+pub use runtime::{
+    ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness,
+    ExtensionOperationAuthorityDenial, ExtensionRuntimeEligibility,
+    ExtensionRuntimeEligibilityDenial,
+};
 pub use transient::{
     ExtensionDocumentPurpose, ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration,
     ExtensionRuntimeInstance, ExtensionUserInvocationKind,
