@@ -3,16 +3,20 @@ use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::extensions::{
     ApiPermissionName, ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
     ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
     ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
-    ExtensionGrantAuthority, ExtensionGrantInitializationState, ExtensionGrantManifestBinding,
-    ExtensionGrantManifestBindings, ExtensionGrantMutation, ExtensionGrantRevision,
-    ExtensionHostPermissionSet, ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
-    ExtensionManifestDigest, ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
-    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantInitializationState,
+    ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantMutation,
+    ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstallCatalogMutation,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
+    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
+    ExtensionManifestResourceDigest, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
+    ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+    ExtensionTreeDigest, EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
 use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
@@ -65,6 +69,9 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         )),
         extension_grant_request_admission: Arc::new(Mutex::new(
             ExtensionGrantRequestAdmission::default(),
+        )),
+        extension_native_ownership_mutation_admission: Arc::new(Mutex::new(
+            ExtensionNativeOwnershipMutationAdmission::default(),
         )),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
@@ -448,6 +455,53 @@ fn mutate_extension_installs(
     let (reply, outcome) = mpsc::sync_channel(1);
     assert!(store.mutate_extension_install_catalog(
         profile,
+        expected,
+        mutation,
+        Box::new(move |result| {
+            let _ = reply.send(result);
+        }),
+    ));
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn native_ownership_preparation(
+    profile: ProfileId,
+    install_id: ExtensionInstallId,
+) -> ExtensionNativeOwnershipPreparation {
+    ExtensionNativeOwnershipPreparation::new(
+        ExtensionNativeOwnershipKey::new(
+            profile,
+            install_id,
+            ExtensionGrantBrowsingContext::Regular,
+        ),
+        bundled_extension_package(41, 42, 1),
+        ExtensionCatalogSetDigest::from_bytes([43; 32]),
+        ExtensionCatalogGenerationRole::Active,
+        ExtensionInstallCatalogRevision::INITIAL,
+        ExtensionInstallRevision::INITIAL,
+        ExtensionGrantRevision::INITIAL,
+        zephium_core::extensions::ExtensionGrantDigest::from_bytes([44; 32]),
+        ExtensionRuntimeBackendTarget::MacosNative,
+    )
+}
+
+fn load_native_ownership_journal(store: &impl Store) -> ExtensionNativeOwnershipJournalLoadOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(
+        store.load_extension_native_ownership_journal(Box::new(move |result| {
+            let _ = reply.send(result);
+        }))
+    );
+    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+}
+
+fn mutate_native_ownership_journal(
+    store: &impl Store,
+    expected: ExtensionNativeOwnershipJournalRevision,
+    mutation: ExtensionNativeOwnershipJournalMutation,
+) -> ExtensionNativeOwnershipJournalMutationOutcome {
+    let (reply, outcome) = mpsc::sync_channel(1);
+    assert!(store.mutate_extension_native_ownership_journal(
         expected,
         mutation,
         Box::new(move |result| {
@@ -1654,6 +1708,356 @@ fn extension_install_commit_ambiguity_requires_exact_load_reconciliation() {
         ),
         ExtensionInstallCatalogMutationOutcome::Invalid,
         "ambiguous settlement lost its durable install-id floor"
+    );
+}
+
+#[test]
+fn native_ownership_journal_cas_survives_restart_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let install = ExtensionInstallId::from(901);
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(initial) =
+            load_native_ownership_journal(&store)
+        else {
+            panic!("initial native-ownership journal did not load");
+        };
+        assert_eq!(
+            initial.revision(),
+            ExtensionNativeOwnershipJournalRevision::INITIAL
+        );
+        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(begun) =
+            mutate_native_ownership_journal(
+                &store,
+                initial.revision(),
+                ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                    profile, install,
+                )),
+            )
+        else {
+            panic!("native-ownership begin was not applied");
+        };
+        let preparing = begun.entry.as_deref().unwrap().clone();
+        assert_eq!(preparing.operation().get(), 1);
+        assert_eq!(preparing.native_incarnation().get(), 1);
+        assert_eq!(
+            preparing.phase(),
+            ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+        );
+        assert_eq!(
+            mutate_native_ownership_journal(
+                &store,
+                begun.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                    profile, install
+                ),),
+            ),
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid,
+            "begin replaced an unresolved owner row"
+        );
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(after_duplicate) =
+            load_native_ownership_journal(&store)
+        else {
+            panic!("native-ownership journal did not reload after duplicate begin");
+        };
+        assert_eq!(after_duplicate.revision(), begun.journal_revision);
+        assert_eq!(after_duplicate.operation_high_water().unwrap().get(), 1);
+        assert_eq!(after_duplicate.entries(), std::slice::from_ref(&preparing));
+        assert_eq!(
+            mutate_native_ownership_journal(
+                &store,
+                initial.revision(),
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    preparing.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                ),
+            ),
+            ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
+                current: begun.journal_revision,
+            }
+        );
+        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(may_own) =
+            mutate_native_ownership_journal(
+                &store,
+                begun.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    preparing.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                ),
+            )
+        else {
+            panic!("native-ownership may-own transition was not applied");
+        };
+        let may_own_entry = may_own.entry.as_deref().unwrap().clone();
+        assert_eq!(
+            may_own_entry.phase(),
+            ExtensionNativeOwnershipPhase::NativeMayOwn
+        );
+        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(owned) =
+            mutate_native_ownership_journal(
+                &store,
+                may_own.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    may_own_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeOwned,
+                ),
+            )
+        else {
+            panic!("native-ownership owned transition was not applied");
+        };
+        assert_eq!(
+            owned.entry.as_deref().unwrap().phase(),
+            ExtensionNativeOwnershipPhase::NativeOwned
+        );
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    {
+        let reopened = SqliteStore::open(dir.path()).unwrap();
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) =
+            load_native_ownership_journal(&reopened)
+        else {
+            panic!("restarted native-ownership journal did not load");
+        };
+        assert_eq!(journal.entries().len(), 1);
+        let entry = journal.entries()[0].clone();
+        assert_eq!(entry.key().profile(), profile);
+        assert_eq!(entry.key().install_id(), install);
+        assert_eq!(entry.phase(), ExtensionNativeOwnershipPhase::NativeOwned);
+        assert_eq!(entry.operation().get(), 1);
+        assert_eq!(entry.native_incarnation().get(), 1);
+
+        // The coordinator interprets persisted Owned as may-own and first
+        // journals release intent before asking the backend to remove it.
+        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(releasing) =
+            mutate_native_ownership_journal(
+                &reopened,
+                journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    entry.cas(),
+                    ExtensionNativeOwnershipIntent::Release,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                ),
+            )
+        else {
+            panic!("restarted owned row did not enter conservative release");
+        };
+        let releasing_entry = releasing.entry.as_deref().unwrap().clone();
+        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(absent) =
+            mutate_native_ownership_journal(
+                &reopened,
+                releasing.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    releasing_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Release,
+                    ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+                ),
+            )
+        else {
+            panic!("restarted owned row did not settle native absence");
+        };
+        let absent_entry = absent.entry.as_deref().unwrap().clone();
+        assert!(matches!(
+            mutate_native_ownership_journal(
+                &reopened,
+                absent.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::clear(absent_entry.cas()),
+            ),
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(_)
+        ));
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(cleared) =
+            load_native_ownership_journal(&reopened)
+        else {
+            panic!("cleared native-ownership journal did not load");
+        };
+        assert!(cleared.entries().is_empty());
+        assert_eq!(cleared.operation_high_water().unwrap().get(), 1);
+        assert_eq!(cleared.native_incarnation_high_water().unwrap().get(), 1);
+        assert_eq!(
+            reopened.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let second_restart = SqliteStore::open(dir.path()).unwrap();
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(cleared) =
+        load_native_ownership_journal(&second_restart)
+    else {
+        panic!("second restarted native-ownership journal did not load");
+    };
+    assert!(cleared.entries().is_empty());
+    assert_eq!(cleared.operation_high_water().unwrap().get(), 1);
+    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(second) =
+        mutate_native_ownership_journal(
+            &second_restart,
+            cleared.revision(),
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                profile,
+                ExtensionInstallId::from(904),
+            )),
+        )
+    else {
+        panic!("second native-ownership operation was not applied");
+    };
+    assert_eq!(second.entry.as_deref().unwrap().operation().get(), 2);
+    assert_eq!(
+        second.entry.as_deref().unwrap().native_incarnation().get(),
+        2
+    );
+}
+
+#[test]
+fn native_ownership_commit_ambiguity_requires_complete_reload() {
+    let profile = ProfileId::from(1);
+    let install = ExtensionInstallId::from(902);
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    hub.make_next_extension_native_ownership_commit_ambiguous();
+    let store = SqliteStore::spawn(hub).unwrap();
+
+    assert_eq!(
+        mutate_native_ownership_journal(
+            &store,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                profile, install,
+            )),
+        ),
+        ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown
+    );
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(reconciled) =
+        load_native_ownership_journal(&store)
+    else {
+        panic!("ambiguous native-ownership commit could not be reconciled");
+    };
+    assert_eq!(reconciled.revision().get(), 2);
+    assert_eq!(reconciled.entries().len(), 1);
+    assert_eq!(reconciled.entries()[0].key().install_id(), install);
+}
+
+#[test]
+fn native_ownership_actor_admission_is_count_and_byte_bounded() {
+    let (tx, rx) = mpsc::sync_channel(MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS + 1);
+    let store = test_store_with_sender(tx);
+    for index in 0..MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS {
+        assert!(store.mutate_extension_native_ownership_journal(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                ProfileId::from(1),
+                ExtensionInstallId::from(index as u128 + 1),
+            )),
+            Box::new(|_| {}),
+        ));
+    }
+    let rejected_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rejected_callback = rejected_completions.clone();
+    assert!(!store.mutate_extension_native_ownership_journal(
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+            ProfileId::from(1),
+            ExtensionInstallId::from(999),
+        )),
+        Box::new(move |_| {
+            rejected_callback.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert_eq!(rejected_completions.load(Ordering::Relaxed), 0);
+    drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
+    assert!(store.mutate_extension_native_ownership_journal(
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+            ProfileId::from(1),
+            ExtensionInstallId::from(1_000),
+        )),
+        Box::new(|_| {}),
+    ));
+    drop(rx);
+    let admission = store
+        .extension_native_ownership_mutation_admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(admission.count, 0);
+    assert_eq!(admission.retained_bytes, 0);
+    drop(admission);
+
+    let accounting = Arc::new(Mutex::new(
+        ExtensionNativeOwnershipMutationAdmission::default(),
+    ));
+    let full = ExtensionNativeOwnershipMutationPermit::acquire(
+        &accounting,
+        MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES,
+    )
+    .unwrap();
+    assert!(ExtensionNativeOwnershipMutationPermit::acquire(&accounting, 1).is_none());
+    drop(full);
+    assert_eq!(
+        *accounting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ExtensionNativeOwnershipMutationAdmission::default()
+    );
+}
+
+#[test]
+fn profile_deletion_waits_for_native_ownership_release_and_clear() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.save_session(two_profile_sample());
+    assert!(store.flush());
+    let profile = ProfileId::from(3);
+    let install = ExtensionInstallId::from(903);
+    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(begun) =
+        mutate_native_ownership_journal(
+            &store,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                profile, install,
+            )),
+        )
+    else {
+        panic!("native-ownership begin was not applied");
+    };
+    assert_eq!(
+        store
+            .authorize_profile_deletion(profile, sample(), Instant::now() + DEFAULT_FLUSH_TIMEOUT,),
+        ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
+    );
+
+    let preparing = begun.entry.as_deref().unwrap().clone();
+    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(release) =
+        mutate_native_ownership_journal(
+            &store,
+            begun.journal_revision,
+            ExtensionNativeOwnershipJournalMutation::transition(
+                preparing.cas(),
+                ExtensionNativeOwnershipIntent::Release,
+                ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+            ),
+        )
+    else {
+        panic!("native-ownership release transition was not applied");
+    };
+    let release_entry = release.entry.as_deref().unwrap().clone();
+    assert!(matches!(
+        mutate_native_ownership_journal(
+            &store,
+            release.journal_revision,
+            ExtensionNativeOwnershipJournalMutation::clear(release_entry.cas()),
+        ),
+        ExtensionNativeOwnershipJournalMutationOutcome::Applied(_)
+    ));
+    assert_eq!(
+        store
+            .authorize_profile_deletion(profile, sample(), Instant::now() + DEFAULT_FLUSH_TIMEOUT,),
+        ProfileDeletionAuthorizeOutcome::Authorized
     );
 }
 

@@ -17,7 +17,9 @@ use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
     ExtensionGrantManifestBindings, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
     MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::item::sanitize_page_title;
@@ -26,7 +28,8 @@ use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPat
 use zephium_core::ports::store::{
     BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionGrantCohortLoadOutcome,
     ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
-    ExtensionInstallCatalogMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
+    ExtensionInstallCatalogMutationOutcome, ExtensionNativeOwnershipJournalLoadOutcome,
+    ExtensionNativeOwnershipJournalMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
     PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
     ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
     UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome,
@@ -60,6 +63,7 @@ const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
 const MAX_PENDING_EXTENSION_INSTALL_MUTATIONS: usize = 16;
 const MAX_PENDING_EXTENSION_GRANT_REQUESTS: usize = 8;
+const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS: usize = 16;
 const MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES: usize = checked_const_add(
     MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
     MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
@@ -71,11 +75,22 @@ const MAX_PENDING_EXTENSION_GRANT_RETAINED_BYTES: usize = checked_const_add(
     MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
     MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES,
 );
+const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES: usize = checked_const_mul(
+    MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+);
 
 const fn checked_const_add(left: usize, right: usize) -> usize {
     match left.checked_add(right) {
         Some(value) => value,
         None => panic!("extension grant admission bound overflow"),
+    }
+}
+
+const fn checked_const_mul(left: usize, right: usize) -> usize {
+    match left.checked_mul(right) {
+        Some(value) => value,
+        None => panic!("extension native-ownership admission bound overflow"),
     }
 }
 
@@ -92,6 +107,10 @@ type ExtensionInstallCatalogMutationDone =
     Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
 type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>;
 type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
+type ExtensionNativeOwnershipJournalLoadDone =
+    Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
+type ExtensionNativeOwnershipJournalMutationDone =
+    Box<dyn FnOnce(ExtensionNativeOwnershipJournalMutationOutcome) + Send>;
 
 #[derive(Default)]
 struct UserscriptMutationAdmission {
@@ -284,6 +303,60 @@ impl Drop for ExtensionGrantRequestPermit {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ExtensionNativeOwnershipMutationAdmission {
+    count: usize,
+    retained_bytes: usize,
+}
+
+struct ExtensionNativeOwnershipMutationPermit {
+    admission: Arc<Mutex<ExtensionNativeOwnershipMutationAdmission>>,
+    retained_bytes: usize,
+}
+
+impl ExtensionNativeOwnershipMutationPermit {
+    fn acquire(
+        admission: &Arc<Mutex<ExtensionNativeOwnershipMutationAdmission>>,
+        retained_bytes: usize,
+    ) -> Option<Self> {
+        let mut state = admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next_count = state.count.checked_add(1)?;
+        let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
+        if next_count > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS
+            || next_bytes > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES
+        {
+            return None;
+        }
+        state.count = next_count;
+        state.retained_bytes = next_bytes;
+        Some(Self {
+            admission: admission.clone(),
+            retained_bytes,
+        })
+    }
+}
+
+impl Drop for ExtensionNativeOwnershipMutationPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (Some(count), Some(retained_bytes)) = (
+            state.count.checked_sub(1),
+            state.retained_bytes.checked_sub(self.retained_bytes),
+        ) else {
+            state.count = usize::MAX;
+            state.retained_bytes = usize::MAX;
+            return;
+        };
+        state.count = count;
+        state.retained_bytes = retained_bytes;
+    }
+}
+
 #[derive(Default)]
 struct PendingSettings {
     pending: HashMap<String, String>,
@@ -423,6 +496,13 @@ enum Cmd {
         ExtensionGrantRequestPermit,
         ExtensionGrantMutationDone,
     ),
+    LoadExtensionNativeOwnershipJournal(ExtensionNativeOwnershipJournalLoadDone),
+    MutateExtensionNativeOwnershipJournal(
+        ExtensionNativeOwnershipJournalRevision,
+        ExtensionNativeOwnershipJournalMutation,
+        ExtensionNativeOwnershipMutationPermit,
+        ExtensionNativeOwnershipJournalMutationDone,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -456,6 +536,8 @@ pub struct SqliteStore {
     page_permission_mutation_admission: Arc<Mutex<PagePermissionMutationAdmission>>,
     extension_install_mutation_admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
     extension_grant_request_admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
+    extension_native_ownership_mutation_admission:
+        Arc<Mutex<ExtensionNativeOwnershipMutationAdmission>>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
 }
@@ -500,6 +582,9 @@ impl SqliteStore {
             Arc::new(Mutex::new(ExtensionInstallMutationAdmission::default()));
         let extension_grant_request_admission =
             Arc::new(Mutex::new(ExtensionGrantRequestAdmission::default()));
+        let extension_native_ownership_mutation_admission = Arc::new(Mutex::new(
+            ExtensionNativeOwnershipMutationAdmission::default(),
+        ));
         let (actor_exited, actor_exit) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("zephium-store".into())
@@ -537,6 +622,7 @@ impl SqliteStore {
             page_permission_mutation_admission,
             extension_install_mutation_admission,
             extension_grant_request_admission,
+            extension_native_ownership_mutation_admission,
             lifecycle: Mutex::new(ActorLifecycle {
                 join: Some(join),
                 exited: actor_exit,
@@ -923,6 +1009,52 @@ impl Store for SqliteStore {
                 write,
                 permit,
                 done,
+            ))
+            .is_ok()
+    }
+
+    fn load_extension_native_ownership_journal(
+        &self,
+        done: ExtensionNativeOwnershipJournalLoadDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionNativeOwnershipJournal(done))
+            .is_ok()
+    }
+
+    fn mutate_extension_native_ownership_journal(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        done: ExtensionNativeOwnershipJournalMutationDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let retained_bytes = mutation.retained_bytes();
+        if retained_bytes > MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES {
+            return false;
+        }
+        let Some(permit) = ExtensionNativeOwnershipMutationPermit::acquire(
+            &self.extension_native_ownership_mutation_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::MutateExtensionNativeOwnershipJournal(
+                expected, mutation, permit, done,
             ))
             .is_ok()
     }
@@ -1487,6 +1619,29 @@ fn actor(
                         ExtensionGrantMutationOutcome::Failed
                     }
                 };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionNativeOwnershipJournal(done)) => {
+                let outcome = match hub.load_extension_native_ownership_journal() {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("store: extension native-ownership journal load failed: {error}");
+                        ExtensionNativeOwnershipJournalLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::MutateExtensionNativeOwnershipJournal(expected, mutation, _permit, done)) => {
+                let outcome =
+                    match hub.mutate_extension_native_ownership_journal(expected, mutation) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            eprintln!(
+                            "store: extension native-ownership journal mutation failed: {error}"
+                        );
+                            ExtensionNativeOwnershipJournalMutationOutcome::Failed
+                        }
+                    };
                 done(outcome);
             }
             Some(Cmd::GetSetting(key, reply)) => {

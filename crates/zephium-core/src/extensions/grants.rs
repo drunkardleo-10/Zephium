@@ -99,7 +99,7 @@ impl fmt::Debug for ExtensionGrantDigest {
 }
 
 /// Browsing partition in which an extension operation would execute.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ExtensionGrantBrowsingContext {
     Regular,
     Private,

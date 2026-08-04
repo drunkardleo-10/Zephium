@@ -396,8 +396,17 @@ that WebKit/WebView2 finished later native work. Deferred dispositions name that
 remaining boundary explicitly. Main-chrome-only status, reconciliation, and
 acknowledgement commands let a reloaded UI subscribe first, recover missed dispositions,
 and explicitly release them; acknowledgement is retried after transient IPC failures.
-This ledger is not durable across process death. Only workflows with their own journal,
-currently profile deletion, have cross-restart continuation.
+This ledger is not durable across process death. Only workflows with their own journal
+have cross-restart continuation: profile deletion and the bounded extension
+native-ownership ordering seam. The latter must durably enter `NativeMayOwn` before an
+ownership-changing native call, treats both `NativeMayOwn` and `NativeOwned` as possible
+ownership after restart, and clears only after definite native absence plus subordinate
+resource release. Its rows are profile-independent shared-meta state, so unresolved or
+unreadable ownership blocks both profile deletion authorization and local purge. The
+coordinator and product native backend remain disabled release work.
+`StoreShutdownOutcome::Clean` proves storage durability and actor/resource shutdown only;
+it does not prove these rows or their possible native owners absent. A future extension
+coordinator owns bounded drain attempts and higher-level shutdown health.
 
 Logical content views have three explicit watermarks. Twelve is the warm soft target;
 above it, hidden idle pages become discard candidates. Above the pressure watermark of
@@ -957,6 +966,18 @@ In scope are hostile pages attempting to reach native APIs, privileged-view XSS,
 cross-profile data leakage, malicious navigation and protocol handling, permission and
 download abuse, page-controlled resource exhaustion, persistence of private state, and
 unsafe teardown/recovery.
+
+The shared extension native-ownership journal remains cleanup-authoritative
+during session recovery. Recovery mode rejects every new ownership `Begin` and
+every acquire-directed `Transition`, but it must continue accepting exact-CAS
+release-directed `Transition` and `Clear` mutations for already-journaled rows;
+otherwise recovery could permanently strand a native owner and block safe
+profile deletion.
+
+Native-ownership clock and phase validation detects internally inconsistent,
+torn, or corrupted journal histories before reconciliation. It is not an
+external anti-rollback mechanism: an attacker who coherently restores the
+entire shared database to an older valid state is outside that guarantee.
 
 Not defeated by this architecture are a native engine sandbox escape, compromise of
 the Rust process or shipped bundle, an already-compromised OS/user account, physical

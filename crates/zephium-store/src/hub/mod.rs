@@ -12,6 +12,7 @@ mod extensions;
 mod favicons;
 mod filesystem;
 mod history;
+mod native_ownership;
 mod page_permissions;
 mod session;
 mod settings;
@@ -83,6 +84,8 @@ pub struct Hub {
     ambiguous_extension_install_commit_once: bool,
     #[cfg(test)]
     ambiguous_extension_grant_commit_once: bool,
+    #[cfg(test)]
+    ambiguous_extension_native_ownership_commit_once: bool,
 }
 
 pub(crate) struct AuthoritativeLoad {
@@ -139,6 +142,8 @@ impl Hub {
             ambiguous_extension_install_commit_once: false,
             #[cfg(test)]
             ambiguous_extension_grant_commit_once: false,
+            #[cfg(test)]
+            ambiguous_extension_native_ownership_commit_once: false,
         };
         hub.load_registry()?;
         // The snapshot and registry must agree before profile files are
@@ -238,6 +243,8 @@ impl Hub {
             ambiguous_extension_install_commit_once: false,
             #[cfg(test)]
             ambiguous_extension_grant_commit_once: false,
+            #[cfg(test)]
+            ambiguous_extension_native_ownership_commit_once: false,
         })
     }
 

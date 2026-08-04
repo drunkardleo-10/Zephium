@@ -6,6 +6,11 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::{Connection, Transaction};
 
+// Keep the literal embedded in META v11's SQLite capacity trigger tied to the
+// Core authority bound. SQL migration text cannot interpolate a Rust const.
+const _: [(); 1024] =
+    [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES];
+
 pub struct Migration {
     pub version: i64,
     pub up: fn(&Transaction) -> rusqlite::Result<()>,
@@ -452,6 +457,167 @@ pub static META: &[Migration] = &[
                  ) STRICT;
                  INSERT INTO profile_blocker_settings(profile_id, revision, enabled)
                  SELECT id, 1, 0 FROM profiles;",
+            )
+        },
+    },
+    Migration {
+        version: 11,
+        up: |tx| {
+            tx.execute_batch(
+                // This global meta journal is the durable ordering barrier
+                // around platform-native extension ownership. Rows have no
+                // foreign key to profiles: retirement and restart cleanup
+                // must survive profile removal and ancillary DB degradation.
+                // The application-level loader additionally validates the
+                // complete cohort without filtering it; SQL ordering uses
+                // bounded projections rather than raw durable sort keys.
+                "CREATE TABLE extension_native_ownership_journal_state (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     operation_high_water INTEGER NOT NULL
+                         CHECK (operation_high_water BETWEEN 0 AND 9223372036854775807),
+                     native_incarnation_high_water INTEGER NOT NULL
+                         CHECK (native_incarnation_high_water BETWEEN 0 AND 9223372036854775807),
+                     CHECK (
+                         (revision = 1
+                          AND operation_high_water = 0
+                          AND native_incarnation_high_water = 0)
+                         OR
+                         (revision > 1
+                          AND operation_high_water = native_incarnation_high_water
+                          AND operation_high_water BETWEEN 1 AND revision - 1)
+                     )
+                 ) STRICT;
+                 INSERT INTO extension_native_ownership_journal_state(
+                     id, revision, operation_high_water, native_incarnation_high_water
+                 ) VALUES (1, 1, 0, 0);
+                 CREATE TABLE extension_native_ownership_journal (
+                     profile_id TEXT NOT NULL
+                         CHECK (length(CAST(profile_id AS BLOB)) = 26
+                                AND instr(CAST(profile_id AS BLOB), X'00') = 0),
+                     install_id BLOB NOT NULL
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     browsing_context TEXT NOT NULL
+                         CHECK (browsing_context IN ('regular', 'private')),
+                     operation INTEGER NOT NULL UNIQUE
+                         CHECK (operation BETWEEN 1 AND 9223372036854775807),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     authority BLOB NOT NULL
+                         CHECK (typeof(authority) = 'blob' AND length(authority) = 32),
+                     package_key BLOB NOT NULL
+                         CHECK (typeof(package_key) = 'blob' AND length(package_key) = 32),
+                     package_revision INTEGER NOT NULL
+                         CHECK (package_revision BETWEEN 1 AND 9223372036854775807),
+                     payload_kind INTEGER NOT NULL CHECK (payload_kind IN (1, 2)),
+                     archive_length INTEGER,
+                     archive_sha256 BLOB,
+                     manifest_sha256 BLOB NOT NULL
+                         CHECK (typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32),
+                     tree_sha256 BLOB NOT NULL
+                         CHECK (typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32),
+                     catalog_set_sha256 BLOB NOT NULL
+                         CHECK (typeof(catalog_set_sha256) = 'blob' AND length(catalog_set_sha256) = 32),
+                     catalog_role TEXT NOT NULL
+                         CHECK (catalog_role IN ('active', 'rollback')),
+                     store_catalog_revision INTEGER NOT NULL
+                         CHECK (store_catalog_revision BETWEEN 1 AND 9223372036854775807),
+                     store_install_revision INTEGER NOT NULL
+                         CHECK (store_install_revision BETWEEN 1 AND 9223372036854775807),
+                     store_grant_revision INTEGER NOT NULL
+                         CHECK (store_grant_revision BETWEEN 1 AND 9223372036854775807),
+                     grant_sha256 BLOB NOT NULL
+                         CHECK (typeof(grant_sha256) = 'blob' AND length(grant_sha256) = 32),
+                     runtime_backend TEXT NOT NULL CHECK (runtime_backend IN (
+                         'macos_native', 'macos_compatibility',
+                         'linux_compatibility', 'windows_native'
+                     )),
+                     native_incarnation INTEGER NOT NULL UNIQUE
+                         CHECK (native_incarnation BETWEEN 1 AND 9223372036854775807),
+                     intent TEXT NOT NULL CHECK (intent IN ('acquire', 'release')),
+                     phase TEXT NOT NULL CHECK (phase IN (
+                         'native_absent_preparing', 'native_may_own',
+                         'native_owned', 'native_absent_release_pending'
+                     )),
+                     PRIMARY KEY (profile_id, install_id, browsing_context),
+                     CHECK (
+                         (payload_kind = 1
+                          AND archive_length IS NULL
+                          AND archive_sha256 IS NULL)
+                         OR
+                         (payload_kind = 2
+                          AND typeof(archive_length) = 'integer'
+                          AND archive_length BETWEEN 1 AND 67108864
+                          AND typeof(archive_sha256) = 'blob'
+                          AND length(archive_sha256) = 32)
+                     ),
+                     CHECK (
+                         operation = native_incarnation
+                     ),
+                     CHECK (
+                         (intent = 'acquire'
+                          AND phase = 'native_absent_preparing'
+                          AND revision = 1)
+                         OR
+                         (intent = 'acquire'
+                          AND phase = 'native_may_own'
+                          AND revision = 2)
+                         OR
+                         (intent = 'acquire'
+                          AND phase = 'native_owned'
+                          AND revision = 3)
+                         OR
+                         (intent = 'release'
+                          AND phase = 'native_may_own'
+                          AND revision BETWEEN 3 AND 4)
+                         OR
+                         (intent = 'release'
+                          AND phase = 'native_absent_release_pending'
+                          AND revision BETWEEN 2 AND 5)
+                     )
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE TRIGGER extension_native_ownership_journal_capacity
+                 BEFORE INSERT ON extension_native_ownership_journal
+                 WHEN (SELECT count(*) FROM extension_native_ownership_journal) >= 1024
+                 BEGIN
+                     SELECT RAISE(ABORT, 'native-ownership journal capacity exceeded');
+                 END;
+                 CREATE TRIGGER extension_native_ownership_journal_state_reachable
+                 BEFORE UPDATE OF revision, operation_high_water,
+                                  native_incarnation_high_water
+                 ON extension_native_ownership_journal_state
+                 BEGIN
+                     SELECT CASE
+                         WHEN live_count > NEW.operation_high_water
+                           OR EXISTS (
+                               SELECT 1
+                               FROM extension_native_ownership_journal
+                               WHERE operation > NEW.operation_high_water
+                                  OR native_incarnation > NEW.native_incarnation_high_water
+                                  OR operation > NEW.revision - revision
+                           )
+                         THEN RAISE(ABORT, 'native-ownership row exceeds journal authority')
+                         WHEN NEW.revision - (1 + live_revision_sum) < 0
+                         THEN RAISE(ABORT, 'native-ownership journal history is impossible')
+                         WHEN NEW.operation_high_water - live_count
+                              > (NEW.revision - (1 + live_revision_sum)) / 3
+                         THEN RAISE(ABORT, 'native-ownership journal history is too short')
+                         WHEN NEW.operation_high_water - live_count
+                              < (NEW.revision - (1 + live_revision_sum)) / 6
+                           OR (
+                               NEW.operation_high_water - live_count
+                               = (NEW.revision - (1 + live_revision_sum)) / 6
+                               AND (NEW.revision - (1 + live_revision_sum)) % 6 != 0
+                           )
+                         THEN RAISE(ABORT, 'native-ownership journal history is too long')
+                     END
+                     FROM (
+                         SELECT count(*) AS live_count,
+                                coalesce(sum(revision), 0) AS live_revision_sum
+                         FROM extension_native_ownership_journal
+                     );
+                 END;",
             )
         },
     },
@@ -926,6 +1092,45 @@ pub static PROFILE: &[Migration] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn insert_native_ownership_test_row(
+        conn: &Connection,
+        operation: i64,
+        entry_revision: i64,
+        incarnation: i64,
+        intent: &str,
+        phase: &str,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO extension_native_ownership_journal(
+                 profile_id, install_id, browsing_context, operation, revision,
+                 authority, package_key, package_revision,
+                 payload_kind, archive_length, archive_sha256,
+                 manifest_sha256, tree_sha256,
+                 catalog_set_sha256, catalog_role,
+                 store_catalog_revision, store_install_revision, store_grant_revision,
+                 grant_sha256, runtime_backend, native_incarnation, intent, phase
+             ) VALUES (
+                 '00000000000000000000000001', ?1, 'regular', ?2, ?3,
+                 ?4, ?5, 1, 1, NULL, NULL, ?6, ?7, ?8, 'active',
+                 1, 1, 1, ?9, 'macos_native', ?10, ?11, ?12
+             )",
+            rusqlite::params![
+                vec![operation as u8; 16],
+                operation,
+                entry_revision,
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                vec![4_u8; 32],
+                vec![5_u8; 32],
+                vec![6_u8; 32],
+                vec![7_u8; 32],
+                incarnation,
+                intent,
+                phase,
+            ],
+        )
+    }
 
     #[test]
     fn apply_is_idempotent_and_versioned() {
@@ -1488,7 +1693,7 @@ mod tests {
             .unwrap();
         }
 
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..10]).unwrap();
 
         let rows: Vec<(String, i64, i64)> = {
             let mut statement = conn
@@ -1543,6 +1748,143 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn meta_v11_adds_an_exact_empty_native_ownership_journal() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..10]).unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let state: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT id, revision, operation_high_water,
+                        native_incarnation_high_water
+                 FROM extension_native_ownership_journal_state",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (1, 1, 0, 0));
+        let entries: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM extension_native_ownership_journal",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(entries, 0);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+    }
+
+    #[test]
+    fn meta_v11_schema_rejects_invalid_native_ownership_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state SET revision = 0",
+                [],
+            )
+            .is_err());
+        for update in [
+            "revision = 2",
+            "revision = 2, operation_high_water = 1",
+            "revision = 1, operation_high_water = 1, native_incarnation_high_water = 1",
+            "revision = 2, operation_high_water = 2, native_incarnation_high_water = 2",
+        ] {
+            assert!(
+                conn.execute(
+                    &format!("UPDATE extension_native_ownership_journal_state SET {update}"),
+                    [],
+                )
+                .is_err(),
+                "accepted impossible state tuple: {update}"
+            );
+        }
+        assert!(
+            insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_owned",).is_err()
+        );
+        assert!(insert_native_ownership_test_row(
+            &conn,
+            1,
+            1,
+            2,
+            "acquire",
+            "native_absent_preparing",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn meta_v11_trigger_enforces_reachable_native_ownership_history_range() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 3,
+                     operation_high_water = 1,
+                     native_incarnation_high_water = 1",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 2,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM extension_native_ownership_journal", [])
+            .unwrap();
+        for impossible in [3_i64, 8] {
+            assert!(
+                conn.execute(
+                    "UPDATE extension_native_ownership_journal_state SET revision = ?1",
+                    [impossible],
+                )
+                .is_err(),
+                "accepted unreachable cleared history revision {impossible}"
+            );
+        }
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state SET revision = 4",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state SET revision = 7",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn meta_v11_exact_manifest_rejects_native_journal_schema_replacement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+        conn.execute_batch(
+            "DROP TABLE extension_native_ownership_journal;
+             CREATE TABLE extension_native_ownership_journal (
+                 profile_id TEXT,
+                 install_id BLOB,
+                 browsing_context TEXT
+             ) STRICT;",
+        )
+        .unwrap();
+
+        let error = apply(&mut conn, META).unwrap_err().to_string();
+        assert!(error.contains("sqlite_schema"), "{error}");
     }
 
     #[test]

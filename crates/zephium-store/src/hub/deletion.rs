@@ -40,6 +40,17 @@ impl Hub {
         profile: ProfileId,
         filtered: &SessionState,
     ) -> rusqlite::Result<ProfileDeletionAuthorizeOutcome> {
+        match self.has_extension_native_ownership_for_profile(profile) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => {
+                // The actor's outer authorization error path is reserved for
+                // durability-ambiguous session/journal commits. Do not let a
+                // corrupt or unreadable ownership cohort enter that path and
+                // be mistaken for an already-authorized deletion after
+                // reconciliation. Unknown ownership is pending ownership.
+                return Ok(ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending);
+            }
+        }
         let prepared = self.prepare_session(filtered)?;
         if prepared.registry.contains(&profile) {
             return Ok(ProfileDeletionAuthorizeOutcome::InvalidSession);
@@ -330,6 +341,14 @@ impl Hub {
         profile: ProfileId,
         require_restart_confirmation: bool,
     ) -> rusqlite::Result<bool> {
+        // Authorization cannot be used as a stale capability to purge the
+        // local profile while a native extension owner remains unresolved.
+        // Validate the complete global cohort; malformed siblings fail closed.
+        if self.has_extension_native_ownership_for_profile(profile)? {
+            return Err(invalid_data(
+                "profile deletion is blocked by native extension ownership",
+            ));
+        }
         // Validate every row first. A malformed sibling must not be hidden by
         // a targeted query and later crowd a valid authorization out of the
         // bounded cohort.
@@ -523,8 +542,80 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use rusqlite::{params, Connection};
+    use zephium_core::extensions::{
+        ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+        ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
+        ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
+        ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
+        ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+        ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+        ExtensionTreeDigest,
+    };
+    use zephium_core::ids::ExtensionInstallId;
+    use zephium_core::profiles::ProfileKind;
+    use zephium_core::session::PersistedProfile;
 
     const PROFILE_SCRUB_MARKER: &str = "zephiumscrubmarker97613";
+
+    fn native_entry(
+        profile: ProfileId,
+        install: ExtensionInstallId,
+    ) -> ExtensionNativeOwnershipEntry {
+        ExtensionNativeOwnershipEntry::from_persisted(
+            ExtensionNativeOwnershipKey::new(
+                profile,
+                install,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionNativeOwnershipOperation::INITIAL,
+            ExtensionNativeOwnershipEntryRevision::new(2).unwrap(),
+            ExtensionPackageIdentity::new(
+                ExtensionAuthorityId::from_bytes([1; 32]),
+                ExtensionPackageKey::from_bytes([2; 32]),
+                ExtensionPackageRevision::INITIAL,
+                ExtensionPackagePayloadIdentity::BundledTree,
+                ExtensionManifestDigest::from_bytes([3; 32]),
+                ExtensionTreeDigest::from_bytes([4; 32]),
+            ),
+            ExtensionCatalogSetDigest::from_bytes([5; 32]),
+            ExtensionCatalogGenerationRole::Active,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallRevision::INITIAL,
+            ExtensionGrantRevision::INITIAL,
+            ExtensionGrantDigest::from_bytes([6; 32]),
+            ExtensionRuntimeBackendTarget::MacosNative,
+            ExtensionNativeIncarnation::INITIAL,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        )
+        .unwrap()
+    }
+
+    fn deletion_sessions() -> (SessionState, SessionState) {
+        let survivor = PersistedProfile {
+            id: ProfileId::from(1),
+            name: "Personal".into(),
+            kind: ProfileKind::Default,
+        };
+        let deleted = PersistedProfile {
+            id: ProfileId::from(2),
+            name: "Work".into(),
+            kind: ProfileKind::Named,
+        };
+        let filtered = SessionState {
+            profiles: vec![survivor.clone()],
+            spaces: Vec::new(),
+            items: Vec::new(),
+            active_space: None,
+            active_item: None,
+            splits: None,
+        };
+        let mut full = filtered.clone();
+        full.profiles.push(deleted);
+        (full, filtered)
+    }
 
     #[test]
     fn profile_scrub_covers_every_current_user_data_and_authority_table() {
@@ -731,6 +822,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn local_profile_purge_refuses_stale_authorization_while_native_owner_is_unresolved() {
+        let mut hub = Hub::in_memory().unwrap();
+        let profile = ProfileId::from(81);
+        hub.meta
+            .execute(
+                "INSERT INTO profile_deletion_journal(
+                     profile_id, authorized_at, native_erasure_verified,
+                     local_unlink_completed, local_unlink_process
+                 ) VALUES (?1, 1, 0, 0, NULL)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        let entry = native_entry(profile, ExtensionInstallId::from(82));
+        hub.inject_extension_native_ownership_entry_for_interlock_test(&entry)
+            .unwrap();
+
+        assert!(hub.finalize_profile_deletion(profile).is_err());
+        let journal = hub.profile_deletion_journal_entries().unwrap();
+        assert_eq!(journal.len(), 1);
+        assert!(!journal[0].native_erasure_verified);
+    }
+
+    #[test]
+    fn malformed_native_ownership_sibling_blocks_authorization_and_final_purge() {
+        let mut hub = Hub::in_memory().unwrap();
+        let (full, filtered) = deletion_sessions();
+        hub.save(&full).unwrap();
+        let target = ProfileId::from(2);
+        let sibling = native_entry(ProfileId::from(99), ExtensionInstallId::from(1));
+        hub.inject_extension_native_ownership_entry_for_interlock_test(&sibling)
+            .unwrap();
+        hub.meta
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        hub.meta
+            .execute(
+                "UPDATE extension_native_ownership_journal SET phase = 'unknown'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            hub.authorize_profile_deletion(target, &filtered).unwrap(),
+            ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
+        );
+        assert!(hub.profile_deletion_journal_entries().unwrap().is_empty());
+
+        // Reproduce a stale pre-interlock authorization without using the
+        // production path, then prove finalization still validates every
+        // ownership sibling before marking native proof or purging locally.
+        hub.meta
+            .execute("DELETE FROM profiles WHERE id = ?1", [target.to_string()])
+            .unwrap();
+        hub.load_registry().unwrap();
+        hub.meta
+            .execute(
+                "INSERT INTO profile_deletion_journal(
+                     profile_id, authorized_at, native_erasure_verified,
+                     local_unlink_completed, local_unlink_process
+                 ) VALUES (?1, 1, 0, 0, NULL)",
+                [target.to_string()],
+            )
+            .unwrap();
+        assert!(hub.finalize_profile_deletion(target).is_err());
+        let journal = hub.profile_deletion_journal_entries().unwrap();
+        assert_eq!(journal.len(), 1);
+        assert!(!journal[0].native_erasure_verified);
     }
 
     fn database_files(path: &Path) -> [PathBuf; 3] {

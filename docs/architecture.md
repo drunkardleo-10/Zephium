@@ -583,6 +583,29 @@ authenticated content-addressed packages, monotonic candidate/current/previous
 state, staged activation, rollback, and crash recovery—without coupling
 extensions to blocker compilation.
 
+The shared meta schema carries a separate bounded native-ownership journal.
+Each path-free row binds one `(profile, install, regular/private context)` to
+the exact package, active/rollback catalog-set digest, store/grant revisions,
+backend target, persistent native incarnation, intent, and conservative phase.
+A complete-cohort global CAS must commit `NativeMayOwn` before any native call
+that could create, retain, or remove an owner. `NativeOwned` is preserved
+exactly on disk but treated as may-own after restart; a row clears only after
+definite native absence and subordinate resource release. Unknown, corrupt,
+duplicate, or over-limit state fails the complete load. The journal survives
+profile ancillary degradation/removal and blocks profile deletion until its
+rows settle. Session recovery rejects new `Begin` operations and every
+acquire-directed `Transition`, while exact release-directed `Transition` and
+`Clear` operations remain available to retire existing native owners. This is
+persistence and ordering infrastructure only: no service coordinator or
+product native-extension activation is implemented yet. Reconstruction also
+rejects unreachable clock histories: operation and incarnation high-water
+marks are equal, every row binds the same operation/incarnation, phase and row
+revision agree, and with `C = high_water - live_rows` plus
+`S = sum(live_row_revisions)`, the global revision is within
+`1 + S + 3C ..= 1 + S + 6C`. These internal consistency checks prevent clock
+reuse from a torn or corrupted cohort; they cannot detect a coherent rollback
+of the entire database without an external anti-rollback anchor.
+
 Durable package identity is representation-exact. A bundled authenticated tree
 is tagged `BundledTree` and carries no synthetic archive evidence; a future
 acquired ZIP is tagged separately and binds both a non-zero bounded byte length
@@ -813,7 +836,9 @@ FTS5; a test guards it).
   structural extension install/grant authority. Those ancillary catalogs are
   durable input only: they do not prove native activation, package
   authentication, or live permission enforcement. The conservative native
-  reconciliation journal remains a separate future authority.
+  reconciliation journal is separate shared-meta ordering state. It does not
+  itself authenticate a package or prove native activation, and the service
+  coordinator that joins it to those authorities is not implemented yet.
 
 ---
 

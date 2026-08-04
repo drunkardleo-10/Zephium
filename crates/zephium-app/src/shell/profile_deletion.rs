@@ -151,6 +151,7 @@ impl Shell {
             ProfileDeletionAuthorizeOutcome::NotRegistered
             | ProfileDeletionAuthorizeOutcome::SessionConflict
             | ProfileDeletionAuthorizeOutcome::InvalidSession
+            | ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
             | ProfileDeletionAuthorizeOutcome::NotAdmitted
             | ProfileDeletionAuthorizeOutcome::Failed => operation_result(
                 OperationOutcome::Rejected,
@@ -437,6 +438,7 @@ impl Shell {
             ProfileDeletionAuthorizeOutcome::NotRegistered
             | ProfileDeletionAuthorizeOutcome::SessionConflict
             | ProfileDeletionAuthorizeOutcome::InvalidSession
+            | ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
             | ProfileDeletionAuthorizeOutcome::NotAdmitted
             | ProfileDeletionAuthorizeOutcome::Failed => self.finish_profile_deletion_operation(
                 profile,

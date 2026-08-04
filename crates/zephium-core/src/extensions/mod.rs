@@ -12,6 +12,7 @@ mod grants;
 mod identity;
 mod install;
 mod manifest;
+mod native_ownership;
 mod runtime;
 mod transient;
 
@@ -61,6 +62,20 @@ pub use manifest::{
     MAX_EXTENSION_MANIFEST_RETAINED_BYTES, MAX_EXTENSION_OVERRIDES,
     MAX_EXTENSION_SANDBOX_RESOURCES, MAX_EXTENSION_UNMODELED_DECLARATIONS,
     MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
+};
+pub use native_ownership::{
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionNativeIncarnation,
+    ExtensionNativeOwnershipApplyError, ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipEntryRevision,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
+    ExtensionNativeOwnershipJournalApplication, ExtensionNativeOwnershipJournalError,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipMutationKind,
+    ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
+    ExtensionNativeOwnershipPreparation, ExtensionRuntimeBackendTarget,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_RETAINED_BYTES,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 };
 pub use runtime::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness,
