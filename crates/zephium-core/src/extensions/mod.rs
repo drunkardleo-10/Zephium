@@ -12,6 +12,7 @@ mod grants;
 mod identity;
 mod install;
 mod manifest;
+mod runtime;
 
 pub use cohort::{
     ExtensionGrantCohort, ExtensionGrantCohortError, ExtensionGrantInitializationState,
@@ -60,3 +61,4 @@ pub use manifest::{
     MAX_EXTENSION_SANDBOX_RESOURCES, MAX_EXTENSION_UNMODELED_DECLARATIONS,
     MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
 };
+pub use runtime::{ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial};

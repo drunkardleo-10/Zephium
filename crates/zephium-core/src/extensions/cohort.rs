@@ -7,8 +7,9 @@ use std::sync::Arc;
 use crate::ids::{ExtensionInstallId, ProfileId};
 
 use super::{
-    ExtensionGrantAuthority, ExtensionInstall, ExtensionInstallCatalog,
-    ExtensionInstallCatalogRevision, ExtensionManifestDescriptor,
+    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionInstall,
+    ExtensionInstallCatalog, ExtensionInstallCatalogRevision, ExtensionManifestDescriptor,
+    ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial,
     MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
     MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
@@ -409,6 +410,23 @@ impl ExtensionGrantCohort {
         })
     }
 
+    /// Projects one exact install's durable runtime prerequisites from this
+    /// complete atomic cohort.
+    ///
+    /// The result remains only store-snapshot eligibility. Callers must join
+    /// it with a freshly authenticated repository package lease and native
+    /// runtime admission before executing extension code.
+    pub fn runtime_eligibility(
+        &self,
+        id: ExtensionInstallId,
+        browsing_context: ExtensionGrantBrowsingContext,
+    ) -> Result<ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial> {
+        let entry = self
+            .resolve_entry(id)
+            .ok_or(ExtensionRuntimeEligibilityDenial::InstallNotFound)?;
+        ExtensionRuntimeEligibility::from_entry(entry, browsing_context)
+    }
+
     /// Issues an exact absence witness only from this complete cohort and only
     /// when the durable non-reuse floor proves that the id existed in, or is
     /// older than, the catalog's admitted identity domain.
@@ -461,10 +479,11 @@ impl Error for ExtensionGrantCohortError {}
 mod tests {
     use super::*;
     use crate::extensions::{
-        ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
-        ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
-        ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
-        ExtensionInstall, ExtensionInstallCatalogRevision, ExtensionManifestDeclarations,
+        ApiPermissionName, ExtensionApiGrantDecision, ExtensionApiPermissionSet,
+        ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionCompatibilityClassification,
+        ExtensionCompatibilityLevel, ExtensionCompatibilityTargetId,
+        ExtensionContentSecurityPolicyDeclaration, ExtensionInstall,
+        ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
         ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
         ExtensionManifestResourceDigest, ExtensionPackageIdentity, ExtensionPackageKey,
         ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
@@ -489,8 +508,16 @@ mod tests {
         package: ExtensionPackageIdentity,
         target: &str,
     ) -> Arc<ExtensionManifestDescriptor> {
+        manifest_with_required_api(package, target, Vec::new())
+    }
+
+    fn manifest_with_required_api(
+        package: ExtensionPackageIdentity,
+        target: &str,
+        required_api: Vec<ApiPermissionName>,
+    ) -> Arc<ExtensionManifestDescriptor> {
         let declarations = ExtensionManifestDeclarations::new(
-            ExtensionApiPermissionSet::new(Vec::new()).unwrap(),
+            ExtensionApiPermissionSet::new(required_api).unwrap(),
             ExtensionApiPermissionSet::new(Vec::new()).unwrap(),
             None,
             None,
@@ -721,6 +748,139 @@ mod tests {
         assert!(Arc::ptr_eq(first.manifest_arc(), &first_manifest));
         assert!(first.authority_arc().is_none());
         assert!(cohort.resolve_entry(ExtensionInstallId::from(8)).is_none());
+    }
+
+    #[test]
+    fn runtime_eligibility_binds_every_store_revision_and_fails_closed() {
+        let package = package();
+        let storage = ApiPermissionName::parse_exact("storage").unwrap();
+        let manifest = manifest_with_required_api(
+            package.clone(),
+            "test.cohort.runtime.v1",
+            vec![storage.clone()],
+        );
+        let id = ExtensionInstallId::from(17);
+        let profile = ProfileId::from(42);
+        let bindings = || {
+            ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+                id,
+                manifest.clone(),
+            )])
+            .unwrap()
+        };
+
+        let disabled = ExtensionInstall::new(id, package.clone());
+        let disabled_authority = ExtensionGrantAuthority::initialize(
+            &disabled,
+            vec![storage.clone()],
+            Vec::new(),
+            false,
+            false,
+            &manifest,
+        )
+        .unwrap();
+        let disabled_cohort = ExtensionGrantCohort::from_persisted(
+            profile,
+            ExtensionInstallCatalog::new(ExtensionInstallCatalogRevision::INITIAL, vec![disabled])
+                .unwrap(),
+            bindings(),
+            vec![disabled_authority],
+        )
+        .unwrap();
+        assert!(matches!(
+            disabled_cohort.runtime_eligibility(id, ExtensionGrantBrowsingContext::Regular),
+            Err(ExtensionRuntimeEligibilityDenial::Disabled)
+        ));
+        assert!(matches!(
+            disabled_cohort.runtime_eligibility(
+                ExtensionInstallId::from(18),
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            Err(ExtensionRuntimeEligibilityDenial::InstallNotFound)
+        ));
+
+        let enabled = ExtensionInstall::from_persisted(
+            id,
+            ExtensionInstallRevision::new(7).unwrap(),
+            package,
+            true,
+        );
+        let catalog_revision = ExtensionInstallCatalogRevision::new(9).unwrap();
+        let enabled_catalog = || {
+            ExtensionInstallCatalog::from_persisted(
+                catalog_revision,
+                Some(id),
+                vec![enabled.clone()],
+            )
+            .unwrap()
+        };
+        let uninitialized = ExtensionGrantCohort::from_persisted(
+            profile,
+            enabled_catalog(),
+            bindings(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            uninitialized.runtime_eligibility(id, ExtensionGrantBrowsingContext::Regular),
+            Err(ExtensionRuntimeEligibilityDenial::GrantsUninitialized)
+        ));
+
+        let missing = ExtensionGrantAuthority::new(&enabled, &manifest).unwrap();
+        let missing = ExtensionGrantCohort::from_persisted(
+            profile,
+            enabled_catalog(),
+            bindings(),
+            vec![missing],
+        )
+        .unwrap();
+        assert!(matches!(
+            missing.runtime_eligibility(id, ExtensionGrantBrowsingContext::Regular),
+            Err(ExtensionRuntimeEligibilityDenial::RequiredAuthorityMissing)
+        ));
+
+        let authority = ExtensionGrantAuthority::initialize(
+            &enabled,
+            vec![storage.clone()],
+            Vec::new(),
+            false,
+            true,
+            &manifest,
+        )
+        .unwrap();
+        let grant_revision = authority.revision();
+        let grant_digest = authority.digest();
+        let admitted = ExtensionGrantCohort::from_persisted(
+            profile,
+            enabled_catalog(),
+            bindings(),
+            vec![authority],
+        )
+        .unwrap();
+        assert!(matches!(
+            admitted.runtime_eligibility(id, ExtensionGrantBrowsingContext::Private),
+            Err(ExtensionRuntimeEligibilityDenial::PrivateBrowsingUnsupported)
+        ));
+
+        let eligibility = admitted
+            .runtime_eligibility(id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        assert_eq!(eligibility.profile(), profile);
+        assert_eq!(eligibility.catalog_revision(), catalog_revision);
+        assert_eq!(eligibility.install_id(), id);
+        assert_eq!(eligibility.install_revision(), enabled.revision());
+        assert_eq!(eligibility.grant_revision(), grant_revision);
+        assert_eq!(eligibility.grant_digest(), grant_digest);
+        assert_eq!(
+            eligibility.browsing_context(),
+            ExtensionGrantBrowsingContext::Regular
+        );
+        assert_eq!(eligibility.package(), enabled.package());
+        assert!(std::ptr::eq(eligibility.manifest(), manifest.as_ref()));
+        assert_eq!(
+            eligibility.decide_api(&storage),
+            ExtensionApiGrantDecision::Granted
+        );
     }
 
     #[test]
