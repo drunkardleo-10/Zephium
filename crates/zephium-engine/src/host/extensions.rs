@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zephium_core::extensions::{
-    ExtensionDocumentPurpose, ExtensionRuntimeInstance, ExtensionUserInvocationKind,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
+    ExtensionGrantDenial, ExtensionRuntimeFingerprint, ExtensionRuntimeInstance,
+    ExtensionUrlScopeDecision, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 
@@ -35,6 +36,7 @@ const MAX_ACTIVE_TAB_AUTHORITIES: usize =
 /// The native resource ledger remains the tighter bound for webview-backed
 /// owners; this cap prevents a future non-view native context from escaping
 /// the profile/install ceilings.
+#[cfg(test)]
 const MAX_NATIVE_EXTENSION_RUNTIME_OWNERS: usize =
     zephium_core::session::MAX_SESSION_PROFILES * MAX_EXTENSION_INSTALLS_PER_PROFILE;
 const MAX_PENDING_DOCUMENT_PERMITS: usize = MAX_ACTIVE_TAB_AUTHORITIES;
@@ -77,6 +79,7 @@ impl DocumentOrigin {
 }
 
 struct ActiveTabAuthority {
+    runtime: ExtensionRuntimeFingerprint,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
     epoch: NavigationEpoch,
@@ -140,93 +143,61 @@ impl ActiveTabAuthority {
 /// concrete, payload-carrying RAII variant here before exposing ingress. The
 /// enum is intentionally uninhabited in production today.
 enum NativeExtensionRuntimeOwner {
+    /// Full-fingerprint owner used by engine-only authority tests.
     #[cfg(test)]
-    Harness,
-}
-
-/// Non-forgeable join between the trusted browser gesture and the exact
-/// runtime whose separately validated activeTab grant may be minted. The
-/// production type is uninhabited until the service/native port carries an
-/// authority-bound variant; ordinary toolbar action dispatch does not require
-/// this witness.
-enum ActiveTabGrantWitness {
+    ExactFingerprint(Box<ExtensionRuntimeFingerprint>),
+    /// Deliberately incomplete low-level registry harness. Retention succeeds,
+    /// but every witness-bearing ingress must reject it.
     #[cfg(test)]
-    Harness {
-        runtime: ExtensionRuntimeInstance,
-        invocation: ExtensionUserInvocationKind,
-    },
-}
-
-impl ActiveTabGrantWitness {
-    #[cfg(test)]
-    fn matches(
-        &self,
-        runtime: ExtensionRuntimeInstance,
-        invocation: ExtensionUserInvocationKind,
-    ) -> bool {
-        match self {
-            Self::Harness {
-                runtime: bound_runtime,
-                invocation: bound_invocation,
-            } => *bound_runtime == runtime && *bound_invocation == invocation,
-        }
-    }
-
-    #[cfg(not(test))]
-    fn matches(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _invocation: ExtensionUserInvocationKind,
-    ) -> bool {
-        false
-    }
-}
-
-/// Non-forgeable purpose capability produced only after the service joins the
-/// exact runtime eligibility, scripting API grant, host scope, and admitted
-/// package. It is uninhabited in production while that port remains absent.
-enum DocumentPurposeWitness {
-    #[cfg(test)]
-    Harness {
-        runtime: ExtensionRuntimeInstance,
-        purpose: ExtensionDocumentPurpose,
-    },
-}
-
-impl DocumentPurposeWitness {
-    #[cfg(test)]
-    fn matches(
-        &self,
-        runtime: ExtensionRuntimeInstance,
-        purpose: ExtensionDocumentPurpose,
-    ) -> bool {
-        match self {
-            Self::Harness {
-                runtime: bound_runtime,
-                purpose: bound_purpose,
-            } => *bound_runtime == runtime && *bound_purpose == purpose,
-        }
-    }
-
-    #[cfg(not(test))]
-    fn matches(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _purpose: ExtensionDocumentPurpose,
-    ) -> bool {
-        false
-    }
+    InstanceOnlyHarness(ExtensionRuntimeInstance),
 }
 
 impl NativeExtensionRuntimeOwner {
     #[cfg(test)]
-    const fn harness() -> Self {
-        Self::Harness
+    fn into_registry_entry(self) -> (ExtensionRuntimeInstance, Self) {
+        match self {
+            Self::ExactFingerprint(runtime) => {
+                let instance = runtime.instance();
+                (instance, Self::ExactFingerprint(runtime))
+            }
+            Self::InstanceOnlyHarness(runtime) => (runtime, Self::InstanceOnlyHarness(runtime)),
+        }
+    }
+
+    #[cfg(test)]
+    fn authenticates(&self, runtime: &ExtensionRuntimeFingerprint) -> bool {
+        match self {
+            Self::ExactFingerprint(retained) => retained.as_ref() == runtime,
+            Self::InstanceOnlyHarness(_) => false,
+        }
+    }
+
+    #[cfg(not(test))]
+    fn authenticates(&self, _runtime: &ExtensionRuntimeFingerprint) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn exact_fingerprint_harness(runtime: ExtensionRuntimeFingerprint) -> Self {
+        Self::ExactFingerprint(Box::new(runtime))
+    }
+
+    #[cfg(test)]
+    const fn instance_only_harness(runtime: ExtensionRuntimeInstance) -> Self {
+        Self::InstanceOnlyHarness(runtime)
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DocumentAuthoritySource {
+    DurableHost,
+    ActiveTab,
+}
+
 struct PendingDocumentPermit {
-    runtime: ExtensionRuntimeInstance,
+    runtime: ExtensionRuntimeFingerprint,
+    witness: ExtensionDocumentAuthorityWitness,
+    authority_source: DocumentAuthoritySource,
     item: ItemId,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
@@ -245,7 +216,8 @@ struct PendingDocumentPermit {
 /// object is denied even when the first presentation was stale or expired.
 struct ExtensionDocumentPermit {
     id: DocumentPermitId,
-    runtime: ExtensionRuntimeInstance,
+    runtime: ExtensionRuntimeFingerprint,
+    authority_source: DocumentAuthoritySource,
     item: ItemId,
     epoch: NavigationEpoch,
     activity: NavigationActivity,
@@ -260,12 +232,13 @@ impl fmt::Debug for ExtensionDocumentPermit {
         formatter
             .debug_struct("ExtensionDocumentPermit")
             .field("id", &self.id)
-            .field("runtime", &self.runtime)
+            .field("runtime", &"<redacted>")
             .field("item", &self.item)
             .field("epoch", &self.epoch)
             .field("activity", &self.activity)
             .field("operation_generation", &"<redacted>")
             .field("purpose", &self.purpose)
+            .field("authority_source", &self.authority_source)
             .field("url", &"<redacted>")
             .field("expires_at", &"<monotonic-deadline>")
             .finish()
@@ -276,7 +249,9 @@ impl fmt::Debug for ExtensionDocumentPermit {
 /// EngineHost wrapper keeps this value on its stack and revalidates it before
 /// and after the native call; no port or public API can receive it.
 struct RedeemedDocumentGuard {
-    runtime: ExtensionRuntimeInstance,
+    runtime: ExtensionRuntimeFingerprint,
+    witness: ExtensionDocumentAuthorityWitness,
+    authority_source: DocumentAuthoritySource,
     item: ItemId,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
@@ -294,7 +269,8 @@ impl RedeemedDocumentGuard {
         event_permit: &EventPermit,
         navigation: &NavigationEpochTracker,
     ) -> bool {
-        self.runtime.profile() == profile
+        self.runtime.instance().profile() == profile
+            && self.witness.matches(&self.runtime, self.purpose)
             && self.event_permit.same_generation(event_permit)
             && self.navigation.same_generation(navigation)
             && self.event_permit.active_token().is_some()
@@ -307,10 +283,39 @@ impl RedeemedDocumentGuard {
     }
 }
 
+/// Keep the native call between two validations of the same redeemed guard.
+///
+/// This helper deliberately owns the ordering rather than leaving it to each
+/// platform operation. A native call can pump callbacks, so successful work
+/// is not allowed to escape unless the exact runtime owner and document are
+/// still authoritative after the call returns.
+fn with_revalidated_native_operation<R, V, F>(
+    guard: &RedeemedDocumentGuard,
+    expected_purpose: ExtensionDocumentPurpose,
+    mut validate: V,
+    operation: F,
+) -> Result<R, ExtensionAuthorityDenial>
+where
+    V: FnMut(&RedeemedDocumentGuard) -> bool,
+    F: FnOnce() -> Result<R, ExtensionAuthorityDenial>,
+{
+    if guard.purpose != expected_purpose || !validate(guard) {
+        return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
+    }
+    let result = operation()?;
+    if !validate(guard) {
+        return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
+    }
+    Ok(result)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtensionAuthorityDenial {
+    #[cfg(test)]
     RuntimeOwnerCapacity,
     RuntimeOwnerMissing,
+    RuntimeFingerprintMismatch,
+    #[cfg(test)]
     RuntimeOwnerAlreadyRetained,
     ActiveTabCapacity,
     PendingPermitCapacity,
@@ -320,6 +325,7 @@ enum ExtensionAuthorityDenial {
     UnsupportedInvocation,
     InvocationWitnessMismatch,
     PurposeWitnessMismatch,
+    DocumentUrlOutOfScope,
     UnsupportedDocumentOrigin,
     DocumentNotPresented,
     NativeDocumentMismatch,
@@ -351,15 +357,17 @@ impl ExtensionDocumentAuthority {
 
     fn active_tab_matches_host_document(
         &self,
-        runtime: ExtensionRuntimeInstance,
+        runtime: &ExtensionRuntimeFingerprint,
         document: &NativeCommittedDocument<'_>,
     ) -> bool {
-        runtime.profile() == document.profile
+        let instance = runtime.instance();
+        instance.profile() == document.profile
             && self
                 .active_tabs
-                .get(&(runtime, document.item))
+                .get(&(instance, document.item))
                 .is_some_and(|authority| {
-                    authority.epoch == document.epoch
+                    authority.runtime == *runtime
+                        && authority.epoch == document.epoch
                         && &*authority.url == document.url
                         && authority.matches_native_document(
                             document.event_permit,
@@ -373,12 +381,13 @@ impl ExtensionDocumentAuthority {
     /// Retires all prior generations for one install before retaining its new
     /// exact native owner. The owner is moved into this map and cannot be
     /// represented by the freely copyable runtime identity alone.
+    #[cfg(test)]
     #[allow(dead_code)] // The first native adapter will become the sole caller.
     fn retain_runtime_owner(
         &mut self,
-        runtime: ExtensionRuntimeInstance,
         owner: NativeExtensionRuntimeOwner,
     ) -> Result<(), ExtensionAuthorityDenial> {
+        let (runtime, owner) = owner.into_registry_entry();
         if self.runtime_owners.contains_key(&runtime) {
             return Err(ExtensionAuthorityDenial::RuntimeOwnerAlreadyRetained);
         }
@@ -403,24 +412,46 @@ impl ExtensionDocumentAuthority {
         Ok(())
     }
 
+    #[cfg(not(test))]
+    #[allow(dead_code)] // Uninhabited until the runtime service/native join exists.
+    fn retain_runtime_owner(
+        &mut self,
+        owner: NativeExtensionRuntimeOwner,
+    ) -> Result<(), ExtensionAuthorityDenial> {
+        match owner {}
+    }
+
+    fn require_runtime_owner(
+        &self,
+        runtime: &ExtensionRuntimeFingerprint,
+    ) -> Result<(), ExtensionAuthorityDenial> {
+        match self.runtime_owners.get(&runtime.instance()) {
+            None => Err(ExtensionAuthorityDenial::RuntimeOwnerMissing),
+            Some(owner) if owner.authenticates(runtime) => Ok(()),
+            Some(_) => Err(ExtensionAuthorityDenial::RuntimeFingerprintMismatch),
+        }
+    }
+
     /// Browser chrome is the sole caller of this user-gesture boundary. It
     /// still cannot mint authority unless the exact runtime's native owner is
     /// retained and the exact physical tab generation has a committed web
     /// origin.
-    #[allow(dead_code)] // Kept sealed until native owner construction exists.
-    fn grant_active_tab_from_host_document(
+    fn grant_active_tab_from_witness_document(
         &mut self,
-        runtime: ExtensionRuntimeInstance,
-        invocation: ExtensionUserInvocationKind,
+        witness: ExtensionActiveTabGrantWitness,
         document: NativeCommittedDocument<'_>,
     ) -> Result<(), ExtensionAuthorityDenial> {
+        let runtime = witness.runtime().clone();
+        let invocation = witness.invocation();
+        if !witness.matches(&runtime, invocation) {
+            return Err(ExtensionAuthorityDenial::InvocationWitnessMismatch);
+        }
         if invocation.transient_grant_api_name() != "activeTab" {
             return Err(ExtensionAuthorityDenial::UnsupportedInvocation);
         }
-        if !self.runtime_owners.contains_key(&runtime) {
-            return Err(ExtensionAuthorityDenial::RuntimeOwnerMissing);
-        }
-        if runtime.profile() != document.profile {
+        self.require_runtime_owner(&runtime)?;
+        let instance = runtime.instance();
+        if instance.profile() != document.profile {
             return Err(ExtensionAuthorityDenial::WrongProfile);
         }
         if document.event_permit.active_token().is_none()
@@ -433,7 +464,7 @@ impl ExtensionDocumentAuthority {
         let Some(origin) = DocumentOrigin::from_url(document.url) else {
             return Err(ExtensionAuthorityDenial::UnsupportedDocumentOrigin);
         };
-        let key = (runtime, document.item);
+        let key = (instance, document.item);
         if !self.active_tabs.contains_key(&key)
             && self.active_tabs.len() >= MAX_ACTIVE_TAB_AUTHORITIES
         {
@@ -444,6 +475,7 @@ impl ExtensionDocumentAuthority {
         self.active_tabs.insert(
             key,
             ActiveTabAuthority {
+                runtime,
                 event_permit: document.event_permit.clone(),
                 navigation: document.navigation.clone(),
                 epoch: document.epoch,
@@ -512,71 +544,49 @@ impl ExtensionDocumentAuthority {
         }
     }
 
-    #[cfg(test)]
-    fn issue_document_permit_at(
+    fn issue_document_permit_from_host_document(
         &mut self,
-        runtime: ExtensionRuntimeInstance,
-        item: ItemId,
-        purpose: ExtensionDocumentPurpose,
-        now: Instant,
-    ) -> Result<ExtensionDocumentPermit, ExtensionAuthorityDenial> {
-        self.issue_document_permit_after_host_validation(runtime, item, purpose, now)
-    }
-
-    fn issue_document_permit_after_host_validation(
-        &mut self,
-        runtime: ExtensionRuntimeInstance,
-        item: ItemId,
-        purpose: ExtensionDocumentPurpose,
+        document: NativeCommittedDocument<'_>,
+        witness: ExtensionDocumentAuthorityWitness,
         now: Instant,
     ) -> Result<ExtensionDocumentPermit, ExtensionAuthorityDenial> {
         self.prune_expired(now);
-        if !self.runtime_owners.contains_key(&runtime) {
-            return Err(ExtensionAuthorityDenial::RuntimeOwnerMissing);
+        let runtime = witness.runtime().clone();
+        let instance = runtime.instance();
+        let purpose = witness.purpose();
+        if !witness.matches(&runtime, purpose) {
+            return Err(ExtensionAuthorityDenial::PurposeWitnessMismatch);
         }
-        let key = (runtime, item);
-        let (event_permit, navigation, epoch, activity, operation_generation, url) = {
-            let Some(authority) = self.active_tabs.get(&key) else {
-                return Err(ExtensionAuthorityDenial::ActiveTabAuthorityMissing);
-            };
-            if authority.event_permit.active_token().is_none() {
-                self.revoke_key(key);
-                return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
-            }
-            let Some((committed_epoch, committed_url)) = authority.navigation.committed_snapshot()
-            else {
-                // A provisional navigation synchronously revoked the old
-                // operation generation, but the activeTab origin grant may
-                // become usable again if that navigation fails. Deny issuance
-                // without deleting the grant.
-                return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
-            };
-            if committed_epoch != authority.epoch || committed_url.as_str() != &*authority.url {
-                self.revoke_key(key);
-                return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
-            }
-            (
-                authority.event_permit.clone(),
-                authority.navigation.clone(),
-                authority.epoch,
-                authority
-                    .navigation
-                    .activity_snapshot()
-                    .ok_or(ExtensionAuthorityDenial::NativeDocumentMismatch)?,
-                authority
-                    .navigation
-                    .document_operation_snapshot(authority.epoch, &authority.url)
-                    .ok_or(ExtensionAuthorityDenial::NativeDocumentMismatch)?,
-                authority.url.clone(),
-            )
-        };
+        self.require_runtime_owner(&runtime)?;
+        if instance.profile() != document.profile {
+            return Err(ExtensionAuthorityDenial::WrongProfile);
+        }
+        if document.event_permit.active_token().is_none()
+            || !document
+                .navigation
+                .matches_committed_snapshot(document.epoch, document.url)
+        {
+            return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
+        }
+        let authority_source = self.document_authority_source(&witness, &document)?;
+        let activity = document
+            .navigation
+            .activity_snapshot()
+            .ok_or(ExtensionAuthorityDenial::NativeDocumentMismatch)?;
+        let operation_generation = document
+            .navigation
+            .document_operation_snapshot(document.epoch, document.url)
+            .ok_or(ExtensionAuthorityDenial::NativeDocumentMismatch)?;
+        let item = document.item;
+        let epoch = document.epoch;
+        let url: Arc<str> = Arc::from(document.url);
         if self.pending_permits.len() >= MAX_PENDING_DOCUMENT_PERMITS {
             return Err(ExtensionAuthorityDenial::PendingPermitCapacity);
         }
         let for_authority = self
             .pending_permits
             .values()
-            .filter(|pending| pending.runtime == runtime && pending.item == item)
+            .filter(|pending| pending.runtime.instance() == instance && pending.item == item)
             .count();
         if for_authority >= MAX_PENDING_DOCUMENT_PERMITS_PER_AUTHORITY {
             return Err(ExtensionAuthorityDenial::PendingPermitPerAuthorityCapacity);
@@ -589,7 +599,8 @@ impl ExtensionDocumentAuthority {
         };
         let permit = ExtensionDocumentPermit {
             id,
-            runtime,
+            runtime: runtime.clone(),
+            authority_source,
             item,
             epoch,
             activity,
@@ -606,9 +617,11 @@ impl ExtensionDocumentAuthority {
             id,
             PendingDocumentPermit {
                 runtime,
+                witness,
+                authority_source,
                 item,
-                event_permit,
-                navigation,
+                event_permit: document.event_permit.clone(),
+                navigation: document.navigation.clone(),
                 epoch,
                 activity,
                 operation_generation,
@@ -618,6 +631,30 @@ impl ExtensionDocumentAuthority {
             },
         );
         Ok(permit)
+    }
+
+    fn document_authority_source(
+        &self,
+        witness: &ExtensionDocumentAuthorityWitness,
+        document: &NativeCommittedDocument<'_>,
+    ) -> Result<DocumentAuthoritySource, ExtensionAuthorityDenial> {
+        let url = url::Url::parse(document.url)
+            .map_err(|_| ExtensionAuthorityDenial::NativeDocumentMismatch)?;
+        match witness.decide_engine_document_url_scope(&url) {
+            ExtensionUrlScopeDecision::InScope => Ok(DocumentAuthoritySource::DurableHost),
+            ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::UrlNotGranted)
+                if DocumentOrigin::from_url(document.url).is_some() =>
+            {
+                if self.active_tab_matches_host_document(witness.runtime(), document) {
+                    Ok(DocumentAuthoritySource::ActiveTab)
+                } else {
+                    Err(ExtensionAuthorityDenial::ActiveTabAuthorityMissing)
+                }
+            }
+            ExtensionUrlScopeDecision::OutOfScope(_) => {
+                Err(ExtensionAuthorityDenial::DocumentUrlOutOfScope)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -641,6 +678,7 @@ impl ExtensionDocumentAuthority {
         };
         self.refresh_pending_presence();
         if pending.runtime != permit.runtime
+            || pending.authority_source != permit.authority_source
             || pending.item != permit.item
             || pending.epoch != permit.epoch
             || pending.activity != permit.activity
@@ -650,38 +688,39 @@ impl ExtensionDocumentAuthority {
             || pending.url != permit.url
             || pending.purpose != permit.purpose
             || pending.expires_at != permit.expires_at
+            || !pending.witness.matches(&pending.runtime, pending.purpose)
         {
             return Err(ExtensionAuthorityDenial::PermitMismatch);
         }
         if now >= pending.expires_at {
             return Err(ExtensionAuthorityDenial::PermitExpired);
         }
-        if !self.runtime_owners.contains_key(&pending.runtime) {
-            return Err(ExtensionAuthorityDenial::RuntimeOwnerMissing);
-        }
-        let key = (pending.runtime, pending.item);
-        let Some(authority) = self.active_tabs.get(&key) else {
-            return Err(ExtensionAuthorityDenial::ActiveTabAuthorityMissing);
-        };
-        if authority.epoch != pending.epoch
-            || authority.url != pending.url
-            || !authority.navigation.matches_activity(pending.activity)
+        self.require_runtime_owner(&pending.runtime)?;
+        if pending.event_permit.active_token().is_none()
+            || !pending.navigation.matches_activity(pending.activity)
             || !pending.operation_generation.is_active()
-            || !authority
-                .event_permit
-                .same_generation(&pending.event_permit)
-            || !authority.navigation.same_generation(&pending.navigation)
-            || !authority.matches_native_document(
-                &pending.event_permit,
-                &pending.navigation,
-                pending.epoch,
-                &pending.url,
-            )
+            || !pending
+                .navigation
+                .matches_committed_snapshot(pending.epoch, &pending.url)
         {
             return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
         }
+        let document = NativeCommittedDocument {
+            item: pending.item,
+            profile: pending.runtime.instance().profile(),
+            event_permit: &pending.event_permit,
+            navigation: &pending.navigation,
+            epoch: pending.epoch,
+            url: &pending.url,
+        };
+        let source = self.document_authority_source(&pending.witness, &document)?;
+        if source != pending.authority_source {
+            return Err(ExtensionAuthorityDenial::PermitMismatch);
+        }
         Ok(RedeemedDocumentGuard {
             runtime: pending.runtime,
+            witness: pending.witness,
+            authority_source: pending.authority_source,
             item: pending.item,
             event_permit: pending.event_permit,
             navigation: pending.navigation,
@@ -698,7 +737,7 @@ impl ExtensionDocumentAuthority {
         self.active_tabs
             .retain(|(row_runtime, _), _| *row_runtime != runtime);
         self.pending_permits
-            .retain(|_, pending| pending.runtime != runtime);
+            .retain(|_, pending| pending.runtime.instance() != runtime);
         self.refresh_pending_presence();
         // Drop the actual native owner only after no document authority can
         // name it or survive its teardown.
@@ -715,7 +754,7 @@ impl ExtensionDocumentAuthority {
         self.active_tabs
             .retain(|(runtime, _), _| runtime.profile() != profile);
         self.pending_permits
-            .retain(|_, pending| pending.runtime.profile() != profile);
+            .retain(|_, pending| pending.runtime.instance().profile() != profile);
         self.refresh_pending_presence();
         self.runtime_owners
             .retain(|runtime, _| runtime.profile() != profile);
@@ -749,14 +788,9 @@ impl ExtensionDocumentAuthority {
         self.refresh_pending_presence();
     }
 
-    fn revoke_key(&mut self, key: (ExtensionRuntimeInstance, ItemId)) {
-        self.active_tabs.remove(&key);
-        self.revoke_pending_for_key(key);
-    }
-
     fn revoke_pending_for_key(&mut self, key: (ExtensionRuntimeInstance, ItemId)) {
         self.pending_permits
-            .retain(|_, pending| (pending.runtime, pending.item) != key);
+            .retain(|_, pending| (pending.runtime.instance(), pending.item) != key);
         self.refresh_pending_presence();
     }
 
@@ -822,56 +856,72 @@ impl EngineHost {
     #[allow(dead_code)]
     fn grant_active_tab_from_user_invocation(
         &mut self,
-        runtime: ExtensionRuntimeInstance,
         item: ItemId,
-        invocation: ExtensionUserInvocationKind,
-        witness: &ActiveTabGrantWitness,
+        witness: ExtensionActiveTabGrantWitness,
     ) -> Result<(), ExtensionAuthorityDenial> {
-        if !witness.matches(runtime, invocation) {
-            return Err(ExtensionAuthorityDenial::InvocationWitnessMismatch);
-        }
-        let document = self.exact_presented_extension_document(item, runtime.profile())?;
+        let profile = witness.runtime_instance().profile();
+        let document = self.exact_presented_extension_document(item, profile)?;
         self.extension_document_authority
-            .grant_active_tab_from_host_document(runtime, invocation, document.borrowed())
+            .grant_active_tab_from_witness_document(witness, document.borrowed())
     }
 
     /// Issues a permit only after joining the purpose witness with the exact
-    /// presented EngineHost document and retained activeTab row.
+    /// presented EngineHost document and either durable host scope or a valid
+    /// exact-document activeTab fallback.
     #[allow(dead_code)]
     fn issue_extension_document_permit(
         &mut self,
-        runtime: ExtensionRuntimeInstance,
         item: ItemId,
-        purpose: ExtensionDocumentPurpose,
-        witness: &DocumentPurposeWitness,
+        witness: ExtensionDocumentAuthorityWitness,
     ) -> Result<ExtensionDocumentPermit, ExtensionAuthorityDenial> {
-        if !witness.matches(runtime, purpose) {
+        let runtime = witness.runtime().clone();
+        let purpose = witness.purpose();
+        if !witness.matches(&runtime, purpose) {
             return Err(ExtensionAuthorityDenial::PurposeWitnessMismatch);
         }
-        let document = self.exact_presented_extension_document(item, runtime.profile())?;
-        if !self
-            .extension_document_authority
-            .active_tab_matches_host_document(runtime, &document.borrowed())
-        {
-            return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
-        }
         self.extension_document_authority
-            .issue_document_permit_after_host_validation(runtime, item, purpose, Instant::now())
+            .require_runtime_owner(&runtime)?;
+        let document =
+            self.exact_presented_extension_document(item, runtime.instance().profile())?;
+        self.extension_document_authority
+            .issue_document_permit_from_host_document(document.borrowed(), witness, Instant::now())
     }
 
     fn redeemed_guard_matches_host(&self, guard: &RedeemedDocumentGuard) -> bool {
         let Ok(document) =
-            self.exact_presented_extension_document(guard.item, guard.runtime.profile())
+            self.exact_presented_extension_document(guard.item, guard.runtime.instance().profile())
         else {
             return false;
         };
-        document.epoch == guard.epoch
+        self.extension_document_authority
+            .require_runtime_owner(&guard.runtime)
+            .is_ok()
+            && document.epoch == guard.epoch
             && document.url.as_str() == &*guard.url
             && guard.matches_document(
                 document.profile,
                 &document.event_permit,
                 &document.navigation,
             )
+            && match guard.authority_source {
+                DocumentAuthoritySource::DurableHost => {
+                    url::Url::parse(&guard.url).ok().is_some_and(|url| {
+                        guard.witness.decide_engine_document_url_scope(&url)
+                            == ExtensionUrlScopeDecision::InScope
+                    })
+                }
+                DocumentAuthoritySource::ActiveTab => {
+                    self.extension_document_authority
+                        .active_tab_matches_host_document(&guard.runtime, &document.borrowed())
+                        && DocumentOrigin::from_url(&guard.url).is_some()
+                        && url::Url::parse(&guard.url).ok().is_some_and(|url| {
+                            guard.witness.decide_engine_document_url_scope(&url)
+                                == ExtensionUrlScopeDecision::OutOfScope(
+                                    ExtensionGrantDenial::UrlNotGranted,
+                                )
+                        })
+                }
+            }
     }
 
     /// Consume and execute inside one exact host validation boundary. A
@@ -882,32 +932,29 @@ impl EngineHost {
     fn with_redeemed_extension_document_operation<R, F>(
         &mut self,
         permit: &ExtensionDocumentPermit,
-        witness: &DocumentPurposeWitness,
         operation: F,
     ) -> Result<R, ExtensionAuthorityDenial>
     where
         F: FnOnce(&wry::WebView) -> Result<R, ()>,
     {
-        if !witness.matches(permit.runtime, permit.purpose) {
-            return Err(ExtensionAuthorityDenial::PurposeWitnessMismatch);
-        }
         let guard = self
             .extension_document_authority
             .redeem_document_permit_after_host_validation(permit, Instant::now())?;
-        if guard.purpose != permit.purpose || !self.redeemed_guard_matches_host(&guard) {
-            return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
-        }
-        let result = self
-            .views
-            .get(&guard.item)
-            .ok_or(ExtensionAuthorityDenial::NativeDocumentMismatch)
-            .and_then(|view| {
-                operation(&view.view).map_err(|()| ExtensionAuthorityDenial::NativeOperationFailed)
-            })?;
-        if !self.redeemed_guard_matches_host(&guard) {
-            return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
-        }
-        Ok(result)
+        let host: &EngineHost = self;
+        with_revalidated_native_operation(
+            &guard,
+            permit.purpose,
+            |guard| host.redeemed_guard_matches_host(guard),
+            || {
+                host.views
+                    .get(&guard.item)
+                    .ok_or(ExtensionAuthorityDenial::NativeDocumentMismatch)
+                    .and_then(|view| {
+                        operation(&view.view)
+                            .map_err(|()| ExtensionAuthorityDenial::NativeOperationFailed)
+                    })
+            },
+        )
     }
 
     /// Apply a provisional-navigation revocation only to the exact physical
@@ -939,11 +986,25 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::sync::atomic::AtomicBool;
 
     use wry::{NavigationEvent, NavigationEventPhase, NavigationId};
-    use zephium_core::extensions::ExtensionRuntimeGeneration;
+    use zephium_core::extensions::{
+        ApiPermissionName, ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
+        ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
+        ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
+        ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
+        ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionHostPermissionSet,
+        ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
+        ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
+        ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
+        ExtensionManifestResourceDigest, ExtensionPackageIdentity, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeEligibility,
+        ExtensionRuntimeGeneration, ExtensionTreeDigest, ExtensionUserInvocationKind,
+    };
     use zephium_core::ids::ExtensionInstallId;
+    use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
 
     use super::*;
 
@@ -1004,32 +1065,191 @@ mod tests {
         epoch
     }
 
-    fn runtime(profile: u128, install: u128, generation: u64) -> ExtensionRuntimeInstance {
-        ExtensionRuntimeInstance::new(
-            ProfileId::from(profile),
-            ExtensionInstallId::from(install),
-            ExtensionRuntimeGeneration::new(generation).expect("nonzero test generation"),
-        )
+    struct TestRuntime {
+        eligibility: ExtensionRuntimeEligibility,
+        fingerprint: ExtensionRuntimeFingerprint,
     }
 
-    fn retain_runtime(
-        authority: &mut ExtensionDocumentAuthority,
-        runtime: ExtensionRuntimeInstance,
-    ) {
+    impl TestRuntime {
+        fn instance(&self) -> ExtensionRuntimeInstance {
+            self.fingerprint.instance()
+        }
+
+        fn profile(&self) -> ProfileId {
+            self.instance().profile()
+        }
+
+        fn active_tab_witness(&self) -> ExtensionActiveTabGrantWitness {
+            self.eligibility
+                .mint_active_tab_grant_witness(
+                    &self.fingerprint,
+                    ExtensionUserInvocationKind::ToolbarAction,
+                )
+                .unwrap()
+        }
+
+        fn document_witness(
+            &self,
+            purpose: ExtensionDocumentPurpose,
+        ) -> ExtensionDocumentAuthorityWitness {
+            self.eligibility
+                .mint_document_authority_witness(&self.fingerprint, purpose)
+                .unwrap()
+        }
+    }
+
+    fn runtime(profile: u128, install: u128, generation: u64) -> TestRuntime {
+        test_runtime(profile, install, generation, false, false)
+    }
+
+    fn durable_runtime(profile: u128, install: u128, generation: u64) -> TestRuntime {
+        test_runtime(profile, install, generation, true, false)
+    }
+
+    fn test_runtime(
+        profile: u128,
+        install: u128,
+        generation: u64,
+        grant_hosts: bool,
+        file_access: bool,
+    ) -> TestRuntime {
+        let profile = ProfileId::from(profile);
+        let install_id = ExtensionInstallId::from(install);
+        let package = ExtensionPackageIdentity::new(
+            ExtensionAuthorityId::from_bytes([1; 32]),
+            ExtensionPackageKey::from_bytes([2; 32]),
+            ExtensionPackageRevision::INITIAL,
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                3,
+                ExtensionArchiveDigest::from_bytes([3; 32]),
+            )
+            .unwrap(),
+            ExtensionManifestDigest::from_bytes([4; 32]),
+            ExtensionTreeDigest::from_bytes([5; 32]),
+        );
+        let api = |names: &[&str]| {
+            ExtensionApiPermissionSet::new(
+                names
+                    .iter()
+                    .map(|name| ApiPermissionName::parse_exact(name).unwrap())
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let hosts = ExtensionHostPermissionSet::new(
+            MatchSet::parse(
+                ["<all_urls>"],
+                std::iter::empty::<&str>(),
+                MatchOptions::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let declarations = ExtensionManifestDeclarations::new(
+            api(&[]),
+            api(&["activeTab", "scripting"]),
+            None,
+            Some(hosts),
+            None,
+            None,
+            Vec::new(),
+            ExtensionManifestExecutionSurfaces::new(
+                Vec::new(),
+                ExtensionContentSecurityPolicyDeclaration::new(
+                    ExtensionManifestResourceDigest::from_bytes([6; 32]),
+                ),
+                None,
+                Vec::new(),
+            )
+            .unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let compatibility = declarations
+            .declaration_keys()
+            .into_iter()
+            .map(|declaration| {
+                ExtensionCompatibilityClassification::new(
+                    declaration,
+                    ExtensionCompatibilityLevel::Compatible,
+                )
+            })
+            .collect();
+        let manifest = Arc::new(
+            ExtensionManifestDescriptor::new(
+                package,
+                3,
+                declarations,
+                ExtensionCompatibilityTargetId::parse_exact("test.engine.authority.v1").unwrap(),
+                compatibility,
+            )
+            .unwrap(),
+        );
+        let install = ExtensionInstall::from_persisted(
+            install_id,
+            ExtensionInstallRevision::new(7).unwrap(),
+            manifest.package().clone(),
+            true,
+        );
+        let catalog = ExtensionInstallCatalog::from_persisted(
+            ExtensionInstallCatalogRevision::new(9).unwrap(),
+            Some(install_id),
+            vec![install.clone()],
+        )
+        .unwrap();
+        let bindings =
+            ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+                install_id,
+                Arc::clone(&manifest),
+            )])
+            .unwrap();
+        let authority = ExtensionGrantAuthority::initialize(
+            &install,
+            ["activeTab", "scripting"]
+                .into_iter()
+                .map(|name| ApiPermissionName::parse_exact(name).unwrap())
+                .collect(),
+            if grant_hosts {
+                vec![MatchPattern::parse("<all_urls>").unwrap()]
+            } else {
+                Vec::new()
+            },
+            file_access,
+            false,
+            &manifest,
+        )
+        .unwrap();
+        let cohort =
+            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority])
+                .unwrap();
+        let eligibility = cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let fingerprint = eligibility.fingerprint(
+            ExtensionRuntimeGeneration::new(generation).expect("nonzero test generation"),
+        );
+        TestRuntime {
+            eligibility,
+            fingerprint,
+        }
+    }
+
+    fn retain_runtime(authority: &mut ExtensionDocumentAuthority, runtime: &TestRuntime) {
         authority
-            .retain_runtime_owner(runtime, NativeExtensionRuntimeOwner::harness())
+            .retain_runtime_owner(NativeExtensionRuntimeOwner::exact_fingerprint_harness(
+                runtime.fingerprint.clone(),
+            ))
             .expect("test runtime owner retained");
     }
 
     fn grant(
         authority: &mut ExtensionDocumentAuthority,
-        runtime: ExtensionRuntimeInstance,
+        runtime: &TestRuntime,
         item: ItemId,
         document: &TestDocument,
     ) -> Result<(), ExtensionAuthorityDenial> {
-        authority.grant_active_tab_from_host_document(
-            runtime,
-            ExtensionUserInvocationKind::ToolbarAction,
+        authority.grant_active_tab_from_witness_document(
+            runtime.active_tab_witness(),
             NativeCommittedDocument {
                 item,
                 profile: runtime.profile(),
@@ -1041,6 +1261,28 @@ mod tests {
         )
     }
 
+    fn issue(
+        authority: &mut ExtensionDocumentAuthority,
+        runtime: &TestRuntime,
+        item: ItemId,
+        document: &TestDocument,
+        purpose: ExtensionDocumentPurpose,
+        now: Instant,
+    ) -> Result<ExtensionDocumentPermit, ExtensionAuthorityDenial> {
+        authority.issue_document_permit_from_host_document(
+            NativeCommittedDocument {
+                item,
+                profile: runtime.profile(),
+                event_permit: &document.permit,
+                navigation: &document.navigation,
+                epoch: document.epoch,
+                url: &document.url,
+            },
+            runtime.document_witness(purpose),
+            now,
+        )
+    }
+
     #[test]
     fn toolbar_invocation_requires_the_exact_retained_native_runtime_and_profile() {
         let mut authority = ExtensionDocumentAuthority::default();
@@ -1049,14 +1291,13 @@ mod tests {
         let item = ItemId::from(1);
 
         assert_eq!(
-            grant(&mut authority, runtime, item, &document),
+            grant(&mut authority, &runtime, item, &document),
             Err(ExtensionAuthorityDenial::RuntimeOwnerMissing)
         );
-        retain_runtime(&mut authority, runtime);
+        retain_runtime(&mut authority, &runtime);
         assert_eq!(
-            authority.grant_active_tab_from_host_document(
-                runtime,
-                ExtensionUserInvocationKind::ToolbarAction,
+            authority.grant_active_tab_from_witness_document(
+                runtime.active_tab_witness(),
                 NativeCommittedDocument {
                     item,
                     profile: ProfileId::from(2),
@@ -1068,14 +1309,14 @@ mod tests {
             ),
             Err(ExtensionAuthorityDenial::WrongProfile)
         );
-        assert_eq!(grant(&mut authority, runtime, item, &document), Ok(()));
+        assert_eq!(grant(&mut authority, &runtime, item, &document), Ok(()));
     }
 
     #[test]
     fn toolbar_invocation_rejects_opaque_file_and_dead_documents() {
         let mut authority = ExtensionDocumentAuthority::default();
         let runtime = runtime(1, 10, 1);
-        retain_runtime(&mut authority, runtime);
+        retain_runtime(&mut authority, &runtime);
         let item = ItemId::from(1);
 
         for url in [
@@ -1087,14 +1328,14 @@ mod tests {
         }
         let opaque = TestDocument::committed(3, "about:blank");
         assert_eq!(
-            grant(&mut authority, runtime, item, &opaque),
+            grant(&mut authority, &runtime, item, &opaque),
             Err(ExtensionAuthorityDenial::UnsupportedDocumentOrigin)
         );
 
         let dead = TestDocument::committed(4, "https://example.test/");
         dead.permit.revoke();
         assert_eq!(
-            grant(&mut authority, runtime, item, &dead),
+            grant(&mut authority, &runtime, item, &dead),
             Err(ExtensionAuthorityDenial::NativeDocumentMismatch)
         );
     }
@@ -1105,8 +1346,8 @@ mod tests {
         let runtime = runtime(1, 10, 1);
         let item = ItemId::from(1);
         let mut document = TestDocument::committed(1, "https://example.test/start");
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
 
         document.navigate_and_commit(2, "https://example.test:443/next");
         authority.on_committed_document(
@@ -1118,7 +1359,7 @@ mod tests {
         );
         let row = authority
             .active_tabs
-            .get(&(runtime, item))
+            .get(&(runtime.instance(), item))
             .expect("same default-port origin retained");
         assert_eq!(row.epoch, document.epoch);
         assert_eq!(&*row.url, document.url);
@@ -1131,7 +1372,9 @@ mod tests {
             document.epoch,
             &document.url,
         );
-        assert!(!authority.active_tabs.contains_key(&(runtime, item)));
+        assert!(!authority
+            .active_tabs
+            .contains_key(&(runtime.instance(), item)));
     }
 
     #[test]
@@ -1140,8 +1383,8 @@ mod tests {
         let runtime = runtime(1, 10, 1);
         let item = ItemId::from(1);
         let old = TestDocument::committed(1, "https://example.test/");
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &old).unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &old).unwrap();
 
         let replacement = TestDocument::committed(2, "https://example.test/");
         authority.on_committed_document(
@@ -1151,7 +1394,9 @@ mod tests {
             replacement.epoch,
             &replacement.url,
         );
-        assert!(!authority.active_tabs.contains_key(&(runtime, item)));
+        assert!(!authority
+            .active_tabs
+            .contains_key(&(runtime.instance(), item)));
     }
 
     #[test]
@@ -1161,24 +1406,38 @@ mod tests {
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
         let pending_presence = authority.pending_presence();
-        let stale = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .unwrap();
+        let stale = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
         assert!(pending_presence.load(Ordering::Acquire));
 
         authority.on_navigation_started(item);
         assert!(!pending_presence.load(Ordering::Acquire));
-        assert!(authority.active_tabs.contains_key(&(runtime, item)));
+        assert!(authority
+            .active_tabs
+            .contains_key(&(runtime.instance(), item)));
         assert!(matches!(
             authority.redeem_document_permit_at(&stale, now),
             Err(ExtensionAuthorityDenial::PermitMissingOrReplayed)
         ));
-        assert!(authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .is_ok());
+        assert!(issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1188,11 +1447,17 @@ mod tests {
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/original");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
-        let stale = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+        let stale = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
 
         let attempted = document
             .navigation
@@ -1207,15 +1472,19 @@ mod tests {
             Some(crate::navigation_epoch::NavigationTransition::Started(epoch)) if epoch == attempted
         ));
         assert!(matches!(
-            authority.issue_document_permit_at(
-                runtime,
+            issue(
+                &mut authority,
+                &runtime,
                 item,
+                &document,
                 ExtensionDocumentPurpose::ExecuteScript,
                 now,
             ),
             Err(ExtensionAuthorityDenial::NativeDocumentMismatch)
         ));
-        assert!(authority.active_tabs.contains_key(&(runtime, item)));
+        assert!(authority
+            .active_tabs
+            .contains_key(&(runtime.instance(), item)));
         assert!(matches!(
             document.navigation.observe_navigation(&event(
                 2,
@@ -1245,10 +1514,18 @@ mod tests {
             authority.redeem_document_permit_at(&stale, now),
             Err(ExtensionAuthorityDenial::PermitMissingOrReplayed)
         ));
-        assert!(authority.active_tabs.contains_key(&(runtime, item)));
         assert!(authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now,)
-            .is_ok());
+            .active_tabs
+            .contains_key(&(runtime.instance(), item)));
+        assert!(issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1258,11 +1535,17 @@ mod tests {
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
-        let permit = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+        let permit = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
         let guard = authority.redeem_document_permit_at(&permit, now).unwrap();
         assert!(guard.matches_document(runtime.profile(), &document.permit, &document.navigation,));
 
@@ -1276,24 +1559,290 @@ mod tests {
     }
 
     #[test]
-    fn opaque_ingress_witnesses_are_exact_runtime_invocation_and_purpose_bound() {
+    fn core_ingress_witnesses_are_exact_runtime_invocation_and_purpose_bound() {
         let first = runtime(1, 10, 1);
         let second = runtime(1, 10, 2);
         let invocation = ExtensionUserInvocationKind::ToolbarAction;
-        let grant = ActiveTabGrantWitness::Harness {
-            runtime: first,
-            invocation,
-        };
-        assert!(grant.matches(first, invocation));
-        assert!(!grant.matches(second, invocation));
+        let grant = first.active_tab_witness();
+        assert!(grant.matches(&first.fingerprint, invocation));
+        assert!(!grant.matches(&second.fingerprint, invocation));
 
-        let purpose = DocumentPurposeWitness::Harness {
-            runtime: first,
-            purpose: ExtensionDocumentPurpose::InsertCss,
-        };
-        assert!(purpose.matches(first, ExtensionDocumentPurpose::InsertCss));
-        assert!(!purpose.matches(first, ExtensionDocumentPurpose::RemoveCss));
-        assert!(!purpose.matches(second, ExtensionDocumentPurpose::InsertCss));
+        let purpose = first.document_witness(ExtensionDocumentPurpose::InsertCss);
+        assert!(purpose.matches(&first.fingerprint, ExtensionDocumentPurpose::InsertCss));
+        assert!(!purpose.matches(&first.fingerprint, ExtensionDocumentPurpose::RemoveCss));
+        assert!(!purpose.matches(&second.fingerprint, ExtensionDocumentPurpose::InsertCss));
+    }
+
+    #[test]
+    fn instance_only_owner_and_same_instance_fingerprint_drift_fail_closed() {
+        let mut authority = ExtensionDocumentAuthority::default();
+        let retained = runtime(1, 10, 1);
+        let different_fingerprint = durable_runtime(1, 10, 1);
+        let item = ItemId::from(1);
+        let document = TestDocument::committed(1, "https://example.test/");
+
+        authority
+            .retain_runtime_owner(NativeExtensionRuntimeOwner::instance_only_harness(
+                retained.instance(),
+            ))
+            .unwrap();
+        assert_eq!(
+            authority.grant_active_tab_from_witness_document(
+                retained.active_tab_witness(),
+                NativeCommittedDocument {
+                    item,
+                    profile: retained.profile(),
+                    event_permit: &document.permit,
+                    navigation: &document.navigation,
+                    epoch: document.epoch,
+                    url: &document.url,
+                },
+            ),
+            Err(ExtensionAuthorityDenial::RuntimeFingerprintMismatch)
+        );
+        authority.runtime_owners.clear();
+        retain_runtime(&mut authority, &retained);
+        assert_eq!(
+            grant(&mut authority, &different_fingerprint, item, &document,),
+            Err(ExtensionAuthorityDenial::RuntimeFingerprintMismatch)
+        );
+    }
+
+    #[test]
+    fn durable_host_scope_issues_and_redeems_without_an_active_tab_row() {
+        let mut authority = ExtensionDocumentAuthority::default();
+        let runtime = durable_runtime(1, 10, 1);
+        let item = ItemId::from(1);
+        let document = TestDocument::committed(1, "https://example.test/durable");
+        let now = Instant::now();
+        retain_runtime(&mut authority, &runtime);
+
+        let permit = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            permit.authority_source,
+            DocumentAuthoritySource::DurableHost
+        );
+        assert!(authority.active_tabs.is_empty());
+        let guard = authority.redeem_document_permit_at(&permit, now).unwrap();
+        assert_eq!(guard.authority_source, DocumentAuthoritySource::DurableHost);
+        assert!(authority.active_tabs.is_empty());
+    }
+
+    #[test]
+    fn active_tab_is_only_the_exact_http_url_not_granted_fallback() {
+        let mut authority = ExtensionDocumentAuthority::default();
+        let runtime = runtime(1, 10, 1);
+        let item = ItemId::from(1);
+        let web = TestDocument::committed(1, "https://example.test/fallback");
+        let now = Instant::now();
+        retain_runtime(&mut authority, &runtime);
+
+        assert!(matches!(
+            issue(
+                &mut authority,
+                &runtime,
+                item,
+                &web,
+                ExtensionDocumentPurpose::ExecuteScript,
+                now,
+            ),
+            Err(ExtensionAuthorityDenial::ActiveTabAuthorityMissing)
+        ));
+        grant(&mut authority, &runtime, item, &web).unwrap();
+        let fallback = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &web,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.authority_source,
+            DocumentAuthoritySource::ActiveTab
+        );
+
+        let blank = TestDocument::committed(2, "about:blank");
+        assert!(matches!(
+            issue(
+                &mut authority,
+                &runtime,
+                item,
+                &blank,
+                ExtensionDocumentPurpose::ExecuteScript,
+                now,
+            ),
+            Err(ExtensionAuthorityDenial::DocumentUrlOutOfScope)
+        ));
+    }
+
+    #[test]
+    fn exact_fingerprint_is_rechecked_at_redeem_and_after_redemption() {
+        let mut authority = ExtensionDocumentAuthority::default();
+        let runtime = runtime(1, 10, 1);
+        let drifted = durable_runtime(1, 10, 1);
+        let item = ItemId::from(1);
+        let document = TestDocument::committed(1, "https://example.test/");
+        let now = Instant::now();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+        let permit = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
+        authority.runtime_owners.insert(
+            runtime.instance(),
+            NativeExtensionRuntimeOwner::exact_fingerprint_harness(drifted.fingerprint.clone()),
+        );
+        assert!(matches!(
+            authority.redeem_document_permit_at(&permit, now),
+            Err(ExtensionAuthorityDenial::RuntimeFingerprintMismatch)
+        ));
+
+        authority.runtime_owners.insert(
+            runtime.instance(),
+            NativeExtensionRuntimeOwner::exact_fingerprint_harness(runtime.fingerprint.clone()),
+        );
+        let permit = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
+        let guard = authority.redeem_document_permit_at(&permit, now).unwrap();
+        authority.runtime_owners.insert(
+            runtime.instance(),
+            NativeExtensionRuntimeOwner::exact_fingerprint_harness(drifted.fingerprint),
+        );
+        assert_eq!(
+            authority.require_runtime_owner(&guard.runtime),
+            Err(ExtensionAuthorityDenial::RuntimeFingerprintMismatch)
+        );
+    }
+
+    #[test]
+    fn native_operation_boundaries_contain_owner_fingerprint_drift() {
+        let mut authority = ExtensionDocumentAuthority::default();
+        let runtime = runtime(1, 10, 1);
+        let drifted = durable_runtime(1, 10, 1);
+        let item = ItemId::from(1);
+        let document = TestDocument::committed(1, "https://example.test/");
+        let now = Instant::now();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+
+        let before_native = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
+        let before_guard = authority
+            .redeem_document_permit_at(&before_native, now)
+            .unwrap();
+        let authority = RefCell::new(authority);
+        authority.borrow_mut().runtime_owners.insert(
+            runtime.instance(),
+            NativeExtensionRuntimeOwner::exact_fingerprint_harness(drifted.fingerprint.clone()),
+        );
+        let native_called = Cell::new(false);
+        assert_eq!(
+            with_revalidated_native_operation(
+                &before_guard,
+                ExtensionDocumentPurpose::ExecuteScript,
+                |guard| {
+                    authority
+                        .borrow()
+                        .require_runtime_owner(&guard.runtime)
+                        .is_ok()
+                        && guard.matches_document(
+                            runtime.profile(),
+                            &document.permit,
+                            &document.navigation,
+                        )
+                },
+                || {
+                    native_called.set(true);
+                    Ok(())
+                },
+            ),
+            Err(ExtensionAuthorityDenial::NativeDocumentMismatch)
+        );
+        assert!(
+            !native_called.get(),
+            "pre-native drift must skip native work"
+        );
+
+        authority.borrow_mut().runtime_owners.insert(
+            runtime.instance(),
+            NativeExtensionRuntimeOwner::exact_fingerprint_harness(runtime.fingerprint.clone()),
+        );
+        let after_native = issue(
+            &mut authority.borrow_mut(),
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
+        let after_guard = authority
+            .borrow_mut()
+            .redeem_document_permit_at(&after_native, now)
+            .unwrap();
+        let native_called = Cell::new(false);
+        assert_eq!(
+            with_revalidated_native_operation(
+                &after_guard,
+                ExtensionDocumentPurpose::ExecuteScript,
+                |guard| {
+                    authority
+                        .borrow()
+                        .require_runtime_owner(&guard.runtime)
+                        .is_ok()
+                        && guard.matches_document(
+                            runtime.profile(),
+                            &document.permit,
+                            &document.navigation,
+                        )
+                },
+                || {
+                    native_called.set(true);
+                    authority.borrow_mut().runtime_owners.insert(
+                        runtime.instance(),
+                        NativeExtensionRuntimeOwner::exact_fingerprint_harness(
+                            drifted.fingerprint.clone(),
+                        ),
+                    );
+                    Ok(())
+                },
+            ),
+            Err(ExtensionAuthorityDenial::NativeDocumentMismatch)
+        );
+        assert!(
+            native_called.get(),
+            "post-native drift occurs during native work"
+        );
     }
 
     #[test]
@@ -1303,21 +1852,33 @@ mod tests {
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/private?secret=1");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
 
-        let permit = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::InsertCss, now)
-            .unwrap();
+        let permit = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::InsertCss,
+            now,
+        )
+        .unwrap();
         assert!(authority.redeem_document_permit_at(&permit, now).is_ok());
         assert!(matches!(
             authority.redeem_document_permit_at(&permit, now),
             Err(ExtensionAuthorityDenial::PermitMissingOrReplayed)
         ));
 
-        let expired = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::RemoveCss, now)
-            .unwrap();
+        let expired = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::RemoveCss,
+            now,
+        )
+        .unwrap();
         assert!(matches!(
             authority.redeem_document_permit_at(&expired, now + DOCUMENT_PERMIT_TTL),
             Err(ExtensionAuthorityDenial::PermitExpired)
@@ -1334,19 +1895,21 @@ mod tests {
         let runtime = runtime(1, 10, 1);
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/private?secret=1");
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
-        let permit = authority
-            .issue_document_permit_at(
-                runtime,
-                item,
-                ExtensionDocumentPurpose::ExecuteScript,
-                Instant::now(),
-            )
-            .unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+        let permit = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            Instant::now(),
+        )
+        .unwrap();
 
         let debug = format!("{permit:?}");
         assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("ExtensionRuntimeFingerprint"));
         assert!(!debug.contains("example.test"));
         assert!(!debug.contains("secret=1"));
     }
@@ -1361,22 +1924,30 @@ mod tests {
         let sibling_item = ItemId::from(2);
         let first_document = TestDocument::committed(1, "https://first.test/");
         let sibling_document = TestDocument::committed(2, "https://sibling.test/");
-        retain_runtime(&mut authority, first);
-        retain_runtime(&mut authority, sibling);
-        grant(&mut authority, first, first_item, &first_document).unwrap();
-        grant(&mut authority, sibling, sibling_item, &sibling_document).unwrap();
+        retain_runtime(&mut authority, &first);
+        retain_runtime(&mut authority, &sibling);
+        grant(&mut authority, &first, first_item, &first_document).unwrap();
+        grant(&mut authority, &sibling, sibling_item, &sibling_document).unwrap();
 
-        retain_runtime(&mut authority, replacement);
-        assert!(!authority.runtime_owners.contains_key(&first));
-        assert!(!authority.active_tabs.contains_key(&(first, first_item)));
-        assert!(authority.runtime_owners.contains_key(&replacement));
-        assert!(authority.runtime_owners.contains_key(&sibling));
+        retain_runtime(&mut authority, &replacement);
+        assert!(!authority.runtime_owners.contains_key(&first.instance()));
+        assert!(!authority
+            .active_tabs
+            .contains_key(&(first.instance(), first_item)));
+        assert!(authority
+            .runtime_owners
+            .contains_key(&replacement.instance()));
+        assert!(authority.runtime_owners.contains_key(&sibling.instance()));
 
         authority.revoke_item(sibling_item);
-        assert!(!authority.active_tabs.contains_key(&(sibling, sibling_item)));
+        assert!(!authority
+            .active_tabs
+            .contains_key(&(sibling.instance(), sibling_item)));
         authority.revoke_profile(ProfileId::from(1));
-        assert!(!authority.runtime_owners.contains_key(&replacement));
-        assert!(authority.runtime_owners.contains_key(&sibling));
+        assert!(!authority
+            .runtime_owners
+            .contains_key(&replacement.instance()));
+        assert!(authority.runtime_owners.contains_key(&sibling.instance()));
         authority.revoke_all();
         assert!(authority.runtime_owners.is_empty());
         assert!(authority.active_tabs.is_empty());
@@ -1390,26 +1961,29 @@ mod tests {
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
 
         let mut permits = Vec::new();
         for _ in 0..MAX_PENDING_DOCUMENT_PERMITS_PER_AUTHORITY {
             permits.push(
-                authority
-                    .issue_document_permit_at(
-                        runtime,
-                        item,
-                        ExtensionDocumentPurpose::ExecuteScript,
-                        now,
-                    )
-                    .unwrap(),
+                issue(
+                    &mut authority,
+                    &runtime,
+                    item,
+                    &document,
+                    ExtensionDocumentPurpose::ExecuteScript,
+                    now,
+                )
+                .unwrap(),
             );
         }
         assert!(matches!(
-            authority.issue_document_permit_at(
-                runtime,
+            issue(
+                &mut authority,
+                &runtime,
                 item,
+                &document,
                 ExtensionDocumentPurpose::ExecuteScript,
                 now,
             ),
@@ -1425,11 +1999,17 @@ mod tests {
         let item = ItemId::from(1);
         let mut document = TestDocument::committed(1, "https://example.test/start");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
-        let old = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+        let old = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
 
         assert!(document
             .navigation
@@ -1443,7 +2023,10 @@ mod tests {
             &document.url,
         );
 
-        let retained = authority.active_tabs.get(&(runtime, item)).unwrap();
+        let retained = authority
+            .active_tabs
+            .get(&(runtime.instance(), item))
+            .unwrap();
         assert_eq!(&*retained.url, document.url);
         assert!(matches!(
             authority.redeem_document_permit_at(&old, now),
@@ -1458,11 +2041,17 @@ mod tests {
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/");
         let now = Instant::now();
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
-        let mut malformed = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
+        let mut malformed = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
         malformed.url = Arc::from("https://example.test/counterfeit");
 
         assert!(matches!(
@@ -1483,58 +2072,66 @@ mod tests {
             .map(|index| runtime(1, index as u128 + 1, 1))
             .collect();
         for runtime in &runtimes {
-            retain_runtime(&mut authority, *runtime);
+            retain_runtime(&mut authority, runtime);
         }
         for item_index in 0..NativeResourceClass::Tab.limit() {
             let item = ItemId::from(item_index as u128 + 1);
             for runtime in &runtimes {
-                grant(&mut authority, *runtime, item, &document).unwrap();
+                grant(&mut authority, runtime, item, &document).unwrap();
             }
         }
         assert_eq!(authority.active_tabs.len(), MAX_ACTIVE_TAB_AUTHORITIES);
         let overflow_runtime = runtime(1, 99, 1);
-        retain_runtime(&mut authority, overflow_runtime);
+        retain_runtime(&mut authority, &overflow_runtime);
         assert_eq!(
-            grant(&mut authority, overflow_runtime, ItemId::from(1), &document,),
+            grant(
+                &mut authority,
+                &overflow_runtime,
+                ItemId::from(1),
+                &document,
+            ),
             Err(ExtensionAuthorityDenial::ActiveTabCapacity)
         );
         assert!(authority
             .active_tabs
-            .contains_key(&(runtimes[0], ItemId::from(1))));
+            .contains_key(&(runtimes[0].instance(), ItemId::from(1))));
 
         let mut pending_authority = ExtensionDocumentAuthority::default();
         for runtime in &runtimes {
-            retain_runtime(&mut pending_authority, *runtime);
+            retain_runtime(&mut pending_authority, runtime);
         }
         let now = Instant::now();
         let authority_count =
             MAX_PENDING_DOCUMENT_PERMITS / MAX_PENDING_DOCUMENT_PERMITS_PER_AUTHORITY;
         for index in 0..authority_count {
-            let runtime = runtimes[index % runtimes.len()];
+            let runtime = &runtimes[index % runtimes.len()];
             let item = ItemId::from((index / runtimes.len()) as u128 + 1);
             grant(&mut pending_authority, runtime, item, &document).unwrap();
             for _ in 0..MAX_PENDING_DOCUMENT_PERMITS_PER_AUTHORITY {
-                pending_authority
-                    .issue_document_permit_at(
-                        runtime,
-                        item,
-                        ExtensionDocumentPurpose::ExecuteScript,
-                        now,
-                    )
-                    .unwrap();
+                issue(
+                    &mut pending_authority,
+                    runtime,
+                    item,
+                    &document,
+                    ExtensionDocumentPurpose::ExecuteScript,
+                    now,
+                )
+                .unwrap();
             }
         }
         assert_eq!(
             pending_authority.pending_permits.len(),
             MAX_PENDING_DOCUMENT_PERMITS
         );
-        let extra_runtime = runtimes[0];
+        let extra_runtime = &runtimes[0];
         let extra_item = ItemId::from((authority_count / runtimes.len()) as u128 + 1);
         grant(&mut pending_authority, extra_runtime, extra_item, &document).unwrap();
         assert!(matches!(
-            pending_authority.issue_document_permit_at(
+            issue(
+                &mut pending_authority,
                 extra_runtime,
                 extra_item,
+                &document,
                 ExtensionDocumentPurpose::ExecuteScript,
                 now,
             ),
@@ -1553,8 +2150,8 @@ mod tests {
         for profile in 0..zephium_core::session::MAX_SESSION_PROFILES {
             for install in 0..MAX_EXTENSION_INSTALLS_PER_PROFILE {
                 let runtime = runtime(profile as u128 + 1, install as u128 + 1, 1);
-                first.get_or_insert(runtime);
-                retain_runtime(&mut authority, runtime);
+                first.get_or_insert(runtime.instance());
+                retain_runtime(&mut authority, &runtime);
             }
         }
         assert_eq!(
@@ -1562,10 +2159,9 @@ mod tests {
             MAX_NATIVE_EXTENSION_RUNTIME_OWNERS
         );
         assert_eq!(
-            authority.retain_runtime_owner(
-                runtime(9_999, 9_999, 1),
-                NativeExtensionRuntimeOwner::harness(),
-            ),
+            authority.retain_runtime_owner(NativeExtensionRuntimeOwner::exact_fingerprint_harness(
+                runtime(9_999, 9_999, 1).fingerprint,
+            )),
             Err(ExtensionAuthorityDenial::RuntimeOwnerCapacity)
         );
         assert!(authority.runtime_owners.contains_key(&first.unwrap()));
@@ -1577,18 +2173,26 @@ mod tests {
         let runtime = runtime(1, 10, 1);
         let item = ItemId::from(1);
         let document = TestDocument::committed(1, "https://example.test/");
-        retain_runtime(&mut authority, runtime);
-        grant(&mut authority, runtime, item, &document).unwrap();
+        retain_runtime(&mut authority, &runtime);
+        grant(&mut authority, &runtime, item, &document).unwrap();
         authority.next_permit_id = u64::MAX - 1;
         let now = Instant::now();
-        let last = authority
-            .issue_document_permit_at(runtime, item, ExtensionDocumentPurpose::ExecuteScript, now)
-            .unwrap();
+        let last = issue(
+            &mut authority,
+            &runtime,
+            item,
+            &document,
+            ExtensionDocumentPurpose::ExecuteScript,
+            now,
+        )
+        .unwrap();
         assert_eq!(last.id, DocumentPermitId(u64::MAX - 1));
         assert!(matches!(
-            authority.issue_document_permit_at(
-                runtime,
+            issue(
+                &mut authority,
+                &runtime,
                 item,
+                &document,
                 ExtensionDocumentPurpose::ExecuteScript,
                 now,
             ),
@@ -1596,9 +2200,11 @@ mod tests {
         ));
         assert!(authority.pending_permits.is_empty());
         assert!(matches!(
-            authority.issue_document_permit_at(
-                runtime,
+            issue(
+                &mut authority,
+                &runtime,
                 item,
+                &document,
                 ExtensionDocumentPurpose::ExecuteScript,
                 now,
             ),
@@ -1654,5 +2260,10 @@ mod tests {
         assert!(!production.contains("NavigationPresentationId"));
         assert!(!production.contains("evaluate_script"));
         assert!(!production.contains("execute_script"));
+        assert!(!production.contains("enum ActiveTabGrantWitness"));
+        assert!(!production.contains("enum DocumentPurposeWitness"));
+        assert!(!production.contains("grant_active_tab_from_host_document"));
+        assert!(production.contains("witness: ExtensionActiveTabGrantWitness"));
+        assert!(production.contains("witness: ExtensionDocumentAuthorityWitness"));
     }
 }
