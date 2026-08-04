@@ -486,7 +486,8 @@ mod tests {
         ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
         ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
         ExtensionManifestResourceDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeGeneration,
+        ExtensionRuntimeInstance, ExtensionTreeDigest,
     };
 
     fn package() -> ExtensionPackageIdentity {
@@ -877,6 +878,21 @@ mod tests {
         );
         assert_eq!(eligibility.package(), enabled.package());
         assert!(std::ptr::eq(eligibility.manifest(), manifest.as_ref()));
+        let runtime_generation = ExtensionRuntimeGeneration::new(13).unwrap();
+        let fingerprint = eligibility.fingerprint(runtime_generation);
+        assert_eq!(
+            fingerprint.instance(),
+            ExtensionRuntimeInstance::new(profile, id, runtime_generation)
+        );
+        assert_eq!(fingerprint.catalog_revision(), catalog_revision);
+        assert_eq!(fingerprint.install_revision(), enabled.revision());
+        assert_eq!(fingerprint.grant_revision(), grant_revision);
+        assert_eq!(fingerprint.grant_digest(), grant_digest);
+        assert_eq!(fingerprint.package(), enabled.package());
+        assert_eq!(
+            fingerprint.browsing_context(),
+            ExtensionGrantBrowsingContext::Regular
+        );
         assert_eq!(
             eligibility.decide_api(&storage),
             ExtensionApiGrantDecision::Granted

@@ -13,11 +13,13 @@ use url::Url;
 use crate::ids::{ExtensionInstallId, ProfileId};
 
 use super::cohort::ExtensionGrantCohortEntry;
+use super::transient::ExtensionRuntimeFingerprintInput;
 use super::{
     ApiPermissionName, ExtensionApiGrantDecision, ExtensionGrantAuthority,
     ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
-    ExtensionPackageIdentity, ExtensionUrlScopeDecision,
+    ExtensionPackageIdentity, ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration,
+    ExtensionUrlScopeDecision,
 };
 
 /// Exact fail-closed reason one atomic profile cohort cannot yield runtime
@@ -133,6 +135,32 @@ impl ExtensionRuntimeEligibility {
     /// Exact admitted structural manifest pinned by the store snapshot.
     pub fn manifest(&self) -> &ExtensionManifestDescriptor {
         &self.manifest
+    }
+
+    /// Projects a complete, non-authorizing reconciliation fingerprint.
+    ///
+    /// A runtime coordinator uses this to detect any durable input change and
+    /// retire the old native generation. The returned value is still not an
+    /// activation or operation capability: the coordinator must retain this
+    /// eligibility and join it with authenticated repository and native
+    /// ownership separately.
+    pub fn fingerprint(
+        &self,
+        generation: ExtensionRuntimeGeneration,
+    ) -> ExtensionRuntimeFingerprint {
+        ExtensionRuntimeFingerprint::from_eligibility(ExtensionRuntimeFingerprintInput {
+            instance: super::ExtensionRuntimeInstance::new(
+                self.profile,
+                self.install_id,
+                generation,
+            ),
+            catalog_revision: self.catalog_revision,
+            install_revision: self.install_revision,
+            grant_revision: self.grant_revision,
+            grant_digest: self.grant_digest,
+            package: self.manifest.package().clone(),
+            browsing_context: self.browsing_context,
+        })
     }
 
     /// Evaluates one exact declared API permission against this snapshot.
