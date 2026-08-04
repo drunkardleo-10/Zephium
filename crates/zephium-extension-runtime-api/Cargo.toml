@@ -1,0 +1,8 @@
+[package]
+name = "zephium-extension-runtime-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
