@@ -6,6 +6,8 @@
 //! consumes them without turning a materialized tree into activation, profile,
 //! path, receipt, or lease authority.
 
+use std::sync::Arc;
+
 use thiserror::Error;
 use zephium_core::extensions::ExtensionPackageKey;
 use zephium_extension_authority::{
@@ -130,6 +132,11 @@ impl ExtensionRepository {
         package_key: ExtensionPackageKey,
         source: &mut S,
     ) -> Result<BundledPackageMaterializationOutcome, BundledPackageMaterializationError> {
+        let operation_gate = Arc::clone(self.package_leases.operation_gate());
+        let health = Arc::clone(self.package_leases.health());
+        let operation = operation_gate
+            .enter(&health)
+            .map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
         let manifest_authority =
             open_product_manifest_authority().map_err(map_preparation_error)?;
@@ -165,7 +172,8 @@ impl ExtensionRepository {
 
         // This call owns every outer high-water and package-line interlock. A
         // writer must never publish an active package around that authority.
-        let _catalog_record = self.record_bundled_catalog(catalog, exact_catalog_bytes)?;
+        let _catalog_record =
+            self.record_bundled_catalog_under_gate(&operation, catalog, exact_catalog_bytes)?;
         self.drive_active_materialization(prepared, source)
     }
 
@@ -183,6 +191,11 @@ impl ExtensionRepository {
         package_key: ExtensionPackageKey,
         source: &mut S,
     ) -> Result<BundledPackageMaterializationOutcome, BundledPackageMaterializationError> {
+        let operation_gate = Arc::clone(self.package_leases.operation_gate());
+        let health = Arc::clone(self.package_leases.health());
+        let _operation = operation_gate
+            .enter(&health)
+            .map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
         let manifest_authority =
             open_product_manifest_authority().map_err(map_preparation_error)?;
@@ -559,7 +572,10 @@ fn map_cleanup_error(error: CleanupError) -> BundledPackageMaterializationError 
     }
 }
 
-const fn preflight_error_requires_sealing(error: PackageObjectError, had_intent: bool) -> bool {
+pub(crate) const fn preflight_error_requires_sealing(
+    error: PackageObjectError,
+    had_intent: bool,
+) -> bool {
     match error {
         PackageObjectError::BuildStateMismatch
         | PackageObjectError::Collision
@@ -606,19 +622,22 @@ const fn cleanup_error_requires_sealing(error: CleanupError) -> bool {
 }
 
 const fn filesystem_error_requires_sealing(error: PrivateFsError) -> bool {
-    matches!(
-        error,
+    match error {
         PrivateFsError::NotFound
-            | PrivateFsError::ReservedComponent
-            | PrivateFsError::Unsafe
-            | PrivateFsError::BoundExceeded
-            | PrivateFsError::AlreadyExists
-            | PrivateFsError::NamespaceMismatch
-            | PrivateFsError::DirectoryNotEmpty
-            | PrivateFsError::IdentityAmbiguous
-            | PrivateFsError::SettlementUnknown
-            | PrivateFsError::Quarantined
-    )
+        | PrivateFsError::ReservedComponent
+        | PrivateFsError::Unsafe
+        | PrivateFsError::BoundExceeded
+        | PrivateFsError::AlreadyExists
+        | PrivateFsError::NamespaceMismatch
+        | PrivateFsError::DirectoryNotEmpty
+        | PrivateFsError::IdentityAmbiguous
+        | PrivateFsError::SettlementUnknown
+        | PrivateFsError::Quarantined => true,
+        PrivateFsError::LockUnavailable
+        | PrivateFsError::InUse
+        | PrivateFsError::PrimitiveUnavailable
+        | PrivateFsError::Io => false,
+    }
 }
 
 #[cfg(all(

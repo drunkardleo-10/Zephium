@@ -384,12 +384,17 @@ pub enum BundledReleaseSourceError {
 /// the observed bytes with the requested exact length, EOF, and SHA-256 remains
 /// the repository callback's responsibility and therefore stays in the nested
 /// result rather than being conflated with source failures.
+///
+/// Repository operations retain one shared high-level operation gate while
+/// invoking source callbacks. An implementation must not re-enter the same
+/// repository or read from a package lease issued by that repository open.
 pub trait BundledReleaseByteSource {
     /// Runs `callback` with a bounded reader for one exact bundled resource.
     ///
     /// The mutable receiver serializes source-local state and prevents ordinary
     /// overlapping calls. The callback must not re-enter the same source by an
-    /// ambient alias. The reader and request borrows cannot escape this call.
+    /// ambient alias, repository, or one of that repository's package leases.
+    /// The reader and request borrows cannot escape this call.
     fn with_resource<T, E, F>(
         &mut self,
         resource: BundledReleaseResource<'_>,

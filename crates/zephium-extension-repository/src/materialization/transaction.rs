@@ -438,6 +438,8 @@ pub(crate) enum OwnerPackagePinRemovalPlan {
     Remove(OwnerPackagePinRemovalProof),
     /// The owner is already absent.
     IdempotentReplay,
+    /// The owner was rebound to another package record or incarnation.
+    Stale,
 }
 
 #[allow(dead_code)]
@@ -465,7 +467,7 @@ pub(crate) fn plan_owner_package_pin_removal(
     if pin.package_record_id != expected_pin.package_record_id
         || pin.incarnation != expected_pin.incarnation
     {
-        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        return Ok(OwnerPackagePinRemovalPlan::Stale);
     }
     Ok(OwnerPackagePinRemovalPlan::Remove(
         OwnerPackagePinRemovalProof {

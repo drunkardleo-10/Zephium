@@ -1,6 +1,7 @@
 //! Monotonic authenticated-catalog admission and durable transitions.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogCheckpoint,
@@ -11,6 +12,8 @@ use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsErro
 use crate::codec;
 use crate::materialization::{self, MaterializationRuntime};
 use crate::names::{catalog_file, state_file, state_stage};
+use crate::operation::RepositoryOperationGuard;
+use crate::package_lease::PackageLeaseRuntime;
 use crate::recovery::open_repository;
 use crate::state::{
     validate_catalog_lines, Digest32, PackageLineHighWater, RecoveryCheckpoint, RepositoryState,
@@ -53,6 +56,7 @@ pub struct ExtensionRepository {
     state: RepositoryState,
     state_bytes: Vec<u8>,
     materialization: Option<MaterializationRuntime>,
+    pub(crate) package_leases: PackageLeaseRuntime,
     sealed: bool,
 }
 
@@ -71,6 +75,7 @@ impl ExtensionRepository {
             state: opened.state,
             state_bytes: opened.state_bytes,
             materialization: Some(opened.materialization),
+            package_leases: PackageLeaseRuntime::new(),
             sealed: false,
         })
     }
@@ -85,17 +90,31 @@ impl ExtensionRepository {
         admitted: &AdmittedBundledCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
+        let operation_gate = Arc::clone(self.package_leases.operation_gate());
+        let health = Arc::clone(self.package_leases.health());
+        let operation = operation_gate
+            .enter(&health)
+            .map_err(|error| error.repository_error())?;
+        self.record_bundled_catalog_under_gate(&operation, admitted, exact_catalog_bytes)
+    }
+
+    pub(crate) fn record_bundled_catalog_under_gate(
+        &mut self,
+        _operation: &RepositoryOperationGuard<'_>,
+        admitted: &AdmittedBundledCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
         self.record_view(admitted, exact_catalog_bytes, FaultPoint::None)
     }
 
-    pub(crate) const fn writer_is_sealed(&self) -> bool {
-        self.sealed
+    pub(crate) fn writer_is_sealed(&self) -> bool {
+        self.sealed || !self.package_leases.health().is_healthy()
     }
 
     pub(crate) fn writer_materialization(
         &mut self,
     ) -> Result<&MaterializationRuntime, ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         if self.materialization.is_none() {
@@ -118,7 +137,7 @@ impl ExtensionRepository {
     pub(crate) fn writer_recover_materialization(
         &mut self,
     ) -> Result<(), ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         self.materialization = None;
@@ -140,6 +159,42 @@ impl ExtensionRepository {
     pub(crate) fn writer_seal(&mut self) {
         self.materialization = None;
         self.sealed = true;
+        self.package_leases.health().poison();
+    }
+
+    pub(crate) fn package_lease_read_catalog_object(
+        &mut self,
+        digest: Digest32,
+    ) -> Result<Vec<u8>, ExtensionRepositoryError> {
+        if self.writer_is_sealed() {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        let bytes = read_required(
+            &self.catalogs,
+            &catalog_file(digest),
+            MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+        )
+        .map_err(|error| self.required_catalog_object_error(error))?;
+        if codec::digest(&bytes) != digest {
+            return Err(self.prejournal_error(ExtensionRepositoryError::StateCorrupt));
+        }
+        Ok(bytes)
+    }
+
+    fn required_catalog_object_error(
+        &mut self,
+        error: ExtensionRepositoryError,
+    ) -> ExtensionRepositoryError {
+        if matches!(
+            error,
+            ExtensionRepositoryError::RecoveryAmbiguous
+                | ExtensionRepositoryError::FileSystem(PrivateFsError::NotFound)
+        ) {
+            // A verified current catalog-set record names this object exactly.
+            // Absence, including an exists/open race, is durable corruption.
+            return self.prejournal_error(ExtensionRepositoryError::StateCorrupt);
+        }
+        self.prejournal_error(error)
     }
 
     pub(crate) fn writer_ensure_rollback_catalog(
@@ -147,7 +202,7 @@ impl ExtensionRepository {
         admitted: &AdmittedRollbackBundledCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<(), ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         validate_exact_rollback_catalog(admitted, exact_catalog_bytes)?;
@@ -184,7 +239,7 @@ impl ExtensionRepository {
         admitted: &AdmittedBundledCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<bool, ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         validate_exact_catalog(admitted, exact_catalog_bytes)?;
@@ -207,7 +262,7 @@ impl ExtensionRepository {
         admitted: &AdmittedRollbackBundledCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<bool, ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         validate_exact_rollback_catalog(admitted, exact_catalog_bytes)?;
@@ -269,7 +324,7 @@ impl ExtensionRepository {
         admitted: &impl CatalogWitnessView,
         exact_catalog_bytes: &[u8],
     ) -> Result<(), ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         validate_exact_catalog(admitted, exact_catalog_bytes)?;
@@ -294,7 +349,7 @@ impl ExtensionRepository {
         exact_catalog_bytes: &[u8],
         fault: FaultPoint,
     ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
-        if self.sealed {
+        if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
         validate_exact_catalog(witness, exact_catalog_bytes)?;

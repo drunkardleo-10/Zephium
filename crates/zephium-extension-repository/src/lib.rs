@@ -6,7 +6,9 @@
 //! grants no profile authority, exposes no filesystem path, issues no activation
 //! receipt, and mutates no native extension runtime. Recording an authenticated
 //! catalog proves only that an equal or older catalog can no longer be accepted
-//! in this authority epoch.
+//! in this authority epoch. Package leases authorize exact resource access and
+//! durable owner pinning only; native activation requires a service-owned join
+//! with separate native-runtime authority.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -20,7 +22,16 @@ mod codec;
 mod error;
 mod materialization;
 mod names;
+mod operation;
+mod package_lease;
 mod recovery;
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "../../zephium-extension-authority/src/repository_e2e_fixture.rs"]
+mod repository_e2e_fixture;
 mod state;
 mod storage;
 mod writer;
@@ -36,5 +47,11 @@ pub use materialization::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,
     BundledReleaseSourceError,
+};
+pub use package_lease::{
+    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
+    BundledCurrentCatalogSet, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
+    BundledPackageLeaseReleaseOutcome, BundledPackageResourceError, RollbackBundledPackageLease,
+    RollbackBundledPackageReleaseRequest,
 };
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

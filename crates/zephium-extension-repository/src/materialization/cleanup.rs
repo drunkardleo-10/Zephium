@@ -8,9 +8,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+use zephium_private_fs::ByteLimit;
 use zephium_private_fs::{DirectoryIdentity, PrivateComponent, PrivateFsError};
 
 use super::names::{self, RecordObjectKind, TreeNameKind};
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+use super::records::{PackageRecord, MAX_PACKAGE_RECORD_BYTES};
 use super::runtime::MaterializationRuntime;
 use super::tree_writer::cleanup_tree_stage;
 use crate::state::Digest32;
@@ -150,6 +162,80 @@ pub(crate) fn reconcile_build_stages_for_abort(
     let proof = proof(runtime, intent);
     proof.validate(runtime)?;
     Ok(proof)
+}
+
+/// Freshly validates one coherent resumable build without removing residue.
+pub(crate) fn validate_resumable_build_projection(
+    runtime: &MaterializationRuntime,
+) -> Result<(), CleanupError> {
+    let intent = IntentStageIdentity::from_runtime(runtime)?;
+    let inventory = inspect_stage_inventory(runtime, intent)?;
+    validate_runtime_projection(runtime, &inventory)
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn install_resumable_package_record_stage_for_e2e(
+    runtime: &mut MaterializationRuntime,
+    record: &PackageRecord,
+) -> Result<(), CleanupError> {
+    let intent = IntentStageIdentity::from_runtime(runtime)?;
+    let record_id = record
+        .record_id()
+        .map_err(|_| CleanupError::BuildStateMismatch)?;
+    if record_id != intent.package_record_id {
+        return Err(CleanupError::BuildStateMismatch);
+    }
+    let stage = names::package_record_stage(record_id);
+    let bytes = record
+        .canonical_bytes()
+        .map_err(|_| CleanupError::BuildStateMismatch)?;
+    runtime
+        ._records
+        .write_new_synced(
+            &stage,
+            &bytes,
+            ByteLimit::new(MAX_PACKAGE_RECORD_BYTES).map_err(map_filesystem)?,
+        )
+        .map_err(map_filesystem)?;
+    if runtime
+        ._record_stages
+        .insert(RecordObjectKind::Package, (record_id, stage))
+        .is_some()
+    {
+        return Err(CleanupError::BuildStateMismatch);
+    }
+    validate_resumable_build_projection(runtime)
+}
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn install_orphan_package_record_stage_for_e2e(
+    runtime: &MaterializationRuntime,
+    record_id: Digest32,
+) -> Result<(), CleanupError> {
+    if runtime._state.build_intent.is_some()
+        || runtime._build_intent.is_some()
+        || runtime._build_stage.is_some()
+        || !runtime._record_stages.is_empty()
+    {
+        return Err(CleanupError::BuildStateMismatch);
+    }
+    runtime
+        ._records
+        .write_new_synced(
+            &names::package_record_stage(record_id),
+            b"orphan-stage",
+            ByteLimit::new(MAX_PACKAGE_RECORD_BYTES).map_err(map_filesystem)?,
+        )
+        .map(|_| ())
+        .map_err(map_filesystem)
 }
 
 fn proof(runtime: &MaterializationRuntime, intent: IntentStageIdentity) -> BuildStagesAbsent {

@@ -24,7 +24,6 @@ const BLOCKER_FEATURE_SETS: [&str; 5] = [
     "runtime-exact,webkit",
 ];
 const INTERNAL_REPOSITORY_CFG: &str = "zephium_internal_repository_e2e";
-const INTERNAL_REPOSITORY_E2E_TESTS: usize = 9;
 const INTERNAL_AUTHORITY_SHIPPING_REJECTION: &str =
     "the internal repository E2E authority may not link into Zephium application code";
 
@@ -700,41 +699,52 @@ fn verify_internal_authority_cannot_link_into_shipping_code() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_repository_e2e_tests() {
-    const TEST_PREFIX: &str = "writer::repository_e2e_tests::";
-    const BASE: [&str; 8] = [
-        "test",
-        "--locked",
-        "-p",
-        "zephium-extension-repository",
-        "--lib",
-        TEST_PREFIX,
-        "--",
-        // APFS durability cases intentionally quarantine ambiguous concurrent
-        // settlements. Serialize this crash matrix so the gate is deterministic.
-        "--test-threads=1",
+    const TEST_SUITES: [(&str, usize); 2] = [
+        ("writer::repository_e2e_tests::", 9),
+        ("package_lease::repository_e2e::", 9),
     ];
-    let mut list_args = BASE.to_vec();
-    list_args.push("--list");
-    let output = internal_repository_command(&list_args)
-        .output()
-        .unwrap_or_else(|error| panic!("failed to list internal repository E2E tests: {error}"));
-    if !output.status.success() {
-        eprintln!("internal repository E2E test inventory failed to compile");
-        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-        exit(output.status.code().unwrap_or(1));
+    let mut commands = Vec::with_capacity(TEST_SUITES.len());
+    for (prefix, expected) in TEST_SUITES {
+        let base = vec![
+            "test",
+            "--locked",
+            "-p",
+            "zephium-extension-repository",
+            "--lib",
+            prefix,
+            "--",
+            // APFS durability cases intentionally quarantine ambiguous concurrent
+            // settlements. Serialize this crash matrix so the gate is deterministic.
+            "--test-threads=1",
+        ];
+        let mut list_args = base.clone();
+        list_args.push("--list");
+        let output = internal_repository_command(&list_args)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("failed to list internal repository E2E tests: {error}")
+            });
+        if !output.status.success() {
+            eprintln!("internal repository E2E test inventory failed to compile");
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            exit(output.status.code().unwrap_or(1));
+        }
+        let count = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with(prefix) && line.ends_with(": test"))
+            .count();
+        if count != expected {
+            eprintln!(
+                "internal repository E2E suite {prefix} contains {count} tests, expected {expected}"
+            );
+            exit(1);
+        }
+        commands.push(base);
     }
-    let count = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.starts_with(TEST_PREFIX) && line.ends_with(": test"))
-        .count();
-    if count != INTERNAL_REPOSITORY_E2E_TESTS {
-        eprintln!(
-            "internal repository E2E inventory contains {count} tests, expected {INTERNAL_REPOSITORY_E2E_TESTS}"
-        );
-        exit(1);
+    for command in commands {
+        run_with_internal_repository_cfg(&command);
     }
-    run_with_internal_repository_cfg(&BASE);
 }
 
 #[cfg(target_os = "macos")]

@@ -74,6 +74,10 @@ pub(crate) struct PreparedActivePackage {
 }
 
 impl PreparedActivePackage {
+    pub(crate) const fn manifest(&self) -> &ProductAdmittedExtensionManifest {
+        &self._manifest
+    }
+
     pub(super) const fn package_source(&self) -> BundledReleasePackageSourceIdentity {
         self.data.package_source
     }
@@ -92,6 +96,15 @@ impl PreparedActivePackage {
 
     pub(crate) const fn record(&self) -> &PackageRecord {
         &self.data.record
+    }
+
+    pub(crate) fn into_lease_parts(
+        self,
+    ) -> (
+        CanonicalExtensionTreeIndex,
+        ProductAdmittedExtensionManifest,
+    ) {
+        (self.data.tree_index, self._manifest)
     }
 }
 
@@ -106,6 +119,10 @@ pub(crate) struct PreparedRollbackPackage {
 }
 
 impl PreparedRollbackPackage {
+    pub(crate) const fn manifest(&self) -> &ProductAdmittedRollbackExtensionManifest {
+        &self._manifest
+    }
+
     pub(super) const fn package_source(&self) -> BundledReleasePackageSourceIdentity {
         self.data.package_source
     }
@@ -124,6 +141,15 @@ impl PreparedRollbackPackage {
 
     pub(crate) const fn record(&self) -> &PackageRecord {
         &self.data.record
+    }
+
+    pub(crate) fn into_lease_parts(
+        self,
+    ) -> (
+        CanonicalExtensionTreeIndex,
+        ProductAdmittedRollbackExtensionManifest,
+    ) {
+        (self.data.tree_index, self._manifest)
     }
 }
 

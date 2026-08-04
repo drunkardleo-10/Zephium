@@ -35,8 +35,7 @@ use crate::{
     BundledReleaseResource, BundledReleaseResourceKind,
 };
 
-#[path = "../../../zephium-extension-authority/src/repository_e2e_fixture.rs"]
-mod fixture;
+use crate::repository_e2e_fixture as fixture;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ServedResource {
@@ -987,9 +986,7 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
                 incarnation: pin_identity.incarnation,
             },
         ),
-        Err(MaterializationTransitionError::Clean(
-            ExtensionRepositoryError::RecoveryAmbiguous
-        ))
+        Ok(OwnerPackagePinRemovalPlan::Stale)
     ));
     assert_eq!(
         durable_repository_snapshot(&harness.repository_path),
@@ -1006,6 +1003,7 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
     {
         OwnerPackagePinRemovalPlan::Remove(proof) => proof,
         OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("owner pin disappeared"),
+        OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
     };
     let second_profile = ProfileId::from(8);
     let second_install = ExtensionInstallId::from(12);
@@ -1051,6 +1049,7 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
         {
             OwnerPackagePinRemovalPlan::Remove(proof) => proof,
             OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("owner pin disappeared"),
+            OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
         };
         let runtime = repository.writer_take_materialization().unwrap();
         repository
@@ -1095,9 +1094,7 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
             install_id,
             pin_identity,
         ),
-        Err(MaterializationTransitionError::Clean(
-            ExtensionRepositoryError::RecoveryAmbiguous
-        ))
+        Ok(OwnerPackagePinRemovalPlan::Stale)
     ));
     assert_eq!(
         durable_repository_snapshot(&harness.repository_path),
@@ -1113,6 +1110,7 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
     {
         OwnerPackagePinRemovalPlan::Remove(proof) => proof,
         OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("reacquired pin disappeared"),
+        OwnerPackagePinRemovalPlan::Stale => panic!("reacquired pin became stale"),
     };
     let runtime = repository.writer_take_materialization().unwrap();
     repository
@@ -1677,6 +1675,7 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
         {
             OwnerPackagePinRemovalPlan::Remove(proof) => proof,
             OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("owner pin disappeared"),
+            OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
         };
         let runtime = repository.writer_take_materialization().unwrap();
         assert!(matches!(
@@ -1703,6 +1702,7 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
                     .unwrap();
             }
             OwnerPackagePinRemovalPlan::IdempotentReplay if committed => {}
+            OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
             _ => panic!("pin-remove frontier recovered the wrong exact outcome"),
         }
         assert!(matches!(
