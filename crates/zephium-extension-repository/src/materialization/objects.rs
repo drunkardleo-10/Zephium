@@ -42,6 +42,7 @@ use super::tree_writer::{
     build_authenticated_tree_stage, cleanup_tree_stage, verify_sealed_tree,
     AuthenticatedSealedTree, TreeWriterError,
 };
+use crate::operation::with_external_callback;
 use crate::state::Digest32;
 
 /// Stable, path-free failure while publishing or verifying package objects.
@@ -1367,22 +1368,24 @@ fn ensure_legal_final<S: BundledReleaseByteSource>(
         prepared.record.legal.sha256.bytes(),
     );
     let mut stage_written = false;
-    let nested = source.with_resource(resource, |reader| {
-        let mut digesting = DigestingReader::new(reader);
-        let identity = runtime
-            ._records
-            .write_new_from_reader(
-                &stage_name,
-                &mut digesting,
-                streaming_length(prepared.record.legal.length)?,
-            )
-            .map_err(map_streaming_write)?;
-        stage_written = true;
-        let proof = digesting.finish();
-        if proof.length != expectation.length || proof.sha256 != expectation.sha256 {
-            return Err(PackageObjectError::ExactMismatch);
-        }
-        Ok(identity)
+    let nested = with_external_callback(|| {
+        source.with_resource(resource, |reader| {
+            let mut digesting = DigestingReader::new(reader);
+            let identity = runtime
+                ._records
+                .write_new_from_reader(
+                    &stage_name,
+                    &mut digesting,
+                    streaming_length(prepared.record.legal.length)?,
+                )
+                .map_err(map_streaming_write)?;
+            stage_written = true;
+            let proof = digesting.finish();
+            if proof.length != expectation.length || proof.sha256 != expectation.sha256 {
+                return Err(PackageObjectError::ExactMismatch);
+            }
+            Ok(identity)
+        })
     });
     let identity = match nested {
         Err(error) => {

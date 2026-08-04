@@ -1,4 +1,17 @@
-use super::*;
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
+
+use super::api::{
+    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledPackageLeaseError,
+    BundledPackageLeaseReleaseError, RollbackBundledPackageLease,
+    RollbackBundledPackageReleaseRequest,
+};
+use super::policy::{map_snapshot_object_error, snapshot_object_error_requires_poison};
+use super::runtime::{LocalLeaseError, PackageLeaseRuntime};
+use crate::materialization::{
+    MaterializationTransitionError, PackageLeaseRepositoryIdentity, PackageObjectError,
+    SnapshotObjectPhase, MAX_DURABLE_PACKAGE_PINS,
+};
+use crate::{ExtensionRepository, ExtensionRepositoryError};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn empty_repository() -> (tempfile::TempDir, ExtensionRepository) {
@@ -31,11 +44,12 @@ fn public_lease_values_are_nominal_and_path_free_in_debug() {
 
 #[test]
 fn repository_health_is_shared_and_sticky() {
-    let runtime = PackageLeaseRuntime::new();
-    let health = Arc::clone(runtime.health());
-    assert!(health.is_healthy());
-    health.poison();
-    assert!(!runtime.health().is_healthy());
+    let runtime = crate::operation::RepositoryRuntime::new();
+    let shared = runtime.clone();
+    assert!(shared.is_healthy());
+    runtime.poison();
+    assert!(!shared.is_healthy());
+    assert!(!runtime.is_healthy());
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

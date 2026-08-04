@@ -6,20 +6,24 @@ use std::sync::Arc;
 use zephium_extension_package::{CanonicalExtensionTreeIndex, PortableRelativePath};
 use zephium_private_fs::SealedPrivateDirectory;
 
-use super::{BundledPackageResourceError, RepositoryHealth};
+use super::api::BundledPackageResourceError;
 use crate::materialization::{with_verified_tree_resource, TreeResourceError};
+use crate::operation::{with_external_callback, RepositoryRuntime};
 
 pub(super) fn with_resource<T, E>(
-    health: &Arc<RepositoryHealth>,
+    runtime: &RepositoryRuntime,
     root: &Arc<SealedPrivateDirectory>,
     index: &CanonicalExtensionTreeIndex,
     path: &PortableRelativePath,
     callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
 ) -> Result<Result<T, E>, BundledPackageResourceError> {
-    if !health.is_healthy() {
+    if !runtime.is_healthy() {
         return Err(BundledPackageResourceError::LeaseInactive);
     }
-    let result = with_verified_tree_resource(root, index, path, callback).map_err(|error| {
+    let result = with_verified_tree_resource(root, index, path, |reader| {
+        with_external_callback(|| callback(reader))
+    })
+    .map_err(|error| {
         let mapped = match error {
             TreeResourceError::NotDeclared => BundledPackageResourceError::ResourceNotDeclared,
             TreeResourceError::Unavailable => BundledPackageResourceError::ResourceReadUnavailable,
@@ -33,11 +37,11 @@ pub(super) fn with_resource<T, E>(
             BundledPackageResourceError::ResourceNotDeclared
                 | BundledPackageResourceError::ResourceReadUnavailable
         ) {
-            health.poison();
+            runtime.poison();
         }
         mapped
     })?;
-    if !health.is_healthy() {
+    if !runtime.is_healthy() {
         return Err(BundledPackageResourceError::LeaseInactive);
     }
     Ok(result)

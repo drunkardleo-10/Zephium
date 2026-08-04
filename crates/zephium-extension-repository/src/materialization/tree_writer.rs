@@ -21,6 +21,7 @@ use super::source::{
     BundledReleaseByteSource, BundledReleasePackageSourceIdentity, BundledReleaseResource,
     BundledReleaseSourceError,
 };
+use crate::operation::with_external_callback;
 
 /// One sealed, exact tree that still has its create-new stage name.
 ///
@@ -297,8 +298,8 @@ fn write_source_file<S: BundledReleaseByteSource>(
 ) -> Result<FileIdentity, TreeWriterError> {
     let resource =
         BundledReleaseResource::tree_file(package, file.path(), file.length(), file.sha256());
-    let nested = source
-        .with_resource(resource, |reader| {
+    let nested = with_external_callback(|| {
+        source.with_resource(resource, |reader| {
             let mut reader = DigestingReader::new(reader);
             let identity = parent
                 .write_new_entry_from_reader(name, &mut reader, streaming_length(file.length())?)
@@ -309,7 +310,8 @@ fn write_source_file<S: BundledReleaseByteSource>(
             }
             Ok(identity)
         })
-        .map_err(TreeWriterError::Source)?;
+    })
+    .map_err(TreeWriterError::Source)?;
     nested
 }
 

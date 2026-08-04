@@ -153,6 +153,32 @@ impl BundledReleaseByteSource for FixtureSource {
     }
 }
 
+struct ReentrantFixtureSource<'repository> {
+    inner: FixtureSource,
+    nested_repository: &'repository mut ExtensionRepository,
+    rejected_entries: usize,
+}
+
+impl BundledReleaseByteSource for ReentrantFixtureSource<'_> {
+    fn with_resource<T, E, F>(
+        &mut self,
+        resource: BundledReleaseResource<'_>,
+        callback: F,
+    ) -> Result<Result<T, E>, BundledReleaseSourceError>
+    where
+        F: FnOnce(&mut dyn Read) -> Result<T, E>,
+    {
+        assert!(matches!(
+            self.nested_repository.current_bundled_catalog_set(),
+            Err(crate::BundledPackageLeaseError::Repository(
+                ExtensionRepositoryError::CallbackReentry
+            ))
+        ));
+        self.rejected_entries += 1;
+        self.inner.with_resource(resource, callback)
+    }
+}
+
 struct Harness {
     temporary: TempDir,
     repository_path: PathBuf,
@@ -696,6 +722,39 @@ fn active_package_materializes_reopens_and_replays_exactly() {
         Ok(BundledPackageMaterializationOutcome::IdempotentReplay)
     );
     second_replay.assert_requests(&preparation_requests());
+}
+
+#[test]
+fn source_callbacks_cannot_enter_another_repository_and_do_not_poison_it() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let source_harness = Harness::new();
+    let nested_harness = Harness::new();
+    let mut repository = source_harness.open();
+    let mut nested_repository = nested_harness.open();
+    let mut source = ReentrantFixtureSource {
+        inner: FixtureSource::active(&active),
+        nested_repository: &mut nested_repository,
+        rejected_entries: 0,
+    };
+
+    assert_eq!(
+        repository.materialize_active_bundled_package(
+            &active,
+            fixture::ACTIVE_CATALOG_BYTES,
+            runtime_target(),
+            package_key(),
+            &mut source,
+        ),
+        Ok(BundledPackageMaterializationOutcome::Materialized)
+    );
+    assert_eq!(source.rejected_entries, full_requests().len());
+    drop(source);
+
+    assert!(nested_repository
+        .current_bundled_catalog_set()
+        .unwrap()
+        .is_none());
+    assert!(repository.current_bundled_catalog_set().unwrap().is_none());
 }
 
 #[test]

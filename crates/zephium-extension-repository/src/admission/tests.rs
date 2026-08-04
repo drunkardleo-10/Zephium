@@ -10,6 +10,7 @@ use super::*;
 use crate::materialization::{
     package_record_fixture, MaterializationBuildIntent, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
 };
+use crate::operation::with_external_callback;
 
 struct Harness {
     _temporary: TempDir,
@@ -47,6 +48,19 @@ impl Harness {
             Err(error) => error,
         }
     }
+}
+
+#[test]
+fn repository_open_is_rejected_inside_an_adapter_callback_before_recovery() {
+    let harness = Harness::new();
+    let namespace = harness.namespace();
+    assert!(matches!(
+        with_external_callback(|| ExtensionRepository::open(namespace)),
+        Err(ExtensionRepositoryError::CallbackReentry)
+    ));
+
+    let repository = harness.open();
+    assert!(!repository.writer_is_sealed());
 }
 
 impl TestCatalogWitness {

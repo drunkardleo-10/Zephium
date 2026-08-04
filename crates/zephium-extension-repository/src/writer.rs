@@ -6,8 +6,6 @@
 //! consumes them without turning a materialized tree into activation, profile,
 //! path, receipt, or lease authority.
 
-use std::sync::Arc;
-
 use thiserror::Error;
 use zephium_core::extensions::ExtensionPackageKey;
 use zephium_extension_authority::{
@@ -132,11 +130,8 @@ impl ExtensionRepository {
         package_key: ExtensionPackageKey,
         source: &mut S,
     ) -> Result<BundledPackageMaterializationOutcome, BundledPackageMaterializationError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let operation = operation_gate
-            .enter(&health)
-            .map_err(|error| error.repository_error())?;
+        let runtime = self.runtime.clone();
+        let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
         let manifest_authority =
             open_product_manifest_authority().map_err(map_preparation_error)?;
@@ -191,11 +186,8 @@ impl ExtensionRepository {
         package_key: ExtensionPackageKey,
         source: &mut S,
     ) -> Result<BundledPackageMaterializationOutcome, BundledPackageMaterializationError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let _operation = operation_gate
-            .enter(&health)
-            .map_err(|error| error.repository_error())?;
+        let runtime = self.runtime.clone();
+        let _operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
         let manifest_authority =
             open_product_manifest_authority().map_err(map_preparation_error)?;

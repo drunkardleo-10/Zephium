@@ -1,8 +1,6 @@
 //! Monotonic authenticated-catalog admission and durable transitions.
 
 use std::cmp::Ordering;
-use std::sync::Arc;
-
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogCheckpoint,
 };
@@ -12,7 +10,7 @@ use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsErro
 use crate::codec;
 use crate::materialization::{self, MaterializationRuntime};
 use crate::names::{catalog_file, state_file, state_stage};
-use crate::operation::RepositoryOperationGuard;
+use crate::operation::{reject_if_external_callback, RepositoryOperationGuard, RepositoryRuntime};
 use crate::package_lease::PackageLeaseRuntime;
 use crate::recovery::open_repository;
 use crate::state::{
@@ -56,6 +54,7 @@ pub struct ExtensionRepository {
     state: RepositoryState,
     state_bytes: Vec<u8>,
     materialization: Option<MaterializationRuntime>,
+    pub(crate) runtime: RepositoryRuntime,
     pub(crate) package_leases: PackageLeaseRuntime,
     sealed: bool,
 }
@@ -67,6 +66,7 @@ impl ExtensionRepository {
     /// disagreement between state and checkpoint fail closed. The caller must
     /// create the namespace at its product-owned application-data location.
     pub fn open(namespace: LockedPrivateNamespace) -> Result<Self, ExtensionRepositoryError> {
+        reject_if_external_callback()?;
         let opened = open_repository(namespace)?;
         Ok(Self {
             _namespace: opened.namespace,
@@ -75,6 +75,7 @@ impl ExtensionRepository {
             state: opened.state,
             state_bytes: opened.state_bytes,
             materialization: Some(opened.materialization),
+            runtime: RepositoryRuntime::new(),
             package_leases: PackageLeaseRuntime::new(),
             sealed: false,
         })
@@ -90,11 +91,8 @@ impl ExtensionRepository {
         admitted: &AdmittedBundledCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let operation = operation_gate
-            .enter(&health)
-            .map_err(|error| error.repository_error())?;
+        let runtime = self.runtime.clone();
+        let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.record_bundled_catalog_under_gate(&operation, admitted, exact_catalog_bytes)
     }
 
@@ -108,7 +106,7 @@ impl ExtensionRepository {
     }
 
     pub(crate) fn writer_is_sealed(&self) -> bool {
-        self.sealed || !self.package_leases.health().is_healthy()
+        self.sealed || !self.runtime.is_healthy()
     }
 
     pub(crate) fn writer_materialization(
@@ -159,7 +157,7 @@ impl ExtensionRepository {
     pub(crate) fn writer_seal(&mut self) {
         self.materialization = None;
         self.sealed = true;
-        self.package_leases.health().poison();
+        self.runtime.poison();
     }
 
     pub(crate) fn package_lease_read_catalog_object(

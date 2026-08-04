@@ -5,6 +5,7 @@ use zephium_private_fs::PrivateFsError;
 
 /// Failure while opening or advancing the authenticated extension repository.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
 pub enum ExtensionRepositoryError {
     /// Exact caller-supplied catalog bytes do not match the admitted witness.
     #[error("extension catalog bytes do not match their admitted witness")]
@@ -51,6 +52,9 @@ pub enum ExtensionRepositoryError {
     /// A mutation may have committed and this process may perform no more work.
     #[error("extension repository mutation settlement is ambiguous")]
     SettlementAmbiguous,
+    /// Trusted adapter code attempted to enter a repository from a callback.
+    #[error("extension repository operations are forbidden from adapter callbacks")]
+    CallbackReentry,
     /// This repository instance was sealed after an ambiguous mutation.
     #[error("extension repository instance is sealed")]
     Sealed,

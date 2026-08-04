@@ -20,20 +20,27 @@ use zephium_extension_authority::{
 use zephium_extension_package::{CanonicalExtensionTreeIndex, PortableRelativePath};
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
-use super::*;
+use super::api::{
+    BundledCatalogGenerationRole, BundledCurrentCatalogSet, BundledPackageLeaseError,
+    BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
+    BundledPackageResourceError,
+};
+use super::repository::{arm_post_pin_reverify_hook, arm_release_planning_error_hook};
 use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build,
     install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
     open_product_manifest_authority, plan_current_catalog_package_pin,
     plan_owner_package_pin_removal, preflight_package_object_capacity, prepare_rollback_package,
-    remove_owner_package_pin, OwnerPackagePinPlan, OwnerPackagePinRemovalPlan,
-    PackageObjectIntentDisposition,
+    remove_owner_package_pin, MaterializationTransitionError, OwnerPackagePinPlan,
+    OwnerPackagePinRemovalPlan, PackageObjectIntentDisposition,
 };
+use crate::state::Digest32;
 use crate::{
-    BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome,
+    BundledCatalogSetIdentity, BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome,
     BundledPackageMaterializationOutcome, BundledPackageRuntimeSelection, BundledReleaseByteSource,
     BundledReleaseCatalogSourceIdentity, BundledReleasePackageSourceIdentity,
     BundledReleaseResource, BundledReleaseResourceKind, BundledReleaseSourceError,
+    ExtensionRepository, ExtensionRepositoryError,
 };
 
 use crate::repository_e2e_fixture as fixture;
@@ -526,6 +533,66 @@ fn resource_reads_drain_callback_results_and_integrity_outranks_callback_error()
 }
 
 #[test]
+fn resource_callback_reentry_is_explicit_non_poisoning_and_drain_safe() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_active(&mut repository, &active);
+    let first_owner =
+        EligibilityFixture::active(&active, ProfileId::from(17), ExtensionInstallId::from(19));
+    let second_owner =
+        EligibilityFixture::active(&active, ProfileId::from(21), ExtensionInstallId::from(23));
+    let first = repository
+        .acquire_active_bundled_package_lease(current, &first_owner.eligibility())
+        .unwrap();
+    let second = repository
+        .acquire_active_bundled_package_lease(current, &second_owner.eligibility())
+        .unwrap();
+    let manifest = PortableRelativePath::parse("manifest.json").unwrap();
+    let nested_manifest = PortableRelativePath::parse("manifest.json").unwrap();
+
+    let first_byte = first
+        .with_resource_reader(&manifest, |reader| {
+            assert!(matches!(
+                repository.current_bundled_catalog_set(),
+                Err(BundledPackageLeaseError::Repository(
+                    ExtensionRepositoryError::CallbackReentry
+                ))
+            ));
+            assert!(matches!(
+                second
+                    .with_resource_reader::<(), std::io::Error>(&nested_manifest, |_reader| Ok(())),
+                Err(BundledPackageResourceError::CallbackReentry)
+            ));
+
+            let mut byte = [0_u8; 1];
+            reader.read_exact(&mut byte)?;
+            Ok::<u8, std::io::Error>(byte[0])
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_byte, fixture::MANIFEST_BYTES[0]);
+    assert!(!repository.writer_is_sealed());
+    assert_eq!(
+        repository
+            .current_bundled_catalog_set()
+            .unwrap()
+            .unwrap()
+            .identity(),
+        current
+    );
+
+    let bytes = second
+        .with_resource_reader(&nested_manifest, |reader| {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(bytes, fixture::MANIFEST_BYTES);
+}
+
+#[test]
 fn shared_operation_gate_orders_resource_poison_before_waiting_writer_mutation() {
     let (active, rollback) = catalogs();
     let harness = Harness::new();
@@ -541,10 +608,7 @@ fn shared_operation_gate_orders_resource_poison_before_waiting_writer_mutation()
     let before_writer = harness.snapshot();
 
     let (contention_tx, contention_rx) = std::sync::mpsc::channel();
-    repository
-        .package_leases
-        .operation_gate()
-        .arm_contention_probe(contention_tx);
+    repository.runtime.arm_contention_probe(contention_tx);
     let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::sync_channel(0);
     let (release_callback_tx, release_callback_rx) = std::sync::mpsc::sync_channel(0);
     let (repository, read_result, write_result) = std::thread::scope(|scope| {

@@ -386,14 +386,16 @@ pub enum BundledReleaseSourceError {
 /// result rather than being conflated with source failures.
 ///
 /// Repository operations retain one shared high-level operation gate while
-/// invoking source callbacks. An implementation must not re-enter the same
-/// repository or read from a package lease issued by that repository open.
+/// invoking source callbacks. Re-entering any extension repository or package
+/// lease on the callback thread is rejected before lock acquisition. An
+/// implementation must not delegate repository access to another thread or
+/// block on work that can enter a repository.
 pub trait BundledReleaseByteSource {
     /// Runs `callback` with a bounded reader for one exact bundled resource.
     ///
     /// The mutable receiver serializes source-local state and prevents ordinary
     /// overlapping calls. The callback must not re-enter the same source by an
-    /// ambient alias, repository, or one of that repository's package leases.
+    /// ambient alias, repository, or package lease.
     /// The reader and request borrows cannot escape this call.
     fn with_resource<T, E, F>(
         &mut self,

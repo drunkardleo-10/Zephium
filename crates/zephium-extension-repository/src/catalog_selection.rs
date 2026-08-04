@@ -5,8 +5,6 @@
 //! profile grant, runtime lease, filesystem path, or native activation escapes
 //! this layer.
 
-use std::sync::Arc;
-
 use thiserror::Error;
 use zephium_core::extensions::ExtensionPackageKey;
 use zephium_extension_authority::{
@@ -149,10 +147,9 @@ impl ExtensionRepository {
         selections: &[BundledPackageRuntimeSelection],
         source: &mut S,
     ) -> Result<BundledCatalogSetStageOutcome, BundledCatalogSetError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let _operation = operation_gate
-            .enter(&health)
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
@@ -201,10 +198,9 @@ impl ExtensionRepository {
         selections: &[BundledPackageRuntimeSelection],
         source: &mut S,
     ) -> Result<BundledCatalogSetStageOutcome, BundledCatalogSetError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let _operation = operation_gate
-            .enter(&health)
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
@@ -253,10 +249,9 @@ impl ExtensionRepository {
         expected_candidate: BundledCatalogSetIdentity,
         source: &mut S,
     ) -> Result<BundledCatalogSetPromotionOutcome, BundledCatalogSetError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let _operation = operation_gate
-            .enter(&health)
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
@@ -315,10 +310,9 @@ impl ExtensionRepository {
         expected_candidate: BundledCatalogSetIdentity,
         source: &mut S,
     ) -> Result<BundledCatalogSetPromotionOutcome, BundledCatalogSetError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let _operation = operation_gate
-            .enter(&health)
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
@@ -378,10 +372,9 @@ impl ExtensionRepository {
         expected_previous: BundledCatalogSetIdentity,
         source: &mut S,
     ) -> Result<BundledCatalogSetRollbackOutcome, BundledCatalogSetError> {
-        let operation_gate = Arc::clone(self.package_leases.operation_gate());
-        let health = Arc::clone(self.package_leases.health());
-        let _operation = operation_gate
-            .enter(&health)
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
         validate_projection(catalog.catalog(), selections)?;
         if !self

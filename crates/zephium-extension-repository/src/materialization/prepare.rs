@@ -26,6 +26,7 @@ use super::source::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseSourceError,
 };
+use crate::operation::with_external_callback;
 use crate::state::{digest_package_row, Digest32};
 
 /// Stable, path-free failure while preparing exact bundled package bytes.
@@ -362,11 +363,12 @@ fn read_exact_resource<S: BundledReleaseByteSource>(
     if expected_length == 0 || expected_length > maximum_length {
         return Err(PreparationError::ResourceLengthMismatch);
     }
-    source
-        .with_resource(resource, |reader| {
+    with_external_callback(|| {
+        source.with_resource(resource, |reader| {
             read_exact_bytes(reader, expected_length, expected_digest)
         })
-        .map_err(PreparationError::Source)?
+    })
+    .map_err(PreparationError::Source)?
 }
 
 fn read_exact_bytes(
