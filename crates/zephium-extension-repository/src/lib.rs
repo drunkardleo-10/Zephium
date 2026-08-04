@@ -11,6 +11,9 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+#[cfg(all(zephium_internal_repository_e2e, not(debug_assertions)))]
+compile_error!("the internal repository E2E authority is forbidden in optimized builds");
+
 mod admission;
 mod codec;
 mod error;

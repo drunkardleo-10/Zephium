@@ -392,6 +392,19 @@ impl ExtensionRepository {
         self.record_view(witness, exact_catalog_bytes, fault)
     }
 
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub(crate) fn writer_record_bundled_catalog_with_fault(
+        &mut self,
+        witness: &AdmittedBundledCatalog,
+        exact_catalog_bytes: &[u8],
+        fault: FaultPoint,
+    ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
+        self.record_view(witness, exact_catalog_bytes, fault)
+    }
 }
 
 trait CatalogWitnessView {

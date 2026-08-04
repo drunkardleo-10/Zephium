@@ -578,6 +578,21 @@ fn fail_after_object_publication(
     Ok(())
 }
 
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn publish_or_reuse_active_package_at_fault<S: BundledReleaseByteSource>(
+    runtime: &mut MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedActivePackage,
+    source: &mut S,
+    fault: ObjectPublicationFaultPoint,
+) -> Result<VerifiedActivePackageClosure, PackageObjectError> {
+    publish_or_reuse_active_package_with_fault(runtime, capacity, prepared, source, fault)
+}
+
 fn verify_completed_package(
     runtime: &MaterializationRuntime,
     capacity: PackageObjectCapacity,

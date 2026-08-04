@@ -51,6 +51,22 @@ pub(crate) use transaction::{
     complete_active_package, complete_rollback_package, MaterializationTransitionError,
 };
 
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use objects::{
+    publish_or_reuse_active_package_at_fault, ObjectPublicationFaultPoint,
+    VerifiedActivePackageClosure,
+};
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use transaction::{complete_active_package_with_fault, TransitionFaultPoint};
+
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 pub(crate) use records::tests::package_record_fixture;
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]

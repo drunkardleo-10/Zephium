@@ -620,3 +620,11 @@ const fn filesystem_error_requires_sealing(error: PrivateFsError) -> bool {
             | PrivateFsError::Quarantined
     )
 }
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "writer/tests.rs"]
+mod repository_e2e_tests;

@@ -295,6 +295,7 @@ fn authority_with_rollback(
     .unwrap()
 }
 
+#[cfg(not(zephium_internal_repository_e2e))]
 #[test]
 fn production_authority_is_explicitly_unprovisioned() {
     assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION, 32);
@@ -332,7 +333,76 @@ fn caller_owned_policy_can_mint_only_structural_output() {
         structural.descriptor().compatibility_target().as_str(),
         "external-policy-v1"
     );
+    #[cfg(not(zephium_internal_repository_e2e))]
     assert!(ProductExtensionManifestAuthority::product().is_err());
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+#[test]
+fn internal_repository_fixture_admits_active_and_rollback_manifests() {
+    use crate::repository_e2e_fixture::{
+        ACTIVE_CATALOG_BYTES, MANIFEST_BYTES, PACKAGE_KEY_BYTES, ROLLBACK_CATALOG_BYTES,
+        TREE_INDEX_BYTES,
+    };
+
+    let package_authority = BundledPackageAuthority::product().unwrap();
+    let active = package_authority
+        .admit_catalog(ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let rollback = package_authority
+        .admit_rollback_catalog(ROLLBACK_CATALOG_BYTES)
+        .unwrap();
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES).unwrap();
+    let package_key = ExtensionPackageKey::from_bytes(PACKAGE_KEY_BYTES);
+    let authority = ProductExtensionManifestAuthority::product().unwrap();
+    let runtime_target = repository_e2e_runtime_target();
+    assert_eq!(
+        ProductExtensionManifestAuthority::product_status(),
+        ProductExtensionManifestAuthorityStatus::Configured
+    );
+
+    let active_manifest = authority
+        .admit_manifest(&active, runtime_target, package_key, &tree, MANIFEST_BYTES)
+        .unwrap();
+    let rollback_manifest = authority
+        .admit_rollback_manifest(
+            &rollback,
+            runtime_target,
+            package_key,
+            &tree,
+            MANIFEST_BYTES,
+        )
+        .unwrap();
+    assert_eq!(active_manifest.catalog_revision().get(), 2);
+    assert_eq!(rollback_manifest.catalog_revision().get(), 1);
+    assert_eq!(active_manifest.runtime_target(), runtime_target);
+    assert_eq!(rollback_manifest.runtime_target(), runtime_target);
+    assert!(matches!(
+        authority.admit_manifest(
+            &active,
+            unavailable_repository_e2e_runtime_target(runtime_target),
+            package_key,
+            &tree,
+            MANIFEST_BYTES,
+        ),
+        Err(ProductExtensionManifestAdmissionError::ProfileNotProvisioned)
+    ));
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+const fn unavailable_repository_e2e_runtime_target(
+    configured: ProductExtensionRuntimeTarget,
+) -> ProductExtensionRuntimeTarget {
+    match configured {
+        ProductExtensionRuntimeTarget::MacosCompatibility => {
+            ProductExtensionRuntimeTarget::LinuxCompatibility
+        }
+        ProductExtensionRuntimeTarget::LinuxCompatibility
+        | ProductExtensionRuntimeTarget::WindowsNative
+        | ProductExtensionRuntimeTarget::MacosNative => {
+            ProductExtensionRuntimeTarget::MacosCompatibility
+        }
+    }
 }
 
 #[test]

@@ -23,6 +23,10 @@ const BLOCKER_FEATURE_SETS: [&str; 5] = [
     "runtime,webkit",
     "runtime-exact,webkit",
 ];
+const INTERNAL_REPOSITORY_CFG: &str = "zephium_internal_repository_e2e";
+const INTERNAL_REPOSITORY_E2E_TESTS: usize = 9;
+const INTERNAL_AUTHORITY_SHIPPING_REJECTION: &str =
+    "the internal repository E2E authority may not link into Zephium application code";
 
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
@@ -524,6 +528,7 @@ fn check_release_engine_security() {
 }
 
 fn ci() {
+    reject_ambient_internal_repository_cfg();
     share_workspace_target_dir();
     check_engine_floors();
     check_advisory_exceptions();
@@ -567,6 +572,7 @@ fn ci() {
     // The desktop test suite regenerates frame/src/shared/ipc/bindings.ts, so the
     // frontend typecheck after it doubles as a Rust/TS drift check.
     run("cargo", &["test", "--workspace"]);
+    run_internal_extension_repository_gates();
     for (manifest, features) in NATIVE_ADAPTERS {
         run_native_adapter_tests(manifest, features);
     }
@@ -575,6 +581,160 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+fn run_internal_extension_repository_gates() {
+    verify_internal_authority_cannot_link_into_shipping_code();
+    for target in ["--all-targets", "--lib"] {
+        run_with_internal_repository_cfg(&[
+            "clippy",
+            "--locked",
+            "-p",
+            "zephium-extension-authority",
+            "-p",
+            "zephium-extension-repository",
+            target,
+            "--",
+            "-D",
+            "warnings",
+        ]);
+    }
+    run_with_internal_repository_cfg(&[
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-authority",
+        "--lib",
+    ]);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    run_internal_repository_e2e_tests();
+    #[cfg(target_os = "windows")]
+    eprintln!(
+        "internal repository writer E2E is unavailable on Windows until the private namespace primitive is implemented; custom authority lint/tests remain mandatory"
+    );
+}
+
+fn run_with_internal_repository_cfg(args: &[&str]) {
+    eprintln!("> [internal repository authority] cargo {}", args.join(" "));
+    let status = internal_repository_command(args)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to spawn cargo: {error}"));
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+}
+
+fn internal_repository_command(args: &[&str]) -> Command {
+    let mut command = Command::new("cargo");
+    command.args(args);
+    if let Some(mut encoded) = std::env::var_os("CARGO_ENCODED_RUSTFLAGS") {
+        if !encoded.is_empty() {
+            encoded.push("\u{1f}");
+        }
+        encoded.push("--cfg\u{1f}");
+        encoded.push(INTERNAL_REPOSITORY_CFG);
+        command.env("CARGO_ENCODED_RUSTFLAGS", encoded);
+    } else {
+        let mut flags = std::env::var_os("RUSTFLAGS").unwrap_or_default();
+        if !flags.is_empty() {
+            flags.push(" ");
+        }
+        flags.push("--cfg ");
+        flags.push(INTERNAL_REPOSITORY_CFG);
+        command.env("RUSTFLAGS", flags);
+    }
+    command
+}
+
+fn reject_ambient_internal_repository_cfg() {
+    let plain = std::env::var_os("RUSTFLAGS")
+        .map(|value| value.to_string_lossy().into_owned())
+        .is_some_and(|value| rustflags_enable_internal_repository_cfg(value.split_whitespace()));
+    let encoded = std::env::var_os("CARGO_ENCODED_RUSTFLAGS")
+        .map(|value| value.to_string_lossy().into_owned())
+        .is_some_and(|value| rustflags_enable_internal_repository_cfg(value.split('\u{1f}')));
+    if plain || encoded {
+        eprintln!(
+            "cargo xtask ci refuses an ambient internal repository E2E authority; remove the custom cfg from compiler flags"
+        );
+        exit(2);
+    }
+}
+
+fn rustflags_enable_internal_repository_cfg<'flag>(
+    flags: impl IntoIterator<Item = &'flag str>,
+) -> bool {
+    let mut expects_cfg_value = false;
+    for raw in flags {
+        let flag = raw.trim_matches(['\'', '"']);
+        if expects_cfg_value {
+            if flag == INTERNAL_REPOSITORY_CFG {
+                return true;
+            }
+            expects_cfg_value = false;
+        }
+        if flag == "--cfg" {
+            expects_cfg_value = true;
+        } else if flag.strip_prefix("--cfg=") == Some(INTERNAL_REPOSITORY_CFG) {
+            return true;
+        }
+    }
+    false
+}
+
+fn verify_internal_authority_cannot_link_into_shipping_code() {
+    let output = internal_repository_command(&["check", "--locked", "-p", "zephium-app", "--lib"])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to spawn negative authority-link gate: {error}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() || !stderr.contains(INTERNAL_AUTHORITY_SHIPPING_REJECTION) {
+        eprintln!(
+            "internal repository authority shipping rejection did not fail for the expected reason"
+        );
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{stderr}");
+        exit(output.status.code().filter(|code| *code != 0).unwrap_or(1));
+    }
+    eprintln!("> internal repository authority is compile-time rejected by shipping code");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_internal_repository_e2e_tests() {
+    const TEST_PREFIX: &str = "writer::repository_e2e_tests::";
+    const BASE: [&str; 8] = [
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-repository",
+        "--lib",
+        TEST_PREFIX,
+        "--",
+        // APFS durability cases intentionally quarantine ambiguous concurrent
+        // settlements. Serialize this crash matrix so the gate is deterministic.
+        "--test-threads=1",
+    ];
+    let mut list_args = BASE.to_vec();
+    list_args.push("--list");
+    let output = internal_repository_command(&list_args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to list internal repository E2E tests: {error}"));
+    if !output.status.success() {
+        eprintln!("internal repository E2E test inventory failed to compile");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        exit(output.status.code().unwrap_or(1));
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with(TEST_PREFIX) && line.ends_with(": test"))
+        .count();
+    if count != INTERNAL_REPOSITORY_E2E_TESTS {
+        eprintln!(
+            "internal repository E2E inventory contains {count} tests, expected {INTERNAL_REPOSITORY_E2E_TESTS}"
+        );
+        exit(1);
+    }
+    run_with_internal_repository_cfg(&BASE);
 }
 
 #[cfg(target_os = "macos")]
@@ -1041,7 +1201,32 @@ fn run(cmd: &str, args: &[&str]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_advisory_exceptions, validate_security_fork_lock};
+    use super::{
+        rustflags_enable_internal_repository_cfg, validate_advisory_exceptions,
+        validate_security_fork_lock,
+    };
+
+    #[test]
+    fn internal_repository_cfg_detection_is_exact_across_rustflag_encodings() {
+        assert!(rustflags_enable_internal_repository_cfg([
+            "-C",
+            "debuginfo=2",
+            "--cfg",
+            "zephium_internal_repository_e2e",
+        ]));
+        assert!(rustflags_enable_internal_repository_cfg([
+            "--cfg=zephium_internal_repository_e2e"
+        ]));
+        assert!(rustflags_enable_internal_repository_cfg([
+            "--cfg",
+            "'zephium_internal_repository_e2e'",
+        ]));
+        assert!(!rustflags_enable_internal_repository_cfg([
+            "--check-cfg=cfg(zephium_internal_repository_e2e)",
+            "--cfg",
+            "another_cfg",
+        ]));
+    }
 
     #[test]
     fn advisory_exceptions_require_owner_and_short_live_expiry() {

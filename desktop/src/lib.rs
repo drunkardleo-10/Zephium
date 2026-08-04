@@ -1,6 +1,9 @@
 //! Composition root: the only crate that knows Tauri. Wires the dependency graph
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
+#[cfg(zephium_internal_repository_e2e)]
+compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
+
 mod blocker_service;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;

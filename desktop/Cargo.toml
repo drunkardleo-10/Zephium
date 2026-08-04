@@ -39,6 +39,11 @@ x11rb = { version = "=0.13.2", features = ["xkb"] }
 xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
 
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = [
+    "cfg(zephium_internal_repository_e2e)",
+] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 zephium-blocker = { workspace = true, features = ["runtime"] }
 raw-window-handle.workspace = true

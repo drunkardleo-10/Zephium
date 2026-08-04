@@ -5,6 +5,8 @@ use std::mem::size_of;
 
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{ExtensionAuthorityId, ExtensionPackagePayloadIdentity};
+#[cfg(zephium_internal_repository_e2e)]
+use zephium_extension_package::{CanonicalExtensionTreeIndex, ExtensionReleaseLicenseRule};
 use zephium_extension_package::{
     ExtensionPackageAdmissionPolicyDigest, ExtensionReleaseAdmissionPolicy,
     ExtensionReleaseCatalog, ExtensionReleaseCatalogDigest, ExtensionReleaseCatalogRevision,
@@ -12,6 +14,15 @@ use zephium_extension_package::{
 };
 
 use crate::inventory::digest_catalog_inventory;
+#[cfg(zephium_internal_repository_e2e)]
+use crate::repository_e2e_fixture::{
+    ACTIVE_CATALOG_BYTES, ACTIVE_CATALOG_LENGTH, ACTIVE_CATALOG_SHA256_HEX,
+    ADMISSION_POLICY_DIGEST_BYTES, CATALOG_INVENTORY_SHA256_HEX, LEGAL_NOTICE_BYTES,
+    LEGAL_NOTICE_LENGTH, LEGAL_NOTICE_SHA256_HEX, LICENSE_EXPRESSION, MANIFEST_BYTES,
+    MANIFEST_LENGTH, MANIFEST_SHA256_HEX, ROLLBACK_CATALOG_BYTES, ROLLBACK_CATALOG_LENGTH,
+    ROLLBACK_CATALOG_SHA256_HEX, TREE_INDEX_BYTES, TREE_INDEX_LENGTH, TREE_INDEX_SHA256_HEX,
+    TREE_SHA256_HEX,
+};
 use crate::{
     BundledCatalogAdmissionError, BundledCatalogCheckpoint, BundledCatalogDisposition,
     BundledCatalogGenerationAnchor, BundledCatalogInventoryDigest,
@@ -93,7 +104,7 @@ impl BundledPackageAuthority {
     /// Opens the product-sealed authority or explicitly reports that this
     /// build has no approved bundled extension package anchor.
     pub fn product() -> Result<Self, BundledCatalogAdmissionError> {
-        let (active, rollback) = sealed_product_bundled_catalog_generations()
+        let (active, rollback) = sealed_product_bundled_catalog_generations()?
             .ok_or(BundledCatalogAdmissionError::Unprovisioned)?;
         Self::from_sealed_generations(active, rollback)
     }
@@ -560,6 +571,11 @@ struct SealedBundledCatalogGeneration {
     policy: ExtensionReleaseAdmissionPolicy,
 }
 
+type SealedBundledCatalogGenerations = (
+    SealedBundledCatalogGeneration,
+    Box<[SealedBundledCatalogGeneration]>,
+);
+
 impl SealedBundledCatalogGeneration {
     fn validate_configuration(&self) -> Result<(), BundledCatalogAdmissionError> {
         if self.anchor.catalog_length == 0
@@ -653,17 +669,118 @@ impl SealedBundledCatalogGeneration {
 // This private compile-time slot is the only production trust root; it must
 // never be populated from runtime configuration, an environment variable, or
 // caller-provided bytes.
-fn sealed_product_bundled_catalog_generations() -> Option<(
-    SealedBundledCatalogGeneration,
-    Box<[SealedBundledCatalogGeneration]>,
-)> {
+#[cfg(not(zephium_internal_repository_e2e))]
+fn sealed_product_bundled_catalog_generations(
+) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
     // Active and rollback generations, including each exact per-generation
     // policy, must land atomically once reviewed release artifacts exist.
     // Returning `None` preserves an explicit fail-closed production build.
-    None
+    Ok(None)
 }
 
-#[cfg(test)]
+#[cfg(zephium_internal_repository_e2e)]
+fn sealed_product_bundled_catalog_generations(
+) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
+    let active = repository_e2e_generation(
+        ACTIVE_CATALOG_BYTES,
+        ACTIVE_CATALOG_LENGTH,
+        ACTIVE_CATALOG_SHA256_HEX,
+    )?;
+    let rollback = repository_e2e_generation(
+        ROLLBACK_CATALOG_BYTES,
+        ROLLBACK_CATALOG_LENGTH,
+        ROLLBACK_CATALOG_SHA256_HEX,
+    )?;
+    Ok(Some((active, vec![rollback].into_boxed_slice())))
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+fn repository_e2e_generation(
+    bytes: &[u8],
+    expected_length: usize,
+    expected_sha256_hex: &str,
+) -> Result<SealedBundledCatalogGeneration, BundledCatalogAdmissionError> {
+    if !repository_e2e_exact_bytes_match(bytes, expected_length, expected_sha256_hex)
+        || !repository_e2e_exact_bytes_match(MANIFEST_BYTES, MANIFEST_LENGTH, MANIFEST_SHA256_HEX)
+        || !repository_e2e_exact_bytes_match(
+            TREE_INDEX_BYTES,
+            TREE_INDEX_LENGTH,
+            TREE_INDEX_SHA256_HEX,
+        )
+        || !repository_e2e_exact_bytes_match(
+            LEGAL_NOTICE_BYTES,
+            LEGAL_NOTICE_LENGTH,
+            LEGAL_NOTICE_SHA256_HEX,
+        )
+    {
+        return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+    }
+    let catalog = ExtensionReleaseCatalog::parse_canonical(bytes)
+        .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let tree_index = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES)
+        .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let Some(package) = catalog.packages().first() else {
+        return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+    };
+    let anchor = anchor_for_fixture(bytes)
+        .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    if catalog.packages().len() != 1
+        || package.bind_tree_index(&tree_index).is_err()
+        || !repository_e2e_digest_matches(tree_index.manifest_sha256().bytes(), MANIFEST_SHA256_HEX)
+        || !repository_e2e_digest_matches(tree_index.index_sha256().bytes(), TREE_INDEX_SHA256_HEX)
+        || !repository_e2e_digest_matches(tree_index.tree_sha256().bytes(), TREE_SHA256_HEX)
+        || usize::try_from(package.provenance().legal_notice().length()).ok()
+            != Some(LEGAL_NOTICE_LENGTH)
+        || !repository_e2e_digest_matches(
+            package.provenance().legal_notice().sha256(),
+            LEGAL_NOTICE_SHA256_HEX,
+        )
+        || !repository_e2e_digest_matches(
+            anchor.inventory_digest.bytes(),
+            CATALOG_INVENTORY_SHA256_HEX,
+        )
+    {
+        return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+    }
+    let policy = ExtensionReleaseAdmissionPolicy::new(
+        ExtensionPackageAdmissionPolicyDigest::from_bytes(ADMISSION_POLICY_DIGEST_BYTES),
+        vec![ExtensionReleaseLicenseRule::new(LICENSE_EXPRESSION, false)
+            .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?],
+    )
+    .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    Ok(SealedBundledCatalogGeneration { anchor, policy })
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+fn repository_e2e_exact_bytes_match(
+    bytes: &[u8],
+    expected_length: usize,
+    expected_sha256_hex: &str,
+) -> bool {
+    bytes.len() == expected_length
+        && repository_e2e_digest_matches(Sha256::digest(bytes).into(), expected_sha256_hex)
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+fn repository_e2e_digest_matches(bytes: [u8; 32], expected_lower_hex: &str) -> bool {
+    let expected = expected_lower_hex.as_bytes();
+    expected.len() == 64
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            expected[index * 2] == repository_e2e_lower_hex_digit(byte >> 4)
+                && expected[index * 2 + 1] == repository_e2e_lower_hex_digit(byte & 0x0f)
+        })
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+const fn repository_e2e_lower_hex_digit(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        10..=15 => b'a' + nibble - 10,
+        _ => b'?',
+    }
+}
+
+#[cfg(any(test, zephium_internal_repository_e2e))]
 fn anchor_for_fixture(
     catalog_bytes: &[u8],
 ) -> Result<SealedBundledCatalogAnchor, BundledCatalogAdmissionError> {
@@ -771,6 +888,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(zephium_internal_repository_e2e))]
     #[test]
     fn production_authority_is_explicitly_unprovisioned() {
         assert_eq!(MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS, 2);
@@ -783,6 +901,50 @@ mod tests {
             BundledPackageAuthority::product_status(),
             BundledProductAuthorityStatus::Unprovisioned
         );
+    }
+
+    #[cfg(zephium_internal_repository_e2e)]
+    #[test]
+    fn internal_repository_fixture_admits_only_its_active_and_rollback_generations() {
+        use crate::repository_e2e_fixture::{
+            ACTIVE_CATALOG_BYTES, LEGAL_NOTICE_BYTES, ROLLBACK_CATALOG_BYTES,
+        };
+
+        let authority = BundledPackageAuthority::product().unwrap();
+        assert_eq!(
+            BundledPackageAuthority::product_status(),
+            BundledProductAuthorityStatus::Configured
+        );
+
+        let active = authority.admit_catalog(ACTIVE_CATALOG_BYTES).unwrap();
+        let rollback = authority
+            .admit_rollback_catalog(ROLLBACK_CATALOG_BYTES)
+            .unwrap();
+        assert_eq!(active.revision().get(), 2);
+        assert_eq!(rollback.revision().get(), 1);
+        assert_eq!(
+            active.catalog().packages()[0]
+                .provenance()
+                .legal_notice()
+                .sha256(),
+            <[u8; 32]>::from(Sha256::digest(LEGAL_NOTICE_BYTES))
+        );
+        assert_eq!(
+            authority.recognize_generation(&active.generation_anchor()),
+            Some(ProductBundledCatalogGenerationRole::Active)
+        );
+        assert_eq!(
+            authority.recognize_generation(&rollback.generation_anchor()),
+            Some(ProductBundledCatalogGenerationRole::Rollback)
+        );
+        assert!(matches!(
+            authority.admit_catalog(ROLLBACK_CATALOG_BYTES),
+            Err(BundledCatalogAdmissionError::CatalogDigestMismatch)
+        ));
+        assert!(matches!(
+            authority.admit_rollback_catalog(ACTIVE_CATALOG_BYTES),
+            Err(BundledCatalogAdmissionError::CatalogDigestMismatch)
+        ));
     }
 
     #[test]

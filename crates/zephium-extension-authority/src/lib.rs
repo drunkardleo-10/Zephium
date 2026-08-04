@@ -19,12 +19,22 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(all(zephium_internal_repository_e2e, not(debug_assertions)))]
+compile_error!("the internal repository E2E authority is forbidden in optimized builds");
+#[cfg(all(
+    zephium_internal_repository_e2e,
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
+compile_error!("the internal repository E2E authority has no unsupported-host profile");
+
 mod checkpoint;
 mod digest;
 mod error;
 mod inventory;
 mod manifest;
 mod product;
+#[cfg(zephium_internal_repository_e2e)]
+mod repository_e2e_fixture;
 
 pub use checkpoint::{
     BundledCatalogCheckpoint, BundledCatalogDisposition, BundledCatalogGenerationAnchor,
