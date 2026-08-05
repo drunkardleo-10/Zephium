@@ -13,6 +13,7 @@ mod identity;
 mod install;
 mod manifest;
 mod native_ownership;
+mod package_pin;
 mod runtime;
 mod transient;
 
@@ -77,6 +78,10 @@ pub use native_ownership::{
     EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_RETAINED_BYTES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+};
+pub use package_pin::{
+    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinAcquisitionDenial,
+    ExtensionPackagePinReleaseBinding, ExtensionPackagePinReleaseDenial,
 };
 pub use runtime::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness,
