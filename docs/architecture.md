@@ -587,6 +587,12 @@ The shared meta schema carries a separate bounded native-ownership journal.
 Each path-free row binds one `(profile, install, regular/private context)` to
 the exact package, active/rollback catalog-set digest, store/grant revisions,
 backend target, persistent native incarnation, intent, and conservative phase.
+Native backends also bind an optional fixed-width, backend-specific owner
+identifier once it is observed. The identifier is immutable for that
+incarnation and is required before a native row may claim `NativeOwned`;
+identityless `NativeMayOwn` and legacy cleanup rows remain conservative rather
+than guessing an owner identity. Compatibility runtimes cannot persist a
+platform-native identifier.
 A complete-cohort global CAS must commit `NativeMayOwn` before any native call
 that could create, retain, or remove an owner. `NativeOwned` is preserved
 exactly on disk but treated as may-own after restart; a row clears only after
@@ -602,7 +608,9 @@ rejects unreachable clock histories: operation and incarnation high-water
 marks are equal, every row binds the same operation/incarnation, phase and row
 revision agree, and with `C = high_water - live_rows` plus
 `S = sum(live_row_revisions)`, the global revision is within
-`1 + S + 3C ..= 1 + S + 6C`. These internal consistency checks prevent clock
+`1 + S + 3C ..= 1 + S + 7C`. The upper bound includes the one-shot identity
+attachment that may be durably fenced before a native call. These internal
+consistency checks prevent clock
 reuse from a torn or corrupted cohort; they cannot detect a coherent rollback
 of the entire database without an external anti-rollback anchor.
 

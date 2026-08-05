@@ -10,6 +10,9 @@ use rusqlite::{Connection, Transaction};
 // Core authority bound. SQL migration text cannot interpolate a Rust const.
 const _: [(); 1024] =
     [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES];
+// Keep META v12's fixed-width native identity checks tied to Core. A changed
+// native grammar must never leave SQLite accepting a different authority.
+const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID_BYTES];
 
 pub struct Migration {
     pub version: i64,
@@ -609,6 +612,206 @@ pub static META: &[Migration] = &[
                                NEW.operation_high_water - live_count
                                = (NEW.revision - (1 + live_revision_sum)) / 6
                                AND (NEW.revision - (1 + live_revision_sum)) % 6 != 0
+                           )
+                         THEN RAISE(ABORT, 'native-ownership journal history is too long')
+                     END
+                     FROM (
+                         SELECT count(*) AS live_count,
+                                coalesce(sum(revision), 0) AS live_revision_sum
+                         FROM extension_native_ownership_journal
+                     );
+                 END;",
+            )
+        },
+    },
+    Migration {
+        version: 12,
+        up: |tx| {
+            tx.execute_batch(
+                // Native owner identifiers are optional until positively
+                // observed, but once present they are exact, backend-bound,
+                // fixed-width authority. Rebuild instead of weakening v11's
+                // immutable schema boundary. Any legacy native-owned row that
+                // lacks an identifier makes the transaction fail closed; an
+                // identity cannot be inferred during migration.
+                "DROP TRIGGER extension_native_ownership_journal_capacity;
+                 DROP TRIGGER extension_native_ownership_journal_state_reachable;
+                 ALTER TABLE extension_native_ownership_journal
+                 RENAME TO extension_native_ownership_journal_v11;
+                 CREATE TABLE extension_native_ownership_journal (
+                     profile_id TEXT NOT NULL
+                         CHECK (length(CAST(profile_id AS BLOB)) = 26
+                                AND instr(CAST(profile_id AS BLOB), X'00') = 0),
+                     install_id BLOB NOT NULL
+                         CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                     browsing_context TEXT NOT NULL
+                         CHECK (browsing_context IN ('regular', 'private')),
+                     operation INTEGER NOT NULL UNIQUE
+                         CHECK (operation BETWEEN 1 AND 9223372036854775807),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     authority BLOB NOT NULL
+                         CHECK (typeof(authority) = 'blob' AND length(authority) = 32),
+                     package_key BLOB NOT NULL
+                         CHECK (typeof(package_key) = 'blob' AND length(package_key) = 32),
+                     package_revision INTEGER NOT NULL
+                         CHECK (package_revision BETWEEN 1 AND 9223372036854775807),
+                     payload_kind INTEGER NOT NULL CHECK (payload_kind IN (1, 2)),
+                     archive_length INTEGER,
+                     archive_sha256 BLOB,
+                     manifest_sha256 BLOB NOT NULL
+                         CHECK (typeof(manifest_sha256) = 'blob' AND length(manifest_sha256) = 32),
+                     tree_sha256 BLOB NOT NULL
+                         CHECK (typeof(tree_sha256) = 'blob' AND length(tree_sha256) = 32),
+                     catalog_set_sha256 BLOB NOT NULL
+                         CHECK (typeof(catalog_set_sha256) = 'blob' AND length(catalog_set_sha256) = 32),
+                     catalog_role TEXT NOT NULL
+                         CHECK (catalog_role IN ('active', 'rollback')),
+                     store_catalog_revision INTEGER NOT NULL
+                         CHECK (store_catalog_revision BETWEEN 1 AND 9223372036854775807),
+                     store_install_revision INTEGER NOT NULL
+                         CHECK (store_install_revision BETWEEN 1 AND 9223372036854775807),
+                     store_grant_revision INTEGER NOT NULL
+                         CHECK (store_grant_revision BETWEEN 1 AND 9223372036854775807),
+                     grant_sha256 BLOB NOT NULL
+                         CHECK (typeof(grant_sha256) = 'blob' AND length(grant_sha256) = 32),
+                     runtime_backend TEXT NOT NULL CHECK (runtime_backend IN (
+                         'macos_native', 'macos_compatibility',
+                         'linux_compatibility', 'windows_native'
+                     )),
+                     native_identity_kind INTEGER,
+                     native_identity BLOB,
+                     native_incarnation INTEGER NOT NULL UNIQUE
+                         CHECK (native_incarnation BETWEEN 1 AND 9223372036854775807),
+                     intent TEXT NOT NULL CHECK (intent IN ('acquire', 'release')),
+                     phase TEXT NOT NULL CHECK (phase IN (
+                         'native_absent_preparing', 'native_may_own',
+                         'native_owned', 'native_absent_release_pending'
+                     )),
+                     PRIMARY KEY (profile_id, install_id, browsing_context),
+                     CHECK (
+                         (payload_kind = 1
+                          AND archive_length IS NULL
+                          AND archive_sha256 IS NULL)
+                         OR
+                         (payload_kind = 2
+                          AND typeof(archive_length) = 'integer'
+                          AND archive_length BETWEEN 1 AND 67108864
+                          AND typeof(archive_sha256) = 'blob'
+                          AND length(archive_sha256) = 32)
+                     ),
+                     CHECK (operation = native_incarnation),
+                     CHECK (
+                         (native_identity_kind IS NULL) = (native_identity IS NULL)
+                     ),
+                     CHECK (
+                         (native_identity_kind IS NULL AND native_identity IS NULL)
+                         OR
+                         (native_identity_kind IS NOT NULL
+                          AND native_identity IS NOT NULL
+                          AND (
+                              (native_identity_kind = 1
+                               AND runtime_backend = 'macos_native'
+                               AND typeof(native_identity) = 'blob'
+                               AND length(native_identity) = 32
+                               AND length(CAST(native_identity AS TEXT)) = 32
+                               AND CAST(native_identity AS TEXT) NOT GLOB '*[^a-p]*')
+                              OR
+                              (native_identity_kind = 2
+                               AND runtime_backend = 'windows_native'
+                               AND typeof(native_identity) = 'blob'
+                               AND length(native_identity) = 32
+                               AND length(CAST(native_identity AS TEXT)) = 32
+                               AND CAST(native_identity AS TEXT) NOT GLOB '*[^a-p]*')
+                          ))
+                     ),
+                     CHECK (
+                         (intent = 'acquire'
+                          AND phase = 'native_absent_preparing'
+                          AND revision = 1
+                          AND native_identity IS NULL)
+                         OR
+                         (intent = 'acquire'
+                          AND phase = 'native_may_own'
+                          AND ((revision = 2 AND native_identity IS NULL)
+                               OR (revision = 3 AND native_identity IS NOT NULL)))
+                         OR
+                         (intent = 'acquire'
+                          AND phase = 'native_owned'
+                          AND ((runtime_backend IN ('macos_native', 'windows_native')
+                                AND revision BETWEEN 3 AND 4
+                                AND native_identity IS NOT NULL)
+                               OR
+                               (runtime_backend IN ('macos_compatibility', 'linux_compatibility')
+                                AND revision = 3
+                                AND native_identity IS NULL)))
+                         OR
+                         (intent = 'release'
+                          AND phase = 'native_may_own'
+                          AND ((revision = 3)
+                               OR revision = 4
+                               OR (revision = 5 AND native_identity IS NOT NULL)))
+                         OR
+                         (intent = 'release'
+                          AND phase = 'native_absent_release_pending'
+                          AND ((revision BETWEEN 2 AND 3 AND native_identity IS NULL)
+                               OR revision = 4
+                               OR revision = 5
+                               OR (revision = 6 AND native_identity IS NOT NULL)))
+                     )
+                 ) STRICT, WITHOUT ROWID;
+                 INSERT INTO extension_native_ownership_journal(
+                     profile_id, install_id, browsing_context, operation, revision,
+                     authority, package_key, package_revision,
+                     payload_kind, archive_length, archive_sha256,
+                     manifest_sha256, tree_sha256,
+                     catalog_set_sha256, catalog_role,
+                     store_catalog_revision, store_install_revision, store_grant_revision,
+                     grant_sha256, runtime_backend, native_identity_kind, native_identity,
+                     native_incarnation, intent, phase
+                 )
+                 SELECT profile_id, install_id, browsing_context, operation, revision,
+                        authority, package_key, package_revision,
+                        payload_kind, archive_length, archive_sha256,
+                        manifest_sha256, tree_sha256,
+                        catalog_set_sha256, catalog_role,
+                        store_catalog_revision, store_install_revision, store_grant_revision,
+                        grant_sha256, runtime_backend, NULL, NULL,
+                        native_incarnation, intent, phase
+                 FROM extension_native_ownership_journal_v11;
+                 DROP TABLE extension_native_ownership_journal_v11;
+                 CREATE TRIGGER extension_native_ownership_journal_capacity
+                 BEFORE INSERT ON extension_native_ownership_journal
+                 WHEN (SELECT count(*) FROM extension_native_ownership_journal) >= 1024
+                 BEGIN
+                     SELECT RAISE(ABORT, 'native-ownership journal capacity exceeded');
+                 END;
+                 CREATE TRIGGER extension_native_ownership_journal_state_reachable
+                 BEFORE UPDATE OF revision, operation_high_water,
+                                  native_incarnation_high_water
+                 ON extension_native_ownership_journal_state
+                 BEGIN
+                     SELECT CASE
+                         WHEN live_count > NEW.operation_high_water
+                           OR EXISTS (
+                               SELECT 1
+                               FROM extension_native_ownership_journal
+                               WHERE operation > NEW.operation_high_water
+                                  OR native_incarnation > NEW.native_incarnation_high_water
+                                  OR operation > NEW.revision - revision
+                           )
+                         THEN RAISE(ABORT, 'native-ownership row exceeds journal authority')
+                         WHEN NEW.revision - (1 + live_revision_sum) < 0
+                         THEN RAISE(ABORT, 'native-ownership journal history is impossible')
+                         WHEN NEW.operation_high_water - live_count
+                              > (NEW.revision - (1 + live_revision_sum)) / 3
+                         THEN RAISE(ABORT, 'native-ownership journal history is too short')
+                         WHEN NEW.operation_high_water - live_count
+                              < (NEW.revision - (1 + live_revision_sum)) / 7
+                           OR (
+                               NEW.operation_high_water - live_count
+                               = (NEW.revision - (1 + live_revision_sum)) / 7
+                               AND (NEW.revision - (1 + live_revision_sum)) % 7 != 0
                            )
                          THEN RAISE(ABORT, 'native-ownership journal history is too long')
                      END
@@ -1755,7 +1958,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &META[..10]).unwrap();
 
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..11]).unwrap();
 
         let state: (i64, i64, i64, i64) = conn
             .query_row(
@@ -1779,6 +1982,187 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, 11);
+    }
+
+    #[test]
+    fn meta_v12_adds_nullable_bounded_native_identity_without_inference() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..11]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 3,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let identity: (Option<i64>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT native_identity_kind, native_identity
+                 FROM extension_native_ownership_journal",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(identity, (None, None));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            12
+        );
+    }
+
+    #[test]
+    fn meta_v12_refuses_to_infer_legacy_native_owned_identity() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..11]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 3, 1, "acquire", "native_owned").unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 4,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+
+        assert!(apply(&mut conn, META).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            11
+        );
+        let has_identity_column = conn
+            .prepare("SELECT native_identity FROM extension_native_ownership_journal")
+            .is_ok();
+        assert!(!has_identity_column);
+    }
+
+    #[test]
+    fn meta_v12_preserves_legacy_identityless_cleanup_frontiers() {
+        for (entry_revision, phase) in [(4, "native_may_own"), (5, "native_absent_release_pending")]
+        {
+            let mut conn = Connection::open_in_memory().unwrap();
+            apply(&mut conn, &META[..11]).unwrap();
+            insert_native_ownership_test_row(&conn, 1, entry_revision, 1, "release", phase)
+                .unwrap();
+            conn.execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = ?1,
+                     operation_high_water = 1,
+                     native_incarnation_high_water = 1",
+                [1 + entry_revision],
+            )
+            .unwrap();
+
+            apply(&mut conn, META).unwrap();
+            let row: (i64, Option<i64>, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT revision, native_identity_kind, native_identity
+                     FROM extension_native_ownership_journal",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(row, (entry_revision, None, None));
+        }
+    }
+
+    #[test]
+    fn meta_v12_schema_mirrors_native_identity_shape_and_backend() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET revision = 3,
+                 phase = 'native_owned',
+                 native_identity_kind = 1,
+                 native_identity = ?1",
+            [vec![b'a'; 32]],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 4,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+
+        for update in [
+            "native_identity_kind = NULL",
+            "native_identity_kind = 2",
+            "native_identity = zeroblob(31)",
+            "native_identity = zeroblob(33)",
+            "native_identity = zeroblob(32)",
+            "native_identity = NULL",
+        ] {
+            assert!(
+                conn.execute(
+                    &format!("UPDATE extension_native_ownership_journal SET {update}"),
+                    [],
+                )
+                .is_err(),
+                "accepted invalid identity update: {update}"
+            );
+        }
+        for (description, invalid_identity) in [
+            ("embedded NUL", {
+                let mut bytes = vec![b'a'; 32];
+                bytes[16] = 0;
+                bytes
+            }),
+            ("non-ASCII high byte", {
+                let mut bytes = vec![b'a'; 32];
+                bytes[16] = 0xff;
+                bytes
+            }),
+        ] {
+            assert!(
+                conn.execute(
+                    "UPDATE extension_native_ownership_journal
+                     SET native_identity = ?1",
+                    [invalid_identity],
+                )
+                .is_err(),
+                "accepted {description} in native identity"
+            );
+        }
+    }
+
+    #[test]
+    fn meta_v12_trigger_accepts_only_extended_reachable_history_ceiling() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 2,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM extension_native_ownership_journal", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state SET revision = 8",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state SET revision = 9",
+                [],
+            )
+            .is_err());
     }
 
     #[test]
@@ -1824,7 +2208,7 @@ mod tests {
     #[test]
     fn meta_v11_trigger_enforces_reachable_native_ownership_history_range() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..11]).unwrap();
         insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
             .unwrap();
 

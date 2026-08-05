@@ -401,7 +401,10 @@ have cross-restart continuation: profile deletion and the bounded extension
 native-ownership ordering seam. The latter must durably enter `NativeMayOwn` before an
 ownership-changing native call, treats both `NativeMayOwn` and `NativeOwned` as possible
 ownership after restart, and clears only after definite native absence plus subordinate
-resource release. Its rows are profile-independent shared-meta state, so unresolved or
+resource release. An observed macOS or WebView2 owner identifier is durably attached by
+exact CAS, is immutable for that native incarnation, and is mandatory before a native
+row can claim `NativeOwned`; an identityless `NativeMayOwn` remains possible ownership
+and must be reconciled conservatively. Its rows are profile-independent shared-meta state, so unresolved or
 unreadable ownership blocks both profile deletion authorization and local purge. The
 coordinator and product native backend remain disabled release work.
 `StoreShutdownOutcome::Clean` proves storage durability and actor/resource shutdown only;

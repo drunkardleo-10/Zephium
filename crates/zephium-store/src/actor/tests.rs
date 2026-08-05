@@ -11,12 +11,13 @@ use zephium_core::extensions::{
     ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
     ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
-    ExtensionManifestResourceDigest, ExtensionNativeOwnershipIntent,
-    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
-    ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-    ExtensionTreeDigest, EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionManifestResourceDigest, ExtensionNativeOwnershipIdentity,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournalMutation,
+    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+    ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
+    ExtensionRuntimeBackendTarget, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
 use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
@@ -1802,10 +1803,15 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
             mutate_native_ownership_journal(
                 &store,
                 may_own.journal_revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
                     may_own_entry.cas(),
                     ExtensionNativeOwnershipIntent::Acquire,
                     ExtensionNativeOwnershipPhase::NativeOwned,
+                    ExtensionNativeOwnershipIdentity::parse(
+                        ExtensionRuntimeBackendTarget::MacosNative,
+                        "abcdefghijklmnopabcdefghijklmnop",
+                    )
+                    .unwrap(),
                 ),
             )
         else {
@@ -1833,6 +1839,16 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         assert_eq!(entry.key().profile(), profile);
         assert_eq!(entry.key().install_id(), install);
         assert_eq!(entry.phase(), ExtensionNativeOwnershipPhase::NativeOwned);
+        assert_eq!(
+            entry.native_identity(),
+            Some(
+                ExtensionNativeOwnershipIdentity::parse(
+                    ExtensionRuntimeBackendTarget::MacosNative,
+                    "abcdefghijklmnopabcdefghijklmnop",
+                )
+                .unwrap()
+            )
+        );
         assert_eq!(entry.operation().get(), 1);
         assert_eq!(entry.native_incarnation().get(), 1);
 
