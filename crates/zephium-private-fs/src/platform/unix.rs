@@ -131,6 +131,8 @@ pub(crate) fn create_new_regular(
         Mode::from_raw_mode(0o600),
     )
     .map_err(|error| map_failed_create(error, directory, name, true))?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_regular_create();
     let file = File::from(descriptor);
     let admission = (|| {
         let opened = file.metadata().map_err(|_| PrivateFsError::Io)?;
@@ -282,7 +284,10 @@ pub(crate) fn set_directory_mode(file: &File, mode: DirectoryMode) -> Result<(),
         DirectoryMode::Writable => 0o700,
         DirectoryMode::Sealed => 0o500,
     };
-    rustix::fs::fchmod(file, Mode::from_raw_mode(raw_mode)).map_err(|_| PrivateFsError::Io)
+    rustix::fs::fchmod(file, Mode::from_raw_mode(raw_mode)).map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_directory_mode_change();
+    Ok(())
 }
 
 pub(crate) fn inspect_child(
@@ -434,7 +439,10 @@ pub(crate) fn remove_regular(
     name: &str,
 ) -> Result<(), PrivateFsError> {
     rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty())
-        .map_err(|_| PrivateFsError::Io)
+        .map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_regular_unlink();
+    Ok(())
 }
 
 pub(crate) fn remove_directory(
@@ -451,7 +459,10 @@ pub(crate) fn remove_directory(
         } else {
             PrivateFsError::Io
         }
-    })
+    })?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_directory_unlink();
+    Ok(())
 }
 
 pub(crate) fn open_directory(path: &Path) -> Result<(File, RawIdentity), PrivateFsError> {
@@ -575,7 +586,11 @@ pub(crate) fn atomic_replace(
     source: &str,
     destination: &str,
 ) -> Result<(), PrivateFsError> {
-    rustix::fs::renameat(directory, source, directory, destination).map_err(|_| PrivateFsError::Io)
+    rustix::fs::renameat(directory, source, directory, destination)
+        .map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_rename();
+    Ok(())
 }
 
 pub(crate) fn atomic_publish_noreplace(
@@ -599,7 +614,10 @@ pub(crate) fn atomic_publish_noreplace(
         } else {
             PrivateFsError::Io
         }
-    })
+    })?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_rename();
+    Ok(())
 }
 
 pub(crate) fn atomic_publish_noreplace_between(
@@ -625,11 +643,17 @@ pub(crate) fn atomic_publish_noreplace_between(
         } else {
             PrivateFsError::Io
         }
-    })
+    })?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_rename();
+    Ok(())
 }
 
 pub(crate) fn sync_directory(file: &File) -> Result<(), PrivateFsError> {
-    file.sync_all().map_err(|_| PrivateFsError::Io)
+    file.sync_all().map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_directory_sync();
+    Ok(())
 }
 
 pub(crate) fn sync_ancestor_directory(path: &Path) -> Result<(), PrivateFsError> {
@@ -651,7 +675,10 @@ pub(crate) fn sync_ancestor_directory(path: &Path) -> Result<(), PrivateFsError>
     {
         return Err(PrivateFsError::Unsafe);
     }
-    file.sync_all().map_err(|_| PrivateFsError::Io)
+    file.sync_all().map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_directory_sync();
+    Ok(())
 }
 
 fn map_boundary_io(error: std::io::Error) -> PrivateFsError {

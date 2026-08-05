@@ -25,3 +25,8 @@ windows = { version = "=0.61.3", features = [
     "Win32_System_IO",
     "Win32_System_Threading",
 ] }
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = [
+    "cfg(zephium_internal_repository_e2e)",
+] }

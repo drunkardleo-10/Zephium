@@ -21,10 +21,15 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+#[cfg(all(zephium_internal_repository_e2e, not(debug_assertions)))]
+compile_error!("private-filesystem operation instrumentation is forbidden in optimized builds");
+
 mod component;
 mod entry_name;
 mod error;
 mod identity;
+#[cfg(zephium_internal_repository_e2e)]
+mod instrumentation;
 mod lease;
 mod namespace;
 mod platform;
@@ -35,6 +40,10 @@ pub use component::{PrivateComponent, PrivateComponentError};
 pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_NAME_BYTES};
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
+#[cfg(zephium_internal_repository_e2e)]
+pub use instrumentation::{
+    PrivateFsOperationMeasurement, PrivateFsOperationMeasurementError, PrivateFsOperationSnapshot,
+};
 pub use namespace::{
     ByteLimit, LockedPrivateNamespace, OpenedPrivateDirectory, PrivateChildKind, PrivateDirectory,
     SealedPrivateDirectory, TreeRemovalLimits, TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH,

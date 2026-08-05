@@ -6,9 +6,7 @@ use std::sync::{Arc, MutexGuard};
 use crate::identity::{DirectoryIdentity, FileIdentity};
 use crate::lease::NamespaceLease;
 use crate::platform::{self, DirectoryMode, OpenPurpose, RegularMode};
-use crate::streaming::copy_exact;
-#[cfg(test)]
-use crate::streaming::ExactCopyError;
+use crate::streaming::{copy_exact, ExactCopyError};
 use crate::{
     PrivateComponent, PrivateEntryName, PrivateFsError, PrivateFsTransitionError,
     StreamingFileLength, StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
@@ -23,6 +21,51 @@ const MAX_INVENTORY_ENTRIES: usize = 4_096;
 const LOCK_COMPONENT_NAME: &str = ".zephium-private-fs-lock-v1";
 const LOCK_STAGING_COMPONENT_NAME: &str = ".zephium-private-fs-lock-staging-v1";
 const LOCK_FILE_CONTENT: &[u8] = b"zephium-private-fs\nlock-format=1\n";
+
+#[inline]
+fn write_all_private_regular(file: &mut File, bytes: &[u8]) -> Result<(), PrivateFsError> {
+    #[cfg(zephium_internal_repository_e2e)]
+    let result = crate::instrumentation::MeasuredWriter::new(file).write_all(bytes);
+    #[cfg(not(zephium_internal_repository_e2e))]
+    let result = file.write_all(bytes);
+    result.map_err(|_| PrivateFsError::Io)
+}
+
+#[inline]
+fn copy_exact_to_private_regular(
+    source: &mut (impl Read + ?Sized),
+    file: &mut File,
+    expected: StreamingFileLength,
+) -> Result<(), ExactCopyError> {
+    #[cfg(zephium_internal_repository_e2e)]
+    {
+        copy_exact(
+            source,
+            &mut crate::instrumentation::MeasuredWriter::new(file),
+            expected,
+        )
+    }
+    #[cfg(not(zephium_internal_repository_e2e))]
+    {
+        copy_exact(source, file, expected)
+    }
+}
+
+#[inline]
+fn sync_private_regular(file: &File) -> Result<(), PrivateFsError> {
+    file.sync_all().map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_file_sync();
+    Ok(())
+}
+
+#[inline]
+fn sync_private_directory(file: &File) -> Result<(), PrivateFsError> {
+    file.sync_all().map_err(|_| PrivateFsError::Io)?;
+    #[cfg(zephium_internal_repository_e2e)]
+    crate::instrumentation::record_directory_sync();
+    Ok(())
+}
 
 /// Validated nonzero bound for a single in-memory file operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -466,7 +509,7 @@ impl SealedPrivateDirectory {
                 self,
             ));
         }
-        if self.core.handle.sync_all().is_err() {
+        if sync_private_directory(&self.core.handle).is_err() {
             let unchanged = self.precheck_unlocked();
             drop(operation);
             return if unchanged.is_ok() {
@@ -850,7 +893,7 @@ impl PrivateDirectory {
         }
 
         let settlement: Result<FileIdentity, PrivateFsError> = (|| {
-            verified.file.sync_all().map_err(|_| PrivateFsError::Io)?;
+            sync_private_regular(&verified.file)?;
             #[cfg(test)]
             if self
                 .lease
@@ -1455,7 +1498,11 @@ impl PrivateDirectory {
         }
 
         let callback_result = {
-            let mut bounded = Read::by_ref(&mut verified.file).take(initial_length);
+            let bounded = Read::by_ref(&mut verified.file).take(initial_length);
+            #[cfg(zephium_internal_repository_e2e)]
+            let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
+            #[cfg(not(zephium_internal_repository_e2e))]
+            let mut bounded = bounded;
             callback(&mut bounded)
         };
         let validation = (|| {
@@ -1499,12 +1546,16 @@ impl PrivateDirectory {
             return Err(PrivateFsError::BoundExceeded);
         }
         let mut bytes = Vec::with_capacity(length);
-        Read::by_ref(&mut verified.file)
-            .take(
-                u64::try_from(limit.get())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
-            )
+        let bounded = Read::by_ref(&mut verified.file).take(
+            u64::try_from(limit.get())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        );
+        #[cfg(zephium_internal_repository_e2e)]
+        let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
+        #[cfg(not(zephium_internal_repository_e2e))]
+        let mut bounded = bounded;
+        bounded
             .read_to_end(&mut bytes)
             .map_err(|_| PrivateFsError::Io)?;
         if bytes.len() != length || bytes.len() > limit.get() {
@@ -1653,10 +1704,11 @@ impl PrivateDirectory {
         {
             Err(ExactCopyError::SinkWrite)
         } else {
-            copy_exact(reader, &mut verified.file, expected_length)
+            copy_exact_to_private_regular(reader, &mut verified.file, expected_length)
         };
         #[cfg(not(test))]
-        let copy_result = copy_exact(reader, &mut verified.file, expected_length);
+        let copy_result =
+            copy_exact_to_private_regular(reader, &mut verified.file, expected_length);
         if let Err(error) = copy_result {
             return self.fail_streaming_write_unlocked(name, verified, error.into_public());
         }
@@ -1678,7 +1730,7 @@ impl PrivateDirectory {
             );
         }
 
-        let file_sync = verified.file.sync_all().map_err(|_| PrivateFsError::Io);
+        let file_sync = sync_private_regular(&verified.file);
         #[cfg(test)]
         let file_sync = file_sync.and_then(|()| {
             if self
@@ -1782,8 +1834,8 @@ impl PrivateDirectory {
                 }
             };
         let settlement = (|| {
-            file.write_all(bytes).map_err(|_| PrivateFsError::Io)?;
-            file.sync_all().map_err(|_| PrivateFsError::Io)?;
+            write_all_private_regular(&mut file, bytes)?;
+            sync_private_regular(&file)?;
             platform::revalidate_regular(
                 &self.core.handle,
                 &self.core.path,
@@ -1873,10 +1925,7 @@ impl PrivateDirectory {
         let source_file = self
             .open_optional_regular_unlocked(ChildName::Control(source), OpenPurpose::Mutation)?
             .ok_or(PrivateFsError::Unsafe)?;
-        source_file
-            .file
-            .sync_all()
-            .map_err(|_| PrivateFsError::Io)?;
+        sync_private_regular(&source_file.file)?;
         self.lease.observe(platform::revalidate_regular(
             &self.core.handle,
             &self.core.path,
@@ -1917,10 +1966,7 @@ impl PrivateDirectory {
         let source_file = self
             .open_optional_regular_unlocked(ChildName::Control(source), OpenPurpose::Mutation)?
             .ok_or(PrivateFsError::Unsafe)?;
-        source_file
-            .file
-            .sync_all()
-            .map_err(|_| PrivateFsError::Io)?;
+        sync_private_regular(&source_file.file)?;
         self.lease.observe(platform::revalidate_regular(
             &self.core.handle,
             &self.core.path,
@@ -2550,12 +2596,9 @@ fn prepare_staged_lock(
         *mutated = true;
         staging.file.set_len(0).map_err(|_| PrivateFsError::Io)?;
         staging.file.rewind().map_err(|_| PrivateFsError::Io)?;
-        staging
-            .file
-            .write_all(LOCK_FILE_CONTENT)
-            .map_err(|_| PrivateFsError::Io)?;
+        write_all_private_regular(&mut staging.file, LOCK_FILE_CONTENT)?;
     }
-    staging.file.sync_all().map_err(|_| PrivateFsError::Io)?;
+    sync_private_regular(&staging.file)?;
     revalidate_exact_lock_regular(directory, staging_name, staging)?;
     if read_lock_content(&mut staging.file)? != LOCK_FILE_CONTENT {
         return Err(PrivateFsError::IdentityAmbiguous);
@@ -2641,12 +2684,16 @@ fn lock_staging_component() -> Result<PrivateComponent, PrivateFsError> {
 fn read_lock_content(file: &mut File) -> Result<Vec<u8>, PrivateFsError> {
     file.rewind().map_err(|_| PrivateFsError::Io)?;
     let mut bytes = Vec::with_capacity(LOCK_FILE_CONTENT.len().saturating_add(1));
-    Read::by_ref(file)
-        .take(
-            u64::try_from(LOCK_FILE_CONTENT.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
-        )
+    let bounded = Read::by_ref(file).take(
+        u64::try_from(LOCK_FILE_CONTENT.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    );
+    #[cfg(zephium_internal_repository_e2e)]
+    let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
+    #[cfg(not(zephium_internal_repository_e2e))]
+    let mut bounded = bounded;
+    bounded
         .read_to_end(&mut bytes)
         .map_err(|_| PrivateFsError::Io)?;
     Ok(bytes)
@@ -2856,7 +2903,11 @@ fn with_bounded_sealed_regular_reader_unlocked<T, E>(
     }
 
     let callback_result = {
-        let mut bounded = Read::by_ref(&mut file).take(initial_length);
+        let bounded = Read::by_ref(&mut file).take(initial_length);
+        #[cfg(zephium_internal_repository_e2e)]
+        let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
+        #[cfg(not(zephium_internal_repository_e2e))]
+        let mut bounded = bounded;
         callback(&mut bounded)
     };
     lease.observe(validate_sealed_regular_after_read(
