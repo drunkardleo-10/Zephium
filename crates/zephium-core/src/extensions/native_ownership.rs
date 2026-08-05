@@ -197,12 +197,29 @@ impl ExtensionRuntimeBackendTarget {
 /// This is deliberately not an extension install identity. It identifies the
 /// concrete owner surfaced by one native backend and is useful only while the
 /// containing journal row and incarnation remain authoritative.
+///
+/// The byte representation cannot be constructed without validation:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionNativeOwnershipIdentity;
+///
+/// let _ = ExtensionNativeOwnershipIdentity::MacosWebExtension([0; 32]);
+/// ```
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ExtensionNativeOwnershipIdentity {
-    /// `WKWebExtensionContext.uniqueIdentifier`, assigned by Zephium.
-    MacosWebExtension([u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES]),
-    /// `CoreWebView2BrowserExtension.Id`, returned by WebView2.
-    WindowsWebView2Extension([u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES]),
+pub struct ExtensionNativeOwnershipIdentity {
+    kind: ExtensionNativeOwnershipIdentityKind,
+    bytes: [u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+}
+
+/// Closed, allocation-free discriminator for a validated native identity.
+///
+/// Keeping this type private prevents callers from bypassing identifier
+/// validation by constructing a public enum variant with arbitrary bytes.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+enum ExtensionNativeOwnershipIdentityKind {
+    MacosWebExtension = 1,
+    WindowsWebView2Extension = 2,
 }
 
 impl ExtensionNativeOwnershipIdentity {
@@ -218,19 +235,35 @@ impl ExtensionNativeOwnershipIdentity {
             .as_bytes()
             .try_into()
             .map_err(|_| ExtensionNativeOwnershipIdentityError::InvalidIdentifier)?;
+        Self::from_encoded_bytes(backend, bytes)
+    }
+
+    /// Constructs an identity from one backend's exact encoded bytes.
+    ///
+    /// This is the allocation-free bridge for native adapters and durable
+    /// decoders. Every byte must use Chromium's canonical lowercase `a..=p`
+    /// alphabet, and compatibility backends cannot mint native-owner
+    /// authority.
+    pub fn from_encoded_bytes(
+        backend: ExtensionRuntimeBackendTarget,
+        bytes: [u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+    ) -> Result<Self, ExtensionNativeOwnershipIdentityError> {
         if !bytes.iter().all(|byte| matches!(byte, b'a'..=b'p')) {
             return Err(ExtensionNativeOwnershipIdentityError::InvalidIdentifier);
         }
-        match backend {
-            ExtensionRuntimeBackendTarget::MacosNative => Ok(Self::MacosWebExtension(bytes)),
+        let kind = match backend {
+            ExtensionRuntimeBackendTarget::MacosNative => {
+                ExtensionNativeOwnershipIdentityKind::MacosWebExtension
+            }
             ExtensionRuntimeBackendTarget::WindowsNative => {
-                Ok(Self::WindowsWebView2Extension(bytes))
+                ExtensionNativeOwnershipIdentityKind::WindowsWebView2Extension
             }
             ExtensionRuntimeBackendTarget::MacosCompatibility
             | ExtensionRuntimeBackendTarget::LinuxCompatibility => {
-                Err(ExtensionNativeOwnershipIdentityError::UnsupportedBackend)
+                return Err(ExtensionNativeOwnershipIdentityError::UnsupportedBackend);
             }
-        }
+        };
+        Ok(Self { kind, bytes })
     }
 
     /// Reconstructs only the closed durable kind vocabulary.
@@ -243,32 +276,29 @@ impl ExtensionNativeOwnershipIdentity {
             2 => ExtensionRuntimeBackendTarget::WindowsNative,
             _ => return Err(ExtensionNativeOwnershipIdentityError::UnknownKind),
         };
-        let value = std::str::from_utf8(&bytes)
-            .map_err(|_| ExtensionNativeOwnershipIdentityError::InvalidIdentifier)?;
-        Self::parse(backend, value)
+        Self::from_encoded_bytes(backend, bytes)
     }
 
     /// Stable compact durable kind.
     pub const fn persisted_kind(self) -> u8 {
-        match self {
-            Self::MacosWebExtension(_) => 1,
-            Self::WindowsWebView2Extension(_) => 2,
-        }
+        self.kind as u8
     }
 
     /// Backend that owns this identifier.
     pub const fn backend(self) -> ExtensionRuntimeBackendTarget {
-        match self {
-            Self::MacosWebExtension(_) => ExtensionRuntimeBackendTarget::MacosNative,
-            Self::WindowsWebView2Extension(_) => ExtensionRuntimeBackendTarget::WindowsNative,
+        match self.kind {
+            ExtensionNativeOwnershipIdentityKind::MacosWebExtension => {
+                ExtensionRuntimeBackendTarget::MacosNative
+            }
+            ExtensionNativeOwnershipIdentityKind::WindowsWebView2Extension => {
+                ExtensionRuntimeBackendTarget::WindowsNative
+            }
         }
     }
 
     /// Returns the exact bounded native identifier bytes.
     pub const fn bytes(self) -> [u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES] {
-        match self {
-            Self::MacosWebExtension(bytes) | Self::WindowsWebView2Extension(bytes) => bytes,
-        }
+        self.bytes
     }
 }
 
@@ -1834,7 +1864,20 @@ mod tests {
         .unwrap();
         assert_eq!(macos.persisted_kind(), 1);
         assert_eq!(macos.backend(), ExtensionRuntimeBackendTarget::MacosNative);
+        assert_eq!(macos.bytes().as_slice(), value.as_bytes());
+        assert_eq!(size_of::<ExtensionNativeOwnershipIdentity>(), 33);
         assert!(!format!("{macos:?}").contains(value));
+        let windows = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            [b'p'; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+        )
+        .unwrap();
+        assert_eq!(windows.persisted_kind(), 2);
+        assert_eq!(
+            windows.backend(),
+            ExtensionRuntimeBackendTarget::WindowsNative
+        );
+        assert_eq!(windows.bytes(), [b'p'; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES]);
         assert_eq!(
             ExtensionNativeOwnershipIdentity::parse(
                 ExtensionRuntimeBackendTarget::LinuxCompatibility,
@@ -1860,6 +1903,78 @@ mod tests {
             ExtensionNativeOwnershipIdentity::from_persisted(3, [b'a'; 32]),
             Err(ExtensionNativeOwnershipIdentityError::UnknownKind)
         );
+    }
+
+    #[test]
+    fn every_noncanonical_identity_byte_is_rejected_before_journal_mutation() {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), 1);
+        let preparing = begun.entry().unwrap().clone();
+        let revision = begun.journal.revision();
+        let may_own = begun
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    preparing.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                ),
+            )
+            .unwrap();
+        let journal = may_own.journal;
+        let entry = journal.entries()[0].clone();
+        let unchanged = journal.clone();
+
+        for backend in [
+            ExtensionRuntimeBackendTarget::MacosNative,
+            ExtensionRuntimeBackendTarget::WindowsNative,
+        ] {
+            let persisted_kind = match backend {
+                ExtensionRuntimeBackendTarget::MacosNative => 1,
+                ExtensionRuntimeBackendTarget::WindowsNative => 2,
+                ExtensionRuntimeBackendTarget::MacosCompatibility
+                | ExtensionRuntimeBackendTarget::LinuxCompatibility => unreachable!(),
+            };
+            for index in 0..EXTENSION_NATIVE_OWNERSHIP_ID_BYTES {
+                for byte in u8::MIN..=u8::MAX {
+                    if matches!(byte, b'a'..=b'p') {
+                        continue;
+                    }
+                    let mut bytes = [b'a'; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES];
+                    bytes[index] = byte;
+
+                    // Identity validation is the only public route to the
+                    // transition value. `map` would enter the pure journal
+                    // mutation only if invalid bytes had minted authority.
+                    let attempted_application =
+                        ExtensionNativeOwnershipIdentity::from_encoded_bytes(backend, bytes).map(
+                            |identity| {
+                                journal.clone().apply(
+                                    journal.revision(),
+                                    ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                                        entry.cas(),
+                                        ExtensionNativeOwnershipIntent::Acquire,
+                                        ExtensionNativeOwnershipPhase::NativeOwned,
+                                        identity,
+                                    ),
+                                )
+                            },
+                        );
+                    assert_eq!(
+                        attempted_application,
+                        Err(ExtensionNativeOwnershipIdentityError::InvalidIdentifier),
+                        "accepted byte {byte:#04x} at offset {index} for {backend:?}"
+                    );
+                    assert_eq!(
+                        ExtensionNativeOwnershipIdentity::from_persisted(persisted_kind, bytes),
+                        Err(ExtensionNativeOwnershipIdentityError::InvalidIdentifier),
+                        "durable decoder accepted byte {byte:#04x} at offset {index} for {backend:?}"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(journal, unchanged);
     }
 
     #[test]
