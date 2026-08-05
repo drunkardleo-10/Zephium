@@ -6304,6 +6304,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-extension-service"
+version = "0.1.0"
+
+[[package]]
 name = "zephium-ipc"
 version = "0.1.0"
 dependencies = [
