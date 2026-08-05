@@ -50,8 +50,11 @@ use crate::state::Digest32;
     zephium_internal_repository_e2e,
     any(target_os = "macos", target_os = "linux")
 ))]
-static COMPLETED_PACKAGE_VERIFICATION_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+std::thread_local! {
+    static COMPLETED_PACKAGE_VERIFICATION_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
 /// Stable, path-free failure while publishing or verifying package objects.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -799,7 +802,14 @@ fn verify_completed_package(
         zephium_internal_repository_e2e,
         any(target_os = "macos", target_os = "linux")
     ))]
-    COMPLETED_PACKAGE_VERIFICATION_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    COMPLETED_PACKAGE_VERIFICATION_COUNT.with(|count| {
+        count.set(
+            count
+                .get()
+                .checked_add(1)
+                .expect("completed package verification test count must fit usize"),
+        );
+    });
     validate_completed_capacity_and_state(runtime, &capacity, &prepared)?;
     validate_prepared_package(&prepared)?;
     let package_record_bytes = canonical_package_record_bytes(&capacity, &prepared)?;
@@ -849,7 +859,7 @@ fn verify_interrupted_package(
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) fn reset_completed_package_verification_count() {
-    COMPLETED_PACKAGE_VERIFICATION_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    COMPLETED_PACKAGE_VERIFICATION_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(all(
@@ -858,7 +868,7 @@ pub(crate) fn reset_completed_package_verification_count() {
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) fn completed_package_verification_count() -> usize {
-    COMPLETED_PACKAGE_VERIFICATION_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    COMPLETED_PACKAGE_VERIFICATION_COUNT.with(std::cell::Cell::get)
 }
 
 fn intent_preflight(

@@ -50,8 +50,11 @@ use crate::ExtensionRepositoryError;
     zephium_internal_repository_e2e,
     any(target_os = "macos", target_os = "linux")
 ))]
-static REPOSITORY_PACKAGE_IO_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+std::thread_local! {
+    static REPOSITORY_PACKAGE_IO_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
 /// Hard logical ceiling for one shared immutable lease snapshot.
 pub(crate) const MAX_PACKAGE_LEASE_SNAPSHOT_RETAINED_BYTES: usize =
@@ -932,7 +935,14 @@ fn load_repository_package(
         zephium_internal_repository_e2e,
         any(target_os = "macos", target_os = "linux")
     ))]
-    REPOSITORY_PACKAGE_IO_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    REPOSITORY_PACKAGE_IO_COUNT.with(|count| {
+        count.set(
+            count
+                .get()
+                .checked_add(1)
+                .expect("repository package I/O test count must fit usize"),
+        );
+    });
     let record_bytes = read_required_sealed_record(
         &runtime._records,
         &package_record(row.package_record_id),
@@ -1000,7 +1010,7 @@ fn load_repository_package(
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) fn reset_repository_package_io_count() {
-    REPOSITORY_PACKAGE_IO_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    REPOSITORY_PACKAGE_IO_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(all(
@@ -1009,7 +1019,7 @@ pub(crate) fn reset_repository_package_io_count() {
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) fn repository_package_io_count() -> usize {
-    REPOSITORY_PACKAGE_IO_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    REPOSITORY_PACKAGE_IO_COUNT.with(std::cell::Cell::get)
 }
 
 fn require_eligibility(
