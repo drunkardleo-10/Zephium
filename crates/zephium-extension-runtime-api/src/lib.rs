@@ -13,15 +13,15 @@
 
 mod access;
 mod lifecycle;
+mod resource_plan;
 mod target;
 
 pub use access::{
     ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessBuildRefusal,
     ExtensionPackageAccessError, ExtensionPackageAccessPort, ExtensionRuntimeNativeRootVisitor,
-    ExtensionRuntimeResource, ExtensionRuntimeResourceBuildError, ExtensionRuntimeResourceVisitor,
-    ExtensionRuntimeVisitorError, MAX_EXTENSION_RUNTIME_INTERRUPTED_READ_RETRIES,
-    MAX_EXTENSION_RUNTIME_MANIFEST_BYTES, MAX_EXTENSION_RUNTIME_NATIVE_ROOT_BYTES,
-    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_BYTES,
+    ExtensionRuntimeResourceVisitor, ExtensionRuntimeVisitorError,
+    MAX_EXTENSION_RUNTIME_INTERRUPTED_READ_RETRIES, MAX_EXTENSION_RUNTIME_NATIVE_ROOT_BYTES,
+    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 pub use lifecycle::{
     ExtensionPackageAccessView, ExtensionRuntimeActivationBuildError,
@@ -32,5 +32,14 @@ pub use lifecycle::{
     ExtensionRuntimeRecoveryBuildError, ExtensionRuntimeRecoveryBuildRefusal,
     ExtensionRuntimeRetirementDisposition, ExtensionRuntimeRetirementRequest,
     ExtensionRuntimeRetirementSettlement, ExtensionRuntimeUncertainOwner,
+};
+pub use resource_plan::{
+    ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,
+    ExtensionRuntimeResourcePlan, ExtensionRuntimeResourcePlanBuildError,
+    ExtensionRuntimeResourcePlanEntry, MAX_EXTENSION_RUNTIME_MANIFEST_BYTES,
+    MAX_EXTENSION_RUNTIME_RESOURCE_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_PATH_BYTES,
+    MAX_EXTENSION_RUNTIME_RESOURCE_PATH_COMPONENT_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_PATH_DEPTH,
+    MAX_EXTENSION_RUNTIME_RESOURCE_PLAN_ENTRIES,
+    MAX_EXTENSION_RUNTIME_RESOURCE_PLAN_RETAINED_BYTES,
 };
 pub use target::ExtensionRuntimeTarget;

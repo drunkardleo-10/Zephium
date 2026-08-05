@@ -5,8 +5,8 @@ use std::fmt;
 use crate::{
     ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessError,
     ExtensionPackageAccessPort, ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeResource,
-    ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
-    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
+    ExtensionRuntimeResourcePlan, ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget,
+    ExtensionRuntimeVisitorError, MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
 /// A closed, redacted runtime lifecycle failure.
@@ -99,8 +99,14 @@ impl ExtensionPackageAccessView<'_> {
 
     /// Returns the manifest descriptor.
     #[must_use]
-    pub const fn manifest(&self) -> ExtensionRuntimeResource {
+    pub fn manifest(&self) -> ExtensionRuntimeResource {
         self.access.manifest()
+    }
+
+    /// Borrows the complete canonical package-resource plan.
+    #[must_use]
+    pub const fn resources(&self) -> &ExtensionRuntimeResourcePlan {
+        self.access.resources()
     }
 
     /// Returns bounded retained bytes attributed to package access.
@@ -290,8 +296,8 @@ impl std::error::Error for ExtensionRuntimeRecoveryBuildError {}
 ///
 /// No ordinary [`ExtensionPackageAccess`] escapes this refusal while native
 /// ownership remains unresolved. It instead preserves the exact raw delegated
-/// provider, target, manifest descriptor, and passive lifecycle proxy supplied
-/// by the service. No ownership-changing lifecycle callback has run and no
+/// provider, target, complete resource plan, and passive lifecycle proxy
+/// supplied by the service. No ownership-changing lifecycle callback has run and no
 /// input is released or replaced. The caller must keep its external native
 /// reservation and durable package pin held on both success and refusal. A
 /// refusal is an opaque fail-closed quarantine: dropping it may destroy these
@@ -344,7 +350,7 @@ impl std::error::Error for ExtensionRuntimeRecoveryBuildError {}
 pub struct ExtensionRuntimeRecoveryBuildRefusal {
     reason: ExtensionRuntimeRecoveryBuildError,
     target: ExtensionRuntimeTarget,
-    _manifest: ExtensionRuntimeResource,
+    _resources: ExtensionRuntimeResourcePlan,
     _provider: Box<dyn ExtensionPackageAccessPort>,
     _lifecycle: Box<dyn ExtensionRuntimeLifecyclePort>,
 }
@@ -363,7 +369,7 @@ impl fmt::Debug for ExtensionRuntimeRecoveryBuildRefusal {
             .debug_struct("ExtensionRuntimeRecoveryBuildRefusal")
             .field("reason", &self.reason)
             .field("target", &self.target)
-            .field("manifest", &"[redacted]")
+            .field("resources", &"[redacted]")
             .field("provider", &"[redacted]")
             .field("lifecycle", &"[redacted]")
             .finish()
@@ -693,8 +699,14 @@ impl ExtensionRuntimeOwner {
 
     /// Returns the authenticated manifest descriptor.
     #[must_use]
-    pub const fn manifest(&self) -> ExtensionRuntimeResource {
+    pub fn manifest(&self) -> ExtensionRuntimeResource {
         self.core.access.manifest()
+    }
+
+    /// Borrows the complete canonical package-resource plan.
+    #[must_use]
+    pub const fn resources(&self) -> &ExtensionRuntimeResourcePlan {
+        self.core.access.resources()
     }
 
     /// Returns the stable total retained-memory charge for this owner.
@@ -938,19 +950,22 @@ impl ExtensionRuntimeUncertainOwner {
     /// instead of constructing this value.
     pub fn try_from_persisted_uncertainty(
         target: ExtensionRuntimeTarget,
-        manifest: ExtensionRuntimeResource,
+        resources: ExtensionRuntimeResourcePlan,
         provider: Box<dyn ExtensionPackageAccessPort>,
         lifecycle: Box<dyn ExtensionRuntimeLifecyclePort>,
     ) -> Result<Self, ExtensionRuntimeRecoveryBuildRefusal> {
         let access =
-            match ExtensionPackageAccess::from_delegated_provider(target, manifest, provider) {
+            match ExtensionPackageAccess::from_delegated_provider(target, resources, provider) {
                 Ok(access) => access,
                 Err(refusal) => {
+                    let reason =
+                        ExtensionRuntimeRecoveryBuildError::PackageAccess(refusal.reason());
+                    let (target, resources, provider) = refusal.into_parts();
                     return Err(ExtensionRuntimeRecoveryBuildRefusal {
-                        reason: ExtensionRuntimeRecoveryBuildError::PackageAccess(refusal.reason()),
+                        reason,
                         target,
-                        _manifest: manifest,
-                        _provider: refusal.into_provider(),
+                        _resources: resources,
+                        _provider: provider,
                         _lifecycle: lifecycle,
                     });
                 }
@@ -960,11 +975,12 @@ impl ExtensionRuntimeUncertainOwner {
             Err(refusal) => {
                 let reason = ExtensionRuntimeRecoveryBuildError::OwnerAccounting(refusal.reason());
                 let (access, lifecycle) = refusal.into_parts();
+                let (target, resources, provider) = access.into_parts();
                 Err(ExtensionRuntimeRecoveryBuildRefusal {
                     reason,
                     target,
-                    _manifest: manifest,
-                    _provider: access.into_provider(),
+                    _resources: resources,
+                    _provider: provider,
                     _lifecycle: lifecycle,
                 })
             }
@@ -1078,7 +1094,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::ExtensionPackageAccessPort;
+    use crate::{
+        ExtensionPackageAccessPort, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan,
+    };
 
     struct IdentityProvider {
         identity: u64,
@@ -1117,6 +1135,39 @@ mod tests {
             let root = Path::new(r"C:\Zephium\extensions\package");
             let _ = visitor.visit(root);
             Ok(())
+        }
+    }
+
+    struct OverflowProvider {
+        identity: u64,
+        recovered: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Drop for OverflowProvider {
+        fn drop(&mut self) {
+            self.recovered.lock().expect("lock").push(self.identity);
+        }
+    }
+
+    impl ExtensionPackageAccessPort for OverflowProvider {
+        fn retained_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn visit_resource(
+            &mut self,
+            _resource: ExtensionRuntimeResource,
+            _visitor: &mut dyn ExtensionRuntimeResourceVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            Err(ExtensionPackageAccessError::Inactive)
+        }
+
+        fn visit_native_root(
+            &mut self,
+            _target: ExtensionRuntimeTarget,
+            _visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            Err(ExtensionPackageAccessError::Inactive)
         }
     }
 
@@ -1254,11 +1305,10 @@ mod tests {
     ) -> TestRequest {
         let recovered = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let manifest = ExtensionRuntimeResource::try_new([identity as u8; 32], 0)
-            .expect("manifest descriptor");
+        let resources = identity_resource_plan(identity);
         let access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            manifest,
+            resources,
             Box::new(IdentityProvider {
                 identity,
                 recovered: Arc::clone(&recovered),
@@ -1284,14 +1334,12 @@ mod tests {
         recovered: &RecoveredIdentities,
     ) -> (
         ExtensionRuntimeTarget,
-        ExtensionRuntimeResource,
+        ExtensionRuntimeResourcePlan,
         Box<dyn ExtensionPackageAccessPort>,
     ) {
-        let manifest = ExtensionRuntimeResource::try_new([identity as u8; 32], 0)
-            .expect("manifest descriptor");
         (
             ExtensionRuntimeTarget::Compatibility,
-            manifest,
+            identity_resource_plan(identity),
             Box::new(IdentityProvider {
                 identity,
                 recovered: Arc::clone(recovered),
@@ -1299,9 +1347,20 @@ mod tests {
         )
     }
 
+    fn identity_resource_plan(identity: u64) -> ExtensionRuntimeResourcePlan {
+        ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+            "manifest.json",
+            1,
+            [identity as u8; 32],
+        )
+        .expect("manifest binding")])
+        .expect("resource plan")
+    }
+
     fn identity_access(identity: u64, recovered: &RecoveredIdentities) -> ExtensionPackageAccess {
-        let (target, manifest, provider) = identity_provider_inputs(identity, recovered);
-        ExtensionPackageAccess::from_delegated_provider(target, manifest, provider).expect("access")
+        let (target, resources, provider) = identity_provider_inputs(identity, recovered);
+        ExtensionPackageAccess::from_delegated_provider(target, resources, provider)
+            .expect("access")
     }
 
     fn recover_identity_provider(access: ExtensionPackageAccess) -> Box<IdentityProvider> {
@@ -1759,18 +1818,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_uncertainty_access_refusal_keeps_provider_captive() {
+    fn persisted_uncertainty_access_accounting_refusal_keeps_provider_captive() {
         let recovered_access = Arc::new(Mutex::new(Vec::new()));
         let recovered_lifecycle = Arc::new(Mutex::new(Vec::new()));
-        let manifest = ExtensionRuntimeResource::try_new(
-            [55; 32],
-            crate::MAX_EXTENSION_RUNTIME_MANIFEST_BYTES + 1,
-        )
-        .expect("resource ceiling is larger than manifest ceiling");
         let refusal = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
             ExtensionRuntimeTarget::Compatibility,
-            manifest,
-            Box::new(IdentityProvider {
+            identity_resource_plan(55),
+            Box::new(OverflowProvider {
                 identity: 55,
                 recovered: Arc::clone(&recovered_access),
             }),
@@ -1780,11 +1834,11 @@ mod tests {
                 recovered: Arc::clone(&recovered_lifecycle),
             }),
         )
-        .expect_err("oversized recovery manifest must fail closed");
+        .expect_err("overflowing package-access accounting must fail closed");
         assert_eq!(
             refusal.reason(),
             ExtensionRuntimeRecoveryBuildError::PackageAccess(
-                ExtensionPackageAccessBuildError::ManifestTooLarge
+                ExtensionPackageAccessBuildError::RetainedBytesOverflow
             )
         );
         assert!(recovered_access.lock().expect("lock").is_empty());
@@ -1971,7 +2025,7 @@ mod tests {
         assert_eq!(
             owner.visit_manifest(&mut |reader: &mut dyn Read| {
                 calls += 1;
-                assert_eq!(reader.read(&mut [0_u8; 1]).expect("read"), 0);
+                assert_eq!(reader.read(&mut [0_u8; 1]).expect("read"), 1);
                 Ok(())
             }),
             Ok(Ok(()))

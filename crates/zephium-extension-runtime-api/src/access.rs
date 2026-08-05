@@ -1,18 +1,12 @@
 //! Bounded, delegated package access.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use crate::ExtensionRuntimeTarget;
-
-/// Maximum declared size of one runtime-readable package resource.
-pub const MAX_EXTENSION_RUNTIME_RESOURCE_BYTES: u64 = 16 * 1024 * 1024;
-
-/// Maximum declared size of an extension manifest.
-pub const MAX_EXTENSION_RUNTIME_MANIFEST_BYTES: u64 = 1024 * 1024;
+use crate::{ExtensionRuntimeResource, ExtensionRuntimeResourcePlan, ExtensionRuntimeTarget};
 
 /// Maximum deterministic control-plane memory attributed to one runtime owner,
 /// including package access, lifecycle proxy state, and API wrappers.
@@ -28,84 +22,6 @@ pub const MAX_EXTENSION_RUNTIME_NATIVE_ROOT_BYTES: usize = 4 * 1024;
 /// Maximum number of consecutive interrupted-read retries performed by one API
 /// read operation.
 pub const MAX_EXTENSION_RUNTIME_INTERRUPTED_READ_RETRIES: usize = 8;
-
-/// An opaque, bounded package-resource descriptor.
-///
-/// This value identifies data; it does not authorize access to that data. The
-/// delegated provider remains responsible for authenticating the descriptor
-/// against the package represented by the access capability.
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-pub struct ExtensionRuntimeResource {
-    identifier: [u8; 32],
-    declared_bytes: u64,
-}
-
-impl ExtensionRuntimeResource {
-    /// Constructs a descriptor after enforcing the public resource-size limit.
-    pub fn try_new(
-        identifier: [u8; 32],
-        declared_bytes: u64,
-    ) -> Result<Self, ExtensionRuntimeResourceBuildError> {
-        if declared_bytes > MAX_EXTENSION_RUNTIME_RESOURCE_BYTES {
-            return Err(ExtensionRuntimeResourceBuildError::LengthExceeded {
-                declared_bytes,
-                maximum_bytes: MAX_EXTENSION_RUNTIME_RESOURCE_BYTES,
-            });
-        }
-
-        Ok(Self {
-            identifier,
-            declared_bytes,
-        })
-    }
-
-    /// Returns the opaque identifier a provider must authenticate.
-    #[must_use]
-    pub const fn identifier(&self) -> &[u8; 32] {
-        &self.identifier
-    }
-
-    /// Returns the exact byte length committed by the descriptor.
-    #[must_use]
-    pub const fn declared_bytes(&self) -> u64 {
-        self.declared_bytes
-    }
-}
-
-impl fmt::Debug for ExtensionRuntimeResource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ExtensionRuntimeResource")
-            .field("identifier", &"[redacted]")
-            .field("declared_bytes", &self.declared_bytes)
-            .finish()
-    }
-}
-
-/// Why an extension-resource descriptor could not be constructed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ExtensionRuntimeResourceBuildError {
-    /// The declared resource length exceeded the process-wide policy limit.
-    LengthExceeded {
-        /// The rejected length.
-        declared_bytes: u64,
-        /// The applicable limit.
-        maximum_bytes: u64,
-    },
-}
-
-impl fmt::Display for ExtensionRuntimeResourceBuildError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LengthExceeded { .. } => {
-                formatter.write_str("extension resource exceeds the runtime size limit")
-            }
-        }
-    }
-}
-
-impl Error for ExtensionRuntimeResourceBuildError {}
 
 /// A closed error returned by a synchronous resource or native-root consumer.
 ///
@@ -204,6 +120,8 @@ pub enum ExtensionPackageAccessError {
     NativeRootIdentityMismatch,
     /// The delegated provider violated the synchronous callback contract.
     ProviderContractViolation,
+    /// A package callback attempted to re-enter delegated repository access.
+    CallbackReentry,
 }
 
 impl fmt::Display for ExtensionPackageAccessError {
@@ -220,6 +138,9 @@ impl fmt::Display for ExtensionPackageAccessError {
             }
             Self::ProviderContractViolation => {
                 "delegated extension package provider violated its callback contract"
+            }
+            Self::CallbackReentry => {
+                "extension package callbacks cannot re-enter delegated package access"
             }
         })
     }
@@ -280,8 +201,6 @@ pub trait ExtensionPackageAccessPort: Any + Send {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ExtensionPackageAccessBuildError {
-    /// The manifest descriptor exceeds the stricter manifest limit.
-    ManifestTooLarge,
     /// Accounting for the provider and wrapper overflowed `usize`.
     RetainedBytesOverflow,
     /// The provider and access wrapper already exceed the per-owner
@@ -292,7 +211,6 @@ pub enum ExtensionPackageAccessBuildError {
 impl fmt::Display for ExtensionPackageAccessBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::ManifestTooLarge => "extension manifest exceeds the runtime size limit",
             Self::RetainedBytesOverflow => "extension package access accounting overflowed",
             Self::RetainedBytesExceeded => {
                 "extension package access exceeds the retained-memory limit"
@@ -307,6 +225,8 @@ impl Error for ExtensionPackageAccessBuildError {}
 #[must_use = "the refusal retains the exact delegated provider"]
 pub struct ExtensionPackageAccessBuildRefusal {
     reason: ExtensionPackageAccessBuildError,
+    target: ExtensionRuntimeTarget,
+    resources: ExtensionRuntimeResourcePlan,
     provider: Box<dyn ExtensionPackageAccessPort>,
 }
 
@@ -322,6 +242,40 @@ impl ExtensionPackageAccessBuildRefusal {
     pub fn into_provider(self) -> Box<dyn ExtensionPackageAccessPort> {
         self.provider
     }
+
+    /// Returns every unchanged constructor input.
+    #[must_use = "the delegated provider retains package authority"]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ExtensionRuntimeTarget,
+        ExtensionRuntimeResourcePlan,
+        Box<dyn ExtensionPackageAccessPort>,
+    ) {
+        (self.target, self.resources, self.provider)
+    }
+
+    /// Recovers a provider of the exact requested concrete type.
+    ///
+    /// A type mismatch returns this complete refusal unchanged; it never drops
+    /// or substitutes the provider.
+    pub fn try_into_delegated_provider<T>(
+        self,
+    ) -> Result<(ExtensionRuntimeTarget, ExtensionRuntimeResourcePlan, Box<T>), Self>
+    where
+        T: ExtensionPackageAccessPort,
+    {
+        if !provider_is::<T>(self.provider.as_ref()) {
+            return Err(self);
+        }
+        let Self {
+            reason: _,
+            target,
+            resources,
+            provider,
+        } = self;
+        Ok((target, resources, downcast_known_provider(provider)))
+    }
 }
 
 impl fmt::Debug for ExtensionPackageAccessBuildRefusal {
@@ -329,6 +283,8 @@ impl fmt::Debug for ExtensionPackageAccessBuildRefusal {
         formatter
             .debug_struct("ExtensionPackageAccessBuildRefusal")
             .field("reason", &self.reason)
+            .field("target", &self.target)
+            .field("resources", &"[redacted]")
             .field("provider", &"[redacted]")
             .finish()
     }
@@ -393,7 +349,7 @@ impl fmt::Debug for ExtensionPackageAccessBuildRefusal {
 #[must_use = "delegated package access must be settled through the runtime ownership protocol"]
 pub struct ExtensionPackageAccess {
     target: ExtensionRuntimeTarget,
-    manifest: ExtensionRuntimeResource,
+    resources: ExtensionRuntimeResourcePlan,
     retained_bytes: usize,
     usable: bool,
     provider: Box<dyn ExtensionPackageAccessPort>,
@@ -408,36 +364,35 @@ impl ExtensionPackageAccess {
     /// [`ExtensionPackageAccessBuildRefusal`].
     pub fn from_delegated_provider(
         target: ExtensionRuntimeTarget,
-        manifest: ExtensionRuntimeResource,
+        resources: ExtensionRuntimeResourcePlan,
         provider: Box<dyn ExtensionPackageAccessPort>,
     ) -> Result<Self, ExtensionPackageAccessBuildRefusal> {
-        if manifest.declared_bytes > MAX_EXTENSION_RUNTIME_MANIFEST_BYTES {
-            return Err(ExtensionPackageAccessBuildRefusal {
-                reason: ExtensionPackageAccessBuildError::ManifestTooLarge,
-                provider,
-            });
-        }
-
-        let retained_bytes =
-            match std::mem::size_of::<Self>().checked_add(provider.retained_bytes()) {
-                Some(retained_bytes) => retained_bytes,
-                None => {
-                    return Err(ExtensionPackageAccessBuildRefusal {
-                        reason: ExtensionPackageAccessBuildError::RetainedBytesOverflow,
-                        provider,
-                    });
-                }
-            };
+        let retained_bytes = match std::mem::size_of::<Self>()
+            .checked_add(resources.exclusive_heap_bytes())
+            .and_then(|bytes| bytes.checked_add(provider.retained_bytes()))
+        {
+            Some(retained_bytes) => retained_bytes,
+            None => {
+                return Err(ExtensionPackageAccessBuildRefusal {
+                    reason: ExtensionPackageAccessBuildError::RetainedBytesOverflow,
+                    target,
+                    resources,
+                    provider,
+                });
+            }
+        };
         if retained_bytes > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES {
             return Err(ExtensionPackageAccessBuildRefusal {
                 reason: ExtensionPackageAccessBuildError::RetainedBytesExceeded,
+                target,
+                resources,
                 provider,
             });
         }
 
         Ok(Self {
             target,
-            manifest,
+            resources,
             retained_bytes,
             usable: true,
             provider,
@@ -452,8 +407,14 @@ impl ExtensionPackageAccess {
 
     /// Returns the authenticated manifest descriptor.
     #[must_use]
-    pub const fn manifest(&self) -> ExtensionRuntimeResource {
-        self.manifest
+    pub fn manifest(&self) -> ExtensionRuntimeResource {
+        self.resources.manifest()
+    }
+
+    /// Borrows the complete canonical runtime package-resource plan.
+    #[must_use]
+    pub const fn resources(&self) -> &ExtensionRuntimeResourcePlan {
+        &self.resources
     }
 
     /// Returns bounded retained bytes attributed to this access object.
@@ -476,13 +437,45 @@ impl ExtensionPackageAccess {
         self.provider
     }
 
+    /// Recovers a provider of the exact requested concrete type.
+    ///
+    /// A type mismatch returns this complete package access unchanged. This is
+    /// the supported downcast path for service-owned providers whose authority
+    /// must remain captive on mismatch.
+    pub fn try_into_delegated_provider<T>(self) -> Result<Box<T>, Self>
+    where
+        T: ExtensionPackageAccessPort,
+    {
+        if !provider_is::<T>(self.provider.as_ref()) {
+            return Err(self);
+        }
+        let Self {
+            target: _,
+            resources: _,
+            retained_bytes: _,
+            usable: _,
+            provider,
+        } = self;
+        Ok(downcast_known_provider(provider))
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ExtensionRuntimeTarget,
+        ExtensionRuntimeResourcePlan,
+        Box<dyn ExtensionPackageAccessPort>,
+    ) {
+        (self.target, self.resources, self.provider)
+    }
+
     /// Visits the package manifest through the same authenticated resource path
     /// used for every other package file.
     pub fn visit_manifest(
         &mut self,
         visitor: &mut dyn ExtensionRuntimeResourceVisitor,
     ) -> Result<Result<(), ExtensionRuntimeVisitorError>, ExtensionPackageAccessError> {
-        self.visit_resource(self.manifest, visitor)
+        self.visit_resource(self.manifest(), visitor)
     }
 
     /// Visits one authenticated, exactly-sized package resource.
@@ -498,7 +491,7 @@ impl ExtensionPackageAccess {
         if !self.usable {
             return Err(ExtensionPackageAccessError::Inactive);
         }
-        let mut guard = ResourceVisitGuard::new(resource.declared_bytes, visitor);
+        let mut guard = ResourceVisitGuard::new(resource.declared_bytes(), visitor);
         let provider_result = self.provider.visit_resource(resource, &mut guard);
         let observed_terminal_error = guard.observed_terminal_error();
         let result = match provider_result {
@@ -556,7 +549,8 @@ const fn access_error_is_terminal(error: ExtensionPackageAccessError) -> bool {
         ExtensionPackageAccessError::ResourceNotDeclared
         | ExtensionPackageAccessError::ResourceUnavailable
         | ExtensionPackageAccessError::ResourceReadFailed
-        | ExtensionPackageAccessError::NativeRootUnavailable => false,
+        | ExtensionPackageAccessError::NativeRootUnavailable
+        | ExtensionPackageAccessError::CallbackReentry => false,
     }
 }
 
@@ -565,10 +559,29 @@ impl fmt::Debug for ExtensionPackageAccess {
         formatter
             .debug_struct("ExtensionPackageAccess")
             .field("target", &self.target)
-            .field("manifest", &self.manifest)
+            .field("manifest", &self.manifest())
+            .field("resources", &"[redacted]")
             .field("retained_bytes", &self.retained_bytes)
             .field("provider", &"[redacted]")
             .finish()
+    }
+}
+
+fn provider_is<T>(provider: &dyn ExtensionPackageAccessPort) -> bool
+where
+    T: ExtensionPackageAccessPort,
+{
+    provider.type_id() == TypeId::of::<T>()
+}
+
+fn downcast_known_provider<T>(provider: Box<dyn ExtensionPackageAccessPort>) -> Box<T>
+where
+    T: ExtensionPackageAccessPort,
+{
+    let provider: Box<dyn Any + Send> = provider;
+    match provider.downcast::<T>() {
+        Ok(provider) => provider,
+        Err(_) => unreachable!("Any type check and downcast disagreed"),
     }
 }
 
@@ -818,6 +831,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::{
+        ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,
+        MAX_EXTENSION_RUNTIME_RESOURCE_BYTES,
+    };
 
     #[derive(Clone, Copy)]
     enum ResourceBehavior {
@@ -952,6 +969,31 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct OtherProvider;
+
+    impl ExtensionPackageAccessPort for OtherProvider {
+        fn retained_bytes(&self) -> usize {
+            0
+        }
+
+        fn visit_resource(
+            &mut self,
+            _resource: ExtensionRuntimeResource,
+            _visitor: &mut dyn ExtensionRuntimeResourceVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            Err(ExtensionPackageAccessError::Inactive)
+        }
+
+        fn visit_native_root(
+            &mut self,
+            _target: ExtensionRuntimeTarget,
+            _visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            Err(ExtensionPackageAccessError::Inactive)
+        }
+    }
+
     struct FailingReader {
         bytes: VecDeque<u8>,
         reads_before_failure: usize,
@@ -1025,8 +1067,14 @@ mod tests {
         }
     }
 
-    fn descriptor(length: usize) -> ExtensionRuntimeResource {
-        ExtensionRuntimeResource::try_new([0x5a; 32], length as u64).expect("descriptor")
+    fn resource_plan(length: usize) -> ExtensionRuntimeResourcePlan {
+        ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+            "manifest.json",
+            length.max(1) as u64,
+            [0x5a; 32],
+        )
+        .expect("manifest binding")])
+        .expect("resource plan")
     }
 
     fn provider(
@@ -1052,11 +1100,11 @@ mod tests {
     }
 
     fn access_with(behavior: ResourceBehavior, bytes: Vec<u8>) -> ExtensionPackageAccess {
-        let manifest = descriptor(bytes.len());
+        let resources = resource_plan(bytes.len());
         let (provider, _) = provider(behavior, bytes, absolute_test_root());
         ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            manifest,
+            resources,
             provider,
         )
         .expect("access")
@@ -1080,7 +1128,7 @@ mod tests {
         });
         let access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            descriptor(bytes.len()),
+            resource_plan(bytes.len()),
             provider,
         )
         .expect("access");
@@ -1101,7 +1149,7 @@ mod tests {
         });
         ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            descriptor(0),
+            resource_plan(0),
             provider,
         )
         .expect("access")
@@ -1133,32 +1181,8 @@ mod tests {
     }
 
     #[test]
-    fn construction_refusal_returns_the_same_provider() {
-        let manifest =
-            ExtensionRuntimeResource::try_new([1; 32], MAX_EXTENSION_RUNTIME_MANIFEST_BYTES + 1)
-                .expect("within general resource limit");
-        let (provider, recovered_identity) =
-            provider(ResourceBehavior::Exact, Vec::new(), absolute_test_root());
-
-        let refusal = ExtensionPackageAccess::from_delegated_provider(
-            ExtensionRuntimeTarget::NativeWebExtension,
-            manifest,
-            provider,
-        )
-        .expect_err("manifest must be refused");
-
-        assert_eq!(
-            refusal.reason(),
-            ExtensionPackageAccessBuildError::ManifestTooLarge
-        );
-        assert_eq!(*recovered_identity.lock().expect("lock"), None);
-        drop(refusal.into_provider());
-        assert_eq!(*recovered_identity.lock().expect("lock"), Some(91));
-    }
-
-    #[test]
     fn retained_memory_is_bounded_and_provider_is_returned() {
-        let manifest = descriptor(0);
+        let resources = resource_plan(0);
         let recovered_identity = Arc::new(Mutex::new(None));
         let provider: Box<dyn ExtensionPackageAccessPort> = Box::new(TestProvider {
             identity: 92,
@@ -1174,7 +1198,7 @@ mod tests {
 
         let refusal = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            manifest,
+            resources,
             provider,
         )
         .expect_err("wrapper overhead must make this too large");
@@ -1188,7 +1212,9 @@ mod tests {
 
     #[test]
     fn retained_memory_accepts_the_exact_limit_and_refuses_overflow() {
-        let wrapper_bytes = std::mem::size_of::<ExtensionPackageAccess>();
+        let resources = resource_plan(0);
+        let wrapper_bytes =
+            std::mem::size_of::<ExtensionPackageAccess>() + resources.exclusive_heap_bytes();
         let recovered_identity = Arc::new(Mutex::new(None));
         let accepted_provider: Box<dyn ExtensionPackageAccessPort> = Box::new(TestProvider {
             identity: 94,
@@ -1203,7 +1229,7 @@ mod tests {
         });
         let access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            descriptor(0),
+            resources,
             accepted_provider,
         )
         .expect("exact retained limit must be accepted");
@@ -1228,7 +1254,7 @@ mod tests {
         });
         let refusal = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            descriptor(0),
+            resource_plan(0),
             overflowing_provider,
         )
         .expect_err("overflow must be refused");
@@ -1242,12 +1268,12 @@ mod tests {
 
     #[test]
     fn successful_access_recovers_the_exact_provider_payload() {
-        let manifest = descriptor(0);
+        let resources = resource_plan(0);
         let (provider, recovered_identity) =
             provider(ResourceBehavior::Exact, Vec::new(), absolute_test_root());
         let access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            manifest,
+            resources,
             provider,
         )
         .expect("access");
@@ -1268,8 +1294,100 @@ mod tests {
     }
 
     #[test]
+    fn typed_provider_mismatch_returns_complete_access_and_refusal() {
+        let resources = resource_plan(1);
+        let plan_digest = resources.digest();
+        let (provider, recovered_identity) =
+            provider(ResourceBehavior::Exact, b"x".to_vec(), absolute_test_root());
+        let access = ExtensionPackageAccess::from_delegated_provider(
+            ExtensionRuntimeTarget::Compatibility,
+            resources,
+            provider,
+        )
+        .expect("access");
+        let access = access
+            .try_into_delegated_provider::<OtherProvider>()
+            .expect_err("a type mismatch must return complete access");
+        assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
+        assert_eq!(access.resources().digest(), plan_digest);
+        assert_eq!(*recovered_identity.lock().expect("lock"), None);
+        let provider = access
+            .try_into_delegated_provider::<TestProvider>()
+            .expect("exact provider type must be recoverable");
+        assert_eq!(provider.identity, 91);
+        drop(provider);
+        assert_eq!(*recovered_identity.lock().expect("lock"), Some(91));
+
+        let resources = resource_plan(1);
+        let plan_digest = resources.digest();
+        let recovered_identity = Arc::new(Mutex::new(None));
+        let provider: Box<dyn ExtensionPackageAccessPort> = Box::new(TestProvider {
+            identity: 101,
+            retained_bytes: usize::MAX,
+            bytes: b"x".to_vec(),
+            behavior: ResourceBehavior::Exact,
+            root: absolute_test_root(),
+            root_calls: 1,
+            root_provider_error: None,
+            recovered_identity: Arc::clone(&recovered_identity),
+            read_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let refusal = ExtensionPackageAccess::from_delegated_provider(
+            ExtensionRuntimeTarget::Compatibility,
+            resources,
+            provider,
+        )
+        .expect_err("overflow must retain all construction inputs");
+        let refusal = refusal
+            .try_into_delegated_provider::<OtherProvider>()
+            .expect_err("a type mismatch must return the complete refusal");
+        assert_eq!(
+            refusal.reason(),
+            ExtensionPackageAccessBuildError::RetainedBytesOverflow
+        );
+        assert_eq!(*recovered_identity.lock().expect("lock"), None);
+        let (target, resources, provider) = refusal
+            .try_into_delegated_provider::<TestProvider>()
+            .expect("exact refused provider must be recoverable");
+        assert_eq!(target, ExtensionRuntimeTarget::Compatibility);
+        assert_eq!(resources.digest(), plan_digest);
+        assert_eq!(provider.identity, 101);
+        drop(provider);
+        assert_eq!(*recovered_identity.lock().expect("lock"), Some(101));
+    }
+
+    #[test]
+    fn zero_length_non_manifest_resource_is_supported() {
+        let resources = ExtensionRuntimeResourcePlan::try_new(vec![
+            ExtensionRuntimeResourceBinding::try_new("empty.bin", 0, [1; 32])
+                .expect("empty binding"),
+            ExtensionRuntimeResourceBinding::try_new("manifest.json", 1, [2; 32])
+                .expect("manifest binding"),
+        ])
+        .expect("resource plan");
+        let empty = resources.entry("empty.bin").unwrap().resource();
+        let (provider, _) = provider(ResourceBehavior::Exact, Vec::new(), absolute_test_root());
+        let mut access = ExtensionPackageAccess::from_delegated_provider(
+            ExtensionRuntimeTarget::Compatibility,
+            resources,
+            provider,
+        )
+        .expect("access");
+        let mut calls = 0;
+        assert_eq!(
+            access.visit_resource(empty, &mut |reader: &mut dyn Read| {
+                calls += 1;
+                assert_eq!(reader.read(&mut [0_u8; 1]).expect("read"), 0);
+                Ok(())
+            }),
+            Ok(Ok(()))
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
     fn exact_empty_and_partial_resource_consumption_succeed() {
-        for bytes in [Vec::new(), b"manifest".to_vec()] {
+        for bytes in [b"x".to_vec(), b"manifest".to_vec()] {
             let mut access = access_with(ResourceBehavior::Exact, bytes.clone());
             let mut observed = Vec::new();
             let result = access.visit_manifest(&mut |reader: &mut dyn Read| {
@@ -1478,7 +1596,7 @@ mod tests {
             Err(ExtensionPackageAccessError::Inactive)
         );
 
-        let manifest = descriptor(0);
+        let resources = resource_plan(0);
         let (provider, _) = provider(
             ResourceBehavior::Exact,
             Vec::new(),
@@ -1486,7 +1604,7 @@ mod tests {
         );
         let mut root_access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            manifest,
+            resources,
             provider,
         )
         .expect("access");
@@ -1528,7 +1646,7 @@ mod tests {
         });
         let mut root_access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            descriptor(0),
+            resource_plan(0),
             provider,
         )
         .expect("access");
@@ -1568,7 +1686,7 @@ mod tests {
         });
         let mut root_access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            descriptor(0),
+            resource_plan(0),
             provider,
         )
         .expect("access");
@@ -1613,7 +1731,7 @@ mod tests {
 
     #[test]
     fn invalid_root_never_reaches_consumer() {
-        let manifest = descriptor(0);
+        let resources = resource_plan(0);
         let (provider, _) = provider(
             ResourceBehavior::Exact,
             Vec::new(),
@@ -1621,7 +1739,7 @@ mod tests {
         );
         let mut access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            manifest,
+            resources,
             provider,
         )
         .expect("access");
@@ -1653,11 +1771,11 @@ mod tests {
         ];
 
         for root in roots {
-            let manifest = descriptor(0);
+            let resources = resource_plan(0);
             let (provider, _) = provider(ResourceBehavior::Exact, Vec::new(), root);
             let mut access = ExtensionPackageAccess::from_delegated_provider(
                 ExtensionRuntimeTarget::NativeWebExtension,
-                manifest,
+                resources,
                 provider,
             )
             .expect("access");
@@ -1686,11 +1804,11 @@ mod tests {
             r"C:\{}",
             "a".repeat(MAX_EXTENSION_RUNTIME_NATIVE_ROOT_BYTES)
         ));
-        let manifest = descriptor(0);
+        let resources = resource_plan(0);
         let (provider, _) = provider(ResourceBehavior::Exact, Vec::new(), root);
         let mut access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            manifest,
+            resources,
             provider,
         )
         .expect("access");
@@ -1708,7 +1826,7 @@ mod tests {
 
     #[test]
     fn native_root_provider_failure_outranks_consumer_failure() {
-        let manifest = descriptor(0);
+        let resources = resource_plan(0);
         let recovered_identity = Arc::new(Mutex::new(None));
         let provider: Box<dyn ExtensionPackageAccessPort> = Box::new(TestProvider {
             identity: 93,
@@ -1723,7 +1841,7 @@ mod tests {
         });
         let mut access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::NativeWebExtension,
-            manifest,
+            resources,
             provider,
         )
         .expect("access");
@@ -1735,11 +1853,19 @@ mod tests {
 
     #[test]
     fn debug_output_redacts_identifiers_and_providers() {
-        let descriptor = ExtensionRuntimeResource::try_new([0xab; 32], 0).expect("descriptor");
+        let resources =
+            ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+                "manifest.json",
+                1,
+                [0xab; 32],
+            )
+            .expect("binding")])
+            .expect("plan");
+        let descriptor = resources.manifest();
         let (provider, _) = provider(ResourceBehavior::Exact, Vec::new(), absolute_test_root());
         let access = ExtensionPackageAccess::from_delegated_provider(
             ExtensionRuntimeTarget::Compatibility,
-            descriptor,
+            resources,
             provider,
         )
         .expect("access");
