@@ -1,15 +1,19 @@
+use std::cell::Cell;
 use std::io::{Read, Write};
-use std::sync::{Mutex, MutexGuard};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use thiserror::Error;
 
-static ACTIVE_MEASUREMENT: Mutex<Option<MeasurementState>> = Mutex::new(None);
+std::thread_local! {
+    static ACTIVE_MEASUREMENT: Cell<Option<MeasurementState>> = const { Cell::new(None) };
+}
 
 /// One completed private-filesystem operation measurement.
 ///
 /// This internal-repository E2E surface is absent unless the dedicated custom
 /// configuration is enabled. Counts describe successful native operations and
-/// bytes actually transferred while the single process-wide guard was active.
+/// bytes actually transferred on the guarded thread while its scope was active.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[must_use = "operation measurements must be checked against their resource budgets"]
 pub struct PrivateFsOperationSnapshot {
@@ -83,8 +87,8 @@ impl PrivateFsOperationSnapshot {
 /// Refusal returned by internal private-filesystem operation measurement.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PrivateFsOperationMeasurementError {
-    /// Another process-wide measurement guard is already active.
-    #[error("a private-filesystem operation measurement is already active")]
+    /// Another measurement guard is already active on this thread.
+    #[error("a private-filesystem operation measurement is already active on this thread")]
     AlreadyActive,
     /// At least one measurement counter exceeded its representable range.
     #[error("a private-filesystem operation measurement counter overflowed")]
@@ -93,34 +97,45 @@ pub enum PrivateFsOperationMeasurementError {
 
 /// Exclusive scope for one internal private-filesystem operation measurement.
 ///
-/// Only one guard may exist in a process. [`Self::finish`] atomically consumes
-/// the active state and returns its snapshot; dropping an unfinished guard
-/// discards that state. There is deliberately no independent reset or read API,
-/// so a later measurement cannot be confused with an earlier generation.
+/// Only one guard may exist per thread. The guard is deliberately non-`Send`,
+/// and [`Self::finish`] consumes the active state on that same thread. Dropping
+/// an unfinished guard discards the state. There is no independent reset or
+/// read API, so a later measurement cannot be confused with an earlier
+/// generation.
 #[derive(Debug)]
 #[must_use = "dropping the guard discards its operation measurement"]
 pub struct PrivateFsOperationMeasurement {
     active: bool,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl PrivateFsOperationMeasurement {
-    /// Starts the only active process-wide operation measurement.
+    /// Starts the only active operation measurement on this thread.
     pub fn begin() -> Result<Self, PrivateFsOperationMeasurementError> {
-        let mut active = lock_active_measurement();
-        if active.is_some() {
+        let already_active = ACTIVE_MEASUREMENT.with(|active| {
+            if active.get().is_some() {
+                true
+            } else {
+                active.set(Some(MeasurementState::default()));
+                false
+            }
+        });
+        if already_active {
             return Err(PrivateFsOperationMeasurementError::AlreadyActive);
         }
-        *active = Some(MeasurementState::default());
-        Ok(Self { active: true })
+        Ok(Self {
+            active: true,
+            _not_send: PhantomData,
+        })
     }
 
     /// Finishes this measurement and returns its immutable snapshot.
     pub fn finish(
         mut self,
     ) -> Result<PrivateFsOperationSnapshot, PrivateFsOperationMeasurementError> {
-        let state = lock_active_measurement()
-            .take()
-            .expect("an active measurement guard must own active state");
+        let state = ACTIVE_MEASUREMENT
+            .with(Cell::take)
+            .expect("an active measurement guard must own active state on its thread");
         self.active = false;
         if state.overflowed {
             Err(PrivateFsOperationMeasurementError::CounterOverflow)
@@ -133,7 +148,9 @@ impl PrivateFsOperationMeasurement {
 impl Drop for PrivateFsOperationMeasurement {
     fn drop(&mut self) {
         if self.active {
-            lock_active_measurement().take();
+            ACTIVE_MEASUREMENT.with(|active| {
+                active.take();
+            });
             self.active = false;
         }
     }
@@ -183,16 +200,14 @@ impl MeasurementState {
     }
 }
 
-fn lock_active_measurement() -> MutexGuard<'static, Option<MeasurementState>> {
-    ACTIVE_MEASUREMENT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 fn record(counter: OperationCounter, amount: usize) {
-    if let Some(active) = lock_active_measurement().as_mut() {
-        active.record(counter, amount);
-    }
+    ACTIVE_MEASUREMENT.with(|active| {
+        let Some(mut state) = active.get() else {
+            return;
+        };
+        state.record(counter, amount);
+        active.set(Some(state));
+    });
 }
 
 pub(crate) fn record_file_sync() {
@@ -324,5 +339,29 @@ mod tests {
         let _snapshot = measurement.finish().unwrap();
         let measurement = PrivateFsOperationMeasurement::begin().unwrap();
         drop(measurement);
+    }
+
+    #[test]
+    fn overlapping_threads_measure_independently() {
+        let rendezvous = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let rendezvous = rendezvous.clone();
+                std::thread::spawn(move || {
+                    let measurement = PrivateFsOperationMeasurement::begin();
+                    rendezvous.wait();
+                    let measurement = measurement.unwrap();
+                    record_file_sync();
+                    measurement.finish().unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        rendezvous.wait();
+        for worker in workers {
+            let snapshot = worker.join().unwrap();
+            assert_eq!(snapshot.file_syncs(), 1);
+            assert_eq!(snapshot.directory_syncs(), 0);
+        }
     }
 }
