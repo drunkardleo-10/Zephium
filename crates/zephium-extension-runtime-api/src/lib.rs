@@ -7,13 +7,17 @@
 //! cancellations whose state already proves native ownership absent.
 //! Persisted uncertainty is reconstructed only from a cleanup-only ownership
 //! proxy: restart recovery carries no package access, resource plan, provider,
-//! target, or activation-capable port.
+//! target, or activation-capable port. Public native-owner identifiers and
+//! evidence enums are structural and non-authorizing; authority exists only
+//! through a service-selected trusted lifecycle port joined to the exact
+//! backend, native incarnation, and durable ownership row.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
 mod access;
 mod lifecycle;
+mod ownership_evidence;
 mod resource_plan;
 mod target;
 
@@ -36,6 +40,10 @@ pub use lifecycle::{
     ExtensionRuntimeRecoveryRetirementSettlement, ExtensionRuntimeRecoverySettlement,
     ExtensionRuntimeRetirementDisposition, ExtensionRuntimeRetirementRequest,
     ExtensionRuntimeRetirementSettlement, ExtensionRuntimeUncertainOwner,
+};
+pub use ownership_evidence::{
+    ExtensionRuntimeNativeOwnerId, ExtensionRuntimeNativeOwnerIdError,
+    ExtensionRuntimeOwnershipEvidence, EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
 };
 pub use resource_plan::{
     ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,
