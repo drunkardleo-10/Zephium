@@ -154,6 +154,146 @@ impl fmt::Debug for ExtensionRuntimeOwnershipEvidence {
     }
 }
 
+/// Closed, structural expectation used to reconcile one conservatively
+/// persisted runtime owner after process restart.
+///
+/// A native ownership row can be committed before the platform has returned
+/// its stable owner identifier. Native variants therefore retain the exact
+/// backend class and optionally the identifier already authenticated and
+/// persisted by the service. [`Self::Compatibility`] is exact immediately,
+/// because the compatibility runtime has no separate platform identifier.
+///
+/// Like [`ExtensionRuntimeOwnershipEvidence`], constructing this value grants
+/// no authority. A package service must join it to the exact durable row,
+/// native incarnation, and service-selected trusted ownership port. Native
+/// identifiers remain canonically bounded by
+/// [`ExtensionRuntimeNativeOwnerId`].
+///
+/// This structural boundary intentionally has no implicit persistence format:
+///
+/// ```compile_fail
+/// use serde::Serialize;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryExpectation;
+/// fn requires_serialize<T: Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeRecoveryExpectation>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryExpectation;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionRuntimeRecoveryExpectation>();
+/// ```
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ExtensionRuntimeRecoveryExpectation {
+    /// A macOS `WKWebExtensionContext`, optionally with its already persisted
+    /// `uniqueIdentifier`.
+    MacosWebExtension {
+        /// Exact durable owner identifier, or `None` when native creation may
+        /// have started but no authenticated identifier was persisted.
+        expected: Option<ExtensionRuntimeNativeOwnerId>,
+    },
+    /// A Windows WebView2 browser extension, optionally with its already
+    /// persisted `ICoreWebView2BrowserExtension::Id`.
+    WindowsWebView2Extension {
+        /// Exact durable owner identifier, or `None` when native creation may
+        /// have started but no authenticated identifier was persisted.
+        expected: Option<ExtensionRuntimeNativeOwnerId>,
+    },
+    /// Zephium's exact compatibility-runtime owner class.
+    Compatibility,
+}
+
+impl ExtensionRuntimeRecoveryExpectation {
+    /// Builds the exact expectation corresponding to authenticated ownership
+    /// evidence.
+    #[must_use]
+    pub const fn from_exact_evidence(evidence: ExtensionRuntimeOwnershipEvidence) -> Self {
+        match evidence {
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(expected) => {
+                Self::MacosWebExtension {
+                    expected: Some(expected),
+                }
+            }
+            ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(expected) => {
+                Self::WindowsWebView2Extension {
+                    expected: Some(expected),
+                }
+            }
+            ExtensionRuntimeOwnershipEvidence::Compatibility => Self::Compatibility,
+        }
+    }
+
+    /// Returns the runtime family consistent with this expectation.
+    #[must_use]
+    pub const fn target(self) -> ExtensionRuntimeTarget {
+        match self {
+            Self::MacosWebExtension { .. } | Self::WindowsWebView2Extension { .. } => {
+                ExtensionRuntimeTarget::NativeWebExtension
+            }
+            Self::Compatibility => ExtensionRuntimeTarget::Compatibility,
+        }
+    }
+
+    /// Returns exact evidence already present in the durable expectation.
+    ///
+    /// An identityless native expectation returns `None`; a trusted matching
+    /// adapter observation can attach that identifier during reconciliation.
+    /// Compatibility is exact at construction.
+    #[must_use]
+    pub const fn known_evidence(self) -> Option<ExtensionRuntimeOwnershipEvidence> {
+        match self {
+            Self::MacosWebExtension {
+                expected: Some(expected),
+            } => Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
+                expected,
+            )),
+            Self::WindowsWebView2Extension {
+                expected: Some(expected),
+            } => Some(ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(
+                expected,
+            )),
+            Self::Compatibility => Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
+            Self::MacosWebExtension { expected: None }
+            | Self::WindowsWebView2Extension { expected: None } => None,
+        }
+    }
+
+    pub(crate) fn accepts(self, evidence: ExtensionRuntimeOwnershipEvidence) -> bool {
+        match (self, evidence) {
+            (
+                Self::MacosWebExtension { expected },
+                ExtensionRuntimeOwnershipEvidence::MacosWebExtension(actual),
+            )
+            | (
+                Self::WindowsWebView2Extension { expected },
+                ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(actual),
+            ) => expected.is_none_or(|expected| expected == actual),
+            (Self::Compatibility, ExtensionRuntimeOwnershipEvidence::Compatibility) => true,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoveryExpectation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let expected = |expected: &Option<ExtensionRuntimeNativeOwnerId>| {
+            expected.as_ref().map(|_| "[redacted]")
+        };
+        match self {
+            Self::MacosWebExtension { expected: owner_id } => formatter
+                .debug_struct("MacosWebExtension")
+                .field("expected", &expected(owner_id))
+                .finish(),
+            Self::WindowsWebView2Extension { expected: owner_id } => formatter
+                .debug_struct("WindowsWebView2Extension")
+                .field("expected", &expected(owner_id))
+                .finish(),
+            Self::Compatibility => formatter.write_str("Compatibility"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +388,85 @@ mod tests {
             EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES
         );
         assert!(std::mem::size_of::<ExtensionRuntimeOwnershipEvidence>() <= 40);
+    }
+
+    #[test]
+    fn recovery_expectation_is_backend_exact_and_bounded() {
+        let id = ExtensionRuntimeNativeOwnerId::parse_exact(CANONICAL).expect("canonical id");
+        let macos = ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: Some(id) };
+        let identityless_macos =
+            ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None };
+        let windows =
+            ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { expected: Some(id) };
+        let identityless_windows =
+            ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { expected: None };
+
+        assert_eq!(
+            macos,
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(
+                ExtensionRuntimeOwnershipEvidence::MacosWebExtension(id)
+            )
+        );
+        assert_eq!(
+            windows,
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(
+                ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(id)
+            )
+        );
+        assert_eq!(
+            ExtensionRuntimeRecoveryExpectation::Compatibility,
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(
+                ExtensionRuntimeOwnershipEvidence::Compatibility
+            )
+        );
+
+        for expectation in [macos, identityless_macos, windows, identityless_windows] {
+            assert_eq!(
+                expectation.target(),
+                ExtensionRuntimeTarget::NativeWebExtension
+            );
+        }
+        assert_eq!(
+            ExtensionRuntimeRecoveryExpectation::Compatibility.target(),
+            ExtensionRuntimeTarget::Compatibility
+        );
+        assert_eq!(
+            macos.known_evidence(),
+            Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(id))
+        );
+        assert_eq!(identityless_macos.known_evidence(), None);
+        assert_eq!(identityless_windows.known_evidence(), None);
+        assert_eq!(
+            ExtensionRuntimeRecoveryExpectation::Compatibility.known_evidence(),
+            Some(ExtensionRuntimeOwnershipEvidence::Compatibility)
+        );
+        assert!(std::mem::size_of::<ExtensionRuntimeRecoveryExpectation>() <= 40);
+    }
+
+    #[test]
+    fn recovery_expectation_debug_never_reveals_native_identifiers() {
+        let id = ExtensionRuntimeNativeOwnerId::parse_exact(CANONICAL).expect("canonical id");
+        for debug in [
+            format!(
+                "{:?}",
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: Some(id) }
+            ),
+            format!(
+                "{:?}",
+                ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                    expected: Some(id)
+                }
+            ),
+        ] {
+            assert!(debug.contains("redacted"));
+            assert!(!debug.contains(CANONICAL));
+        }
+        assert_eq!(
+            format!(
+                "{:?}",
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None }
+            ),
+            "MacosWebExtension { expected: None }"
+        );
     }
 }

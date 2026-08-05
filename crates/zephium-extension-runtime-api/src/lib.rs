@@ -43,7 +43,8 @@ pub use lifecycle::{
 };
 pub use ownership_evidence::{
     ExtensionRuntimeNativeOwnerId, ExtensionRuntimeNativeOwnerIdError,
-    ExtensionRuntimeOwnershipEvidence, EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
+    EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
 };
 pub use resource_plan::{
     ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,

@@ -5,8 +5,9 @@ use std::time::Instant;
 
 use crate::{
     ExtensionPackageAccess, ExtensionPackageAccessError, ExtensionRuntimeNativeRootVisitor,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeResource, ExtensionRuntimeResourcePlan,
-    ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
+    ExtensionRuntimeResource, ExtensionRuntimeResourcePlan, ExtensionRuntimeResourceVisitor,
+    ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
@@ -1268,20 +1269,87 @@ impl fmt::Debug for ExtensionRuntimeReconciliationSettlement {
 
 struct RecoveryOwnershipCore {
     ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
-    expected_evidence: ExtensionRuntimeOwnershipEvidence,
-    evidence_poisoned: bool,
+    observation: RecoveryEvidenceObservation,
     retained_bytes: usize,
 }
 
 impl RecoveryOwnershipCore {
     fn merge_evidence(&mut self, evidence: Option<ExtensionRuntimeOwnershipEvidence>) -> bool {
-        if self.evidence_poisoned {
+        self.observation.merge(evidence)
+    }
+
+    fn try_into_owned(self) -> Result<RecoveryOwnedCore, Self> {
+        if self.observation.poisoned {
+            return Err(self);
+        }
+        let Some(evidence) = self.observation.evidence else {
+            return Err(self);
+        };
+        Ok(RecoveryOwnedCore {
+            ownership: self.ownership,
+            evidence,
+            retained_bytes: self.retained_bytes,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RecoveryEvidenceObservation {
+    expectation: ExtensionRuntimeRecoveryExpectation,
+    evidence: Option<ExtensionRuntimeOwnershipEvidence>,
+    poisoned: bool,
+}
+
+impl RecoveryEvidenceObservation {
+    const fn new(expectation: ExtensionRuntimeRecoveryExpectation) -> Self {
+        Self {
+            evidence: expectation.known_evidence(),
+            expectation,
+            poisoned: false,
+        }
+    }
+
+    const fn exact(evidence: ExtensionRuntimeOwnershipEvidence) -> Self {
+        Self {
+            expectation: ExtensionRuntimeRecoveryExpectation::from_exact_evidence(evidence),
+            evidence: Some(evidence),
+            poisoned: false,
+        }
+    }
+
+    fn merge(&mut self, evidence: Option<ExtensionRuntimeOwnershipEvidence>) -> bool {
+        if self.poisoned {
             return true;
         }
-        if evidence.is_some_and(|evidence| evidence != self.expected_evidence) {
-            self.evidence_poisoned = true;
+        let Some(evidence) = evidence else {
+            return false;
+        };
+        if !self.expectation.accepts(evidence) {
+            self.poisoned = true;
+            return true;
         }
-        self.evidence_poisoned
+        match self.evidence {
+            None => self.evidence = Some(evidence),
+            Some(previous) if previous == evidence => {}
+            Some(_) => self.poisoned = true,
+        }
+        self.poisoned
+    }
+}
+
+struct RecoveryOwnedCore {
+    ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
+    evidence: ExtensionRuntimeOwnershipEvidence,
+    retained_bytes: usize,
+}
+
+impl RecoveryOwnedCore {
+    fn into_uncertain(self) -> RecoveryOwnershipCore {
+        RecoveryOwnershipCore {
+            ownership: self.ownership,
+            observation: RecoveryEvidenceObservation::exact(self.evidence),
+            retained_bytes: self.retained_bytes,
+        }
     }
 }
 
@@ -1294,9 +1362,13 @@ impl RecoveryOwnershipCore {
 /// control proxy; the service may then settle its separately retained durable
 /// package pin.
 ///
-/// Any adapter evidence inconsistent with the durable expected evidence
-/// irreversibly poisons positive settlement in this process. Later matching
-/// evidence cannot heal the conflict; only definite absence can discharge it.
+/// A request may begin with only the exact native backend class when process
+/// termination preceded persistence of the platform owner identifier. The
+/// first matching trusted observation attaches that identifier. Any adapter
+/// evidence inconsistent with the durable backend class, an already-known
+/// identifier, or a previously attached identifier irreversibly poisons
+/// positive settlement in this process. Later matching evidence cannot heal
+/// the conflict; only definite absence can discharge it.
 ///
 /// Construction calls only the ownership port's side-effect-free accounting
 /// query. Every destructor remains passive.
@@ -1373,12 +1445,15 @@ pub struct ExtensionRuntimeRecoveryRequest {
 impl ExtensionRuntimeRecoveryRequest {
     /// Constructs one cleanup-only request from an exact-incarnation ownership
     /// proxy after the service has validated its durable identity join.
-    /// `expected_evidence` must come from that exact durable row; constructing
-    /// the public structural evidence value does not itself authorize cleanup
-    /// or prove that the native owner exists.
+    ///
+    /// `expectation` must come from that exact durable row. Native rows may omit
+    /// an identifier only while they conservatively record that the matching
+    /// backend class may own the runtime. Constructing the public structural
+    /// expectation does not itself authorize cleanup or prove that a native
+    /// owner exists.
     pub fn try_from_persisted_uncertainty(
         ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
-        expected_evidence: ExtensionRuntimeOwnershipEvidence,
+        expectation: ExtensionRuntimeRecoveryExpectation,
     ) -> Result<Self, ExtensionRuntimeRecoveryBuildRefusal> {
         let retained_bytes = ownership
             .retained_bytes()
@@ -1401,8 +1476,7 @@ impl ExtensionRuntimeRecoveryRequest {
         Ok(Self {
             core: RecoveryOwnershipCore {
                 ownership,
-                expected_evidence,
-                evidence_poisoned: false,
+                observation: RecoveryEvidenceObservation::new(expectation),
                 retained_bytes,
             },
         })
@@ -1414,12 +1488,23 @@ impl ExtensionRuntimeRecoveryRequest {
         self.core.retained_bytes
     }
 
-    /// Returns a copied structural description of the expected exact native
-    /// ownership evidence loaded from the durable ownership row. The copy is
-    /// non-authorizing outside this cleanup capability.
+    /// Returns the closed backend-class expectation loaded from the durable
+    /// ownership row. The copy is non-authorizing outside this cleanup
+    /// capability.
     #[must_use]
-    pub const fn ownership_evidence(&self) -> ExtensionRuntimeOwnershipEvidence {
-        self.core.expected_evidence
+    pub const fn expectation(&self) -> ExtensionRuntimeRecoveryExpectation {
+        self.core.observation.expectation
+    }
+
+    /// Returns exact ownership evidence already persisted or monotonically
+    /// attached from a trusted adapter observation.
+    ///
+    /// Identityless native recovery returns `None` until the first matching
+    /// observation. Compatibility recovery is exact from construction. The
+    /// copy remains non-authorizing outside this cleanup capability.
+    #[must_use]
+    pub const fn ownership_evidence(&self) -> Option<ExtensionRuntimeOwnershipEvidence> {
+        self.core.observation.evidence
     }
 
     /// Reconciles native ownership before the exact absolute `deadline`.
@@ -1442,9 +1527,15 @@ impl ExtensionRuntimeRecoveryRequest {
                         failure: ExtensionRuntimeFailure::Internal,
                     }
                 } else {
-                    ExtensionRuntimeRecoverySettlement::Owned(ExtensionRuntimeRecoveryOwner {
-                        core,
-                    })
+                    match core.try_into_owned() {
+                        Ok(core) => ExtensionRuntimeRecoverySettlement::Owned(
+                            ExtensionRuntimeRecoveryOwner { core },
+                        ),
+                        Err(core) => ExtensionRuntimeRecoverySettlement::StillUncertain {
+                            request: Self { core },
+                            failure: ExtensionRuntimeFailure::Internal,
+                        },
+                    }
                 }
             }
             ExtensionRuntimeOwnershipDisposition::Absent => {
@@ -1469,8 +1560,9 @@ impl fmt::Debug for ExtensionRuntimeRecoveryRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtensionRuntimeRecoveryRequest")
-            .field("ownership_evidence", &self.core.expected_evidence)
-            .field("evidence_conflicted", &self.core.evidence_poisoned)
+            .field("expectation", &self.core.observation.expectation)
+            .field("ownership_evidence", &self.core.observation.evidence)
+            .field("evidence_conflicted", &self.core.observation.poisoned)
             .field("retained_bytes", &self.retained_bytes())
             .field("ownership", &"[redacted]")
             .finish()
@@ -1567,7 +1659,7 @@ impl fmt::Debug for ExtensionRuntimeRecoverySettlement {
 /// ```
 #[must_use = "recovered native ownership must be explicitly retired"]
 pub struct ExtensionRuntimeRecoveryOwner {
-    core: RecoveryOwnershipCore,
+    core: RecoveryOwnedCore,
 }
 
 impl ExtensionRuntimeRecoveryOwner {
@@ -1576,7 +1668,7 @@ impl ExtensionRuntimeRecoveryOwner {
     /// non-authorizing outside this cleanup owner capability.
     #[must_use]
     pub const fn ownership_evidence(&self) -> ExtensionRuntimeOwnershipEvidence {
-        self.core.expected_evidence
+        self.core.evidence
     }
 
     /// Returns the exact conservative retained-memory charge for this owner.
@@ -1595,7 +1687,7 @@ impl fmt::Debug for ExtensionRuntimeRecoveryOwner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtensionRuntimeRecoveryOwner")
-            .field("ownership_evidence", &self.core.expected_evidence)
+            .field("ownership_evidence", &self.core.evidence)
             .field("retained_bytes", &self.retained_bytes())
             .field("ownership", &"[redacted]")
             .finish()
@@ -1638,7 +1730,7 @@ impl fmt::Debug for ExtensionRuntimeRecoveryOwner {
 /// ```
 #[must_use = "persisted retirement must settle before durable cleanup"]
 pub struct ExtensionRuntimeRecoveryRetirementRequest {
-    core: RecoveryOwnershipCore,
+    core: RecoveryOwnedCore,
 }
 
 impl ExtensionRuntimeRecoveryRetirementRequest {
@@ -1647,7 +1739,7 @@ impl ExtensionRuntimeRecoveryRetirementRequest {
     /// this cleanup ownership capability.
     #[must_use]
     pub const fn ownership_evidence(&self) -> ExtensionRuntimeOwnershipEvidence {
-        self.core.expected_evidence
+        self.core.evidence
     }
 
     /// Returns the exact conservative retained-memory charge for this owner.
@@ -1685,6 +1777,7 @@ impl ExtensionRuntimeRecoveryRetirementRequest {
                 }
             }
             ExtensionRuntimeRetirementDisposition::OwnershipUncertain { failure, evidence } => {
+                let mut core = core.into_uncertain();
                 let failure = if core.merge_evidence(evidence) {
                     ExtensionRuntimeFailure::Internal
                 } else {
@@ -1703,7 +1796,7 @@ impl fmt::Debug for ExtensionRuntimeRecoveryRetirementRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtensionRuntimeRecoveryRetirementRequest")
-            .field("ownership_evidence", &self.core.expected_evidence)
+            .field("ownership_evidence", &self.core.evidence)
             .field("retained_bytes", &self.retained_bytes())
             .field("ownership", &"[redacted]")
             .finish()
@@ -2192,10 +2285,17 @@ mod tests {
     fn recovery_request(
         ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
     ) -> Result<ExtensionRuntimeRecoveryRequest, ExtensionRuntimeRecoveryBuildRefusal> {
-        ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(
+        recovery_request_for(
             ownership,
-            TEST_OWNERSHIP_EVIDENCE,
+            ExtensionRuntimeRecoveryExpectation::Compatibility,
         )
+    }
+
+    fn recovery_request_for(
+        ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
+        expectation: ExtensionRuntimeRecoveryExpectation,
+    ) -> Result<ExtensionRuntimeRecoveryRequest, ExtensionRuntimeRecoveryBuildRefusal> {
+        ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership, expectation)
     }
 
     fn recover_identity_provider(access: ExtensionPackageAccess) -> Box<IdentityProvider> {
@@ -2466,6 +2566,313 @@ mod tests {
     }
 
     #[test]
+    fn identityless_native_recovery_attaches_exact_macos_and_windows_evidence() {
+        for (identity, expectation, evidence) in [
+            (
+                79,
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None },
+                macos_evidence(b'j'),
+            ),
+            (
+                80,
+                ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { expected: None },
+                windows_evidence(b'k'),
+            ),
+        ] {
+            let (ownership, _, dropped) = scripted_ownership(
+                identity,
+                [],
+                [
+                    still_uncertain(ExtensionRuntimeFailure::TimedOut, Some(evidence)),
+                    ExtensionRuntimeOwnershipDisposition::Owned(evidence),
+                ],
+                1024,
+            );
+            let request = recovery_request_for(ownership, expectation)
+                .expect("identityless native recovery must fit the owner budget");
+            assert_eq!(request.expectation(), expectation);
+            assert_eq!(request.ownership_evidence(), None);
+
+            let request = match request.reconcile_until(future_deadline()) {
+                ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                    assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                    request
+                }
+                settlement => panic!("unexpected settlement: {settlement:?}"),
+            };
+            assert_eq!(request.ownership_evidence(), Some(evidence));
+
+            let owner = match request.reconcile_until(future_deadline()) {
+                ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+                settlement => panic!("unexpected settlement: {settlement:?}"),
+            };
+            assert_eq!(owner.ownership_evidence(), evidence);
+            drop(owner);
+            assert_eq!(*dropped.lock().expect("lock"), vec![identity]);
+        }
+    }
+
+    #[test]
+    fn identityless_recovery_wrong_backend_poisons_and_cannot_be_healed() {
+        let matching = macos_evidence(b'l');
+        let conflicting = windows_evidence(b'l');
+        let expectation = ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None };
+        let (ownership, _, dropped) = scripted_ownership(
+            81,
+            [],
+            [
+                still_uncertain(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                    Some(conflicting),
+                ),
+                ExtensionRuntimeOwnershipDisposition::Owned(matching),
+                still_uncertain(ExtensionRuntimeFailure::TimedOut, Some(matching)),
+                ExtensionRuntimeOwnershipDisposition::Absent,
+            ],
+            1024,
+        );
+        let request = recovery_request_for(ownership, expectation)
+            .expect("identityless native recovery must fit the owner budget");
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::Internal);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(request.ownership_evidence(), None);
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::Internal);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(request.ownership_evidence(), None);
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::Internal);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert!(matches!(
+            request.reconcile_until(future_deadline()),
+            ExtensionRuntimeRecoverySettlement::Absent
+        ));
+        assert_eq!(*dropped.lock().expect("lock"), vec![81]);
+    }
+
+    #[test]
+    fn attached_native_identifier_conflict_is_irreversible_until_absence() {
+        let first = macos_evidence(b'm');
+        let conflicting = macos_evidence(b'n');
+        let (ownership, _, dropped) = scripted_ownership(
+            82,
+            [],
+            [
+                still_uncertain(ExtensionRuntimeFailure::TimedOut, Some(first)),
+                ExtensionRuntimeOwnershipDisposition::Owned(conflicting),
+                ExtensionRuntimeOwnershipDisposition::Owned(first),
+                ExtensionRuntimeOwnershipDisposition::Absent,
+            ],
+            1024,
+        );
+        let request = recovery_request_for(
+            ownership,
+            ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None },
+        )
+        .expect("identityless native recovery must fit the owner budget");
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(request.ownership_evidence(), Some(first));
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::Internal);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(request.ownership_evidence(), Some(first));
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::Internal);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(request.ownership_evidence(), Some(first));
+        assert!(matches!(
+            request.reconcile_until(future_deadline()),
+            ExtensionRuntimeRecoverySettlement::Absent
+        ));
+        assert_eq!(*dropped.lock().expect("lock"), vec![82]);
+    }
+
+    #[test]
+    fn compatibility_recovery_is_exact_from_construction() {
+        let (ownership, _, dropped) = scripted_ownership(
+            83,
+            [ExtensionRuntimeRetirementDisposition::Retired],
+            [
+                still_uncertain(ExtensionRuntimeFailure::BackendUnavailable, None),
+                owned(),
+            ],
+            1024,
+        );
+        let request = recovery_request(ownership).expect("bounded compatibility recovery");
+        assert_eq!(
+            request.ownership_evidence(),
+            Some(ExtensionRuntimeOwnershipEvidence::Compatibility)
+        );
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(
+            owner.ownership_evidence(),
+            ExtensionRuntimeOwnershipEvidence::Compatibility
+        );
+        assert!(matches!(
+            owner
+                .into_retirement_request()
+                .settle_until(future_deadline()),
+            ExtensionRuntimeRecoveryRetirementSettlement::Absent
+        ));
+        assert_eq!(*dropped.lock().expect("lock"), vec![83]);
+    }
+
+    #[test]
+    fn recovery_none_and_expired_deadlines_preserve_identityless_uncertainty() {
+        let expectation =
+            ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { expected: None };
+        let (ownership, calls, dropped) = scripted_ownership(
+            84,
+            [],
+            [still_uncertain(
+                ExtensionRuntimeFailure::BackendUnavailable,
+                None,
+            )],
+            1024,
+        );
+        let request = recovery_request_for(ownership, expectation)
+            .expect("identityless native recovery must fit the owner budget");
+        let request = match request.reconcile_until(Instant::now()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert!(calls.lock().expect("lock").is_empty());
+        assert_eq!(request.expectation(), expectation);
+        assert_eq!(request.ownership_evidence(), None);
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(request.ownership_evidence(), None);
+        drop(request);
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        assert_eq!(*dropped.lock().expect("lock"), vec![84]);
+    }
+
+    #[test]
+    fn attached_native_evidence_remains_exact_through_recovery_retirement() {
+        let evidence = macos_evidence(b'o');
+        let (ownership, calls, dropped) = scripted_ownership(
+            85,
+            [
+                ExtensionRuntimeRetirementDisposition::Retained(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                ),
+                retirement_uncertain(ExtensionRuntimeFailure::TimedOut, None),
+                ExtensionRuntimeRetirementDisposition::Retired,
+            ],
+            [
+                ExtensionRuntimeOwnershipDisposition::Owned(evidence),
+                ExtensionRuntimeOwnershipDisposition::Owned(evidence),
+            ],
+            1024,
+        );
+        let request = recovery_request_for(
+            ownership,
+            ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None },
+        )
+        .expect("identityless native recovery must fit the owner budget");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(owner.ownership_evidence(), evidence);
+        let owner = match owner.into_retirement_request().settle_until(Instant::now()) {
+            ExtensionRuntimeRecoveryRetirementSettlement::Retained { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        let owner = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
+            ExtensionRuntimeRecoveryRetirementSettlement::Retained { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(owner.ownership_evidence(), evidence);
+        let request = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
+            ExtensionRuntimeRecoveryRetirementSettlement::OwnershipUncertain {
+                request,
+                failure,
+            } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(
+            request.expectation(),
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(evidence)
+        );
+        assert_eq!(request.ownership_evidence(), Some(evidence));
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(owner.ownership_evidence(), evidence);
+        assert!(matches!(
+            owner
+                .into_retirement_request()
+                .settle_until(future_deadline()),
+            ExtensionRuntimeRecoveryRetirementSettlement::Absent
+        ));
+        assert_eq!(calls.lock().expect("lock").len(), 5);
+        assert_eq!(*dropped.lock().expect("lock"), vec![85]);
+    }
+
+    #[test]
     fn recovery_evidence_conflict_is_irreversible_until_absence() {
         let expected = macos_evidence(b'c');
         let unexpected = macos_evidence(b'd');
@@ -2480,10 +2887,12 @@ mod tests {
             ],
             1024,
         );
-        let request =
-            ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership, expected)
-                .expect("bounded recovery request");
-        assert_eq!(request.ownership_evidence(), expected);
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(
+            ownership,
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(expected),
+        )
+        .expect("bounded recovery request");
+        assert_eq!(request.ownership_evidence(), Some(expected));
         let request = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::Internal);
@@ -2491,7 +2900,7 @@ mod tests {
             }
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        assert_eq!(request.ownership_evidence(), expected);
+        assert_eq!(request.ownership_evidence(), Some(expected));
         let request = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::Internal);
@@ -2499,7 +2908,7 @@ mod tests {
             }
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        assert_eq!(request.ownership_evidence(), expected);
+        assert_eq!(request.ownership_evidence(), Some(expected));
         let request = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::Internal);
@@ -2507,7 +2916,7 @@ mod tests {
             }
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        assert_eq!(request.ownership_evidence(), expected);
+        assert_eq!(request.ownership_evidence(), Some(expected));
         let settlement = request.reconcile_until(future_deadline());
         assert!(matches!(
             settlement,
@@ -2534,9 +2943,11 @@ mod tests {
             ],
             1024,
         );
-        let request =
-            ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership, expected)
-                .expect("bounded recovery request");
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(
+            ownership,
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(expected),
+        )
+        .expect("bounded recovery request");
         let request = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
@@ -2544,7 +2955,7 @@ mod tests {
             }
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        assert_eq!(request.ownership_evidence(), expected);
+        assert_eq!(request.ownership_evidence(), Some(expected));
         let owner = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
@@ -2566,7 +2977,7 @@ mod tests {
             } => request,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        assert_eq!(request.ownership_evidence(), expected);
+        assert_eq!(request.ownership_evidence(), Some(expected));
         let owner = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
@@ -2741,9 +3152,11 @@ mod tests {
             ],
             1024,
         );
-        let request =
-            ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership, expected)
-                .expect("bounded recovery request");
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(
+            ownership,
+            ExtensionRuntimeRecoveryExpectation::from_exact_evidence(expected),
+        )
+        .expect("bounded recovery request");
         let owner = match request.reconcile_until(future_deadline()) {
             ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
