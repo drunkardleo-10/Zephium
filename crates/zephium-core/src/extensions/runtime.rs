@@ -7,6 +7,7 @@
 //! backend runtime admission are still required before any native execution.
 
 use std::fmt;
+use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
 use url::Url;
@@ -368,6 +369,21 @@ impl ExtensionRuntimeEligibility {
     /// Exact admitted structural manifest pinned by the store snapshot.
     pub fn manifest(&self) -> &ExtensionManifestDescriptor {
         &self.manifest
+    }
+
+    /// Conservative logical heap-plus-inline charge retained by this snapshot.
+    ///
+    /// The manifest and grants are immutable shared values. Counting their
+    /// complete logical charge here deliberately does not assume another owner
+    /// will keep either allocation alive.
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(self.retained_heap_bytes())
+    }
+
+    pub(crate) fn retained_heap_bytes(&self) -> usize {
+        self.manifest
+            .retained_bytes()
+            .saturating_add(self.grants.retained_bytes())
     }
 
     /// Projects a complete, non-authorizing reconciliation fingerprint.

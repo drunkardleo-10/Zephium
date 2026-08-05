@@ -8,6 +8,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::mem::size_of;
 
 use crate::ids::{ExtensionInstallId, ProfileId};
 
@@ -274,6 +275,11 @@ impl ExtensionPackagePinAcquisitionBinding {
     /// independently from the binding.
     pub const fn eligibility(&self) -> &ExtensionRuntimeEligibility {
         &self.eligibility
+    }
+
+    /// Conservative heap-plus-inline charge while this authority is retained.
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(self.eligibility.retained_heap_bytes())
     }
 
     binding_identity_accessors!();
@@ -626,6 +632,8 @@ mod tests {
         assert_eq!(binding.journal_entry_cas(), entry.cas());
         assert_eq!(binding.eligibility().profile(), entry.key().profile());
         assert_eq!(binding.eligibility().package(), entry.package());
+        assert!(binding.retained_bytes() >= size_of::<ExtensionPackagePinAcquisitionBinding>());
+        assert!(binding.retained_bytes() >= binding.eligibility().retained_bytes());
     }
 
     #[test]
