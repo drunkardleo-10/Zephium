@@ -9,6 +9,12 @@ use rustix::fs::{FileType, Mode, OFlags};
 use super::{DirectoryMode, RegularMode};
 use crate::PrivateFsError;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod tree_removal;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use tree_removal::{remove_tree_bounded, TreeRemovalFaults};
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RawIdentity {
     device: u64,

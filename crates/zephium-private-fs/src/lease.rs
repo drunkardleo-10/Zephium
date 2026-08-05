@@ -33,6 +33,12 @@ pub(crate) struct NamespaceLease {
     seal_child_identity_fault: AtomicBool,
     #[cfg(test)]
     same_parent_publish_syncs: AtomicUsize,
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    tree_removal_mutation_fault_ordinal: AtomicUsize,
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    tree_removal_final_parent_sync_fault: AtomicBool,
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    tree_removal_preexecution_identity_fault: AtomicBool,
 }
 
 #[cfg(test)]
@@ -139,6 +145,12 @@ impl NamespaceLease {
             seal_child_identity_fault: AtomicBool::new(false),
             #[cfg(test)]
             same_parent_publish_syncs: AtomicUsize::new(0),
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            tree_removal_mutation_fault_ordinal: AtomicUsize::new(0),
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            tree_removal_final_parent_sync_fault: AtomicBool::new(false),
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            tree_removal_preexecution_identity_fault: AtomicBool::new(false),
         }
     }
 
@@ -316,5 +328,47 @@ impl NamespaceLease {
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub(crate) fn same_parent_publish_sync_count(&self) -> usize {
         self.same_parent_publish_syncs.load(Ordering::Acquire)
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_tree_removal_mutation_fault(&self, ordinal: usize) {
+        assert_ne!(ordinal, 0, "tree-removal mutation ordinals are one-based");
+        self.tree_removal_mutation_fault_ordinal
+            .store(ordinal, Ordering::Release);
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn take_tree_removal_mutation_fault_ordinal(&self) -> Option<usize> {
+        match self
+            .tree_removal_mutation_fault_ordinal
+            .swap(0, Ordering::AcqRel)
+        {
+            0 => None,
+            ordinal => Some(ordinal),
+        }
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_tree_removal_final_parent_sync_fault(&self) {
+        self.tree_removal_final_parent_sync_fault
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn take_tree_removal_final_parent_sync_fault(&self) -> bool {
+        self.tree_removal_final_parent_sync_fault
+            .swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn inject_tree_removal_preexecution_identity_fault(&self) {
+        self.tree_removal_preexecution_identity_fault
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn take_tree_removal_preexecution_identity_fault(&self) -> bool {
+        self.tree_removal_preexecution_identity_fault
+            .swap(false, Ordering::AcqRel)
     }
 }

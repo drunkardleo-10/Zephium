@@ -14,6 +14,11 @@ use crate::{
     StreamingFileLength, StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
 };
 
+mod tree_removal;
+pub use tree_removal::{
+    TreeRemovalLimits, TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH, MAX_TREE_REMOVAL_ENTRIES,
+};
+
 const MAX_INVENTORY_ENTRIES: usize = 4_096;
 const LOCK_COMPONENT_NAME: &str = ".zephium-private-fs-lock-v1";
 const LOCK_STAGING_COMPONENT_NAME: &str = ".zephium-private-fs-lock-staging-v1";

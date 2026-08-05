@@ -37,7 +37,8 @@ pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
 pub use namespace::{
     ByteLimit, LockedPrivateNamespace, OpenedPrivateDirectory, PrivateChildKind, PrivateDirectory,
-    SealedPrivateDirectory,
+    SealedPrivateDirectory, TreeRemovalLimits, TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH,
+    MAX_TREE_REMOVAL_ENTRIES,
 };
 pub use streaming::{StreamingFileLength, StreamingWriteError, MAX_STREAMING_FILE_BYTES};
 pub use transition::PrivateFsTransitionError;
