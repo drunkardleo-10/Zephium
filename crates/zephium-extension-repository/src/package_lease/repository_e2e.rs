@@ -3,6 +3,7 @@ use std::io::{Cursor, Read};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -23,8 +24,8 @@ use zephium_extension_runtime_api::{
     ExtensionPackageAccessBuildError, ExtensionPackageAccessError, ExtensionPackageAccessView,
     ExtensionRuntimeActivationDisposition, ExtensionRuntimeActivationRequest,
     ExtensionRuntimeActivationSettlement, ExtensionRuntimeFailure, ExtensionRuntimeLifecyclePort,
-    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeRetirementDisposition,
-    ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipPort,
+    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
 };
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
@@ -450,14 +451,28 @@ fn install_catalog(
 
 struct CompatibilityNativeRootGate;
 
-impl ExtensionRuntimeLifecyclePort for CompatibilityNativeRootGate {
+impl ExtensionRuntimeOwnershipPort for CompatibilityNativeRootGate {
     fn retained_bytes(&self) -> usize {
         0
     }
 
-    fn activate(
+    fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
+        panic!("rejected compatibility root probe cannot retire")
+    }
+
+    fn reconcile_ownership_until(
+        &mut self,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeOwnershipDisposition {
+        panic!("rejected compatibility root probe cannot reconcile")
+    }
+}
+
+impl ExtensionRuntimeLifecyclePort for CompatibilityNativeRootGate {
+    fn activate_until(
         &mut self,
         access: &mut ExtensionPackageAccessView<'_>,
+        _deadline: Instant,
     ) -> ExtensionRuntimeActivationDisposition {
         assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
         let mut visitor_called = false;
@@ -470,20 +485,6 @@ impl ExtensionRuntimeLifecyclePort for CompatibilityNativeRootGate {
         );
         assert!(!visitor_called);
         ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::PackageRejected)
-    }
-
-    fn retire(
-        &mut self,
-        _access: &mut ExtensionPackageAccessView<'_>,
-    ) -> ExtensionRuntimeRetirementDisposition {
-        panic!("rejected compatibility root probe cannot retire")
-    }
-
-    fn reconcile_ownership(
-        &mut self,
-        _access: &mut ExtensionPackageAccessView<'_>,
-    ) -> ExtensionRuntimeOwnershipDisposition {
-        panic!("rejected compatibility root probe cannot reconcile")
     }
 }
 
@@ -1456,7 +1457,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let request =
         ExtensionRuntimeActivationRequest::try_new(access, Box::new(CompatibilityNativeRootGate))
             .unwrap();
-    let access = match request.settle() {
+    let access = match request.settle_until(Instant::now() + Duration::from_secs(60)) {
         ExtensionRuntimeActivationSettlement::Rejected { access, failure } => {
             assert_eq!(failure, ExtensionRuntimeFailure::PackageRejected);
             access

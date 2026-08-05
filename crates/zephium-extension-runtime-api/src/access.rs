@@ -459,16 +459,6 @@ impl ExtensionPackageAccess {
         Ok(downcast_known_provider(provider))
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ExtensionRuntimeTarget,
-        ExtensionRuntimeResourcePlan,
-        Box<dyn ExtensionPackageAccessPort>,
-    ) {
-        (self.target, self.resources, self.provider)
-    }
-
     /// Visits the package manifest through the same authenticated resource path
     /// used for every other package file.
     pub fn visit_manifest(

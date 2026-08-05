@@ -1,12 +1,13 @@
 //! Explicit runtime ownership settlement.
 
 use std::fmt;
+use std::time::Instant;
 
 use crate::{
-    ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessError,
-    ExtensionPackageAccessPort, ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeResource,
-    ExtensionRuntimeResourcePlan, ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget,
-    ExtensionRuntimeVisitorError, MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
+    ExtensionPackageAccess, ExtensionPackageAccessError, ExtensionRuntimeNativeRootVisitor,
+    ExtensionRuntimeResource, ExtensionRuntimeResourcePlan, ExtensionRuntimeResourceVisitor,
+    ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
 /// A closed, redacted runtime lifecycle failure.
@@ -150,7 +151,7 @@ impl fmt::Debug for ExtensionPackageAccessView<'_> {
     }
 }
 
-/// A passive control-plane proxy for one exact native runtime incarnation.
+/// A passive ownership-control proxy for one exact native runtime incarnation.
 ///
 /// Every callback is synchronous. Implementations must return a disposition
 /// that describes native ownership after the attempted operation, not merely
@@ -174,7 +175,7 @@ impl fmt::Debug for ExtensionPackageAccessView<'_> {
 /// service must durably record conservative ownership before entering a
 /// lifecycle call so startup reconciliation covers process termination at any
 /// boundary.
-pub trait ExtensionRuntimeLifecyclePort: Send {
+pub trait ExtensionRuntimeOwnershipPort: Send {
     /// Reports a stable upper bound for deterministic control-plane memory
     /// retained by this proxy for this owner.
     ///
@@ -186,26 +187,42 @@ pub trait ExtensionRuntimeLifecyclePort: Send {
     /// that separate hard count/reservation for every request, owner, and
     /// uncertainty state. A proxy that cannot provide its deterministic bound
     /// must report `usize::MAX`, causing construction to fail closed. The query
-    /// must be side-effect-free so construction refusal returns unchanged state.
+    /// must be side-effect-free so construction refusal retains unchanged state.
     fn retained_bytes(&self) -> usize;
 
-    /// Attempts to activate the package.
-    fn activate(
-        &mut self,
-        access: &mut ExtensionPackageAccessView<'_>,
-    ) -> ExtensionRuntimeActivationDisposition;
+    /// Attempts to retire the exact native owner before `deadline`.
+    ///
+    /// `deadline` is the caller's absolute monotonic deadline and must not be
+    /// extended, rounded, or replaced. Package bytes and delegated resource
+    /// access are deliberately unavailable at this boundary.
+    fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition;
 
-    /// Attempts to retire the package.
-    fn retire(
+    /// Reconciles native ownership before the exact absolute `deadline`.
+    ///
+    /// Package bytes and delegated resource access are deliberately
+    /// unavailable. Expiration alone is never evidence of absence.
+    fn reconcile_ownership_until(
         &mut self,
-        access: &mut ExtensionPackageAccessView<'_>,
-    ) -> ExtensionRuntimeRetirementDisposition;
-
-    /// Reconciles native ownership after an uncertain outcome.
-    fn reconcile_ownership(
-        &mut self,
-        access: &mut ExtensionPackageAccessView<'_>,
+        deadline: Instant,
     ) -> ExtensionRuntimeOwnershipDisposition;
+}
+
+/// Activation-capable extension of an ownership-only runtime proxy.
+///
+/// Only a fresh, already-authorized activation request exposes temporary
+/// package access. Once activation has settled, retirement and reconciliation
+/// use only [`ExtensionRuntimeOwnershipPort`]. Persisted recovery therefore
+/// cannot read package bytes or accidentally recreate activation authority.
+pub trait ExtensionRuntimeLifecyclePort: ExtensionRuntimeOwnershipPort {
+    /// Attempts to activate the package before the exact absolute `deadline`.
+    ///
+    /// Implementations must propagate the deadline unchanged to lower native
+    /// layers and return a disposition describing ownership after the attempt.
+    fn activate_until(
+        &mut self,
+        access: &mut ExtensionPackageAccessView<'_>,
+        deadline: Instant,
+    ) -> ExtensionRuntimeActivationDisposition;
 }
 
 /// Why a runtime activation request could not be constructed.
@@ -275,18 +292,20 @@ impl fmt::Debug for ExtensionRuntimeActivationBuildRefusal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ExtensionRuntimeRecoveryBuildError {
-    /// Delegated package access failed its bounded construction checks.
-    PackageAccess(ExtensionPackageAccessBuildError),
-    /// The combined recovery owner exceeded its bounded accounting contract.
-    OwnerAccounting(ExtensionRuntimeActivationBuildError),
+    /// Recovery-proxy and wrapper accounting overflowed `usize`.
+    RetainedBytesOverflow,
+    /// The cleanup-only recovery owner exceeds the per-owner ceiling.
+    RetainedBytesExceeded,
 }
 
 impl fmt::Display for ExtensionRuntimeRecoveryBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PackageAccess(error) => error.fmt(formatter),
-            Self::OwnerAccounting(error) => error.fmt(formatter),
-        }
+        formatter.write_str(match self {
+            Self::RetainedBytesOverflow => "extension runtime recovery accounting overflowed",
+            Self::RetainedBytesExceeded => {
+                "extension runtime recovery exceeds the retained-memory limit"
+            }
+        })
     }
 }
 
@@ -294,15 +313,13 @@ impl std::error::Error for ExtensionRuntimeRecoveryBuildError {}
 
 /// A failed reconstruction of one conservatively persisted native owner.
 ///
-/// No ordinary [`ExtensionPackageAccess`] escapes this refusal while native
-/// ownership remains unresolved. It instead preserves the exact raw delegated
-/// provider, target, complete resource plan, and passive lifecycle proxy
-/// supplied by the service. No ownership-changing lifecycle callback has run and no
-/// input is released or replaced. The caller must keep its external native
-/// reservation and durable package pin held on both success and refusal. A
-/// refusal is an opaque fail-closed quarantine: dropping it may destroy these
-/// process-local wrappers, but provider and lifecycle destructors must remain
-/// passive and the durable pin must survive for a later process to reconcile.
+/// No package access, resource plan, provider, target, or activation-capable
+/// port participates in this value. It preserves only the passive ownership
+/// proxy supplied by the service. No ownership callback has run. The caller
+/// must keep its external native reservation and durable package pin held on
+/// both success and refusal. A refusal is an opaque fail-closed quarantine:
+/// dropping it destroys only the process-local proxy, whose destructor must be
+/// passive, while durable cleanup authority survives for a later process.
 ///
 /// The refusal cannot be cloned:
 ///
@@ -338,7 +355,7 @@ impl std::error::Error for ExtensionRuntimeRecoveryBuildError {}
 /// requires_deserialize::<ExtensionRuntimeRecoveryBuildRefusal>();
 /// ```
 ///
-/// Its captive delegated provider cannot be extracted:
+/// Its captive ownership proxy cannot be extracted:
 ///
 /// ```compile_fail
 /// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryBuildRefusal;
@@ -346,13 +363,10 @@ impl std::error::Error for ExtensionRuntimeRecoveryBuildError {}
 ///     let _ = refusal.into_parts();
 /// }
 /// ```
-#[must_use = "the refusal retains delegated package and recovery lifecycle state"]
+#[must_use = "the refusal retains cleanup-only ownership-recovery state"]
 pub struct ExtensionRuntimeRecoveryBuildRefusal {
     reason: ExtensionRuntimeRecoveryBuildError,
-    target: ExtensionRuntimeTarget,
-    _resources: ExtensionRuntimeResourcePlan,
-    _provider: Box<dyn ExtensionPackageAccessPort>,
-    _lifecycle: Box<dyn ExtensionRuntimeLifecyclePort>,
+    _ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
 }
 
 impl ExtensionRuntimeRecoveryBuildRefusal {
@@ -368,10 +382,7 @@ impl fmt::Debug for ExtensionRuntimeRecoveryBuildRefusal {
         formatter
             .debug_struct("ExtensionRuntimeRecoveryBuildRefusal")
             .field("reason", &self.reason)
-            .field("target", &self.target)
-            .field("resources", &"[redacted]")
-            .field("provider", &"[redacted]")
-            .field("lifecycle", &"[redacted]")
+            .field("ownership", &"[redacted]")
             .finish()
     }
 }
@@ -383,7 +394,7 @@ struct RuntimeOwnershipCore {
 }
 
 impl RuntimeOwnershipCore {
-    fn with_view<T>(
+    fn with_activation_view<T>(
         &mut self,
         operation: impl FnOnce(
             &mut dyn ExtensionRuntimeLifecyclePort,
@@ -429,6 +440,15 @@ impl RuntimeOwnershipCore {
 /// use zephium_extension_runtime_api::ExtensionRuntimeActivationRequest;
 /// fn requires_deserialize<T: DeserializeOwned>() {}
 /// requires_deserialize::<ExtensionRuntimeActivationRequest>();
+/// ```
+///
+/// Every activation attempt requires an explicit absolute deadline:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeActivationRequest;
+/// fn deadline_is_required(request: ExtensionRuntimeActivationRequest) {
+///     let _ = request.settle();
+/// }
 /// ```
 #[must_use = "activation requests must be settled to preserve package ownership"]
 pub struct ExtensionRuntimeActivationRequest {
@@ -515,12 +535,21 @@ impl ExtensionRuntimeActivationRequest {
         (self.core.access, self.core.lifecycle)
     }
 
-    /// Attempts activation and converts the backend disposition into an
-    /// ownership-safe public settlement.
-    pub fn settle(mut self) -> ExtensionRuntimeActivationSettlement {
+    /// Attempts activation before the caller's absolute monotonic `deadline`.
+    ///
+    /// An already-expired deadline performs no adapter call. Because an
+    /// unattempted activation is definitely absent, it returns the same
+    /// retryable request with [`ExtensionRuntimeFailure::TimedOut`].
+    pub fn settle_until(mut self, deadline: Instant) -> ExtensionRuntimeActivationSettlement {
+        if deadline <= Instant::now() {
+            return ExtensionRuntimeActivationSettlement::Retryable {
+                request: self,
+                failure: ExtensionRuntimeFailure::TimedOut,
+            };
+        }
         let disposition = self
             .core
-            .with_view(|lifecycle, access| lifecycle.activate(access));
+            .with_activation_view(|lifecycle, access| lifecycle.activate_until(access, deadline));
         match disposition {
             ExtensionRuntimeActivationDisposition::Activated => {
                 ExtensionRuntimeActivationSettlement::Activated(ExtensionRuntimeOwner {
@@ -776,6 +805,15 @@ impl fmt::Debug for ExtensionRuntimeOwner {
 /// fn requires_deserialize<T: DeserializeOwned>() {}
 /// requires_deserialize::<ExtensionRuntimeRetirementRequest>();
 /// ```
+///
+/// Every retirement attempt requires an explicit absolute deadline:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRetirementRequest;
+/// fn deadline_is_required(request: ExtensionRuntimeRetirementRequest) {
+///     let _ = request.settle();
+/// }
+/// ```
 #[must_use = "retirement requests must be settled to preserve package ownership"]
 pub struct ExtensionRuntimeRetirementRequest {
     core: RuntimeOwnershipCore,
@@ -796,25 +834,32 @@ impl ExtensionRuntimeRetirementRequest {
         ExtensionRuntimeOwner { core: self.core }
     }
 
-    /// Attempts retirement and returns access only when native absence is
-    /// definite.
-    pub fn settle(mut self) -> ExtensionRuntimeRetirementSettlement {
-        let disposition = self
-            .core
-            .with_view(|lifecycle, access| lifecycle.retire(access));
+    /// Attempts retirement before the caller's absolute monotonic `deadline`.
+    ///
+    /// An already-expired deadline performs no adapter call and restores the
+    /// definitely-owned state. Expiration never proves native absence.
+    pub fn settle_until(self, deadline: Instant) -> ExtensionRuntimeRetirementSettlement {
+        if deadline <= Instant::now() {
+            return ExtensionRuntimeRetirementSettlement::Retained {
+                owner: ExtensionRuntimeOwner { core: self.core },
+                failure: ExtensionRuntimeFailure::TimedOut,
+            };
+        }
+        let mut core = self.core;
+        let disposition = core.lifecycle.retire_until(deadline);
         match disposition {
             ExtensionRuntimeRetirementDisposition::Retired => {
-                ExtensionRuntimeRetirementSettlement::Retired(self.core.access)
+                ExtensionRuntimeRetirementSettlement::Retired(core.access)
             }
             ExtensionRuntimeRetirementDisposition::Retained(failure) => {
                 ExtensionRuntimeRetirementSettlement::Retained {
-                    owner: ExtensionRuntimeOwner { core: self.core },
+                    owner: ExtensionRuntimeOwner { core },
                     failure,
                 }
             }
             ExtensionRuntimeRetirementDisposition::OwnershipUncertain(failure) => {
                 ExtensionRuntimeRetirementSettlement::OwnershipUncertain {
-                    owner: ExtensionRuntimeUncertainOwner { core: self.core },
+                    owner: ExtensionRuntimeUncertainOwner { core },
                     failure,
                 }
             }
@@ -925,68 +970,21 @@ impl fmt::Debug for ExtensionRuntimeRetirementSettlement {
 ///     let _ = owner.into_provider();
 /// }
 /// ```
+///
+/// Every reconciliation attempt requires an explicit absolute deadline:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeUncertainOwner;
+/// fn deadline_is_required(owner: ExtensionRuntimeUncertainOwner) {
+///     let _ = owner.reconcile();
+/// }
+/// ```
 #[must_use = "uncertain ownership must be reconciled before access can return"]
 pub struct ExtensionRuntimeUncertainOwner {
     core: RuntimeOwnershipCore,
 }
 
 impl ExtensionRuntimeUncertainOwner {
-    /// Reconstructs conservative native-ownership uncertainty after restart.
-    ///
-    /// This constructor is deliberately non-authorizing. The caller must have
-    /// reauthenticated and durably pinned the exact package, loaded an
-    /// unresolved ownership row from its bounded durable journal, and created
-    /// a passive lifecycle proxy bound to that row's exact native incarnation.
-    /// The separate service/engine native-resource reservation must already be
-    /// held and must remain held for every returned state.
-    ///
-    /// Construction invokes only the provider and lifecycle ports'
-    /// side-effect-free retained-memory queries; no ownership-changing
-    /// lifecycle callback runs. The returned value cannot activate code or
-    /// expose package access, and its only settlement operation is
-    /// [`Self::reconcile`]. The external native reservation remains held on
-    /// both success and refusal. A caller that cannot prove the persisted
-    /// identity join must retain its durable package pin and fail closed
-    /// instead of constructing this value.
-    pub fn try_from_persisted_uncertainty(
-        target: ExtensionRuntimeTarget,
-        resources: ExtensionRuntimeResourcePlan,
-        provider: Box<dyn ExtensionPackageAccessPort>,
-        lifecycle: Box<dyn ExtensionRuntimeLifecyclePort>,
-    ) -> Result<Self, ExtensionRuntimeRecoveryBuildRefusal> {
-        let access =
-            match ExtensionPackageAccess::from_delegated_provider(target, resources, provider) {
-                Ok(access) => access,
-                Err(refusal) => {
-                    let reason =
-                        ExtensionRuntimeRecoveryBuildError::PackageAccess(refusal.reason());
-                    let (target, resources, provider) = refusal.into_parts();
-                    return Err(ExtensionRuntimeRecoveryBuildRefusal {
-                        reason,
-                        target,
-                        _resources: resources,
-                        _provider: provider,
-                        _lifecycle: lifecycle,
-                    });
-                }
-            };
-        match ExtensionRuntimeActivationRequest::try_new(access, lifecycle) {
-            Ok(request) => Ok(Self { core: request.core }),
-            Err(refusal) => {
-                let reason = ExtensionRuntimeRecoveryBuildError::OwnerAccounting(refusal.reason());
-                let (access, lifecycle) = refusal.into_parts();
-                let (target, resources, provider) = access.into_parts();
-                Err(ExtensionRuntimeRecoveryBuildRefusal {
-                    reason,
-                    target,
-                    _resources: resources,
-                    _provider: provider,
-                    _lifecycle: lifecycle,
-                })
-            }
-        }
-    }
-
     /// Returns the selected runtime family without exposing package access.
     #[must_use]
     pub const fn target(&self) -> ExtensionRuntimeTarget {
@@ -999,11 +997,22 @@ impl ExtensionRuntimeUncertainOwner {
         self.core.retained_bytes
     }
 
-    /// Reconciles native ownership and returns access only on definite absence.
-    pub fn reconcile(mut self) -> ExtensionRuntimeReconciliationSettlement {
-        let disposition = self
-            .core
-            .with_view(|lifecycle, access| lifecycle.reconcile_ownership(access));
+    /// Reconciles native ownership before the caller's absolute monotonic
+    /// `deadline` and returns access only on definite absence.
+    ///
+    /// An already-expired deadline performs no adapter call and preserves
+    /// uncertainty.
+    pub fn reconcile_until(
+        mut self,
+        deadline: Instant,
+    ) -> ExtensionRuntimeReconciliationSettlement {
+        if deadline <= Instant::now() {
+            return ExtensionRuntimeReconciliationSettlement::StillUncertain {
+                owner: self,
+                failure: ExtensionRuntimeFailure::TimedOut,
+            };
+        }
+        let disposition = self.core.lifecycle.reconcile_ownership_until(deadline);
         match disposition {
             ExtensionRuntimeOwnershipDisposition::Owned => {
                 ExtensionRuntimeReconciliationSettlement::Owned(ExtensionRuntimeOwner {
@@ -1085,6 +1094,443 @@ impl fmt::Debug for ExtensionRuntimeReconciliationSettlement {
     }
 }
 
+struct RecoveryOwnershipCore {
+    ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
+    retained_bytes: usize,
+}
+
+/// Cleanup-only reconstruction of one conservatively persisted native owner.
+///
+/// The caller must first join an unresolved durable ownership row to the exact
+/// native incarnation and hold the separate native-resource reservation. This
+/// request carries no package access, resource plan, provider, target, or
+/// activation-capable port. Definite absence releases only this process-local
+/// control proxy; the service may then settle its separately retained durable
+/// package pin.
+///
+/// Construction calls only the ownership port's side-effect-free accounting
+/// query. Every destructor remains passive.
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionRuntimeRecoveryRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<ExtensionRuntimeRecoveryRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::Serialize;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn requires_serialize<T: Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeRecoveryRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionRuntimeRecoveryRequest>();
+/// ```
+///
+/// Cleanup recovery cannot extract package access, recover package metadata,
+/// activate a runtime, or omit a deadline:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn escape(request: ExtensionRuntimeRecoveryRequest) {
+///     let _ = request.into_provider();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn no_target(request: &ExtensionRuntimeRecoveryRequest) {
+///     let _ = request.target();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn no_resource_plan(request: &ExtensionRuntimeRecoveryRequest) {
+///     let _ = request.resources();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use std::time::Instant;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn no_activation(request: ExtensionRuntimeRecoveryRequest) {
+///     let _ = request.settle_until(Instant::now());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRequest;
+/// fn deadline_is_required(request: ExtensionRuntimeRecoveryRequest) {
+///     let _ = request.reconcile();
+/// }
+/// ```
+#[must_use = "persisted ownership must be reconciled before durable cleanup"]
+pub struct ExtensionRuntimeRecoveryRequest {
+    core: RecoveryOwnershipCore,
+}
+
+impl ExtensionRuntimeRecoveryRequest {
+    /// Constructs one cleanup-only request from an exact-incarnation ownership
+    /// proxy after the service has validated its durable identity join.
+    pub fn try_from_persisted_uncertainty(
+        ownership: Box<dyn ExtensionRuntimeOwnershipPort>,
+    ) -> Result<Self, ExtensionRuntimeRecoveryBuildRefusal> {
+        let retained_bytes = ownership
+            .retained_bytes()
+            .checked_add(recovery_owner_wrapper_bytes());
+        let retained_bytes = match retained_bytes {
+            Some(retained_bytes) => retained_bytes,
+            None => {
+                return Err(ExtensionRuntimeRecoveryBuildRefusal {
+                    reason: ExtensionRuntimeRecoveryBuildError::RetainedBytesOverflow,
+                    _ownership: ownership,
+                });
+            }
+        };
+        if retained_bytes > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES {
+            return Err(ExtensionRuntimeRecoveryBuildRefusal {
+                reason: ExtensionRuntimeRecoveryBuildError::RetainedBytesExceeded,
+                _ownership: ownership,
+            });
+        }
+        Ok(Self {
+            core: RecoveryOwnershipCore {
+                ownership,
+                retained_bytes,
+            },
+        })
+    }
+
+    /// Returns the exact conservative retained-memory charge for this owner.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        self.core.retained_bytes
+    }
+
+    /// Reconciles native ownership before the exact absolute `deadline`.
+    ///
+    /// An already-expired deadline performs no callback and preserves
+    /// uncertainty. Definite absence returns no package or release capability.
+    pub fn reconcile_until(self, deadline: Instant) -> ExtensionRuntimeRecoverySettlement {
+        if deadline <= Instant::now() {
+            return ExtensionRuntimeRecoverySettlement::StillUncertain {
+                request: self,
+                failure: ExtensionRuntimeFailure::TimedOut,
+            };
+        }
+        let mut core = self.core;
+        match core.ownership.reconcile_ownership_until(deadline) {
+            ExtensionRuntimeOwnershipDisposition::Owned => {
+                ExtensionRuntimeRecoverySettlement::Owned(ExtensionRuntimeRecoveryOwner { core })
+            }
+            ExtensionRuntimeOwnershipDisposition::Absent => {
+                ExtensionRuntimeRecoverySettlement::Absent
+            }
+            ExtensionRuntimeOwnershipDisposition::StillUncertain(failure) => {
+                ExtensionRuntimeRecoverySettlement::StillUncertain {
+                    request: Self { core },
+                    failure,
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoveryRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeRecoveryRequest")
+            .field("retained_bytes", &self.retained_bytes())
+            .field("ownership", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Cleanup-only result of persisted ownership reconciliation.
+#[must_use]
+pub enum ExtensionRuntimeRecoverySettlement {
+    /// The exact native owner definitely exists.
+    Owned(ExtensionRuntimeRecoveryOwner),
+    /// Native ownership is definitely absent. No package capability is
+    /// created; the service may proceed with its separate durable cleanup.
+    Absent,
+    /// Native ownership remains indeterminate.
+    StillUncertain {
+        /// The same cleanup-only request.
+        request: ExtensionRuntimeRecoveryRequest,
+        /// The redacted runtime failure.
+        failure: ExtensionRuntimeFailure,
+    },
+}
+
+impl ExtensionRuntimeRecoverySettlement {
+    /// Returns the exact conservative retained-memory charge of this value.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Owned(owner) => owner.retained_bytes(),
+            Self::Absent => std::mem::size_of::<Self>(),
+            Self::StillUncertain { request, .. } => request.retained_bytes(),
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoverySettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owned(_) => formatter.write_str("Owned([redacted])"),
+            Self::Absent => formatter.write_str("Absent"),
+            Self::StillUncertain { failure, .. } => formatter
+                .debug_struct("StillUncertain")
+                .field("request", &"[redacted]")
+                .field("failure", failure)
+                .finish(),
+        }
+    }
+}
+
+/// Cleanup-only proof that the exact persisted native owner exists.
+///
+/// This move-only value exposes no package data or activation operation.
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryOwner;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionRuntimeRecoveryOwner>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryOwner;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<ExtensionRuntimeRecoveryOwner>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::Serialize;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryOwner;
+/// fn requires_serialize<T: Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeRecoveryOwner>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryOwner;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionRuntimeRecoveryOwner>();
+/// ```
+///
+/// Definite recovered ownership still cannot expose package data:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryOwner;
+/// fn no_package_access(mut owner: ExtensionRuntimeRecoveryOwner) {
+///     let _ = owner.visit_manifest(&mut |_| Ok(()));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryOwner;
+/// fn no_provider(owner: ExtensionRuntimeRecoveryOwner) {
+///     let _ = owner.into_provider();
+/// }
+/// ```
+#[must_use = "recovered native ownership must be explicitly retired"]
+pub struct ExtensionRuntimeRecoveryOwner {
+    core: RecoveryOwnershipCore,
+}
+
+impl ExtensionRuntimeRecoveryOwner {
+    /// Returns the exact conservative retained-memory charge for this owner.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        self.core.retained_bytes
+    }
+
+    /// Consumes definite ownership into its only retirement entry point.
+    pub fn into_retirement_request(self) -> ExtensionRuntimeRecoveryRetirementRequest {
+        ExtensionRuntimeRecoveryRetirementRequest { core: self.core }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoveryOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeRecoveryOwner")
+            .field("retained_bytes", &self.retained_bytes())
+            .field("ownership", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Cleanup-only request to retire a definitely present persisted owner.
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRetirementRequest;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionRuntimeRecoveryRetirementRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRetirementRequest;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<ExtensionRuntimeRecoveryRetirementRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::Serialize;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRetirementRequest;
+/// fn requires_serialize<T: Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeRecoveryRetirementRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRetirementRequest;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionRuntimeRecoveryRetirementRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeRecoveryRetirementRequest;
+/// fn deadline_is_required(request: ExtensionRuntimeRecoveryRetirementRequest) {
+///     let _ = request.settle();
+/// }
+/// ```
+#[must_use = "persisted retirement must settle before durable cleanup"]
+pub struct ExtensionRuntimeRecoveryRetirementRequest {
+    core: RecoveryOwnershipCore,
+}
+
+impl ExtensionRuntimeRecoveryRetirementRequest {
+    /// Returns the exact conservative retained-memory charge for this owner.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        self.core.retained_bytes
+    }
+
+    /// Cancels retirement without calling the adapter or changing ownership.
+    #[must_use = "cancelled recovery retirement still owns the native runtime"]
+    pub fn cancel(self) -> ExtensionRuntimeRecoveryOwner {
+        ExtensionRuntimeRecoveryOwner { core: self.core }
+    }
+
+    /// Attempts retirement before the exact absolute `deadline`.
+    ///
+    /// An already-expired deadline performs no callback and restores definite
+    /// ownership. Expiration never proves native absence.
+    pub fn settle_until(self, deadline: Instant) -> ExtensionRuntimeRecoveryRetirementSettlement {
+        if deadline <= Instant::now() {
+            return ExtensionRuntimeRecoveryRetirementSettlement::Retained {
+                owner: ExtensionRuntimeRecoveryOwner { core: self.core },
+                failure: ExtensionRuntimeFailure::TimedOut,
+            };
+        }
+        let mut core = self.core;
+        match core.ownership.retire_until(deadline) {
+            ExtensionRuntimeRetirementDisposition::Retired => {
+                ExtensionRuntimeRecoveryRetirementSettlement::Absent
+            }
+            ExtensionRuntimeRetirementDisposition::Retained(failure) => {
+                ExtensionRuntimeRecoveryRetirementSettlement::Retained {
+                    owner: ExtensionRuntimeRecoveryOwner { core },
+                    failure,
+                }
+            }
+            ExtensionRuntimeRetirementDisposition::OwnershipUncertain(failure) => {
+                ExtensionRuntimeRecoveryRetirementSettlement::OwnershipUncertain {
+                    request: ExtensionRuntimeRecoveryRequest { core },
+                    failure,
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoveryRetirementRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeRecoveryRetirementRequest")
+            .field("retained_bytes", &self.retained_bytes())
+            .field("ownership", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Cleanup-only result of a persisted-owner retirement attempt.
+#[must_use]
+pub enum ExtensionRuntimeRecoveryRetirementSettlement {
+    /// Native ownership is definitely absent.
+    Absent,
+    /// Native ownership definitely remains present.
+    Retained {
+        /// Restored cleanup-only definite ownership.
+        owner: ExtensionRuntimeRecoveryOwner,
+        /// The redacted runtime failure.
+        failure: ExtensionRuntimeFailure,
+    },
+    /// Native ownership became indeterminate.
+    OwnershipUncertain {
+        /// The cleanup-only reconciliation request.
+        request: ExtensionRuntimeRecoveryRequest,
+        /// The redacted runtime failure.
+        failure: ExtensionRuntimeFailure,
+    },
+}
+
+impl ExtensionRuntimeRecoveryRetirementSettlement {
+    /// Returns the exact conservative retained-memory charge of this value.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Absent => std::mem::size_of::<Self>(),
+            Self::Retained { owner, .. } => owner.retained_bytes(),
+            Self::OwnershipUncertain { request, .. } => request.retained_bytes(),
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeRecoveryRetirementSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent => formatter.write_str("Absent"),
+            Self::Retained { failure, .. } => formatter
+                .debug_struct("Retained")
+                .field("owner", &"[redacted]")
+                .field("failure", failure)
+                .finish(),
+            Self::OwnershipUncertain { failure, .. } => formatter
+                .debug_struct("OwnershipUncertain")
+                .field("request", &"[redacted]")
+                .field("failure", failure)
+                .finish(),
+        }
+    }
+}
+
+fn recovery_owner_wrapper_bytes() -> usize {
+    [
+        std::mem::size_of::<ExtensionRuntimeRecoveryRequest>(),
+        std::mem::size_of::<ExtensionRuntimeRecoveryOwner>(),
+        std::mem::size_of::<ExtensionRuntimeRecoveryRetirementRequest>(),
+        std::mem::size_of::<ExtensionRuntimeRecoverySettlement>(),
+        std::mem::size_of::<ExtensionRuntimeRecoveryRetirementSettlement>(),
+    ]
+    .into_iter()
+    .max()
+    .expect("recovery owner layout set is nonempty")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1092,6 +1538,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::*;
     use crate::{
@@ -1138,39 +1585,6 @@ mod tests {
         }
     }
 
-    struct OverflowProvider {
-        identity: u64,
-        recovered: Arc<Mutex<Vec<u64>>>,
-    }
-
-    impl Drop for OverflowProvider {
-        fn drop(&mut self) {
-            self.recovered.lock().expect("lock").push(self.identity);
-        }
-    }
-
-    impl ExtensionPackageAccessPort for OverflowProvider {
-        fn retained_bytes(&self) -> usize {
-            usize::MAX
-        }
-
-        fn visit_resource(
-            &mut self,
-            _resource: ExtensionRuntimeResource,
-            _visitor: &mut dyn ExtensionRuntimeResourceVisitor,
-        ) -> Result<(), ExtensionPackageAccessError> {
-            Err(ExtensionPackageAccessError::Inactive)
-        }
-
-        fn visit_native_root(
-            &mut self,
-            _target: ExtensionRuntimeTarget,
-            _visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-        ) -> Result<(), ExtensionPackageAccessError> {
-            Err(ExtensionPackageAccessError::Inactive)
-        }
-    }
-
     struct ScriptedLifecycle {
         activations: VecDeque<ExtensionRuntimeActivationDisposition>,
         retirements: VecDeque<ExtensionRuntimeRetirementDisposition>,
@@ -1187,38 +1601,36 @@ mod tests {
         LifecycleCalls,
     );
 
-    impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
+    impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
         fn retained_bytes(&self) -> usize {
             self.retained_bytes
         }
 
-        fn activate(
-            &mut self,
-            access: &mut ExtensionPackageAccessView<'_>,
-        ) -> ExtensionRuntimeActivationDisposition {
-            assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
-            self.calls.lock().expect("lock").push("activate");
-            self.activations.pop_front().expect("activation scripted")
-        }
-
-        fn retire(
-            &mut self,
-            access: &mut ExtensionPackageAccessView<'_>,
-        ) -> ExtensionRuntimeRetirementDisposition {
-            assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
+        fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
             self.calls.lock().expect("lock").push("retire");
             self.retirements.pop_front().expect("retirement scripted")
         }
 
-        fn reconcile_ownership(
+        fn reconcile_ownership_until(
             &mut self,
-            access: &mut ExtensionPackageAccessView<'_>,
+            _deadline: Instant,
         ) -> ExtensionRuntimeOwnershipDisposition {
-            assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
             self.calls.lock().expect("lock").push("reconcile");
             self.reconciliations
                 .pop_front()
                 .expect("reconciliation scripted")
+        }
+    }
+
+    impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
+        fn activate_until(
+            &mut self,
+            access: &mut ExtensionPackageAccessView<'_>,
+            _deadline: Instant,
+        ) -> ExtensionRuntimeActivationDisposition {
+            assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
+            self.calls.lock().expect("lock").push("activate");
+            self.activations.pop_front().expect("activation scripted")
         }
     }
 
@@ -1234,67 +1646,165 @@ mod tests {
         }
     }
 
-    impl ExtensionRuntimeLifecyclePort for BudgetLifecycle {
+    impl ExtensionRuntimeOwnershipPort for BudgetLifecycle {
         fn retained_bytes(&self) -> usize {
             self.retained_bytes
         }
 
-        fn activate(
-            &mut self,
-            _access: &mut ExtensionPackageAccessView<'_>,
-        ) -> ExtensionRuntimeActivationDisposition {
-            ExtensionRuntimeActivationDisposition::Activated
-        }
-
-        fn retire(
-            &mut self,
-            _access: &mut ExtensionPackageAccessView<'_>,
-        ) -> ExtensionRuntimeRetirementDisposition {
+        fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
             ExtensionRuntimeRetirementDisposition::Retired
         }
 
-        fn reconcile_ownership(
+        fn reconcile_ownership_until(
             &mut self,
-            _access: &mut ExtensionPackageAccessView<'_>,
+            _deadline: Instant,
         ) -> ExtensionRuntimeOwnershipDisposition {
             ExtensionRuntimeOwnershipDisposition::Owned
         }
     }
 
-    struct RecoveryConstructionProbeLifecycle {
+    impl ExtensionRuntimeLifecyclePort for BudgetLifecycle {
+        fn activate_until(
+            &mut self,
+            _access: &mut ExtensionPackageAccessView<'_>,
+            _deadline: Instant,
+        ) -> ExtensionRuntimeActivationDisposition {
+            ExtensionRuntimeActivationDisposition::Activated
+        }
+    }
+
+    struct RecoveryConstructionProbeOwnership {
         retained_queries: Arc<AtomicUsize>,
         ownership_callbacks: Arc<AtomicUsize>,
     }
 
-    impl ExtensionRuntimeLifecyclePort for RecoveryConstructionProbeLifecycle {
+    impl ExtensionRuntimeOwnershipPort for RecoveryConstructionProbeOwnership {
         fn retained_bytes(&self) -> usize {
             self.retained_queries.fetch_add(1, Ordering::Relaxed);
             0
         }
 
-        fn activate(
-            &mut self,
-            _access: &mut ExtensionPackageAccessView<'_>,
-        ) -> ExtensionRuntimeActivationDisposition {
-            self.ownership_callbacks.fetch_add(1, Ordering::Relaxed);
-            ExtensionRuntimeActivationDisposition::Activated
-        }
-
-        fn retire(
-            &mut self,
-            _access: &mut ExtensionPackageAccessView<'_>,
-        ) -> ExtensionRuntimeRetirementDisposition {
+        fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
             self.ownership_callbacks.fetch_add(1, Ordering::Relaxed);
             ExtensionRuntimeRetirementDisposition::Retired
         }
 
-        fn reconcile_ownership(
+        fn reconcile_ownership_until(
             &mut self,
-            _access: &mut ExtensionPackageAccessView<'_>,
+            _deadline: Instant,
         ) -> ExtensionRuntimeOwnershipDisposition {
             self.ownership_callbacks.fetch_add(1, Ordering::Relaxed);
             ExtensionRuntimeOwnershipDisposition::Absent
         }
+    }
+
+    struct ScriptedOwnership {
+        identity: u64,
+        retirements: VecDeque<ExtensionRuntimeRetirementDisposition>,
+        reconciliations: VecDeque<ExtensionRuntimeOwnershipDisposition>,
+        calls: Arc<Mutex<Vec<(&'static str, Instant)>>>,
+        dropped: Arc<Mutex<Vec<u64>>>,
+        retained_bytes: usize,
+    }
+
+    impl Drop for ScriptedOwnership {
+        fn drop(&mut self) {
+            self.dropped.lock().expect("lock").push(self.identity);
+        }
+    }
+
+    impl ExtensionRuntimeOwnershipPort for ScriptedOwnership {
+        fn retained_bytes(&self) -> usize {
+            self.retained_bytes
+        }
+
+        fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
+            self.calls.lock().expect("lock").push(("retire", deadline));
+            self.retirements.pop_front().expect("retirement scripted")
+        }
+
+        fn reconcile_ownership_until(
+            &mut self,
+            deadline: Instant,
+        ) -> ExtensionRuntimeOwnershipDisposition {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push(("reconcile", deadline));
+            self.reconciliations
+                .pop_front()
+                .expect("reconciliation scripted")
+        }
+    }
+
+    type OwnershipCalls = Arc<Mutex<Vec<(&'static str, Instant)>>>;
+
+    struct DeadlineLifecycle {
+        calls: OwnershipCalls,
+    }
+
+    impl ExtensionRuntimeOwnershipPort for DeadlineLifecycle {
+        fn retained_bytes(&self) -> usize {
+            0
+        }
+
+        fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
+            self.calls.lock().expect("lock").push(("retire", deadline));
+            ExtensionRuntimeRetirementDisposition::Retired
+        }
+
+        fn reconcile_ownership_until(
+            &mut self,
+            deadline: Instant,
+        ) -> ExtensionRuntimeOwnershipDisposition {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push(("reconcile", deadline));
+            ExtensionRuntimeOwnershipDisposition::Owned
+        }
+    }
+
+    impl ExtensionRuntimeLifecyclePort for DeadlineLifecycle {
+        fn activate_until(
+            &mut self,
+            _access: &mut ExtensionPackageAccessView<'_>,
+            deadline: Instant,
+        ) -> ExtensionRuntimeActivationDisposition {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push(("activate", deadline));
+            ExtensionRuntimeActivationDisposition::OwnershipUncertain(
+                ExtensionRuntimeFailure::TimedOut,
+            )
+        }
+    }
+
+    fn scripted_ownership(
+        identity: u64,
+        retirements: impl IntoIterator<Item = ExtensionRuntimeRetirementDisposition>,
+        reconciliations: impl IntoIterator<Item = ExtensionRuntimeOwnershipDisposition>,
+        retained_bytes: usize,
+    ) -> (
+        Box<dyn ExtensionRuntimeOwnershipPort>,
+        OwnershipCalls,
+        RecoveredIdentities,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let dropped = Arc::new(Mutex::new(Vec::new()));
+        (
+            Box::new(ScriptedOwnership {
+                identity,
+                retirements: retirements.into_iter().collect(),
+                reconciliations: reconciliations.into_iter().collect(),
+                calls: Arc::clone(&calls),
+                dropped: Arc::clone(&dropped),
+                retained_bytes,
+            }),
+            calls,
+            dropped,
+        )
     }
 
     fn request(
@@ -1363,6 +1873,10 @@ mod tests {
             .expect("access")
     }
 
+    fn future_deadline() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
     fn recover_identity_provider(access: ExtensionPackageAccess) -> Box<IdentityProvider> {
         let provider = access.into_provider();
         let payload: Box<dyn std::any::Any + Send> = provider;
@@ -1397,7 +1911,7 @@ mod tests {
             MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
         );
 
-        let activation = request.settle();
+        let activation = request.settle_until(future_deadline());
         assert_eq!(
             activation.retained_bytes(),
             MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
@@ -1415,7 +1929,7 @@ mod tests {
             retirement.retained_bytes(),
             MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
         );
-        let settlement = retirement.settle();
+        let settlement = retirement.settle_until(future_deadline());
         assert!(settlement.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
         let access = match settlement {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
@@ -1438,6 +1952,20 @@ mod tests {
             std::mem::size_of::<ExtensionRuntimeActivationSettlement>(),
             std::mem::size_of::<ExtensionRuntimeRetirementSettlement>(),
             std::mem::size_of::<ExtensionRuntimeReconciliationSettlement>(),
+        ] {
+            assert!(actual <= charged_layout);
+        }
+    }
+
+    #[test]
+    fn recovery_accounting_covers_every_persistent_public_state_layout() {
+        let charged_layout = recovery_owner_wrapper_bytes();
+        for actual in [
+            std::mem::size_of::<ExtensionRuntimeRecoveryRequest>(),
+            std::mem::size_of::<ExtensionRuntimeRecoveryOwner>(),
+            std::mem::size_of::<ExtensionRuntimeRecoveryRetirementRequest>(),
+            std::mem::size_of::<ExtensionRuntimeRecoverySettlement>(),
+            std::mem::size_of::<ExtensionRuntimeRecoveryRetirementSettlement>(),
         ] {
             assert!(actual <= charged_layout);
         }
@@ -1467,7 +1995,7 @@ mod tests {
             [],
             [],
         );
-        let request = match request.settle() {
+        let request = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Retryable { request, .. } => request,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1488,13 +2016,16 @@ mod tests {
             [ExtensionRuntimeRetirementDisposition::Retired],
             [],
         );
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
         let owner = owner.into_retirement_request().cancel();
         assert_eq!(*calls.lock().expect("lock"), vec!["activate"]);
-        let access = match owner.into_retirement_request().settle() {
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1503,6 +2034,157 @@ mod tests {
         drop(provider);
         assert_eq!(*recovered.lock().expect("lock"), vec![43]);
         assert_eq!(*calls.lock().expect("lock"), vec!["activate", "retire"]);
+    }
+
+    #[test]
+    fn same_process_lifecycle_forwards_every_absolute_deadline_unchanged() {
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let request = ExtensionRuntimeActivationRequest::try_new(
+            identity_access(58, &recovered),
+            Box::new(DeadlineLifecycle {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .expect("bounded activation request");
+        let base = Instant::now() + Duration::from_secs(60);
+        let activation_deadline = base;
+        let reconciliation_deadline = base + Duration::from_secs(1);
+        let retirement_deadline = base + Duration::from_secs(2);
+
+        let uncertain = match request.settle_until(activation_deadline) {
+            ExtensionRuntimeActivationSettlement::OwnershipUncertain { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let owner = match uncertain.reconcile_until(reconciliation_deadline) {
+            ExtensionRuntimeReconciliationSettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(retirement_deadline)
+        {
+            ExtensionRuntimeRetirementSettlement::Retired(access) => access,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(
+            *calls.lock().expect("lock"),
+            vec![
+                ("activate", activation_deadline),
+                ("reconcile", reconciliation_deadline),
+                ("retire", retirement_deadline),
+            ]
+        );
+        drop(access);
+        assert_eq!(*recovered.lock().expect("lock"), vec![58]);
+    }
+
+    #[test]
+    fn expired_deadlines_make_no_callback_and_preserve_the_known_state() {
+        let (request, recovered, calls) = self::request(
+            59,
+            [ExtensionRuntimeActivationDisposition::Activated],
+            [],
+            [],
+        );
+        let request = match request.settle_until(Instant::now()) {
+            ExtensionRuntimeActivationSettlement::Retryable { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert!(calls.lock().expect("lock").is_empty());
+        let (access, lifecycle) = request.cancel();
+        drop(lifecycle);
+        drop(access);
+        assert_eq!(*recovered.lock().expect("lock"), vec![59]);
+
+        let (request, recovered, calls) = self::request(
+            60,
+            [ExtensionRuntimeActivationDisposition::Activated],
+            [ExtensionRuntimeRetirementDisposition::Retired],
+            [],
+        );
+        let owner = match request.settle_until(future_deadline()) {
+            ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let owner = match owner.into_retirement_request().settle_until(Instant::now()) {
+            ExtensionRuntimeRetirementSettlement::Retained { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(*calls.lock().expect("lock"), vec!["activate"]);
+        drop(owner);
+        assert_eq!(*recovered.lock().expect("lock"), vec![60]);
+
+        let (request, recovered, calls) = self::request(
+            61,
+            [ExtensionRuntimeActivationDisposition::OwnershipUncertain(
+                ExtensionRuntimeFailure::TimedOut,
+            )],
+            [],
+            [ExtensionRuntimeOwnershipDisposition::Absent],
+        );
+        let uncertain = match request.settle_until(future_deadline()) {
+            ExtensionRuntimeActivationSettlement::OwnershipUncertain { owner, .. } => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let uncertain = match uncertain.reconcile_until(Instant::now()) {
+            ExtensionRuntimeReconciliationSettlement::StillUncertain { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(*calls.lock().expect("lock"), vec!["activate"]);
+        drop(uncertain);
+        assert_eq!(*recovered.lock().expect("lock"), vec![61]);
+
+        let (ownership, calls, dropped) =
+            scripted_ownership(62, [], [ExtensionRuntimeOwnershipDisposition::Absent], 1024);
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let request = match request.reconcile_until(Instant::now()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert!(calls.lock().expect("lock").is_empty());
+        drop(request);
+        assert_eq!(*dropped.lock().expect("lock"), vec![62]);
+
+        let (ownership, calls, dropped) = scripted_ownership(
+            63,
+            [ExtensionRuntimeRetirementDisposition::Retired],
+            [ExtensionRuntimeOwnershipDisposition::Owned],
+            1024,
+        );
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let owner = match owner.into_retirement_request().settle_until(Instant::now()) {
+            ExtensionRuntimeRecoveryRetirementSettlement::Retained { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        assert_eq!(calls.lock().expect("lock")[0].0, "reconcile");
+        drop(owner);
+        assert_eq!(*dropped.lock().expect("lock"), vec![63]);
     }
 
     #[test]
@@ -1557,7 +2239,7 @@ mod tests {
             [],
         );
 
-        let access = match request.settle() {
+        let access = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Rejected { access, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::PackageRejected);
                 access
@@ -1584,7 +2266,7 @@ mod tests {
             [],
         );
 
-        let request = match request.settle() {
+        let request = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Retryable { request, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
                 request
@@ -1592,11 +2274,14 @@ mod tests {
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
         assert!(recovered.lock().expect("lock").is_empty());
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        let access = match owner.into_retirement_request().settle() {
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1622,11 +2307,14 @@ mod tests {
             ],
             [],
         );
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        let owner = match owner.into_retirement_request().settle() {
+        let owner = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retained { owner, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
                 owner
@@ -1634,7 +2322,10 @@ mod tests {
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
         assert!(recovered.lock().expect("lock").is_empty());
-        let access = match owner.into_retirement_request().settle() {
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1662,7 +2353,7 @@ mod tests {
             ],
         );
         let retained_bytes = request.retained_bytes();
-        let uncertain = match request.settle() {
+        let uncertain = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::OwnershipUncertain { owner, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
                 owner
@@ -1671,7 +2362,7 @@ mod tests {
         };
         assert_eq!(uncertain.retained_bytes(), retained_bytes);
         assert!(recovered.lock().expect("lock").is_empty());
-        let uncertain = match uncertain.reconcile() {
+        let uncertain = match uncertain.reconcile_until(future_deadline()) {
             ExtensionRuntimeReconciliationSettlement::StillUncertain { owner, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
                 owner
@@ -1680,7 +2371,7 @@ mod tests {
         };
         assert_eq!(uncertain.retained_bytes(), retained_bytes);
         assert!(recovered.lock().expect("lock").is_empty());
-        let access = match uncertain.reconcile() {
+        let access = match uncertain.reconcile_until(future_deadline()) {
             ExtensionRuntimeReconciliationSettlement::Absent(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1694,158 +2385,176 @@ mod tests {
     }
 
     #[test]
-    fn persisted_uncertainty_can_only_reconcile_and_never_activates() {
-        let recovered = Arc::new(Mutex::new(Vec::new()));
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let (target, manifest, provider) = identity_provider_inputs(51, &recovered);
-        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
-            target,
-            manifest,
-            provider,
-            Box::new(ScriptedLifecycle {
-                activations: VecDeque::new(),
-                retirements: [ExtensionRuntimeRetirementDisposition::Retired]
-                    .into_iter()
-                    .collect(),
-                reconciliations: [ExtensionRuntimeOwnershipDisposition::Owned]
-                    .into_iter()
-                    .collect(),
-                calls: Arc::clone(&calls),
-                retained_bytes: 1024,
-            }),
-        )
-        .expect("persisted uncertainty must fit the owner budget");
+    fn persisted_recovery_covers_every_state_and_forwards_exact_deadlines() {
+        let (ownership, calls, dropped) = scripted_ownership(
+            51,
+            [
+                ExtensionRuntimeRetirementDisposition::Retained(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                ),
+                ExtensionRuntimeRetirementDisposition::OwnershipUncertain(
+                    ExtensionRuntimeFailure::TimedOut,
+                ),
+            ],
+            [
+                ExtensionRuntimeOwnershipDisposition::StillUncertain(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                ),
+                ExtensionRuntimeOwnershipDisposition::Owned,
+                ExtensionRuntimeOwnershipDisposition::Absent,
+            ],
+            1024,
+        );
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded persisted recovery must be constructible");
+        let retained_bytes = request.retained_bytes();
         assert!(calls.lock().expect("lock").is_empty());
-        assert!(recovered.lock().expect("lock").is_empty());
+        assert!(dropped.lock().expect("lock").is_empty());
 
-        let owner = match uncertain.reconcile() {
-            ExtensionRuntimeReconciliationSettlement::Owned(owner) => owner,
-            settlement => panic!("unexpected settlement: {settlement:?}"),
-        };
-        assert_eq!(*calls.lock().expect("lock"), vec!["reconcile"]);
-        let access = match owner.into_retirement_request().settle() {
-            ExtensionRuntimeRetirementSettlement::Retired(access) => access,
-            settlement => panic!("unexpected settlement: {settlement:?}"),
-        };
-        let provider = recover_identity_provider(access);
-        assert_eq!(provider.identity, 51);
-        drop(provider);
-        assert_eq!(*recovered.lock().expect("lock"), vec![51]);
-        assert_eq!(*calls.lock().expect("lock"), vec!["reconcile", "retire"]);
+        let base = Instant::now() + Duration::from_secs(60);
+        let reconciliation_one = base;
+        let reconciliation_two = base + Duration::from_secs(1);
+        let retirement_one = base + Duration::from_secs(2);
+        let retirement_two = base + Duration::from_secs(3);
+        let reconciliation_three = base + Duration::from_secs(4);
 
-        let recovered = Arc::new(Mutex::new(Vec::new()));
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let (target, manifest, provider) = identity_provider_inputs(52, &recovered);
-        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
-            target,
-            manifest,
-            provider,
-            Box::new(ScriptedLifecycle {
-                activations: VecDeque::new(),
-                retirements: VecDeque::new(),
-                reconciliations: [ExtensionRuntimeOwnershipDisposition::Absent]
-                    .into_iter()
-                    .collect(),
-                calls: Arc::clone(&calls),
-                retained_bytes: 1024,
-            }),
-        )
-        .expect("persisted uncertainty must fit the owner budget");
-        let access = match uncertain.reconcile() {
-            ExtensionRuntimeReconciliationSettlement::Absent(access) => access,
+        let request = match request.reconcile_until(reconciliation_one) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                request
+            }
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        assert_eq!(*calls.lock().expect("lock"), vec!["reconcile"]);
-        let provider = recover_identity_provider(access);
-        assert_eq!(provider.identity, 52);
-        drop(provider);
-        assert_eq!(*recovered.lock().expect("lock"), vec![52]);
+        assert_eq!(request.retained_bytes(), retained_bytes);
+        let owner = match request.reconcile_until(reconciliation_two) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(owner.retained_bytes(), retained_bytes);
+        let owner = match owner.into_retirement_request().settle_until(retirement_one) {
+            ExtensionRuntimeRecoveryRetirementSettlement::Retained { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let request = match owner.into_retirement_request().settle_until(retirement_two) {
+            ExtensionRuntimeRecoveryRetirementSettlement::OwnershipUncertain {
+                request,
+                failure,
+            } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let settlement = request.reconcile_until(reconciliation_three);
+        assert!(settlement.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+        assert!(matches!(
+            settlement,
+            ExtensionRuntimeRecoverySettlement::Absent
+        ));
+
+        assert_eq!(
+            *calls.lock().expect("lock"),
+            vec![
+                ("reconcile", reconciliation_one),
+                ("reconcile", reconciliation_two),
+                ("retire", retirement_one),
+                ("retire", retirement_two),
+                ("reconcile", reconciliation_three),
+            ]
+        );
+        assert_eq!(*dropped.lock().expect("lock"), vec![51]);
     }
 
     #[test]
-    fn persisted_uncertainty_construction_only_queries_accounting() {
-        let recovered = Arc::new(Mutex::new(Vec::new()));
-        let (target, manifest, provider) = identity_provider_inputs(57, &recovered);
+    fn persisted_recovery_construction_only_queries_accounting() {
         let retained_queries = Arc::new(AtomicUsize::new(0));
         let ownership_callbacks = Arc::new(AtomicUsize::new(0));
-        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
-            target,
-            manifest,
-            provider,
-            Box::new(RecoveryConstructionProbeLifecycle {
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(Box::new(
+            RecoveryConstructionProbeOwnership {
                 retained_queries: Arc::clone(&retained_queries),
                 ownership_callbacks: Arc::clone(&ownership_callbacks),
-            }),
-        )
-        .expect("bounded persisted uncertainty must be constructible");
+            },
+        ))
+        .expect("bounded persisted recovery must be constructible");
         assert_eq!(retained_queries.load(Ordering::Relaxed), 1);
         assert_eq!(ownership_callbacks.load(Ordering::Relaxed), 0);
-        drop(uncertain);
+        drop(request);
         assert_eq!(ownership_callbacks.load(Ordering::Relaxed), 0);
-        assert_eq!(*recovered.lock().expect("lock"), vec![57]);
     }
 
     #[test]
-    fn persisted_uncertainty_accounting_refusal_quarantines_both_inputs() {
-        let recovered_access = Arc::new(Mutex::new(Vec::new()));
-        let recovered_lifecycle = Arc::new(Mutex::new(Vec::new()));
-        let (target, manifest, provider) = identity_provider_inputs(53, &recovered_access);
-        let refusal = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
-            target,
-            manifest,
-            provider,
-            Box::new(BudgetLifecycle {
-                identity: 54,
-                retained_bytes: usize::MAX,
-                recovered: Arc::clone(&recovered_lifecycle),
-            }),
-        )
-        .expect_err("overflowing recovery owner accounting must fail closed");
+    fn persisted_recovery_accounting_accepts_the_ceiling_and_refuses_excess() {
+        let wrapper_bytes = recovery_owner_wrapper_bytes();
+        let exact_proxy_bytes = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+            .checked_sub(wrapper_bytes)
+            .expect("recovery wrapper must fit the owner ceiling");
+        let (ownership, calls, dropped) = scripted_ownership(
+            52,
+            [ExtensionRuntimeRetirementDisposition::Retired],
+            [ExtensionRuntimeOwnershipDisposition::Owned],
+            exact_proxy_bytes,
+        );
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("the exact recovery-owner ceiling must be accepted");
+        assert_eq!(
+            request.retained_bytes(),
+            MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        );
+        let settlement = request.reconcile_until(future_deadline());
+        assert_eq!(
+            settlement.retained_bytes(),
+            MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        );
+        let owner = match settlement {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let retirement = owner.into_retirement_request();
+        assert_eq!(
+            retirement.retained_bytes(),
+            MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        );
+        let settlement = retirement.settle_until(future_deadline());
+        assert!(settlement.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+        assert!(matches!(
+            settlement,
+            ExtensionRuntimeRecoveryRetirementSettlement::Absent
+        ));
+        assert_eq!(calls.lock().expect("lock").len(), 2);
+        assert_eq!(*dropped.lock().expect("lock"), vec![52]);
+
+        let exceeded_proxy_bytes = exact_proxy_bytes
+            .checked_add(1)
+            .expect("the configured owner ceiling leaves one excess byte");
+        let (ownership, calls, dropped) = scripted_ownership(53, [], [], exceeded_proxy_bytes);
+        let refusal = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect_err("one byte above the recovery ceiling must fail closed");
         assert_eq!(
             refusal.reason(),
-            ExtensionRuntimeRecoveryBuildError::OwnerAccounting(
-                ExtensionRuntimeActivationBuildError::RetainedBytesOverflow
-            )
+            ExtensionRuntimeRecoveryBuildError::RetainedBytesExceeded
         );
         let debug = format!("{refusal:?}");
         assert!(debug.contains("[redacted]"));
-        assert!(!debug.contains("IdentityProvider"));
-        assert!(recovered_access.lock().expect("lock").is_empty());
-        assert!(recovered_lifecycle.lock().expect("lock").is_empty());
+        assert!(!debug.contains("ScriptedOwnership"));
+        assert!(calls.lock().expect("lock").is_empty());
+        assert!(dropped.lock().expect("lock").is_empty());
         drop(refusal);
-        assert_eq!(*recovered_access.lock().expect("lock"), vec![53]);
-        assert_eq!(*recovered_lifecycle.lock().expect("lock"), vec![54]);
-    }
+        assert_eq!(*dropped.lock().expect("lock"), vec![53]);
 
-    #[test]
-    fn persisted_uncertainty_access_accounting_refusal_keeps_provider_captive() {
-        let recovered_access = Arc::new(Mutex::new(Vec::new()));
-        let recovered_lifecycle = Arc::new(Mutex::new(Vec::new()));
-        let refusal = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
-            ExtensionRuntimeTarget::Compatibility,
-            identity_resource_plan(55),
-            Box::new(OverflowProvider {
-                identity: 55,
-                recovered: Arc::clone(&recovered_access),
-            }),
-            Box::new(BudgetLifecycle {
-                identity: 56,
-                retained_bytes: 0,
-                recovered: Arc::clone(&recovered_lifecycle),
-            }),
-        )
-        .expect_err("overflowing package-access accounting must fail closed");
+        let (ownership, calls, dropped) = scripted_ownership(54, [], [], usize::MAX);
+        let refusal = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect_err("overflowing recovery accounting must fail closed");
         assert_eq!(
             refusal.reason(),
-            ExtensionRuntimeRecoveryBuildError::PackageAccess(
-                ExtensionPackageAccessBuildError::RetainedBytesOverflow
-            )
+            ExtensionRuntimeRecoveryBuildError::RetainedBytesOverflow
         );
-        assert!(recovered_access.lock().expect("lock").is_empty());
-        assert!(recovered_lifecycle.lock().expect("lock").is_empty());
+        assert!(calls.lock().expect("lock").is_empty());
+        assert!(dropped.lock().expect("lock").is_empty());
         drop(refusal);
-        assert_eq!(*recovered_access.lock().expect("lock"), vec![55]);
-        assert_eq!(*recovered_lifecycle.lock().expect("lock"), vec![56]);
+        assert_eq!(*dropped.lock().expect("lock"), vec![54]);
     }
 
     #[test]
@@ -1861,11 +2570,14 @@ mod tests {
             ],
             [ExtensionRuntimeOwnershipDisposition::Owned],
         );
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        let uncertain = match owner.into_retirement_request().settle() {
+        let uncertain = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::OwnershipUncertain { owner, failure } => {
                 assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
                 owner
@@ -1873,11 +2585,14 @@ mod tests {
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
         assert!(recovered.lock().expect("lock").is_empty());
-        let owner = match uncertain.reconcile() {
+        let owner = match uncertain.reconcile_until(future_deadline()) {
             ExtensionRuntimeReconciliationSettlement::Owned(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        let access = match owner.into_retirement_request().settle() {
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1897,11 +2612,14 @@ mod tests {
             [ExtensionRuntimeRetirementDisposition::Retired],
             [],
         );
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        let access = match owner.into_retirement_request().settle() {
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1919,11 +2637,11 @@ mod tests {
             [],
             [ExtensionRuntimeOwnershipDisposition::Absent],
         );
-        let uncertain = match request.settle() {
+        let uncertain = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::OwnershipUncertain { owner, .. } => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
-        let settlement = uncertain.reconcile();
+        let settlement = uncertain.reconcile_until(future_deadline());
         assert!(settlement.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
         let access = match settlement {
             ExtensionRuntimeReconciliationSettlement::Absent(access) => access,
@@ -1953,7 +2671,7 @@ mod tests {
             [],
             [],
         );
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1966,7 +2684,7 @@ mod tests {
             [],
             [],
         );
-        let owner = match request.settle() {
+        let owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -1981,32 +2699,140 @@ mod tests {
             [],
             [],
         );
-        let uncertain = match request.settle() {
+        let uncertain = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::OwnershipUncertain { owner, .. } => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
         drop(uncertain);
         assert_eq!(*calls.lock().expect("lock"), vec!["activate"]);
 
-        let recovered = Arc::new(Mutex::new(Vec::new()));
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let (target, manifest, provider) = identity_provider_inputs(50, &recovered);
-        let uncertain = ExtensionRuntimeUncertainOwner::try_from_persisted_uncertainty(
-            target,
-            manifest,
-            provider,
-            Box::new(ScriptedLifecycle {
-                activations: VecDeque::new(),
-                retirements: VecDeque::new(),
-                reconciliations: VecDeque::new(),
-                calls: Arc::clone(&calls),
-                retained_bytes: 1024,
-            }),
-        )
-        .expect("persisted uncertainty must fit the owner budget");
-        drop(uncertain);
+        let (ownership, calls, dropped) = scripted_ownership(50, [], [], 1024);
+        let recovery = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("persisted recovery must fit the owner budget");
+        drop(recovery);
         assert!(calls.lock().expect("lock").is_empty());
-        assert_eq!(*recovered.lock().expect("lock"), vec![50]);
+        assert_eq!(*dropped.lock().expect("lock"), vec![50]);
+    }
+
+    #[test]
+    fn dropping_every_recovery_capability_is_passive() {
+        let (ownership, calls, dropped) =
+            scripted_ownership(64, [], [ExtensionRuntimeOwnershipDisposition::Owned], 1024);
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        drop(owner);
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        assert_eq!(*dropped.lock().expect("lock"), vec![64]);
+
+        let (ownership, calls, dropped) =
+            scripted_ownership(65, [], [ExtensionRuntimeOwnershipDisposition::Owned], 1024);
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        drop(owner.into_retirement_request());
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        assert_eq!(*dropped.lock().expect("lock"), vec![65]);
+
+        let (ownership, calls, dropped) =
+            scripted_ownership(69, [], [ExtensionRuntimeOwnershipDisposition::Owned], 1024);
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let owner = owner.into_retirement_request().cancel();
+        drop(owner);
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        assert_eq!(*dropped.lock().expect("lock"), vec![69]);
+
+        let (ownership, calls, dropped) = scripted_ownership(
+            66,
+            [],
+            [ExtensionRuntimeOwnershipDisposition::StillUncertain(
+                ExtensionRuntimeFailure::BackendUnavailable,
+            )],
+            1024,
+        );
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let request = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        drop(request);
+        assert_eq!(calls.lock().expect("lock").len(), 1);
+        assert_eq!(*dropped.lock().expect("lock"), vec![66]);
+
+        let (ownership, calls, dropped) = scripted_ownership(
+            67,
+            [ExtensionRuntimeRetirementDisposition::Retained(
+                ExtensionRuntimeFailure::BackendUnavailable,
+            )],
+            [ExtensionRuntimeOwnershipDisposition::Owned],
+            1024,
+        );
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let owner = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
+            ExtensionRuntimeRecoveryRetirementSettlement::Retained { owner, failure } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::BackendUnavailable);
+                owner
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        drop(owner);
+        assert_eq!(calls.lock().expect("lock").len(), 2);
+        assert_eq!(*dropped.lock().expect("lock"), vec![67]);
+
+        let (ownership, calls, dropped) = scripted_ownership(
+            68,
+            [ExtensionRuntimeRetirementDisposition::OwnershipUncertain(
+                ExtensionRuntimeFailure::TimedOut,
+            )],
+            [ExtensionRuntimeOwnershipDisposition::Owned],
+            1024,
+        );
+        let request = ExtensionRuntimeRecoveryRequest::try_from_persisted_uncertainty(ownership)
+            .expect("bounded recovery request");
+        let owner = match request.reconcile_until(future_deadline()) {
+            ExtensionRuntimeRecoverySettlement::Owned(owner) => owner,
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        let request = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
+            ExtensionRuntimeRecoveryRetirementSettlement::OwnershipUncertain {
+                request,
+                failure,
+            } => {
+                assert_eq!(failure, ExtensionRuntimeFailure::TimedOut);
+                request
+            }
+            settlement => panic!("unexpected settlement: {settlement:?}"),
+        };
+        drop(request);
+        assert_eq!(calls.lock().expect("lock").len(), 2);
+        assert_eq!(*dropped.lock().expect("lock"), vec![68]);
     }
 
     #[test]
@@ -2017,7 +2843,7 @@ mod tests {
             [ExtensionRuntimeRetirementDisposition::Retired],
             [],
         );
-        let mut owner = match request.settle() {
+        let mut owner = match request.settle_until(future_deadline()) {
             ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -2031,7 +2857,10 @@ mod tests {
             Ok(Ok(()))
         );
         assert_eq!(calls, 1);
-        let access = match owner.into_retirement_request().settle() {
+        let access = match owner
+            .into_retirement_request()
+            .settle_until(future_deadline())
+        {
             ExtensionRuntimeRetirementSettlement::Retired(access) => access,
             settlement => panic!("unexpected settlement: {settlement:?}"),
         };
@@ -2046,6 +2875,12 @@ mod tests {
         assert_send::<ExtensionRuntimeOwner>();
         assert_send::<ExtensionRuntimeRetirementRequest>();
         assert_send::<ExtensionRuntimeUncertainOwner>();
+        assert_send::<ExtensionRuntimeRecoveryRequest>();
+        assert_send::<ExtensionRuntimeRecoveryOwner>();
+        assert_send::<ExtensionRuntimeRecoveryRetirementRequest>();
+        assert_send::<ExtensionRuntimeRecoverySettlement>();
+        assert_send::<ExtensionRuntimeRecoveryRetirementSettlement>();
+        let _: Option<Box<dyn ExtensionRuntimeOwnershipPort>> = None;
         let _: Option<Box<dyn ExtensionRuntimeLifecyclePort>> = None;
     }
 

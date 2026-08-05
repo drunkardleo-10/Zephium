@@ -3,10 +3,11 @@
 //! This crate defines only move-only ownership and bounded I/O contracts. It
 //! neither authorizes extension packages nor owns durable repository pins. A
 //! package service must complete those checks before constructing delegated
-//! access and may recover that access only from settlements or cancellations
-//! whose state already proves native ownership absent. Persisted uncertainty
-//! may be reconstructed only into the reconciliation-only state; it never
-//! creates activation authority or exposes package access.
+//! access and may recover that access only from same-process settlements or
+//! cancellations whose state already proves native ownership absent.
+//! Persisted uncertainty is reconstructed only from a cleanup-only ownership
+//! proxy: restart recovery carries no package access, resource plan, provider,
+//! target, or activation-capable port.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -28,8 +29,11 @@ pub use lifecycle::{
     ExtensionRuntimeActivationBuildRefusal, ExtensionRuntimeActivationDisposition,
     ExtensionRuntimeActivationRequest, ExtensionRuntimeActivationSettlement,
     ExtensionRuntimeFailure, ExtensionRuntimeLifecyclePort, ExtensionRuntimeOwner,
-    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeReconciliationSettlement,
-    ExtensionRuntimeRecoveryBuildError, ExtensionRuntimeRecoveryBuildRefusal,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipPort,
+    ExtensionRuntimeReconciliationSettlement, ExtensionRuntimeRecoveryBuildError,
+    ExtensionRuntimeRecoveryBuildRefusal, ExtensionRuntimeRecoveryOwner,
+    ExtensionRuntimeRecoveryRequest, ExtensionRuntimeRecoveryRetirementRequest,
+    ExtensionRuntimeRecoveryRetirementSettlement, ExtensionRuntimeRecoverySettlement,
     ExtensionRuntimeRetirementDisposition, ExtensionRuntimeRetirementRequest,
     ExtensionRuntimeRetirementSettlement, ExtensionRuntimeUncertainOwner,
 };
