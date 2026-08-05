@@ -133,6 +133,7 @@ impl ExtensionRepository {
         let runtime = self.runtime.clone();
         let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
+        self.writer_require_gc_idle()?;
         let interrupted_record = self
             .writer_materialization()?
             ._build_intent
@@ -197,6 +198,7 @@ impl ExtensionRepository {
         let runtime = self.runtime.clone();
         let _operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
+        self.writer_require_gc_idle()?;
         let interrupted_record = self
             .writer_materialization()?
             ._build_intent

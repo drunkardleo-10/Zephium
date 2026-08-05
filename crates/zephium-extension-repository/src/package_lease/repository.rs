@@ -151,6 +151,7 @@ impl ExtensionRepository {
     ) -> Result<BundledPackageLease, BundledPackageLeaseError> {
         let runtime = self.runtime.clone();
         let _operation = runtime.enter().map_err(map_lease_operation_error)?;
+        self.writer_require_gc_idle()?;
         match binding.catalog_role() {
             ExtensionCatalogGenerationRole::Active => self
                 .acquire_active_bundled_package_lease(binding)
@@ -302,6 +303,7 @@ impl ExtensionRepository {
     ) -> Result<BundledPackageLeaseReleaseOutcome, BundledPackageLeaseReleaseError> {
         let runtime = self.runtime.clone();
         let _operation = runtime.enter().map_err(map_release_operation_error)?;
+        self.writer_require_gc_idle()?;
         self.release_request(&mut request.core, binding)
     }
 
@@ -317,6 +319,7 @@ impl ExtensionRepository {
     ) -> Result<BundledPackageLeaseReleaseOutcome, BundledPackageLeaseReleaseError> {
         let runtime = self.runtime.clone();
         let _operation = runtime.enter().map_err(map_release_operation_error)?;
+        self.writer_require_gc_idle()?;
         self.release_request(&mut request.core, binding)
     }
 
@@ -333,6 +336,7 @@ impl ExtensionRepository {
     ) -> Result<BundledPackageLeaseReleaseOutcome, BundledPackageLeaseReleaseError> {
         let runtime = self.runtime.clone();
         let _operation = runtime.enter().map_err(map_release_operation_error)?;
+        self.writer_require_gc_idle()?;
         let build_in_progress = {
             let materialization = self.writer_materialization()?;
             validated_resumable_build_in_progress(materialization)

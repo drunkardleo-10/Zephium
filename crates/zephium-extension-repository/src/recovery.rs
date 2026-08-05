@@ -1,5 +1,7 @@
 //! Read-only repository preflight and exact journal recovery.
 
+use std::collections::BTreeSet;
+
 use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_CATALOG_BYTES};
 use zephium_private_fs::{LockedPrivateNamespace, PrivateComponent, PrivateDirectory};
 
@@ -20,6 +22,7 @@ pub(crate) struct OpenedRepository {
     pub(crate) namespace: LockedPrivateNamespace,
     pub(crate) catalogs: PrivateDirectory,
     pub(crate) journals: PrivateDirectory,
+    pub(crate) catalog_object_ids: BTreeSet<crate::state::Digest32>,
     pub(crate) state: RepositoryState,
     pub(crate) state_bytes: Vec<u8>,
     pub(crate) materialization: MaterializationRuntime,
@@ -80,6 +83,7 @@ pub(crate) fn open_repository(
     let materialization = materialization::open_or_recover(
         root,
         &catalogs,
+        &catalog_inventory.finals,
         state.checkpoint(),
         root_shape.has_materialization,
         materialization::FaultPoint::None,
@@ -88,6 +92,7 @@ pub(crate) fn open_repository(
         namespace,
         catalogs,
         journals,
+        catalog_object_ids: catalog_inventory.finals,
         state,
         state_bytes,
         materialization,
@@ -181,7 +186,7 @@ fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRe
 
 struct CatalogInventory {
     stages: Vec<PrivateComponent>,
-    final_count: usize,
+    finals: BTreeSet<crate::state::Digest32>,
 }
 
 fn inspect_catalogs(
@@ -190,7 +195,7 @@ fn inspect_catalogs(
     let entries = catalogs
         .list_components(names::MAX_CATALOG_OBJECT_ENTRIES)
         .map_err(map_recovery_fs)?;
-    let mut finals = Vec::new();
+    let mut finals = BTreeSet::new();
     let mut stages = Vec::new();
     for entry in entries {
         let (digest, stage) = names::parse_catalog_file(entry.as_str())
@@ -202,7 +207,9 @@ fn inspect_catalogs(
             stages.push((entry, digest));
         } else {
             validate_named_catalog_object(catalogs, &entry, digest)?;
-            finals.push(digest);
+            if !finals.insert(digest) {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
         }
     }
     if stages
@@ -213,7 +220,7 @@ fn inspect_catalogs(
     }
     Ok(CatalogInventory {
         stages: stages.into_iter().map(|(name, _)| name).collect(),
-        final_count: finals.len(),
+        finals,
     })
 }
 
@@ -233,7 +240,7 @@ fn initialize_controls(
     }
     let pristine_materialization =
         materialization::is_pristine_for_outer_initialization(root, shape.has_materialization)?;
-    if catalogs.final_count != 0
+    if !catalogs.finals.is_empty()
         || !catalogs.stages.is_empty()
         || !journals.stages.is_empty()
         || journals.prepared.is_some()

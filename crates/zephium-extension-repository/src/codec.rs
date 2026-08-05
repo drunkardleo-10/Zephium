@@ -8,8 +8,10 @@ use zephium_extension_package::{parse_bounded_json, BoundedJsonLimits};
 
 use crate::materialization::{
     MAX_CATALOG_SET_PACKAGES, MAX_CATALOG_SET_RECORD_BYTES, MAX_COMPLETED_PACKAGE_RECORDS,
-    MAX_DURABLE_PACKAGE_PINS, MAX_MATERIALIZATION_CHECKPOINT_BYTES,
-    MAX_MATERIALIZATION_JOURNAL_BYTES, MAX_MATERIALIZATION_STATE_BYTES, MAX_PACKAGE_RECORD_BYTES,
+    MAX_DURABLE_PACKAGE_PINS, MAX_GC_CATALOG_OBJECT_TARGETS, MAX_GC_CATALOG_SET_TARGETS,
+    MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS, MAX_GC_TREE_JOBS,
+    MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
+    MAX_MATERIALIZATION_STATE_BYTES, MAX_PACKAGE_RECORD_BYTES,
 };
 use crate::state::{
     Digest32, MAX_CHECKPOINT_BYTES, MAX_JOURNAL_BYTES, MAX_PACKAGE_LINE_HIGH_WATERS,
@@ -22,9 +24,10 @@ const MAX_AUTHORITY_JSON_DEPTH: usize = 5;
 const MAX_AUTHORITY_JSON_NODES: usize = 145;
 const MAX_AUTHORITY_JSON_COLLECTION_ENTRIES: usize = MAX_PACKAGE_LINE_HIGH_WATERS;
 
-// The deepest materialization document is journal -> state -> build intent ->
-// package record -> acquired payload -> scalar. Owner-scoped package pins
-// dominate the node count (1,024 rows, each with seven scalar fields).
+// The deepest materialization document remains journal -> state -> build
+// intent -> package record -> acquired payload -> scalar. Owner-scoped package
+// pins dominate the node count (1,024 rows, each with seven scalar fields);
+// the mutually exclusive GC intent adds at most one bounded 8-job batch.
 const MAX_MATERIALIZATION_JSON_DEPTH: usize = 8;
 const MAX_MATERIALIZATION_JSON_NODES: usize = 16_384;
 const MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES: usize = MAX_DURABLE_PACKAGE_PINS;
@@ -53,6 +56,11 @@ const _: () = {
     assert!(MAX_COMPLETED_PACKAGE_RECORDS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
     assert!(MAX_DURABLE_PACKAGE_PINS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
     assert!(MAX_CATALOG_SET_PACKAGES <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
+    assert!(MAX_GC_CATALOG_OBJECT_TARGETS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
+    assert!(MAX_GC_CATALOG_SET_TARGETS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
+    assert!(MAX_GC_PACKAGE_RECORD_TARGETS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
+    assert!(MAX_GC_DATA_OBJECT_TARGETS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
+    assert!(MAX_GC_TREE_JOBS <= MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES);
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

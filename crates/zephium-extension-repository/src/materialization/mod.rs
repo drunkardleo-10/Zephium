@@ -2,14 +2,19 @@
 //!
 //! This module owns the public path-free byte-source contract and the private
 //! exact object/transition machinery consumed by the repository writer. It has
-//! no native-activation operation, garbage collector, receipt constructor,
-//! profile grant, or native-runtime mutation. The crate's package-lease layer
+//! no native-activation operation, product-reachable collector, physical GC
+//! deletion, receipt constructor, profile grant, or native-runtime mutation.
+//! The crate's package-lease layer
 //! composes these private snapshots into authenticated package access and
 //! durable owner-pin authority only. Opening a repository recovers only bounded
 //! metadata and live sealed tree-root identities.
 
 mod catalog_set;
 mod cleanup;
+// Modeled and tested ahead of the separately reviewed destructive settlement
+// slice; no product path may invoke the planner yet.
+#[allow(dead_code)]
+mod gc;
 mod interlock;
 mod names;
 mod objects;
@@ -87,9 +92,19 @@ pub use source::{
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,
     BundledReleaseSourceError,
 };
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
 pub(crate) use state::{
-    MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_PACKAGE_PINS, MAX_MATERIALIZATION_CHECKPOINT_BYTES,
-    MAX_MATERIALIZATION_JOURNAL_BYTES, MAX_MATERIALIZATION_STATE_BYTES,
+    MaterializationGarbageCollectionIntent, MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+};
+pub(crate) use state::{
+    MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_PACKAGE_PINS, MAX_GC_CATALOG_OBJECT_TARGETS,
+    MAX_GC_CATALOG_SET_TARGETS, MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS,
+    MAX_GC_TREE_JOBS, MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
+    MAX_MATERIALIZATION_STATE_BYTES,
 };
 pub(crate) use transaction::{
     abort_package_build, begin_active_package_build, begin_rollback_package_build,

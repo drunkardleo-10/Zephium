@@ -1117,8 +1117,16 @@ fn validate_runtime(
         .map_err(MaterializationTransitionError::Clean)?;
     let canonical = codec::encode(&runtime._state, MAX_MATERIALIZATION_STATE_BYTES)
         .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
-    if canonical != runtime._state_bytes || runtime._state.build_intent != runtime._build_intent {
+    if canonical != runtime._state_bytes
+        || runtime._state.build_intent != runtime._build_intent
+        || runtime._state.gc_intent != runtime._gc_intent
+    {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    if runtime._state.gc_intent.is_some() {
+        return Err(before_journal(
+            ExtensionRepositoryError::GarbageCollectionInProgress,
+        ));
     }
     Ok(())
 }

@@ -8,7 +8,9 @@ use zephium_extension_authority::{
 
 use super::records::{CatalogAnchor, CatalogSetRecord};
 use super::runtime::MaterializationRuntime;
-use super::state::{MaterializationBuildIntent, MaterializationState};
+use super::state::{
+    MaterializationBuildIntent, MaterializationGarbageCollectionIntent, MaterializationState,
+};
 use crate::state::{Digest32, StoredCatalogCheckpoint};
 use crate::ExtensionRepositoryError;
 
@@ -35,18 +37,23 @@ fn collect_live_catalogs(
     collect_live_catalogs_from(
         &runtime._state,
         &runtime._build_intent,
+        &runtime._gc_intent,
         &runtime._catalog_sets,
     )
 }
 
 fn collect_live_catalogs_from(
     state: &MaterializationState,
-    runtime_intent: &Option<MaterializationBuildIntent>,
+    runtime_build_intent: &Option<MaterializationBuildIntent>,
+    runtime_gc_intent: &Option<MaterializationGarbageCollectionIntent>,
     catalog_sets: &BTreeMap<Digest32, CatalogSetRecord>,
 ) -> Result<BTreeSet<CatalogAnchor>, ExtensionRepositoryError> {
     state.validate()?;
-    if &state.build_intent != runtime_intent {
+    if &state.build_intent != runtime_build_intent || &state.gc_intent != runtime_gc_intent {
         return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+    }
+    if state.gc_intent.is_some() {
+        return Err(ExtensionRepositoryError::GarbageCollectionInProgress);
     }
     if state.build_intent.is_some() {
         return Err(ExtensionRepositoryError::CatalogAdvanceBlockedByBuild);
@@ -104,7 +111,7 @@ mod tests {
     use crate::materialization::records::tests::{catalog_set_fixture, package_record_fixture};
     use crate::materialization::state::{
         DurablePackagePin, HistoricalCatalogRole, StoredBrowsingContext,
-        MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+        MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION, MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
@@ -205,7 +212,7 @@ mod tests {
             ..MaterializationState::default()
         };
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &sets).unwrap(),
+            collect_live_catalogs_from(&state, &None, &None, &sets).unwrap(),
             expected
         );
     }
@@ -219,13 +226,15 @@ mod tests {
             completed_package_record_ids: vec![package_id],
             ..MaterializationState::default()
         };
-        assert!(collect_live_catalogs_from(&state, &None, &BTreeMap::new())
-            .unwrap()
-            .is_empty());
+        assert!(
+            collect_live_catalogs_from(&state, &None, &None, &BTreeMap::new())
+                .unwrap()
+                .is_empty()
+        );
 
         state.current_catalog_set_id = Some(crate::state::Digest32::from_bytes([50; 32]));
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &None, &None, &BTreeMap::new()),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)
         );
         state.current_catalog_set_id = None;
@@ -239,7 +248,7 @@ mod tests {
             native_incarnation: 1,
         }];
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &None, &None, &BTreeMap::new()),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)
         );
     }
@@ -259,11 +268,35 @@ mod tests {
             ..MaterializationState::default()
         };
         assert_eq!(
-            collect_live_catalogs_from(&state, &Some(intent), &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &Some(intent), &None, &BTreeMap::new()),
             Err(ExtensionRepositoryError::CatalogAdvanceBlockedByBuild)
         );
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &None, &None, &BTreeMap::new()),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+    }
+
+    #[test]
+    fn collector_requires_one_exact_runtime_gc_intent_projection() {
+        let runtime_only = MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation: 1,
+            cohort: None,
+            catalog_object_ids: vec![crate::state::Digest32::from_bytes([90; 32])],
+            catalog_set_record_ids: Vec::new(),
+            package_record_ids: Vec::new(),
+            tree_index_ids: Vec::new(),
+            legal_artifact_ids: Vec::new(),
+            tree_objects: Vec::new(),
+            retired_trees: Vec::new(),
+        };
+        let state = MaterializationState {
+            generation: 1,
+            ..MaterializationState::default()
+        };
+        assert_eq!(
+            collect_live_catalogs_from(&state, &None, &Some(runtime_only), &BTreeMap::new(),),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)
         );
     }

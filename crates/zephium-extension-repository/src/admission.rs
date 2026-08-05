@@ -1,6 +1,7 @@
 //! Monotonic authenticated-catalog admission and durable transitions.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogCheckpoint,
 };
@@ -9,6 +10,14 @@ use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory, PrivateFsErro
 
 use crate::codec;
 use crate::materialization::{self, MaterializationRuntime};
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+use crate::materialization::{
+    MaterializationGarbageCollectionIntent, MAX_MATERIALIZATION_STATE_BYTES,
+};
 use crate::names::{catalog_file, state_file, state_stage};
 use crate::operation::{reject_if_external_callback, RepositoryOperationGuard, RepositoryRuntime};
 use crate::package_lease::PackageLeaseRuntime;
@@ -51,6 +60,7 @@ pub struct ExtensionRepository {
     _namespace: LockedPrivateNamespace,
     catalogs: PrivateDirectory,
     journals: PrivateDirectory,
+    catalog_object_ids: BTreeSet<Digest32>,
     state: RepositoryState,
     state_bytes: Vec<u8>,
     materialization: Option<MaterializationRuntime>,
@@ -72,6 +82,7 @@ impl ExtensionRepository {
             _namespace: opened.namespace,
             catalogs: opened.catalogs,
             journals: opened.journals,
+            catalog_object_ids: opened.catalog_object_ids,
             state: opened.state,
             state_bytes: opened.state_bytes,
             materialization: Some(opened.materialization),
@@ -123,6 +134,49 @@ impl ExtensionRepository {
             .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)
     }
 
+    pub(crate) fn writer_require_gc_idle(&mut self) -> Result<(), ExtensionRepositoryError> {
+        let validation = self.writer_materialization()?.validate_gc_idle_projection();
+        match validation {
+            Ok(()) => Ok(()),
+            Err(ExtensionRepositoryError::GarbageCollectionInProgress) => {
+                Err(ExtensionRepositoryError::GarbageCollectionInProgress)
+            }
+            Err(error) => Err(self.prejournal_error(error)),
+        }
+    }
+
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub(crate) fn writer_install_gc_projection_for_e2e(
+        &mut self,
+        intent: MaterializationGarbageCollectionIntent,
+    ) -> Result<(), ExtensionRepositoryError> {
+        let mut state = self.writer_materialization()?._state.clone();
+        state.generation = intent.generation;
+        state.gc_intent = Some(intent.clone());
+        state.validate()?;
+        let state_bytes = codec::encode(&state, MAX_MATERIALIZATION_STATE_BYTES)
+            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
+        let mut runtime = self.writer_take_materialization()?;
+        runtime._state = state;
+        runtime._state_bytes = state_bytes;
+        runtime._gc_intent = Some(intent);
+        self.materialization = Some(runtime);
+        Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub(crate) fn writer_break_gc_projection_for_e2e(&mut self) {
+        self.materialization.as_mut().unwrap()._gc_intent = None;
+    }
+
     pub(crate) fn writer_take_materialization(
         &mut self,
     ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
@@ -142,6 +196,7 @@ impl ExtensionRepository {
         match materialization::open_or_recover(
             self._namespace.directory(),
             &self.catalogs,
+            &self.catalog_object_ids,
             self.state.checkpoint(),
             true,
             materialization::FaultPoint::None,
@@ -208,6 +263,7 @@ impl ExtensionRepository {
         if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
+        self.writer_require_gc_idle()?;
         validate_exact_rollback_catalog(admitted, exact_catalog_bytes)?;
         if let Err(error) = self.state.validate() {
             return Err(self.prejournal_error(error));
@@ -232,7 +288,9 @@ impl ExtensionRepository {
         }
         let digest = Digest32::from_bytes(admitted.catalog_digest().bytes());
         ensure_catalog_object(&self.catalogs, digest, exact_catalog_bytes)
-            .map_err(|error| self.prejournal_error(error))
+            .map_err(|error| self.prejournal_error(error))?;
+        self.catalog_object_ids.insert(digest);
+        Ok(())
     }
 
     /// Read-only proof that the exact active catalog is already the durable
@@ -330,6 +388,7 @@ impl ExtensionRepository {
         if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
+        self.writer_require_gc_idle()?;
         validate_exact_catalog(admitted, exact_catalog_bytes)?;
         let candidate = StoredCatalogCheckpoint::from_admitted(
             admitted.checkpoint(),
@@ -343,7 +402,9 @@ impl ExtensionRepository {
             candidate.catalog_sha256,
             exact_catalog_bytes,
         )
-        .map_err(|error| self.prejournal_error(error))
+        .map_err(|error| self.prejournal_error(error))?;
+        self.catalog_object_ids.insert(candidate.catalog_sha256);
+        Ok(())
     }
 
     fn record_view(
@@ -363,8 +424,20 @@ impl ExtensionRepository {
         let catalog_digest = candidate.catalog_sha256;
         let plan = plan_record(&self.state, witness.catalog(), candidate.clone())?;
 
-        if matches!(&plan, RecordPlan::Advance(_)) {
-            self.validate_materialization_advance(candidate)?;
+        match &plan {
+            RecordPlan::Advance(_) => self.validate_materialization_advance(candidate)?,
+            RecordPlan::Replay => {
+                if let Some(runtime) = self.materialization.as_ref() {
+                    let validation = runtime.validate_gc_idle_projection();
+                    match validation {
+                        Ok(()) => {}
+                        Err(ExtensionRepositoryError::GarbageCollectionInProgress) => {
+                            return Err(ExtensionRepositoryError::GarbageCollectionInProgress);
+                        }
+                        Err(error) => return Err(self.prejournal_error(error)),
+                    }
+                }
+            }
         }
 
         if let Err(error) =
@@ -372,6 +445,7 @@ impl ExtensionRepository {
         {
             return Err(self.prejournal_error(error));
         }
+        self.catalog_object_ids.insert(catalog_digest);
         self.fail_if(fault, FaultPoint::AfterCatalogObject)?;
 
         let RecordPlan::Advance(next_state) = plan else {
@@ -442,6 +516,7 @@ impl ExtensionRepository {
             let reopened = materialization::open_or_recover(
                 self._namespace.directory(),
                 &self.catalogs,
+                &self.catalog_object_ids,
                 self.state.checkpoint(),
                 true,
                 materialization::FaultPoint::None,
@@ -452,11 +527,19 @@ impl ExtensionRepository {
             };
             self.materialization = Some(reopened);
         }
-        let validation = self
+        let runtime = self
             .materialization
             .as_ref()
-            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)
-            .and_then(|runtime| materialization::validate_catalog_advance(runtime, &candidate));
+            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+        let gc_validation = runtime.validate_gc_idle_projection();
+        match gc_validation {
+            Ok(()) => {}
+            Err(ExtensionRepositoryError::GarbageCollectionInProgress) => {
+                return Err(ExtensionRepositoryError::GarbageCollectionInProgress);
+            }
+            Err(error) => return Err(self.prejournal_error(error)),
+        }
+        let validation = materialization::validate_catalog_advance(runtime, &candidate);
         validation.map_err(|error| self.prejournal_error(error))
     }
 

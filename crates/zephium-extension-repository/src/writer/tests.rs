@@ -36,10 +36,11 @@ use crate::materialization::{
     publish_or_reuse_active_package_at_fault, remove_owner_package_pin,
     remove_owner_package_pin_at_fault, resolve_recovered_package_pin_release,
     rollback_to_previous_catalog_set_at_fault, stage_active_catalog_set_candidate,
-    stage_active_catalog_set_candidate_at_fault, ObjectPublicationFaultPoint, OwnerPackagePinPlan,
-    OwnerPackagePinRemovalPlan, PackagePinReleaseAdmissionError, RecoveredPackagePinRelease,
-    TransitionFaultPoint, VerifiedActiveCatalogSet, VerifiedPackagePinAdmission,
-    VerifiedRollbackCatalogSet, MAX_PACKAGE_RECORD_BYTES,
+    stage_active_catalog_set_candidate_at_fault, MaterializationGarbageCollectionIntent,
+    ObjectPublicationFaultPoint, OwnerPackagePinPlan, OwnerPackagePinRemovalPlan,
+    PackagePinReleaseAdmissionError, RecoveredPackagePinRelease, TransitionFaultPoint,
+    VerifiedActiveCatalogSet, VerifiedPackagePinAdmission, VerifiedRollbackCatalogSet,
+    MATERIALIZATION_GC_INTENT_SCHEMA_VERSION, MAX_PACKAGE_RECORD_BYTES,
 };
 use crate::{
     BundledCatalogRecordOutcome, BundledCatalogSetError, BundledCatalogSetIdentity,
@@ -1380,6 +1381,99 @@ fn different_build_settlement_failure_precedes_every_new_source_callback() {
         Err(BundledPackageMaterializationError::InterruptedBuildSettlement(_))
     ));
     assert!(rollback_source.requests.is_empty());
+}
+
+#[test]
+fn pending_gc_blocks_settlement_sources_and_every_catalog_writer() {
+    let (_authority, active, rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    repository
+        .writer_install_gc_projection_for_e2e(MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation: 1,
+            cohort: None,
+            catalog_object_ids: vec![crate::state::Digest32::from_bytes([250; 32])],
+            catalog_set_record_ids: Vec::new(),
+            package_record_ids: Vec::new(),
+            tree_index_ids: Vec::new(),
+            legal_artifact_ids: Vec::new(),
+            tree_objects: Vec::new(),
+            retired_trees: Vec::new(),
+        })
+        .unwrap();
+    let before = durable_repository_snapshot(&harness.repository_path);
+
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build(),
+        Err(BundledPackageBuildSettlementError::Repository(
+            ExtensionRepositoryError::GarbageCollectionInProgress
+        ))
+    );
+    let mut source = FixtureSource::active(&active);
+    assert!(matches!(
+        repository.materialize_active_bundled_package(
+            &active,
+            fixture::ACTIVE_CATALOG_BYTES,
+            runtime_target(),
+            package_key(),
+            &mut source,
+        ),
+        Err(BundledPackageMaterializationError::Repository(
+            ExtensionRepositoryError::GarbageCollectionInProgress
+        ))
+    ));
+    assert!(source.requests.is_empty());
+    assert_eq!(
+        repository.writer_stage_active_catalog_candidate(&active, fixture::ACTIVE_CATALOG_BYTES,),
+        Err(ExtensionRepositoryError::GarbageCollectionInProgress)
+    );
+    assert_eq!(
+        repository.writer_ensure_rollback_catalog(&rollback, fixture::ROLLBACK_CATALOG_BYTES,),
+        Err(ExtensionRepositoryError::GarbageCollectionInProgress)
+    );
+    assert_eq!(
+        repository.record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES),
+        Err(ExtensionRepositoryError::GarbageCollectionInProgress)
+    );
+    assert!(!repository.writer_is_sealed());
+    assert_eq!(
+        durable_repository_snapshot(&harness.repository_path),
+        before
+    );
+}
+
+#[test]
+fn gc_projection_mismatch_is_corruption_not_a_busy_repository() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    repository
+        .writer_install_gc_projection_for_e2e(MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation: 1,
+            cohort: None,
+            catalog_object_ids: vec![crate::state::Digest32::from_bytes([250; 32])],
+            catalog_set_record_ids: Vec::new(),
+            package_record_ids: Vec::new(),
+            tree_index_ids: Vec::new(),
+            legal_artifact_ids: Vec::new(),
+            tree_objects: Vec::new(),
+            retired_trees: Vec::new(),
+        })
+        .unwrap();
+    repository.writer_break_gc_projection_for_e2e();
+    let before = durable_repository_snapshot(&harness.repository_path);
+
+    assert_eq!(
+        repository.record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES),
+        Err(ExtensionRepositoryError::SettlementAmbiguous)
+    );
+    assert!(repository.writer_is_sealed());
+    assert_eq!(
+        durable_repository_snapshot(&harness.repository_path),
+        before
+    );
 }
 
 #[test]

@@ -40,6 +40,9 @@ pub enum ExtensionRepositoryError {
     /// A package build must settle or be durably aborted before catalog advance.
     #[error("catalog advance is blocked by an extension package build")]
     CatalogAdvanceBlockedByBuild,
+    /// A bounded garbage-collection intent must settle before repository mutation.
+    #[error("extension repository garbage collection is in progress")]
+    GarbageCollectionInProgress,
     /// A live selected or owner-pinned package is incompatible with catalog advance.
     #[error("catalog advance is blocked by a live extension generation")]
     CatalogAdvanceBlockedByLiveGeneration,

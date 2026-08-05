@@ -50,7 +50,7 @@ impl CatalogAnchor {
         }
     }
 
-    fn validate(self) -> Result<(), ExtensionRepositoryError> {
+    pub(crate) fn validate(self) -> Result<(), ExtensionRepositoryError> {
         if ExtensionReleaseCatalogRevision::new(self.revision).is_none()
             || self.catalog_length == 0
             || self.catalog_length > MAX_EXTENSION_RELEASE_CATALOG_BYTES as u64

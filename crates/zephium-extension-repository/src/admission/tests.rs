@@ -219,11 +219,17 @@ fn records_replays_and_advances_one_exact_authority_history() {
         Ok(BundledCatalogRecordOutcome::Recorded)
     );
     assert_eq!(repository.state.generation, 2);
+    let expected_catalog_objects = BTreeSet::from([
+        Digest32::from_bytes(first_witness.checkpoint.catalog_digest().bytes()),
+        Digest32::from_bytes(second_witness.checkpoint.catalog_digest().bytes()),
+    ]);
+    assert_eq!(repository.catalog_object_ids, expected_catalog_objects);
     drop(repository);
 
     let recovered = harness.open();
     assert_eq!(recovered.state.generation, 2);
     assert_eq!(recovered.state.package_line_high_waters.len(), 1);
+    assert_eq!(recovered.catalog_object_ids, expected_catalog_objects);
     assert!(recovered.materialization.is_some());
 }
 

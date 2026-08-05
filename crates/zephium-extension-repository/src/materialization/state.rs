@@ -9,13 +9,20 @@ use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::session::MAX_SESSION_PROFILES;
 use zephium_extension_authority::MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS;
 use zephium_extension_package::MAX_EXTENSION_PACKAGE_LINES;
+use zephium_extension_package::{
+    MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES,
+};
 
-use super::records::PackageRecord;
+use super::records::{CatalogAnchor, PackageRecord};
 use crate::state::Digest32;
 use crate::ExtensionRepositoryError;
 
-pub(crate) const MATERIALIZATION_STATE_SCHEMA_VERSION: u32 = 3;
-pub(crate) const MATERIALIZATION_JOURNAL_SCHEMA_VERSION: u32 = 3;
+// Schema v3 never shipped. It is deliberately rejected instead of migrated:
+// v4 makes an in-progress collector part of the durable retention graph, and
+// silently defaulting that field while opening pre-v4 bytes would erase the
+// distinction between "never planned" and "plan metadata was lost".
+pub(crate) const MATERIALIZATION_STATE_SCHEMA_VERSION: u32 = 4;
+pub(crate) const MATERIALIZATION_JOURNAL_SCHEMA_VERSION: u32 = 4;
 pub(crate) const MATERIALIZATION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub(crate) const MAX_MATERIALIZATION_STATE_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_MATERIALIZATION_CHECKPOINT_BYTES: usize = 16 * 1024;
@@ -31,6 +38,16 @@ pub(crate) const MAX_DURABLE_PACKAGE_PINS_PER_PROFILE: usize =
 pub(crate) const MAX_DURABLE_PACKAGE_PINS: usize =
     checked_mul(MAX_SESSION_PROFILES, MAX_DURABLE_PACKAGE_PINS_PER_PROFILE);
 pub(crate) const MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const MATERIALIZATION_GC_INTENT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const MAX_GC_CATALOG_OBJECT_TARGETS: usize = MAX_EXTENSION_PACKAGE_LINES;
+pub(crate) const MAX_GC_CATALOG_SET_TARGETS: usize = MAX_EXTENSION_PACKAGE_LINES;
+pub(crate) const MAX_GC_PACKAGE_RECORD_TARGETS: usize = MAX_COMPLETED_PACKAGE_RECORDS;
+pub(crate) const MAX_GC_DATA_OBJECT_TARGETS: usize = MAX_EXTENSION_PACKAGE_LINES;
+pub(crate) const MAX_GC_TREE_JOBS: usize = MAX_EXTENSION_PACKAGE_LINES;
+pub(crate) const MAX_GC_TREE_ENTRIES: usize =
+    checked_mul(MAX_EXTENSION_TREE_ENTRIES, MAX_GC_TREE_JOBS);
+pub(crate) const MAX_GC_KNOWN_TREE_BYTES: u64 = MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES;
+pub(crate) const MAX_GC_INTENT_RETAINED_BYTES: usize = 16 * 1024;
 
 // Candidate/current/previous retain one selected backend per package for all
 // product-recognized catalog generations. One additional catalog-sized
@@ -40,6 +57,13 @@ const _: () = assert!(MAX_CATALOG_SET_SLOTS == 3);
 const _: () = assert!(MAX_DRAIN_CATALOG_SELECTIONS == 1);
 const _: () = assert!(MAX_COMPLETED_PACKAGE_RECORDS <= 32);
 const _: () = assert!(MAX_DURABLE_PACKAGE_PINS == MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES);
+const _: () = assert!(MAX_GC_PACKAGE_RECORD_TARGETS <= 32);
+const _: () = assert!(MAX_GC_CATALOG_OBJECT_TARGETS <= 8);
+const _: () = assert!(MAX_GC_CATALOG_SET_TARGETS <= 8);
+const _: () = assert!(MAX_GC_DATA_OBJECT_TARGETS <= 8);
+const _: () = assert!(MAX_GC_TREE_JOBS <= 8);
+const _: () = assert!(MAX_GC_TREE_ENTRIES <= 32_768);
+const _: () = assert!(MAX_GC_KNOWN_TREE_BYTES <= 256 * 1024 * 1024);
 
 pub(crate) const MAX_DURABLE_GENERATION: u64 = i64::MAX as u64;
 
@@ -72,6 +96,7 @@ pub(crate) struct MaterializationState {
     pub(crate) previous_catalog_set_id: Option<Digest32>,
     pub(crate) package_pins: Vec<DurablePackagePin>,
     pub(crate) build_intent: Option<MaterializationBuildIntent>,
+    pub(crate) gc_intent: Option<MaterializationGarbageCollectionIntent>,
 }
 
 impl Default for MaterializationState {
@@ -85,6 +110,7 @@ impl Default for MaterializationState {
             previous_catalog_set_id: None,
             package_pins: Vec::new(),
             build_intent: None,
+            gc_intent: None,
         }
     }
 }
@@ -111,6 +137,9 @@ impl MaterializationState {
         {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
+        if self.build_intent.is_some() && self.gc_intent.is_some() {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
         if let Some(intent) = &self.build_intent {
             if self.generation == MAX_DURABLE_GENERATION {
                 return Err(ExtensionRepositoryError::RecoveryAmbiguous);
@@ -120,6 +149,25 @@ impl MaterializationState {
                 .completed_package_record_ids
                 .binary_search(&intent.package_record_id)
                 .is_ok()
+            {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
+        }
+        if let Some(intent) = &self.gc_intent {
+            if self.generation == MAX_DURABLE_GENERATION {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
+            intent.validate(self.generation)?;
+            if self
+                .completed_package_record_ids
+                .len()
+                .checked_add(intent.package_record_ids.len())
+                .is_none_or(|preplan_count| preplan_count > MAX_COMPLETED_PACKAGE_RECORDS)
+                || intent.package_record_ids.iter().any(|record_id| {
+                    self.completed_package_record_ids
+                        .binary_search(record_id)
+                        .is_ok()
+                })
             {
                 return Err(ExtensionRepositoryError::RecoveryAmbiguous);
             }
@@ -143,7 +191,8 @@ impl MaterializationState {
             && (!self.completed_package_record_ids.is_empty()
                 || slots.iter().any(Option::is_some)
                 || !self.package_pins.is_empty()
-                || self.build_intent.is_some())
+                || self.build_intent.is_some()
+                || self.gc_intent.is_some())
         {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
@@ -167,6 +216,215 @@ impl MaterializationState {
         pins.sort_unstable();
         pins.dedup();
         pins
+    }
+}
+
+/// Exact durable identity of one bounded garbage-collection batch.
+///
+/// A cohort is present only when deleting catalog-bound set/package metadata.
+/// `None` is reserved for already-unreachable content-addressed residue and
+/// retired tree roots; it must never weaken catalog/package identity checks.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MaterializationGarbageCollectionIntent {
+    pub(crate) schema_version: u32,
+    pub(crate) generation: u64,
+    pub(crate) cohort: Option<CatalogAnchor>,
+    pub(crate) catalog_object_ids: Vec<Digest32>,
+    pub(crate) catalog_set_record_ids: Vec<Digest32>,
+    pub(crate) package_record_ids: Vec<Digest32>,
+    pub(crate) tree_index_ids: Vec<Digest32>,
+    pub(crate) legal_artifact_ids: Vec<Digest32>,
+    pub(crate) tree_objects: Vec<GarbageCollectionTreeObject>,
+    pub(crate) retired_trees: Vec<GarbageCollectionRetiredTree>,
+}
+
+impl MaterializationGarbageCollectionIntent {
+    pub(crate) fn validate(&self, state_generation: u64) -> Result<(), ExtensionRepositoryError> {
+        if self.schema_version != MATERIALIZATION_GC_INTENT_SCHEMA_VERSION
+            || self.generation == 0
+            || self.generation != state_generation
+            || self.catalog_object_ids.len() > MAX_GC_CATALOG_OBJECT_TARGETS
+            || self.catalog_set_record_ids.len() > MAX_GC_CATALOG_SET_TARGETS
+            || self.package_record_ids.len() > MAX_GC_PACKAGE_RECORD_TARGETS
+            || self.tree_index_ids.len() > MAX_GC_DATA_OBJECT_TARGETS
+            || self.legal_artifact_ids.len() > MAX_GC_DATA_OBJECT_TARGETS
+            || self
+                .tree_objects
+                .len()
+                .saturating_add(self.retired_trees.len())
+                > MAX_GC_TREE_JOBS
+            || !strictly_sorted(&self.catalog_object_ids)
+            || !strictly_sorted(&self.catalog_set_record_ids)
+            || !strictly_sorted(&self.package_record_ids)
+            || !strictly_sorted(&self.tree_index_ids)
+            || !strictly_sorted(&self.legal_artifact_ids)
+            || self
+                .tree_objects
+                .windows(2)
+                .any(|pair| pair[0].tree_sha256 >= pair[1].tree_sha256)
+            || self
+                .retired_trees
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1] || pair[0].tree_sha256 == pair[1].tree_sha256)
+            || self.tree_objects.iter().any(|tree| {
+                self.retired_trees
+                    .binary_search_by_key(&tree.tree_sha256, |retired| retired.tree_sha256)
+                    .is_ok()
+            })
+            || self.is_empty()
+            || self.retained_bytes() > MAX_GC_INTENT_RETAINED_BYTES
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+
+        let catalog_bound_work =
+            !self.catalog_set_record_ids.is_empty() || !self.package_record_ids.is_empty();
+        if self.cohort.is_none() && catalog_bound_work
+            || self.cohort.is_some() && self.package_record_ids.is_empty()
+            || self.cohort.is_some() && !self.retired_trees.is_empty()
+            || self.cohort.is_some()
+                && self.tree_objects.iter().any(|tree| {
+                    tree.known_total_entry_count.is_none() || tree.known_tree_bytes.is_none()
+                })
+            || self.cohort.is_none()
+                && self.tree_objects.iter().any(|tree| {
+                    tree.known_total_entry_count.is_some() || tree.known_tree_bytes.is_some()
+                })
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        if let Some(cohort) = self.cohort {
+            cohort.validate()?;
+            if self.catalog_object_ids.len() > 1
+                || self
+                    .catalog_object_ids
+                    .first()
+                    .is_some_and(|digest| *digest != cohort.catalog_sha256)
+            {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
+        }
+
+        let mut charged_entries = 0_usize;
+        let mut known_bytes = 0_u64;
+        for tree in &self.tree_objects {
+            tree.validate()?;
+            charged_entries = charged_entries
+                .checked_add(
+                    tree.known_total_entry_count
+                        .map_or(MAX_EXTENSION_TREE_ENTRIES, |count| count as usize),
+                )
+                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+            if let Some(bytes) = tree.known_tree_bytes {
+                known_bytes = known_bytes
+                    .checked_add(bytes)
+                    .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+            }
+        }
+        for retired in &self.retired_trees {
+            retired.validate()?;
+            if retired.retirement_generation >= self.generation {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
+            charged_entries = charged_entries
+                .checked_add(MAX_EXTENSION_TREE_ENTRIES)
+                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+        }
+        if charged_entries > MAX_GC_TREE_ENTRIES || known_bytes > MAX_GC_KNOWN_TREE_BYTES {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.catalog_object_ids.is_empty()
+            && self.catalog_set_record_ids.is_empty()
+            && self.package_record_ids.is_empty()
+            && self.tree_index_ids.is_empty()
+            && self.legal_artifact_ids.is_empty()
+            && self.tree_objects.is_empty()
+            && self.retired_trees.is_empty()
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.catalog_object_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Digest32>()),
+            )
+            .saturating_add(
+                self.catalog_set_record_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Digest32>()),
+            )
+            .saturating_add(
+                self.package_record_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Digest32>()),
+            )
+            .saturating_add(
+                self.tree_index_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Digest32>()),
+            )
+            .saturating_add(
+                self.legal_artifact_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Digest32>()),
+            )
+            .saturating_add(
+                self.tree_objects
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<GarbageCollectionTreeObject>()),
+            )
+            .saturating_add(
+                self.retired_trees
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<GarbageCollectionRetiredTree>()),
+            )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GarbageCollectionTreeObject {
+    pub(crate) tree_sha256: Digest32,
+    pub(crate) known_total_entry_count: Option<u32>,
+    pub(crate) known_tree_bytes: Option<u64>,
+}
+
+impl GarbageCollectionTreeObject {
+    fn validate(self) -> Result<(), ExtensionRepositoryError> {
+        match (self.known_total_entry_count, self.known_tree_bytes) {
+            (Some(entries), Some(bytes))
+                if entries > 0
+                    && entries as usize <= MAX_EXTENSION_TREE_ENTRIES
+                    && bytes > 0
+                    && bytes <= MAX_EXTENSION_TREE_BYTES =>
+            {
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            _ => Err(ExtensionRepositoryError::RecoveryAmbiguous),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GarbageCollectionRetiredTree {
+    pub(crate) tree_sha256: Digest32,
+    pub(crate) retirement_generation: u64,
+}
+
+impl GarbageCollectionRetiredTree {
+    fn validate(self) -> Result<(), ExtensionRepositoryError> {
+        if self.retirement_generation == 0 || self.retirement_generation > MAX_DURABLE_GENERATION {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        Ok(())
     }
 }
 
@@ -478,6 +736,210 @@ mod tests {
         );
     }
 
+    fn residue_gc_intent(
+        generation: u64,
+        catalog_object_ids: Vec<Digest32>,
+    ) -> MaterializationGarbageCollectionIntent {
+        MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation,
+            cohort: None,
+            catalog_object_ids,
+            catalog_set_record_ids: Vec::new(),
+            package_record_ids: Vec::new(),
+            tree_index_ids: Vec::new(),
+            legal_artifact_ids: Vec::new(),
+            tree_objects: Vec::new(),
+            retired_trees: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gc_targets_replace_completed_roots_and_exclude_build_intents() {
+        let target = digest(1);
+        let mut state = MaterializationState {
+            generation: 2,
+            completed_package_record_ids: vec![digest(2)],
+            gc_intent: Some(MaterializationGarbageCollectionIntent {
+                cohort: Some(super::super::records::tests::package_record_fixture(20).catalog),
+                package_record_ids: vec![target],
+                ..residue_gc_intent(2, Vec::new())
+            }),
+            ..MaterializationState::default()
+        };
+        assert_eq!(state.validate(), Ok(()));
+
+        state.completed_package_record_ids.insert(0, target);
+        assert_eq!(
+            state.validate(),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+        state.completed_package_record_ids.remove(0);
+
+        let package_record = super::super::records::tests::package_record_fixture(31);
+        state.build_intent = Some(MaterializationBuildIntent {
+            schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+            generation: 2,
+            package_record_id: package_record.record_id().unwrap(),
+            package_record,
+        });
+        assert_eq!(
+            state.validate(),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+    }
+
+    #[test]
+    fn gc_package_partition_never_widens_the_completed_ledger_bound() {
+        let package = super::super::records::tests::package_record_fixture(20);
+        let target = digest(250);
+        let intent = MaterializationGarbageCollectionIntent {
+            cohort: Some(package.catalog),
+            package_record_ids: vec![target],
+            ..residue_gc_intent(1, Vec::new())
+        };
+        let mut state = MaterializationState {
+            generation: 1,
+            completed_package_record_ids: (0..MAX_COMPLETED_PACKAGE_RECORDS - 1)
+                .map(|index| digest(index as u8 + 1))
+                .collect(),
+            gc_intent: Some(intent),
+            ..MaterializationState::default()
+        };
+        assert_eq!(state.validate(), Ok(()));
+
+        state
+            .completed_package_record_ids
+            .push(digest(MAX_COMPLETED_PACKAGE_RECORDS as u8));
+        assert_eq!(
+            state.validate(),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+    }
+
+    #[test]
+    fn gc_intent_rejects_noncanonical_and_over_budget_targets() {
+        let mut intent = residue_gc_intent(1, vec![digest(1), digest(1)]);
+        assert_eq!(
+            intent.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+
+        intent.catalog_object_ids = (0..=MAX_GC_CATALOG_OBJECT_TARGETS)
+            .map(|index| digest(index as u8 + 1))
+            .collect();
+        assert_eq!(
+            intent.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+
+        intent = residue_gc_intent(1, vec![digest(1)]);
+        intent.tree_objects = (0..=MAX_GC_TREE_JOBS)
+            .map(|index| GarbageCollectionTreeObject {
+                tree_sha256: digest(index as u8 + 20),
+                known_total_entry_count: None,
+                known_tree_bytes: None,
+            })
+            .collect();
+        assert_eq!(
+            intent.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+
+        intent.tree_objects = (0..3)
+            .map(|index| GarbageCollectionTreeObject {
+                tree_sha256: digest(index + 20),
+                known_total_entry_count: Some(1),
+                known_tree_bytes: Some(MAX_EXTENSION_TREE_BYTES),
+            })
+            .collect();
+        assert_eq!(
+            intent.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+
+        intent.tree_objects.clear();
+        intent.retired_trees = vec![GarbageCollectionRetiredTree {
+            tree_sha256: digest(30),
+            retirement_generation: 1,
+        }];
+        assert_eq!(
+            intent.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+        intent.generation = 2;
+        assert_eq!(intent.validate(2), Ok(()));
+
+        let package = super::super::records::tests::package_record_fixture(80);
+        let catalog_only = MaterializationGarbageCollectionIntent {
+            cohort: Some(package.catalog),
+            ..residue_gc_intent(1, vec![package.catalog.catalog_sha256])
+        };
+        assert_eq!(
+            catalog_only.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+        let set_only = MaterializationGarbageCollectionIntent {
+            cohort: Some(package.catalog),
+            catalog_set_record_ids: vec![digest(100)],
+            ..residue_gc_intent(1, vec![package.catalog.catalog_sha256])
+        };
+        assert_eq!(
+            set_only.validate(1),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        );
+    }
+
+    #[test]
+    fn maximum_gc_intent_is_canonical_and_memory_bounded() {
+        let package = super::super::records::tests::package_record_fixture(41);
+        let tree_bytes_per_job = MAX_GC_KNOWN_TREE_BYTES / MAX_GC_TREE_JOBS as u64;
+        let intent = MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation: 1,
+            cohort: Some(package.catalog),
+            catalog_object_ids: vec![package.catalog.catalog_sha256],
+            catalog_set_record_ids: (0..MAX_GC_CATALOG_SET_TARGETS)
+                .map(|index| digest(index as u8 + 1))
+                .collect(),
+            package_record_ids: (0..MAX_GC_PACKAGE_RECORD_TARGETS)
+                .map(|index| digest(index as u8 + 20))
+                .collect(),
+            tree_index_ids: (0..MAX_GC_DATA_OBJECT_TARGETS)
+                .map(|index| digest(index as u8 + 60))
+                .collect(),
+            legal_artifact_ids: (0..MAX_GC_DATA_OBJECT_TARGETS)
+                .map(|index| digest(index as u8 + 80))
+                .collect(),
+            tree_objects: (0..MAX_GC_TREE_JOBS)
+                .map(|index| GarbageCollectionTreeObject {
+                    tree_sha256: digest(index as u8 + 100),
+                    known_total_entry_count: Some(MAX_EXTENSION_TREE_ENTRIES as u32),
+                    known_tree_bytes: Some(tree_bytes_per_job),
+                })
+                .collect(),
+            retired_trees: Vec::new(),
+        };
+        intent.validate(1).unwrap();
+        assert!(intent.retained_bytes() <= MAX_GC_INTENT_RETAINED_BYTES);
+        let state = MaterializationState {
+            generation: 1,
+            gc_intent: Some(intent),
+            ..MaterializationState::default()
+        };
+        state.validate().unwrap();
+        let bytes = crate::codec::encode(&state, MAX_MATERIALIZATION_STATE_BYTES).unwrap();
+        assert!(bytes.len() <= MAX_MATERIALIZATION_STATE_BYTES);
+        assert_eq!(
+            crate::codec::decode_materialization::<MaterializationState>(
+                &bytes,
+                MAX_MATERIALIZATION_STATE_BYTES,
+            )
+            .unwrap(),
+            state
+        );
+    }
+
     #[test]
     fn pin_projection_is_sorted_and_duplicate_free() {
         let mut owner_pin = pin(1, 1, StoredBrowsingContext::Regular, digest(9), 1);
@@ -621,7 +1083,7 @@ mod tests {
     #[test]
     fn maximum_owner_pin_state_fits_the_bounded_duplicate_safe_codec() {
         let state = MaterializationState {
-            generation: MAX_DURABLE_GENERATION,
+            generation: MAX_DURABLE_GENERATION - 1,
             completed_package_record_ids: vec![digest(9)],
             package_pins: (0..MAX_DURABLE_PACKAGE_PINS)
                 .map(|index| {
@@ -642,6 +1104,10 @@ mod tests {
                     )
                 })
                 .collect(),
+            gc_intent: Some(residue_gc_intent(
+                MAX_DURABLE_GENERATION - 1,
+                vec![digest(12)],
+            )),
             ..MaterializationState::default()
         };
         state.validate().unwrap();
@@ -714,14 +1180,12 @@ mod tests {
         assert!(serde_json::from_str::<StoredBrowsingContext>(r#""guest""#).is_err());
 
         let old_empty = br#"{"schema_version":2,"generation":0,"completed_package_record_ids":[],"candidate_catalog_set_id":null,"current_catalog_set_id":null,"previous_catalog_set_id":null,"package_pins":[],"build_intent":null}"#;
-        let decoded = crate::codec::decode_materialization::<MaterializationState>(
-            old_empty,
-            MAX_MATERIALIZATION_STATE_BYTES,
-        )
-        .unwrap();
-        assert_eq!(
-            decoded.validate(),
-            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        assert!(
+            crate::codec::decode_materialization::<MaterializationState>(
+                old_empty,
+                MAX_MATERIALIZATION_STATE_BYTES,
+            )
+            .is_err()
         );
 
         let old_live_pin = br#"{"schema_version":2,"generation":1,"completed_package_record_ids":["0909090909090909090909090909090909090909090909090909090909090909"],"candidate_catalog_set_id":null,"current_catalog_set_id":null,"previous_catalog_set_id":null,"package_pins":[{"profile_id":"00000000000000000000000001","install_id":"00000000000000000000000001","package_record_id":"0909090909090909090909090909090909090909090909090909090909090909","incarnation":1}],"build_intent":null}"#;
@@ -732,5 +1196,24 @@ mod tests {
             )
             .is_err()
         );
+
+        // Schema v3 was an unreleased checkout-local format. It is rejected
+        // rather than silently defaulting the v4 collector retention field.
+        let unreleased_v3 = br#"{"schema_version":3,"generation":0,"completed_package_record_ids":[],"candidate_catalog_set_id":null,"current_catalog_set_id":null,"previous_catalog_set_id":null,"package_pins":[],"build_intent":null}"#;
+        assert!(
+            crate::codec::decode_materialization::<MaterializationState>(
+                unreleased_v3,
+                MAX_MATERIALIZATION_STATE_BYTES,
+            )
+            .is_err()
+        );
+
+        let current_empty = br#"{"schema_version":4,"generation":0,"completed_package_record_ids":[],"candidate_catalog_set_id":null,"current_catalog_set_id":null,"previous_catalog_set_id":null,"package_pins":[],"build_intent":null,"gc_intent":null}"#;
+        let decoded = crate::codec::decode_materialization::<MaterializationState>(
+            current_empty,
+            MAX_MATERIALIZATION_STATE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(decoded, MaterializationState::default());
     }
 }

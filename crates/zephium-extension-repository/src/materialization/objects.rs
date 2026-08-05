@@ -24,7 +24,7 @@ use zephium_private_fs::{
 use super::cleanup::{prove_build_stages_absent, BuildStagesAbsent, CleanupError};
 use super::names::{self, RecordNameKind, TreeNameKind};
 use super::policy::{
-    reserve_package_build_intent_generation, validate_completed_tree_budget,
+    reserve_two_transition_intent_generation, validate_completed_tree_budget,
     validate_package_anchor_consistency, PackagePolicyError,
 };
 use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
@@ -579,7 +579,8 @@ pub(super) fn publish_or_reuse_catalog_set_record(
     record
         .validate()
         .map_err(|_| PackageObjectError::ExactMismatch)?;
-    if runtime._state.build_intent.is_some()
+    if !runtime.garbage_collection_is_idle()
+        || runtime._state.build_intent.is_some()
         || runtime._build_intent.is_some()
         || runtime._build_stage.is_some()
         || !runtime._record_stages.is_empty()
@@ -869,7 +870,8 @@ fn intent_preflight(
         ._state
         .validate()
         .map_err(|_| PackageObjectError::BuildStateMismatch)?;
-    if runtime._state.build_intent != runtime._build_intent
+    if !runtime.garbage_collection_is_idle()
+        || runtime._state.build_intent != runtime._build_intent
         || runtime._build_stage.is_some()
         || !runtime._record_stages.is_empty()
     {
@@ -892,7 +894,7 @@ fn intent_preflight(
 
     match runtime._build_intent.as_ref() {
         None => {
-            let generation = reserve_package_build_intent_generation(runtime._state.generation)
+            let generation = reserve_two_transition_intent_generation(runtime._state.generation)
                 .ok_or(PackageObjectError::GenerationExhausted)?;
             Ok((
                 PackageObjectIntentDisposition::RequiresCommit,
@@ -1140,6 +1142,7 @@ fn validate_capacity_and_intent(
         || prepared.record.tree_index.tree_sha256 != capacity.tree_id
         || prepared.record.tree_index.index_sha256 != capacity.tree_index_id
         || prepared.record.legal.sha256 != capacity.legal_id
+        || !runtime.garbage_collection_is_idle()
         || runtime._state.build_intent != runtime._build_intent
         || runtime._build_stage.is_some()
         || !runtime._record_stages.is_empty()
@@ -1192,6 +1195,7 @@ fn validate_completed_capacity_and_state(
         || prepared.record.tree_index.tree_sha256 != capacity.tree_id
         || prepared.record.tree_index.index_sha256 != capacity.tree_index_id
         || prepared.record.legal.sha256 != capacity.legal_id
+        || !runtime.garbage_collection_is_idle()
         || runtime._state.build_intent.is_some()
         || runtime._build_intent.is_some()
         || runtime._build_stage.is_some()

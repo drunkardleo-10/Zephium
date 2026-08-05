@@ -136,6 +136,7 @@ impl ExtensionRepository {
         if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed.into());
         }
+        self.writer_require_gc_idle()?;
 
         loop {
             let marker = {

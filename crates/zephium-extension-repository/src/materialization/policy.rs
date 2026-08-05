@@ -39,8 +39,8 @@ pub(crate) const fn next_durable_generation(current: u64) -> Option<u64> {
     }
 }
 
-/// Reserves the intent generation only when its later settlement also fits.
-pub(crate) const fn reserve_package_build_intent_generation(current: u64) -> Option<u64> {
+/// Reserves any durable intent generation only when its settlement also fits.
+pub(crate) const fn reserve_two_transition_intent_generation(current: u64) -> Option<u64> {
     match next_durable_generation(current) {
         Some(intent) if next_durable_generation(intent).is_some() => Some(intent),
         _ => None,
@@ -122,6 +122,26 @@ pub(crate) fn validate_completed_tree_budget<'a>(
     Ok(())
 }
 
+/// Enforces the signed-catalog aggregate tree budget for one exact set.
+///
+/// Catalog sets contain one backend row per package, so this deliberately
+/// charges every row just like release-catalog admission rather than applying
+/// the completed-ledger CAS deduplication policy.
+pub(crate) fn validate_catalog_set_tree_budget<'a>(
+    packages: impl IntoIterator<Item = &'a PackageRecord>,
+) -> Result<(), PackagePolicyError> {
+    let mut tree_bytes = 0_u64;
+    for package in packages {
+        tree_bytes = tree_bytes
+            .checked_add(package.tree_index.tree_bytes)
+            .ok_or(PackagePolicyError::AccountingOverflow)?;
+    }
+    if tree_bytes > MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES {
+        return Err(PackagePolicyError::TreeBudgetExceeded);
+    }
+    Ok(())
+}
+
 fn insert_consistent<Key, Value>(anchors: &mut BTreeMap<Key, Value>, key: Key, value: Value) -> bool
 where
     Key: Ord,
@@ -140,6 +160,7 @@ where
 mod tests {
     use super::*;
     use crate::materialization::records::tests::package_record_fixture;
+    use zephium_extension_package::MAX_EXTENSION_TREE_BYTES;
 
     #[test]
     fn equal_content_addresses_require_equal_structural_anchors() {
@@ -165,14 +186,29 @@ mod tests {
     }
 
     #[test]
-    fn package_build_generation_reserves_its_settlement() {
+    fn catalog_set_budget_charges_every_selected_package_row() {
+        let mut first = package_record_fixture(3);
+        first.tree_index.tree_bytes = MAX_EXTENSION_TREE_BYTES;
+        let mut second = package_record_fixture(20);
+        second.tree_index.tree_bytes = MAX_EXTENSION_TREE_BYTES;
+        let mut third = package_record_fixture(40);
+        third.tree_index.tree_bytes = 1;
+        assert_eq!(validate_catalog_set_tree_budget([&first, &second]), Ok(()));
+        assert_eq!(
+            validate_catalog_set_tree_budget([&first, &second, &third]),
+            Err(PackagePolicyError::TreeBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn durable_intent_generation_reserves_its_settlement() {
         assert_eq!(next_durable_generation(MAX_DURABLE_GENERATION), None);
         assert_eq!(
-            reserve_package_build_intent_generation(MAX_DURABLE_GENERATION - 1),
+            reserve_two_transition_intent_generation(MAX_DURABLE_GENERATION - 1),
             None
         );
         assert_eq!(
-            reserve_package_build_intent_generation(MAX_DURABLE_GENERATION - 2),
+            reserve_two_transition_intent_generation(MAX_DURABLE_GENERATION - 2),
             Some(MAX_DURABLE_GENERATION - 1)
         );
     }

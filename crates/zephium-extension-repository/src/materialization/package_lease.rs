@@ -287,7 +287,7 @@ pub(crate) fn validated_resumable_build_in_progress(
     runtime._state.validate()?;
     let canonical = crate::codec::encode(&runtime._state, MAX_MATERIALIZATION_STATE_BYTES)
         .map_err(|_| SnapshotLoadError::DurableMismatch)?;
-    if canonical != runtime._state_bytes || runtime._state.build_intent != runtime._build_intent {
+    if canonical != runtime._state_bytes || !runtime.intent_projection_is_exact() {
         return Err(SnapshotLoadError::DurableMismatch);
     }
     let build_in_progress = runtime._state.build_intent.is_some()

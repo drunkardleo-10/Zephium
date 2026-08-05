@@ -342,7 +342,8 @@ pub(crate) fn install_orphan_package_record_stage_for_e2e(
     runtime: &MaterializationRuntime,
     record_id: Digest32,
 ) -> Result<(), CleanupError> {
-    if runtime._state.build_intent.is_some()
+    if !runtime.garbage_collection_is_idle()
+        || runtime._state.build_intent.is_some()
         || runtime._build_intent.is_some()
         || runtime._build_stage.is_some()
         || !runtime._record_stages.is_empty()
@@ -385,7 +386,9 @@ impl IntentStageIdentity {
             ._state
             .validate()
             .map_err(|_| CleanupError::BuildStateMismatch)?;
-        if runtime._state.build_intent != runtime._build_intent {
+        if !runtime.garbage_collection_is_idle()
+            || runtime._state.build_intent != runtime._build_intent
+        {
             return Err(CleanupError::BuildStateMismatch);
         }
         let intent = runtime
@@ -726,7 +729,11 @@ mod tests {
                 _tree_ids: BTreeSet::new(),
             },
             _sealed_tree_roots: BTreeMap::<Digest32, Arc<SealedPrivateDirectory>>::new(),
+            _tree_object_ids: BTreeSet::from([final_tree_id]),
+            _tree_index_ids: BTreeSet::new(),
+            _legal_artifact_ids: BTreeSet::from([retained_record_id]),
             _build_intent: Some(intent),
+            _gc_intent: None,
             _build_stage: Some(MaterializationTreeCapability::Writable {
                 _directory: tree_stage,
             }),

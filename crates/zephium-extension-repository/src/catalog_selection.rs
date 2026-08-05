@@ -151,6 +151,8 @@ impl ExtensionRepository {
         let _operation = runtime
             .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
             .writer_validate_active_catalog_materialized(catalog, exact_catalog_bytes)
@@ -202,6 +204,8 @@ impl ExtensionRepository {
         let _operation = runtime
             .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
             .writer_validate_rollback_catalog_materialized(catalog, exact_catalog_bytes)
@@ -253,6 +257,8 @@ impl ExtensionRepository {
         let _operation = runtime
             .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
             .writer_validate_active_catalog_materialized(catalog, exact_catalog_bytes)
@@ -314,6 +320,8 @@ impl ExtensionRepository {
         let _operation = runtime
             .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
             .writer_validate_rollback_catalog_materialized(catalog, exact_catalog_bytes)
@@ -376,6 +384,8 @@ impl ExtensionRepository {
         let _operation = runtime
             .enter()
             .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
         validate_projection(catalog.catalog(), selections)?;
         if !self
             .writer_validate_rollback_catalog_materialized(catalog, exact_catalog_bytes)
