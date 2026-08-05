@@ -1,19 +1,17 @@
 //! Durable metadata and opaque sealed-root recovery for materialized packages.
 //!
 //! This module owns the public path-free byte-source contract and the private
-//! exact object/transition machinery consumed by the repository writer. It has
-//! no native-activation operation, product-reachable collector, physical GC
-//! deletion, receipt constructor, profile grant, or native-runtime mutation.
-//! The crate's package-lease layer
+//! exact object/transition machinery consumed by the repository writer. It
+//! supplies the bounded GC plan, proof, transition, and tree-removal
+//! primitives; the root repository module owns their serialized orchestration.
+//! It has no native-activation operation, receipt constructor, profile grant,
+//! or native-runtime mutation. The crate's package-lease layer
 //! composes these private snapshots into authenticated package access and
 //! durable owner-pin authority only. Opening a repository recovers only bounded
 //! metadata and live sealed tree-root identities.
 
 mod catalog_set;
 mod cleanup;
-// Modeled and tested ahead of the separately reviewed destructive settlement
-// slice; no product path may invoke the planner yet.
-#[allow(dead_code)]
 mod gc;
 mod interlock;
 mod names;
@@ -29,6 +27,7 @@ mod source;
 mod state;
 mod storage;
 mod transaction;
+mod tree_cleanup;
 mod tree_reader;
 mod tree_writer;
 
@@ -48,7 +47,13 @@ pub(crate) use cleanup::{
 pub(crate) use cleanup::{
     install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
 };
+pub(crate) use gc::{plan_garbage_collection, prove_garbage_collection_absence};
 pub(crate) use interlock::validate_catalog_advance;
+pub(crate) use names::{
+    catalog_set_record as gc_catalog_set_record, legal_object as gc_legal_object,
+    package_record as gc_package_record, tree_index_object as gc_tree_index_object,
+    tree_object as gc_tree_object, tree_retired as gc_tree_retired,
+};
 #[cfg(all(
     test,
     zephium_internal_repository_e2e,
@@ -79,7 +84,7 @@ pub(crate) use prepare::{
     PreparationError, PreparedActivePackage, PreparedRollbackPackage,
 };
 pub(crate) use records::{
-    MAX_CATALOG_SET_PACKAGES, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
+    CatalogAnchor, MAX_CATALOG_SET_PACKAGES, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
 };
 pub(crate) use recovery::{is_pristine_for_outer_initialization, open_or_recover, FaultPoint};
 pub(crate) use runtime::MaterializationRuntime;
@@ -97,22 +102,22 @@ pub use source::{
     zephium_internal_repository_e2e,
     any(target_os = "macos", target_os = "linux")
 ))]
+pub(crate) use state::MATERIALIZATION_GC_INTENT_SCHEMA_VERSION;
 pub(crate) use state::{
-    MaterializationGarbageCollectionIntent, MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
-};
-pub(crate) use state::{
-    MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_PACKAGE_PINS, MAX_GC_CATALOG_OBJECT_TARGETS,
-    MAX_GC_CATALOG_SET_TARGETS, MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS,
-    MAX_GC_TREE_JOBS, MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
+    MaterializationGarbageCollectionIntent, MAX_COMPLETED_PACKAGE_RECORDS,
+    MAX_DURABLE_PACKAGE_PINS, MAX_GC_CATALOG_OBJECT_TARGETS, MAX_GC_CATALOG_SET_TARGETS,
+    MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS, MAX_GC_TREE_JOBS,
+    MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
     MAX_MATERIALIZATION_STATE_BYTES,
 };
 pub(crate) use transaction::{
-    abort_package_build, begin_active_package_build, begin_rollback_package_build,
-    complete_active_package, complete_rollback_package, promote_active_catalog_set,
-    promote_rollback_catalog_set, rollback_to_previous_catalog_set,
-    stage_active_catalog_set_candidate, stage_rollback_catalog_set_candidate,
-    MaterializationTransitionError,
+    abort_package_build, begin_active_package_build, begin_garbage_collection,
+    begin_rollback_package_build, complete_active_package, complete_garbage_collection,
+    complete_rollback_package, promote_active_catalog_set, promote_rollback_catalog_set,
+    rollback_to_previous_catalog_set, stage_active_catalog_set_candidate,
+    stage_rollback_catalog_set_candidate, MaterializationTransitionError,
 };
+pub(crate) use tree_cleanup::{remove_tree_directory, TreeCleanupError};
 pub(crate) use tree_reader::{with_verified_tree_resource, TreeResourceError};
 // Kept crate-private so durable owner retention is reachable only through the
 // package-lease layer's authenticated package access and pinning authority.

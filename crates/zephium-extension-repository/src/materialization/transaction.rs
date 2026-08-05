@@ -20,6 +20,7 @@ use super::cleanup::{
     inspect_package_build_commit_marker, reconcile_build_stages_for_abort, PackageBuildCommitMarker,
 };
 use super::cleanup::{AbortablePackageBuild, BuildStagesAbsent, CleanupError};
+use super::gc::{GarbageCollectionAbsenceProof, GarbageCollectionPlan};
 use super::names::{self, RecordNameKind, TreeNameKind};
 use super::objects::{
     PackageObjectCapacity, PackageObjectError, VerifiedActivePackageClosure,
@@ -97,6 +98,86 @@ pub(crate) fn begin_active_package_build(
         prepared.record(),
         TransitionFaultPoint::None,
     )
+}
+
+/// Publishes one exact bounded collection intent before physical mutation.
+pub(crate) fn begin_garbage_collection(
+    runtime: MaterializationRuntime,
+    plan: GarbageCollectionPlan,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    if runtime._state.build_intent.is_some()
+        || runtime._build_intent.is_some()
+        || runtime._state.gc_intent.is_some()
+        || runtime._gc_intent.is_some()
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+
+    let next = plan.into_state();
+    let intent = next
+        .gc_intent
+        .as_ref()
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    let mut reconstructed_completed = next.completed_package_record_ids.clone();
+    reconstructed_completed.extend(&intent.package_record_ids);
+    reconstructed_completed.sort_unstable();
+    if reconstructed_completed
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    if next.generation != next_generation(runtime._state.generation)?
+        || next.schema_version != runtime._state.schema_version
+        || next.candidate_catalog_set_id != runtime._state.candidate_catalog_set_id
+        || next.current_catalog_set_id != runtime._state.current_catalog_set_id
+        || next.previous_catalog_set_id != runtime._state.previous_catalog_set_id
+        || next.package_pins != runtime._state.package_pins
+        || next.build_intent.is_some()
+        || intent.generation != next.generation
+        || reconstructed_completed != runtime._state.completed_package_record_ids
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    commit_state_transition(runtime, next, TransitionFaultPoint::None)
+}
+
+/// Clears one durable collection intent after exact post-delete proof.
+pub(crate) fn complete_garbage_collection(
+    runtime: MaterializationRuntime,
+    proof: GarbageCollectionAbsenceProof,
+    catalogs_parent: DirectoryIdentity,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    validate_runtime_projection(&runtime)?;
+    require_no_object_stages(&runtime)?;
+    let intent = runtime
+        ._state
+        .gc_intent
+        .as_ref()
+        .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+    if runtime._build_intent.is_some()
+        || runtime._state.build_intent.is_some()
+        || runtime._gc_intent.as_ref() != Some(intent)
+        || proof.intent() != intent
+        || proof.state_sha256() != codec::digest(&runtime._state_bytes)
+        || proof.generation() != intent.generation
+        || proof.records_parent() != runtime._records.identity()
+        || proof.trees_parent() != runtime._trees.identity()
+        || proof.catalogs_parent() != catalogs_parent
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+
+    let mut next = runtime._state.clone();
+    next.generation = next_generation(runtime._state.generation)?;
+    next.gc_intent = None;
+    next.validate()
+        .map_err(MaterializationTransitionError::Clean)?;
+    commit_state_transition(runtime, next, TransitionFaultPoint::None)
 }
 
 /// Selects one freshly authenticated active catalog set as the sole candidate.
@@ -1111,6 +1192,18 @@ fn validate_candidate_policy(
 fn validate_runtime(
     runtime: &MaterializationRuntime,
 ) -> Result<(), MaterializationTransitionError> {
+    validate_runtime_projection(runtime)?;
+    if runtime._state.gc_intent.is_some() {
+        return Err(before_journal(
+            ExtensionRepositoryError::GarbageCollectionInProgress,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_projection(
+    runtime: &MaterializationRuntime,
+) -> Result<(), MaterializationTransitionError> {
     runtime
         ._state
         .validate()
@@ -1122,11 +1215,6 @@ fn validate_runtime(
         || runtime._state.gc_intent != runtime._gc_intent
     {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
-    }
-    if runtime._state.gc_intent.is_some() {
-        return Err(before_journal(
-            ExtensionRepositoryError::GarbageCollectionInProgress,
-        ));
     }
     Ok(())
 }

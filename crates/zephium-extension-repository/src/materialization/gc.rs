@@ -21,6 +21,7 @@ use super::state::{
 };
 use crate::state::Digest32;
 use crate::ExtensionRepositoryError;
+use zephium_private_fs::DirectoryIdentity;
 
 /// One deterministic bounded batch and the completed ledger after its commit.
 ///
@@ -31,8 +32,111 @@ use crate::ExtensionRepositoryError;
 pub(crate) struct GarbageCollectionPlan {
     /// Exact transition-1 successor. Target package records are pruned from
     /// the completed ledger atomically with durable intent publication.
-    pub(crate) next_state: MaterializationState,
-    pub(crate) more_garbage: bool,
+    next_state: MaterializationState,
+    more_garbage: bool,
+}
+
+/// Live proof that every target of one durable collection intent is absent.
+///
+/// This value is deliberately non-serializable. The repository constructs it
+/// only after a fresh combined inventory and binds it to both mutable object
+/// parents before the completion transition may clear durable intent.
+pub(crate) struct GarbageCollectionAbsenceProof {
+    intent: MaterializationGarbageCollectionIntent,
+    state_sha256: Digest32,
+    generation: u64,
+    records_parent: DirectoryIdentity,
+    trees_parent: DirectoryIdentity,
+    catalogs_parent: DirectoryIdentity,
+}
+
+impl GarbageCollectionAbsenceProof {
+    pub(super) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) const fn records_parent(&self) -> DirectoryIdentity {
+        self.records_parent
+    }
+
+    pub(super) const fn trees_parent(&self) -> DirectoryIdentity {
+        self.trees_parent
+    }
+
+    pub(super) const fn catalogs_parent(&self) -> DirectoryIdentity {
+        self.catalogs_parent
+    }
+
+    pub(super) fn intent(&self) -> &MaterializationGarbageCollectionIntent {
+        &self.intent
+    }
+
+    pub(super) const fn state_sha256(&self) -> Digest32 {
+        self.state_sha256
+    }
+}
+
+impl GarbageCollectionPlan {
+    pub(super) fn into_state(self) -> MaterializationState {
+        self.next_state
+    }
+}
+
+pub(crate) fn prove_garbage_collection_absence(
+    runtime: &MaterializationRuntime,
+    catalog_object_ids: &BTreeSet<Digest32>,
+    catalogs_parent: DirectoryIdentity,
+) -> Result<GarbageCollectionAbsenceProof, ExtensionRepositoryError> {
+    let intent = runtime
+        ._gc_intent
+        .as_ref()
+        .filter(|intent| runtime._state.gc_intent.as_ref() == Some(*intent))
+        .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+    if intent
+        .catalog_object_ids
+        .iter()
+        .any(|target| catalog_object_ids.contains(target))
+        || intent
+            .catalog_set_record_ids
+            .iter()
+            .any(|target| runtime._catalog_sets.contains_key(target))
+        || intent
+            .package_record_ids
+            .iter()
+            .any(|target| runtime._package_records.contains_key(target))
+        || intent
+            .tree_index_ids
+            .iter()
+            .any(|target| runtime._tree_index_ids.contains(target))
+        || intent
+            .legal_artifact_ids
+            .iter()
+            .any(|target| runtime._legal_artifact_ids.contains(target))
+        || intent.tree_objects.iter().any(|target| {
+            runtime._tree_object_ids.contains(&target.tree_sha256)
+                || runtime
+                    ._retired_tree_ids
+                    .iter()
+                    .any(|(digest, _)| *digest == target.tree_sha256)
+        })
+        || intent.retired_trees.iter().any(|target| {
+            runtime._tree_object_ids.contains(&target.tree_sha256)
+                || runtime
+                    ._retired_tree_ids
+                    .iter()
+                    .any(|(digest, _)| *digest == target.tree_sha256)
+        })
+    {
+        return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+    }
+    Ok(GarbageCollectionAbsenceProof {
+        intent: intent.clone(),
+        state_sha256: crate::codec::digest(&runtime._state_bytes),
+        generation: intent.generation,
+        records_parent: runtime._records.identity(),
+        trees_parent: runtime._trees.identity(),
+        catalogs_parent,
+    })
 }
 
 /// Plans against the exact identities retained by repository recovery.

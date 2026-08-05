@@ -700,9 +700,10 @@ fn verify_internal_authority_cannot_link_into_shipping_code() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_repository_e2e_tests() {
-    const TEST_SUITES: [(&str, usize); 2] = [
+    const TEST_SUITES: [(&str, usize); 3] = [
         ("writer::repository_e2e_tests::", 20),
         ("package_lease::repository_e2e::", 14),
+        ("garbage_collection::tests::", 4),
     ];
     let mut commands = Vec::with_capacity(TEST_SUITES.len());
     for (prefix, expected) in TEST_SUITES {

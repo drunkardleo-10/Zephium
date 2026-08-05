@@ -109,6 +109,26 @@ impl Harness {
         self.open_with_fault(FaultPoint::None).unwrap()
     }
 
+    fn open_with_catalog_ids(
+        &self,
+        catalog_object_ids: &BTreeSet<Digest32>,
+    ) -> Result<(LockedPrivateNamespace, MaterializationRuntime), ExtensionRepositoryError> {
+        let namespace = self.namespace();
+        let exists = namespace
+            .directory()
+            .list_components(8)
+            .unwrap()
+            .iter()
+            .any(|entry| entry == &names::materialization_directory());
+        let runtime = open_or_recover_test_fixture_with_catalog_ids(
+            namespace.directory(),
+            catalog_object_ids,
+            exists,
+            FaultPoint::None,
+        )?;
+        Ok((namespace, runtime))
+    }
+
     fn handles(&self) -> Handles {
         let namespace = self.namespace();
         let materialization = namespace
@@ -359,6 +379,477 @@ fn gc_recovery_fixture() -> GcRecoveryFixture {
         package,
         ids,
     }
+}
+
+#[test]
+fn gc_partial_frontier_accepts_only_the_canonical_deletion_prefix() {
+    let mut fixture = gc_recovery_fixture();
+
+    let removed_package = fixture
+        .records
+        .packages
+        .remove(&fixture.ids.package_id)
+        .unwrap();
+    assert!(matches!(
+        validate_gc_partial_frontier(
+            &fixture.state,
+            &fixture.records,
+            &fixture.trees,
+            Some(&fixture.catalog_object_ids),
+            None,
+        ),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+    fixture
+        .records
+        .packages
+        .insert(fixture.ids.package_id, removed_package);
+
+    fixture
+        .records
+        .catalog_sets
+        .remove(&fixture.ids.catalog_set_id);
+    assert!(validate_gc_partial_frontier(
+        &fixture.state,
+        &fixture.records,
+        &fixture.trees,
+        Some(&fixture.catalog_object_ids),
+        None,
+    )
+    .is_ok());
+    fixture.records.packages.remove(&fixture.ids.package_id);
+    fixture
+        .records
+        .tree_indexes
+        .remove(&fixture.package.tree_index.index_sha256);
+    fixture
+        .records
+        .legal_artifacts
+        .remove(&fixture.package.legal.sha256);
+    fixture
+        .trees
+        .objects
+        .remove(&fixture.package.tree_index.tree_sha256);
+    fixture
+        .catalog_object_ids
+        .remove(&fixture.package.catalog.catalog_sha256);
+    let frontier = validate_gc_partial_frontier(
+        &fixture.state,
+        &fixture.records,
+        &fixture.trees,
+        Some(&fixture.catalog_object_ids),
+        None,
+    )
+    .unwrap();
+    assert!(frontier.all_absent);
+    assert!(!frontier.all_intact);
+}
+
+#[test]
+fn gc_partial_frontier_rejects_object_and_retired_aliases() {
+    for retirement_generation in [1_u64, 2_u64] {
+        let harness = Harness::new();
+        drop(harness.open());
+        let handles = harness.handles();
+        let package = package_record_fixture(20);
+        install_package_fixture(&handles, &package, false);
+        let retired = handles
+            .trees
+            .create_new_private_child(
+                &names::tree_retired(package.tree_index.tree_sha256, retirement_generation)
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(retired.seal().unwrap());
+
+        assert!(
+            matches!(
+                inspect_trees(&handles.trees),
+                Err(ExtensionRepositoryError::RecoveryAmbiguous)
+            ),
+            "an object plus retirement generation {retirement_generation} must fail closed"
+        );
+    }
+}
+
+fn install_prepared_gc_completion(
+    handles: &Handles,
+    current_state: &MaterializationState,
+) -> (PrivateComponent, Vec<u8>, Vec<u8>, Vec<u8>) {
+    replace_settled_state(handles, current_state);
+    let current_state_bytes = read_required_control(
+        &handles.materialization,
+        &names::state_file(),
+        MAX_MATERIALIZATION_STATE_BYTES,
+    )
+    .unwrap();
+    let current_checkpoint_bytes = read_required_control(
+        &handles.materialization,
+        &names::checkpoint_file(),
+        MAX_MATERIALIZATION_CHECKPOINT_BYTES,
+    )
+    .unwrap();
+    let mut next_state = current_state.clone();
+    next_state.generation += 1;
+    next_state.gc_intent = None;
+    next_state.validate().unwrap();
+    let next_state_bytes = codec::encode(&next_state, MAX_MATERIALIZATION_STATE_BYTES).unwrap();
+    let journal = MaterializationJournal {
+        schema_version: MATERIALIZATION_JOURNAL_SCHEMA_VERSION,
+        generation: next_state.generation,
+        previous_state_sha256: codec::digest(&current_state_bytes),
+        next_state_sha256: codec::digest(&next_state_bytes),
+        next_state,
+    };
+    let journal_bytes = codec::encode(&journal, MAX_MATERIALIZATION_JOURNAL_BYTES).unwrap();
+    let journal_name =
+        names::journal_file(journal.generation, codec::digest(&journal_bytes)).unwrap();
+    handles
+        .journals
+        .write_new_synced(
+            &journal_name,
+            &journal_bytes,
+            ByteLimit::new(MAX_MATERIALIZATION_JOURNAL_BYTES).unwrap(),
+        )
+        .unwrap();
+    (
+        journal_name,
+        current_state_bytes,
+        current_checkpoint_bytes,
+        journal_bytes,
+    )
+}
+
+fn remove_gc_completion_prefix(
+    handles: &Handles,
+    package: &PackageRecord,
+    ids: &FixtureIds,
+    prefix_len: usize,
+) {
+    for index in 0..prefix_len {
+        match index {
+            0 => assert!(handles
+                .records
+                .remove_verified_regular(&names::catalog_set_record(ids.catalog_set_id))
+                .unwrap()),
+            1 => assert!(handles
+                .records
+                .remove_verified_regular(&names::package_record(ids.package_id))
+                .unwrap()),
+            2 => assert!(handles
+                .records
+                .remove_verified_regular(
+                    &names::tree_index_object(package.tree_index.index_sha256,)
+                )
+                .unwrap()),
+            3 => assert!(handles
+                .records
+                .remove_verified_regular(&names::legal_object(package.legal.sha256))
+                .unwrap()),
+            4 => {
+                let name = names::tree_object(package.tree_index.tree_sha256);
+                let opened = handles.trees.open_private_child_any_mode(&name).unwrap();
+                crate::materialization::remove_tree_directory(opened).unwrap();
+            }
+            _ => unreachable!("outer catalog is the terminal target class"),
+        }
+    }
+}
+
+#[test]
+fn prepared_gc_completion_refuses_each_residual_target_class_without_control_mutation() {
+    let target_classes = [
+        "catalog set",
+        "package",
+        "tree index",
+        "legal artifact",
+        "tree object",
+        "outer catalog",
+    ];
+    for (residual_index, target_class) in target_classes.into_iter().enumerate() {
+        let harness = Harness::new();
+        drop(harness.open());
+        let handles = harness.handles();
+        let package = package_record_fixture(20);
+        let ids = install_package_fixture(&handles, &package, false);
+        let intent_generation = 2;
+        let state = MaterializationState {
+            generation: intent_generation,
+            gc_intent: Some(MaterializationGarbageCollectionIntent {
+                schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+                generation: intent_generation,
+                cohort: Some(package.catalog),
+                catalog_object_ids: vec![package.catalog.catalog_sha256],
+                catalog_set_record_ids: vec![ids.catalog_set_id],
+                package_record_ids: vec![ids.package_id],
+                tree_index_ids: vec![package.tree_index.index_sha256],
+                legal_artifact_ids: vec![package.legal.sha256],
+                retired_trees: Vec::new(),
+                tree_objects: vec![GarbageCollectionTreeObject {
+                    tree_sha256: package.tree_index.tree_sha256,
+                    known_total_entry_count: Some(package.tree_index.total_entry_count),
+                    known_tree_bytes: Some(package.tree_index.tree_bytes),
+                }],
+            }),
+            ..MaterializationState::default()
+        };
+        state.validate().unwrap();
+        let (journal_name, state_before, checkpoint_before, journal_before) =
+            install_prepared_gc_completion(&handles, &state);
+        remove_gc_completion_prefix(&handles, &package, &ids, residual_index);
+        drop(handles);
+
+        let catalog_object_ids = BTreeSet::from([package.catalog.catalog_sha256]);
+        assert!(matches!(
+            harness.open_with_catalog_ids(&catalog_object_ids),
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        ));
+
+        let handles = harness.handles();
+        assert_eq!(
+            read_required_control(
+                &handles.materialization,
+                &names::state_file(),
+                MAX_MATERIALIZATION_STATE_BYTES,
+            )
+            .unwrap(),
+            state_before,
+            "{target_class} residue must not mutate state"
+        );
+        assert_eq!(
+            read_required_control(
+                &handles.materialization,
+                &names::checkpoint_file(),
+                MAX_MATERIALIZATION_CHECKPOINT_BYTES,
+            )
+            .unwrap(),
+            checkpoint_before,
+            "{target_class} residue must not mutate the checkpoint"
+        );
+        assert_eq!(
+            read_required_control(
+                &handles.journals,
+                &journal_name,
+                MAX_MATERIALIZATION_JOURNAL_BYTES,
+            )
+            .unwrap(),
+            journal_before,
+            "{target_class} residue must not retire the prepared journal"
+        );
+        assert!(!handles
+            .materialization
+            .regular_exists(&names::state_stage())
+            .unwrap());
+        assert!(!handles
+            .materialization
+            .regular_exists(&names::checkpoint_stage())
+            .unwrap());
+    }
+}
+
+#[test]
+fn prepared_gc_completion_refuses_pre_retired_residue_without_control_mutation() {
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let retired_digest = Digest32::from_bytes([239; 32]);
+    let retired_name = names::tree_retired(retired_digest, 1).unwrap();
+    let retired = handles
+        .trees
+        .create_new_private_child(&retired_name)
+        .unwrap();
+    drop(retired.seal().unwrap());
+    let state = MaterializationState {
+        generation: 2,
+        gc_intent: Some(MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation: 2,
+            cohort: None,
+            catalog_object_ids: Vec::new(),
+            catalog_set_record_ids: Vec::new(),
+            package_record_ids: Vec::new(),
+            tree_index_ids: Vec::new(),
+            legal_artifact_ids: Vec::new(),
+            retired_trees: vec![GarbageCollectionRetiredTree {
+                tree_sha256: retired_digest,
+                retirement_generation: 1,
+            }],
+            tree_objects: Vec::new(),
+        }),
+        ..MaterializationState::default()
+    };
+    state.validate().unwrap();
+    let (journal_name, state_before, checkpoint_before, journal_before) =
+        install_prepared_gc_completion(&handles, &state);
+    drop(handles);
+
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+
+    let handles = harness.handles();
+    assert_eq!(
+        read_required_control(
+            &handles.materialization,
+            &names::state_file(),
+            MAX_MATERIALIZATION_STATE_BYTES,
+        )
+        .unwrap(),
+        state_before
+    );
+    assert_eq!(
+        read_required_control(
+            &handles.materialization,
+            &names::checkpoint_file(),
+            MAX_MATERIALIZATION_CHECKPOINT_BYTES,
+        )
+        .unwrap(),
+        checkpoint_before
+    );
+    assert_eq!(
+        read_required_control(
+            &handles.journals,
+            &journal_name,
+            MAX_MATERIALIZATION_JOURNAL_BYTES,
+        )
+        .unwrap(),
+        journal_before
+    );
+    assert!(!handles
+        .materialization
+        .regular_exists(&names::state_stage())
+        .unwrap());
+    assert!(!handles
+        .materialization
+        .regular_exists(&names::checkpoint_stage())
+        .unwrap());
+}
+
+#[test]
+fn prepared_gc_completion_applies_only_after_exact_absence_and_reopens_idempotently() {
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let package = package_record_fixture(20);
+    let ids = install_package_fixture(&handles, &package, false);
+    let state = MaterializationState {
+        generation: 2,
+        gc_intent: Some(MaterializationGarbageCollectionIntent {
+            schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+            generation: 2,
+            cohort: Some(package.catalog),
+            catalog_object_ids: vec![package.catalog.catalog_sha256],
+            catalog_set_record_ids: vec![ids.catalog_set_id],
+            package_record_ids: vec![ids.package_id],
+            tree_index_ids: vec![package.tree_index.index_sha256],
+            legal_artifact_ids: vec![package.legal.sha256],
+            retired_trees: Vec::new(),
+            tree_objects: vec![GarbageCollectionTreeObject {
+                tree_sha256: package.tree_index.tree_sha256,
+                known_total_entry_count: Some(package.tree_index.total_entry_count),
+                known_tree_bytes: Some(package.tree_index.tree_bytes),
+            }],
+        }),
+        ..MaterializationState::default()
+    };
+    state.validate().unwrap();
+    let (journal_name, _, _, _) = install_prepared_gc_completion(&handles, &state);
+    remove_gc_completion_prefix(&handles, &package, &ids, 5);
+    drop(handles);
+
+    let empty_catalog_inventory = BTreeSet::new();
+    let (namespace, runtime) = harness
+        .open_with_catalog_ids(&empty_catalog_inventory)
+        .unwrap();
+    assert_eq!(runtime._state.generation, 3);
+    assert!(runtime._state.gc_intent.is_none());
+    assert!(runtime._gc_intent.is_none());
+    assert!(!runtime._journals.regular_exists(&journal_name).unwrap());
+    let checkpoint = read_checkpoint(&runtime._root).unwrap();
+    assert_eq!(checkpoint.generation, 3);
+    assert_eq!(
+        checkpoint.state_sha256,
+        codec::digest(&runtime._state_bytes)
+    );
+    drop(runtime);
+    drop(namespace);
+
+    let (namespace, reopened) = harness
+        .open_with_catalog_ids(&empty_catalog_inventory)
+        .unwrap();
+    assert_eq!(reopened._state.generation, 3);
+    assert!(reopened._state.gc_intent.is_none());
+    assert!(reopened
+        ._journals
+        .list_components(names::MAX_MATERIALIZATION_JOURNAL_ENTRIES)
+        .unwrap()
+        .is_empty());
+    drop(reopened);
+    drop(namespace);
+}
+
+#[test]
+fn prepared_gc_transition_shape_preserves_every_nongc_field_and_exact_ledger_union() {
+    let package = package_record_fixture(20);
+    let first = Digest32::from_bytes([1; 32]);
+    let target = Digest32::from_bytes([2; 32]);
+    let current = MaterializationState {
+        generation: 1,
+        completed_package_record_ids: vec![first, target],
+        ..MaterializationState::default()
+    };
+    let intent = MaterializationGarbageCollectionIntent {
+        schema_version: MATERIALIZATION_GC_INTENT_SCHEMA_VERSION,
+        generation: 2,
+        cohort: Some(package.catalog),
+        catalog_object_ids: Vec::new(),
+        catalog_set_record_ids: Vec::new(),
+        package_record_ids: vec![target],
+        tree_index_ids: Vec::new(),
+        legal_artifact_ids: Vec::new(),
+        tree_objects: Vec::new(),
+        retired_trees: Vec::new(),
+    };
+    let published = MaterializationState {
+        generation: 2,
+        completed_package_record_ids: vec![first],
+        gc_intent: Some(intent),
+        ..MaterializationState::default()
+    };
+    assert_eq!(
+        validate_prepared_gc_transition_shape(&current, &published),
+        Ok(())
+    );
+
+    let mut unrelated_prune = published.clone();
+    unrelated_prune.completed_package_record_ids.clear();
+    assert_eq!(
+        validate_prepared_gc_transition_shape(&current, &unrelated_prune),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
+    let mut mutated_slot = published.clone();
+    mutated_slot.current_catalog_set_id = Some(Digest32::from_bytes([9; 32]));
+    assert_eq!(
+        validate_prepared_gc_transition_shape(&current, &mutated_slot),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
+
+    let completed = MaterializationState {
+        generation: 3,
+        completed_package_record_ids: vec![first],
+        ..MaterializationState::default()
+    };
+    assert_eq!(
+        validate_prepared_gc_transition_shape(&published, &completed),
+        Ok(())
+    );
+    let mut resurrected = completed;
+    resurrected.completed_package_record_ids.push(target);
+    assert_eq!(
+        validate_prepared_gc_transition_shape(&published, &resurrected),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
 }
 
 fn install_prepared_transition(handles: &Handles, ids: &FixtureIds) -> PrivateComponent {

@@ -20,6 +20,7 @@ mod admission;
 mod catalog_selection;
 mod codec;
 mod error;
+mod garbage_collection;
 mod materialization;
 mod names;
 mod operation;
@@ -44,6 +45,7 @@ pub use catalog_selection::{
     BundledPackageRuntimeSelection,
 };
 pub use error::ExtensionRepositoryError;
+pub use garbage_collection::BundledPackageGarbageCollectionOutcome;
 pub use materialization::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,

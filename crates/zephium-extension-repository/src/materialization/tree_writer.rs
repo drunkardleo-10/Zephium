@@ -7,13 +7,15 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zephium_core::extensions::ExtensionTreeDigest;
+#[cfg(test)]
+use zephium_extension_package::MAX_EXTENSION_RELATIVE_PATH_DEPTH;
 use zephium_extension_package::{
     CanonicalExtensionTreeIndex, ExtensionTreeFile, PortableRelativePath,
-    MAX_EXTENSION_RELATIVE_PATH_DEPTH, MAX_EXTENSION_TREE_ENTRIES,
+    MAX_EXTENSION_TREE_ENTRIES,
 };
 use zephium_private_fs::{
-    ByteLimit, DirectoryIdentity, FileIdentity, OpenedPrivateDirectory, PrivateChildKind,
-    PrivateComponent, PrivateDirectory, PrivateEntryName, PrivateFsError, PrivateFsTransitionError,
+    ByteLimit, DirectoryIdentity, FileIdentity, PrivateChildKind, PrivateComponent,
+    PrivateDirectory, PrivateEntryName, PrivateFsError, PrivateFsTransitionError,
     SealedPrivateDirectory, StreamingFileLength, StreamingWriteError,
 };
 
@@ -21,6 +23,7 @@ use super::source::{
     BundledReleaseByteSource, BundledReleasePackageSourceIdentity, BundledReleaseResource,
     BundledReleaseSourceError,
 };
+use super::tree_cleanup::{remove_tree_directory, TreeCleanupError};
 use crate::operation::with_external_callback;
 
 /// One sealed, exact tree that still has its create-new stage name.
@@ -249,8 +252,7 @@ pub(crate) fn cleanup_tree_stage(
         Err(PrivateFsError::NotFound) => return Ok(false),
         Err(error) => return Err(map_filesystem(error)),
     };
-    let mut observed_entries = 0_usize;
-    clear_and_remove_directory(opened, 0, &mut observed_entries)?;
+    remove_tree_directory(opened).map_err(map_tree_cleanup)?;
     Ok(true)
 }
 
@@ -480,56 +482,6 @@ fn digest_reader(reader: &mut dyn Read) -> io::Result<(u64, [u8; 32])> {
     Ok((bytes, digest.finalize().into()))
 }
 
-fn clear_and_remove_directory(
-    opened: OpenedPrivateDirectory,
-    depth: usize,
-    observed_entries: &mut usize,
-) -> Result<(), TreeWriterError> {
-    let directory = match opened {
-        OpenedPrivateDirectory::Writable(directory) => directory,
-        OpenedPrivateDirectory::Sealed(directory) => directory.unseal().map_err(map_transition)?,
-    };
-    let names = directory
-        .list_entry_names(MAX_EXTENSION_TREE_ENTRIES)
-        .map_err(map_filesystem)?;
-    for name in names {
-        let child_depth = depth.checked_add(1).ok_or(TreeWriterError::ExactMismatch)?;
-        if child_depth > MAX_EXTENSION_RELATIVE_PATH_DEPTH {
-            return Err(TreeWriterError::ExactMismatch);
-        }
-        *observed_entries = observed_entries
-            .checked_add(1)
-            .ok_or(TreeWriterError::ExactMismatch)?;
-        if *observed_entries > MAX_EXTENSION_TREE_ENTRIES {
-            return Err(TreeWriterError::ExactMismatch);
-        }
-        let kind = directory
-            .inspect_entry(&name)
-            .map_err(map_filesystem)?
-            .ok_or(TreeWriterError::ExactMismatch)?;
-        match kind {
-            PrivateChildKind::RegularFile(_) => {
-                if !directory
-                    .remove_verified_entry_regular(&name)
-                    .map_err(map_filesystem)?
-                {
-                    return Err(TreeWriterError::ExactMismatch);
-                }
-            }
-            PrivateChildKind::Directory(identity) => {
-                let child = directory
-                    .open_entry_child_any_mode(&name)
-                    .map_err(map_filesystem)?;
-                if child.identity() != identity {
-                    return Err(map_filesystem(PrivateFsError::IdentityAmbiguous));
-                }
-                clear_and_remove_directory(child, child_depth, observed_entries)?;
-            }
-        }
-    }
-    directory.remove_empty().map_err(map_transition)
-}
-
 fn logical_child_path(
     prefix: &str,
     name: &PrivateEntryName,
@@ -568,6 +520,14 @@ fn map_transition<S>(error: PrivateFsTransitionError<S>) -> TreeWriterError {
         TreeWriterError::Filesystem(error)
     } else {
         TreeWriterError::TransitionAmbiguous
+    }
+}
+
+fn map_tree_cleanup(error: TreeCleanupError) -> TreeWriterError {
+    match error {
+        TreeCleanupError::InvalidShape => TreeWriterError::ExactMismatch,
+        TreeCleanupError::Filesystem(error) => map_filesystem(error),
+        TreeCleanupError::SettlementAmbiguous => TreeWriterError::TransitionAmbiguous,
     }
 }
 

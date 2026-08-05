@@ -18,14 +18,14 @@ use crate::materialization::{self, MaterializationRuntime};
 use crate::materialization::{
     MaterializationGarbageCollectionIntent, MAX_MATERIALIZATION_STATE_BYTES,
 };
-use crate::names::{catalog_file, state_file, state_stage};
+use crate::names::{catalog_file, checkpoint_file, checkpoint_stage, state_file, state_stage};
 use crate::operation::{reject_if_external_callback, RepositoryOperationGuard, RepositoryRuntime};
 use crate::package_lease::PackageLeaseRuntime;
 use crate::recovery::open_repository;
 use crate::state::{
     validate_catalog_lines, Digest32, PackageLineHighWater, RecoveryCheckpoint, RepositoryState,
-    StoredCatalogCheckpoint, TransitionJournal, JOURNAL_SCHEMA_VERSION, MAX_JOURNAL_BYTES,
-    MAX_PACKAGE_LINE_HIGH_WATERS, MAX_STATE_BYTES,
+    StoredCatalogCheckpoint, TransitionJournal, JOURNAL_SCHEMA_VERSION, MAX_CHECKPOINT_BYTES,
+    MAX_JOURNAL_BYTES, MAX_PACKAGE_LINE_HIGH_WATERS, MAX_STATE_BYTES,
 };
 use crate::storage::{
     atomic_write_control, ensure_catalog_object, publish_journal, read_required, write_checkpoint,
@@ -36,10 +36,7 @@ use crate::ExtensionRepositoryError;
 use zephium_private_fs::PrivateComponent;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-use crate::names::{self, catalog_stage, checkpoint_stage, journal_file, journal_stage};
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-use crate::state::MAX_CHECKPOINT_BYTES;
-
+use crate::names::{self, catalog_stage, journal_file, journal_stage};
 /// Result of durably recording one authenticated bundled catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use = "catalog replay and durable advancement have different effects"]
@@ -78,7 +75,7 @@ impl ExtensionRepository {
     pub fn open(namespace: LockedPrivateNamespace) -> Result<Self, ExtensionRepositoryError> {
         reject_if_external_callback()?;
         let opened = open_repository(namespace)?;
-        Ok(Self {
+        let mut repository = Self {
             _namespace: opened.namespace,
             catalogs: opened.catalogs,
             journals: opened.journals,
@@ -89,7 +86,19 @@ impl ExtensionRepository {
             runtime: RepositoryRuntime::new(),
             package_leases: PackageLeaseRuntime::new(),
             sealed: false,
-        })
+        };
+        // Opening settles only an intent that was already durable. Avoid a
+        // second catalog inventory and parse pass on the ordinary no-GC
+        // startup path; fresh collection remains an explicit, schedulable
+        // operation so startup cannot acquire unbounded maintenance latency.
+        if repository
+            .materialization
+            .as_ref()
+            .is_some_and(|runtime| runtime._gc_intent.is_some())
+        {
+            repository.settle_pending_garbage_collection()?;
+        }
+        Ok(repository)
     }
 
     /// Records an exact authenticated bundled catalog as the monotonic floor.
@@ -118,6 +127,62 @@ impl ExtensionRepository {
 
     pub(crate) fn writer_is_sealed(&self) -> bool {
         self.sealed || !self.runtime.is_healthy()
+    }
+
+    pub(crate) fn writer_catalogs(&self) -> &PrivateDirectory {
+        &self.catalogs
+    }
+
+    pub(crate) fn writer_catalog_object_ids(&self) -> &BTreeSet<Digest32> {
+        &self.catalog_object_ids
+    }
+
+    pub(crate) fn writer_replace_catalog_object_ids(&mut self, ids: BTreeSet<Digest32>) {
+        self.catalog_object_ids = ids;
+    }
+
+    pub(crate) fn writer_catalog_high_water(&self) -> Option<&StoredCatalogCheckpoint> {
+        self.state.checkpoint()
+    }
+
+    /// Fresh proof that the outer monotonic authority has no pending journal
+    /// and that its state/checkpoint controls still equal the live projection.
+    pub(crate) fn writer_validate_outer_settled_projection(
+        &self,
+    ) -> Result<(), ExtensionRepositoryError> {
+        if self.writer_is_sealed() {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        self.state.validate()?;
+        let canonical = codec::encode(&self.state, MAX_STATE_BYTES)
+            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
+        if canonical != self.state_bytes
+            || read_required(self._namespace.directory(), &state_file(), MAX_STATE_BYTES)?
+                != canonical
+            || self._namespace.directory().regular_exists(&state_stage())?
+            || self
+                ._namespace
+                .directory()
+                .regular_exists(&checkpoint_stage())?
+            || !self
+                .journals
+                .list_components(crate::names::MAX_JOURNAL_ENTRIES)
+                .map_err(crate::storage::map_recovery_fs)?
+                .is_empty()
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        let checkpoint_bytes = read_required(
+            self._namespace.directory(),
+            &checkpoint_file(),
+            MAX_CHECKPOINT_BYTES,
+        )?;
+        let checkpoint: RecoveryCheckpoint = codec::decode(&checkpoint_bytes, MAX_CHECKPOINT_BYTES)
+            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
+        if checkpoint != RecoveryCheckpoint::new(self.state.generation, codec::digest(&canonical)) {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        Ok(())
     }
 
     pub(crate) fn writer_materialization(
