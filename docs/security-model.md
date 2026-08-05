@@ -758,21 +758,27 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version and meet the reviewed Microsoft Stable security floor. The current
-  hard floor is `150.0.4078.96`, published July 23, 2026; the latest reviewed
-  recommendation is `150.0.4078.99`, published July 24. A runtime between
-  those versions receives an update recommendation, and a newer stable major
-  receives an unreviewed-runtime advisory. Preview-channel and malformed strings
-  fail closed. The process also rejects documented WebView2 environment overrides that
+  hard floor and latest reviewed recommendation are both `151.0.4129.59`, published
+  July 31, 2026, so there is currently no between-floor-and-latest advisory band. A
+  newer stable major receives an unreviewed-runtime advisory. Preview-channel and
+  malformed strings fail closed. The process also rejects documented WebView2
+  environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after August 4; runtime reports an overdue-review
+  expire this review after August 11; runtime reports an overdue-review
   advisory instead. A clock before the hard-floor publication still fails
   closed. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
-  incorporated the update on July 16, and the reviewed floor now names the
-  later July 24 security release above. The release gate preserves the
+  incorporated the update on July 16, and the reviewed floor now names the later
+  July 31 security release above. Microsoft's Edge Stable security notes report
+  15 Edge-specific CVE fixes for that release, but Microsoft publishes no
+  WebView2-specific per-CVE applicability matrix; Zephium therefore treats the
+  shared Edge/WebView2 runtime release as a conservative floor rather than claiming
+  each listed CVE applies to WebView2. Microsoft's first-party WebView2 download
+  selector independently confirmed the exact runtime build for x86, x64, and ARM64
+  during the August 4 review. The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
   release evidence.

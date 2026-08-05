@@ -439,11 +439,12 @@ fn check_engine_floors() {
         .as_secs();
     if !zephium_core::webview2::security_floor_review_is_current(now) {
         eprintln!(
-            "WebView2 security review (hard floor {}, latest reviewed {}) expired after {}. Review {} and update the versions, publication dates, and review deadline together.",
+            "WebView2 security review (hard floor {}, latest reviewed {}) expired after {}. Review {} and confirm exact runtime availability at {}, then update the versions, publication dates, and review deadline together.",
             zephium_core::webview2::SECURITY_FLOOR_TEXT,
             zephium_core::webview2::LATEST_REVIEWED_TEXT,
             zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY,
             zephium_core::webview2::SECURITY_FLOOR_SOURCE_URL,
+            zephium_core::webview2::RUNTIME_AVAILABILITY_SOURCE_URL,
         );
         exit(1);
     }

@@ -23,45 +23,51 @@ mod runtime;
 #[cfg(target_os = "windows")]
 pub use runtime::{RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind};
 
-/// Windows Stable security release published by Microsoft on 2026-07-23.
-pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(150, 0, 4078, 96);
-pub const SECURITY_FLOOR_TEXT: &str = "150.0.4078.96";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-07-23";
-/// 2026-07-23T00:00:00Z. A wall clock before the reviewed release cannot
+/// Windows Stable security release published by Microsoft on 2026-07-31.
+pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(151, 0, 4129, 59);
+pub const SECURITY_FLOOR_TEXT: &str = "151.0.4129.59";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-07-31";
+/// 2026-07-31T00:00:00Z. A wall clock before the reviewed release cannot
 /// establish that the floor is current and must fail closed just like an
 /// expired review.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_784_764_800;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_785_456_000;
 pub const SECURITY_FLOOR_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes-security";
+/// Microsoft's first-party download selector that proves the exact reviewed
+/// WebView2 Runtime build is available for x86, x64, and ARM64. Edge security
+/// notes establish the security release; this independent source establishes
+/// that the corresponding supported WebView2 artifact actually exists.
+pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str =
+    "https://developer.microsoft.com/en-us/microsoft-edge/webview2/";
 
 /// Newest Stable security release included in this review. It is intentionally
-/// separate from the hard floor: falling behind by one serviced patch produces
-/// an actionable advisory rather than a wall-clock or latest-version kill
-/// switch.
-pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(150, 0, 4078, 99);
-pub const LATEST_REVIEWED_TEXT: &str = "150.0.4078.99";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-07-24";
-/// 2026-07-24T00:00:00Z.
-pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_784_851_200;
-pub const REVIEWED_STABLE_MAJOR: u32 = 150;
+/// separate from the hard floor even though both currently name the same
+/// release: when they differ, falling behind by one serviced patch produces an
+/// actionable advisory rather than a wall-clock or latest-version kill switch.
+pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(151, 0, 4129, 59);
+pub const LATEST_REVIEWED_TEXT: &str = "151.0.4129.59";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-07-31";
+/// 2026-07-31T00:00:00Z.
+pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_785_456_000;
+pub const REVIEWED_STABLE_MAJOR: u32 = 151;
 
 /// Microsoft reported a pending Chromium security update on 2026-07-14 and
 /// subsequently published fixed Stable releases beginning with 150.0.4078.80
-/// on 2026-07-16. The hard floor is the later 150.0.4078.96 security release
-/// and the newest recommendation is 150.0.4078.99, so the historical release
-/// blocker is resolved. Keep the notice date and post-notice review check:
-/// clearing the flag alone must never turn older evidence into release proof.
+/// on 2026-07-16. The hard floor is now the later 151.0.4129.59 security
+/// release from 2026-07-31, so the historical release blocker remains
+/// resolved. Keep the notice date and post-notice review check: clearing the
+/// flag alone must never turn older evidence into release proof.
 pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-07-14";
-pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-07-24";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-08-04";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-04";
-/// 2026-08-05T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_785_888_000;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-11";
+/// 2026-08-12T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_786_492_800;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -384,19 +390,19 @@ mod tests {
 
     #[test]
     fn parses_every_documented_channel_and_stable_runtime() {
-        let stable: WebView2Version = "150.0.4078.65".parse().unwrap();
-        assert_eq!(stable.components(), [150, 0, 4078, 65]);
+        let stable: WebView2Version = "151.0.4129.59".parse().unwrap();
+        assert_eq!(stable.components(), [151, 0, 4129, 59]);
         assert_eq!(stable.channel(), None);
-        assert_eq!(stable.to_string(), "150.0.4078.65");
+        assert_eq!(stable.to_string(), "151.0.4129.59");
 
         for (suffix, expected) in [
             ("beta", Channel::Beta),
             ("dev", Channel::Dev),
             ("canary", Channel::Canary),
         ] {
-            let version: WebView2Version = format!("150.0.4078.65 {suffix}").parse().unwrap();
+            let version: WebView2Version = format!("151.0.4129.59 {suffix}").parse().unwrap();
             assert_eq!(version.channel(), Some(expected));
-            assert_eq!(version.to_string(), format!("150.0.4078.65 {suffix}"));
+            assert_eq!(version.to_string(), format!("151.0.4129.59 {suffix}"));
         }
     }
 
@@ -404,22 +410,22 @@ mod tests {
     fn parser_rejects_malformed_and_ambiguous_versions() {
         let cases = [
             "",
-            "150",
-            "150.0.4078",
-            "150.0.4078.65.1",
-            ".0.4078.65",
-            "150..4078.65",
-            "150.0.4078.",
-            "+150.0.4078.65",
-            "-150.0.4078.65",
-            "１５０.0.4078.65",
-            "150.0.4078.65 ",
-            " 150.0.4078.65",
-            "150.0.4078.65  beta",
-            "150.0.4078.65\tbeta",
-            "150.0.4078.65 stable",
-            "150.0.4078.65 Beta",
-            "150.0.4078.65 beta extra",
+            "151",
+            "151.0.4129",
+            "151.0.4129.59.1",
+            ".0.4129.59",
+            "151..4129.59",
+            "151.0.4129.",
+            "+151.0.4129.59",
+            "-151.0.4129.59",
+            "１５１.0.4129.59",
+            "151.0.4129.59 ",
+            " 151.0.4129.59",
+            "151.0.4129.59  beta",
+            "151.0.4129.59\tbeta",
+            "151.0.4129.59 stable",
+            "151.0.4129.59 Beta",
+            "151.0.4129.59 beta extra",
             "4294967296.0.0.0",
         ];
         for value in cases {
@@ -436,19 +442,19 @@ mod tests {
 
     #[test]
     fn numeric_order_compares_all_four_components() {
-        let required = WebView2Version::stable(150, 0, 4078, 96);
+        let required = WebView2Version::stable(151, 0, 4129, 59);
         for older in [
-            WebView2Version::stable(149, u32::MAX, u32::MAX, u32::MAX),
-            WebView2Version::stable(150, 0, 4077, u32::MAX),
-            WebView2Version::stable(150, 0, 4078, 95),
+            WebView2Version::stable(150, u32::MAX, u32::MAX, u32::MAX),
+            WebView2Version::stable(151, 0, 4128, u32::MAX),
+            WebView2Version::stable(151, 0, 4129, 58),
         ] {
             assert!(!older.is_at_least(required), "{older} must be older");
         }
         for accepted in [
             required,
-            WebView2Version::stable(150, 0, 4078, 97),
-            WebView2Version::stable(150, 0, 4079, 0),
-            WebView2Version::stable(151, 0, 0, 0),
+            WebView2Version::stable(151, 0, 4129, 60),
+            WebView2Version::stable(151, 0, 4130, 0),
+            WebView2Version::stable(152, 0, 0, 0),
         ] {
             assert!(
                 accepted.is_at_least(required),
@@ -462,11 +468,11 @@ mod tests {
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
         assert!(admit_runtime(LATEST_REVIEWED_TEXT).is_ok());
         assert!(matches!(
-            admit_runtime("150.0.4078.95"),
+            admit_runtime("151.0.4129.58"),
             Err(AdmissionError::BelowSecurityFloor { .. })
         ));
         assert_eq!(
-            admit_runtime("150.0.4078.96 beta"),
+            admit_runtime("151.0.4129.59 beta"),
             Err(AdmissionError::PreviewChannel(Channel::Beta))
         );
         assert!(matches!(
@@ -494,26 +500,19 @@ mod tests {
     }
 
     #[test]
-    fn assessment_separates_hard_floor_recommendation_and_future_stable_line() {
+    fn assessment_separates_current_floor_review_age_and_future_stable_line() {
         assert_eq!(
             assess_runtime(SECURITY_FLOOR_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
-            Ok((
-                SECURITY_FLOOR,
-                RuntimeSecurityAdvisories::from_advisory(
-                    RuntimeSecurityAdvisory::update_recommended(
-                        RuntimeSecurityUpdateTarget::BrowserRuntime,
-                    ),
-                )
-            ))
+            Ok((SECURITY_FLOOR, RuntimeSecurityAdvisories::new()))
         );
         assert_eq!(
             assess_runtime(LATEST_REVIEWED_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
             Ok((LATEST_REVIEWED, RuntimeSecurityAdvisories::new()))
         );
         assert_eq!(
-            assess_runtime("151.0.4129.15", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            assess_runtime("152.0.4170.0", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
             Ok((
-                WebView2Version::stable(151, 0, 4129, 15),
+                WebView2Version::stable(152, 0, 4170, 0),
                 RuntimeSecurityAdvisories::from_advisory(
                     RuntimeSecurityAdvisory::unreviewed_runtime(),
                 )
@@ -531,7 +530,7 @@ mod tests {
         );
 
         let (_, combined) = assess_runtime(
-            "151.0.4129.15",
+            "152.0.4170.0",
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
         )
         .unwrap();
