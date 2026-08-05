@@ -6,7 +6,11 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use thiserror::Error;
-use zephium_core::extensions::{ExtensionManifestDescriptor, ExtensionPackageIdentity};
+use zephium_core::extensions::{
+    ExtensionCatalogGenerationRole, ExtensionManifestDescriptor, ExtensionPackageIdentity,
+    ExtensionPackagePinAcquisitionBinding, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibility,
+};
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
     BundledCatalogAdmissionError, ProductExtensionManifestAdmissionError,
@@ -23,15 +27,11 @@ use crate::materialization::{
 use crate::operation::{RepositoryOperationError, RepositoryRuntime};
 use crate::{BundledCatalogSetIdentity, ExtensionRepositoryError};
 
+const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
+const RETAINED_ARC_COUNTER_BYTES: usize = 2 * size_of::<usize>();
+
 /// Product-sealed role of the repository's exact current catalog set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum BundledCatalogGenerationRole {
-    /// Ordinary active product generation.
-    Active,
-    /// Explicitly product-approved rollback generation.
-    Rollback,
-}
+pub type BundledCatalogGenerationRole = ExtensionCatalogGenerationRole;
 
 /// Path-free identity and role of the exact current bundled catalog set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +77,12 @@ pub enum BundledPackageLeaseError {
     /// Fresh product admission did not equal the complete store eligibility.
     #[error("extension runtime eligibility differs from the authenticated package")]
     EligibilityMismatch,
+    /// The Store-bound browsing partition is not supported for fresh runtime acquisition.
+    #[error("extension package acquisition does not support this browsing partition")]
+    BrowsingContextUnsupported,
+    /// The Store-bound backend differs from the authenticated catalog selection.
+    #[error("extension runtime backend differs from the authenticated package selection")]
+    RuntimeBackendMismatch,
     /// The owner already has a different durable package pin.
     #[error("extension owner is pinned to another package")]
     OwnerConflict,
@@ -122,9 +128,9 @@ pub enum BundledPackageLeaseReleaseError {
     /// Another live lease owns this owner slot in this repository open.
     #[error("another live extension package lease owns this release slot")]
     ConcurrentLease,
-    /// The durable owner pin has a different package record or incarnation.
-    #[error("extension package release request is stale")]
-    StaleLease,
+    /// The Store cleanup row, same-process request, and durable pin do not identify one owner.
+    #[error("extension package release does not match the native-ownership journal")]
+    JournalPinMismatch,
 }
 
 /// Exact durable release outcome.
@@ -167,11 +173,42 @@ pub(super) struct PackageLeaseCore<Snapshot> {
     pub(super) runtime: RepositoryRuntime,
     pub(super) repository: PackageLeaseRepositoryIdentity,
     pub(super) current_set: BundledCatalogSetIdentity,
-    pub(super) profile: ProfileId,
-    pub(super) install: ExtensionInstallId,
     pub(super) pin: OwnerPackagePinIdentity,
+    pub(super) acquisition: Box<ExtensionPackagePinAcquisitionBinding>,
     pub(super) presence: Arc<LeasePresence>,
     pub(super) snapshot: Arc<Snapshot>,
+}
+
+/// Nominal package lease selected by one journal-bound active or rollback role.
+///
+/// The variants preserve the product authority used for package admission. The
+/// selected variant owns the exact move-only Core acquisition binding while
+/// this lease and its native owner remain unresolved.
+#[must_use = "a bundled package lease must remain owned until native teardown settles"]
+pub enum BundledPackageLease {
+    /// Ordinary active-generation package authority.
+    Active(ActiveBundledPackageLease),
+    /// Explicitly authorized rollback-generation package authority.
+    Rollback(RollbackBundledPackageLease),
+}
+
+impl BundledPackageLease {
+    /// Returns the historical product role used for this acquisition.
+    pub const fn role(&self) -> BundledCatalogGenerationRole {
+        match self {
+            Self::Active(_) => BundledCatalogGenerationRole::Active,
+            Self::Rollback(_) => BundledCatalogGenerationRole::Rollback,
+        }
+    }
+}
+
+impl fmt::Debug for BundledPackageLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active(_) => formatter.write_str("Active([redacted])"),
+            Self::Rollback(_) => formatter.write_str("Rollback([redacted])"),
+        }
+    }
 }
 
 /// Authenticated active-generation package access and durable pinning authority.
@@ -184,8 +221,8 @@ pub(super) struct PackageLeaseCore<Snapshot> {
 /// never removes its durable owner pin.
 /// The caller must consume it into an exact release request and settle that
 /// request after native teardown. A crash or accidental drop therefore fails
-/// safe: exact reacquisition replays the pin, while absent-install orphan
-/// reconciliation requires a separate Store-authorized service.
+/// safe: the exact Store-bound pin survives for cleanup-only reconciliation;
+/// restart never reconstructs package access from this lease.
 ///
 /// ```compile_fail
 /// use zephium_extension_repository::ActiveBundledPackageLease;
@@ -218,8 +255,8 @@ pub struct ActiveBundledPackageLease {
 /// never removes its durable owner pin.
 /// The caller must consume it into an exact release request and settle that
 /// request after native teardown. A crash or accidental drop therefore fails
-/// safe: exact reacquisition replays the pin, while absent-install orphan
-/// reconciliation requires a separate Store-authorized service.
+/// safe: the exact Store-bound pin survives for cleanup-only reconciliation;
+/// restart never reconstructs package access from this lease.
 ///
 /// ```compile_fail
 /// use zephium_extension_repository::RollbackBundledPackageLease;
@@ -267,12 +304,25 @@ macro_rules! impl_lease {
         impl $lease {
             /// Returns the exact profile owner.
             pub const fn profile(&self) -> ProfileId {
-                self.core.profile
+                self.core.acquisition.profile()
             }
 
             /// Returns the exact profile-scoped installation owner.
             pub const fn install_id(&self) -> ExtensionInstallId {
-                self.core.install
+                self.core.acquisition.install_id()
+            }
+
+            /// Returns the complete Store-bound runtime eligibility.
+            ///
+            /// The lease owns the move-only acquisition binding, so this
+            /// value can only be borrowed while the exact package pin is live.
+            pub const fn eligibility(&self) -> &ExtensionRuntimeEligibility {
+                self.core.acquisition.eligibility()
+            }
+
+            /// Returns the exact reviewed native backend selected by Store.
+            pub const fn runtime_backend(&self) -> ExtensionRuntimeBackendTarget {
+                self.core.acquisition.runtime_backend()
             }
 
             /// Returns the atomic catalog-set identity used at acquisition.
@@ -300,7 +350,15 @@ macro_rules! impl_lease {
             /// Immutable snapshots are physically shared by exact package record,
             /// so this logical per-lease charge does not imply duplicate allocation.
             pub fn retained_bytes(&self) -> usize {
-                size_of::<Self>().saturating_add(self.core.snapshot.retained_bytes())
+                size_of::<Self>()
+                    .saturating_add(self.core.acquisition.retained_bytes())
+                    .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+                    .saturating_add(self.core.snapshot.retained_bytes())
+                    .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+                    .saturating_add(RETAINED_ARC_COUNTER_BYTES)
+                    .saturating_add(size_of::<LeasePresence>())
+                    .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+                    .saturating_add(RETAINED_ARC_COUNTER_BYTES)
             }
 
             /// Reads one declared resource through the sealed descriptor-relative tree.
@@ -342,24 +400,25 @@ macro_rules! impl_lease {
             /// Recovery after repository reopen requires exact lease reacquisition or
             /// Store-authorized reconciliation.
             pub fn into_release_request(self) -> $request {
+                let package = self.core.snapshot.package().clone();
                 let PackageLeaseCore {
                     open_epoch,
                     runtime: _,
                     repository,
                     current_set: _,
-                    profile,
-                    install,
                     pin,
+                    acquisition,
                     presence,
                     snapshot: _,
                 } = self.core;
+                let backend = acquisition.runtime_backend();
                 $request {
                     core: PackageReleaseRequestCore {
                         open_epoch,
                         repository,
-                        profile,
-                        install,
                         pin,
+                        package,
+                        backend,
                         presence,
                         state: PackageReleaseRequestState::ReleasePending,
                     },
@@ -389,9 +448,9 @@ pub(super) enum PackageReleaseRequestState {
 pub(super) struct PackageReleaseRequestCore {
     pub(super) open_epoch: Arc<RepositoryOpenEpoch>,
     pub(super) repository: PackageLeaseRepositoryIdentity,
-    pub(super) profile: ProfileId,
-    pub(super) install: ExtensionInstallId,
     pub(super) pin: OwnerPackagePinIdentity,
+    pub(super) package: ExtensionPackageIdentity,
+    pub(super) backend: ExtensionRuntimeBackendTarget,
     pub(super) presence: Arc<LeasePresence>,
     pub(super) state: PackageReleaseRequestState,
 }

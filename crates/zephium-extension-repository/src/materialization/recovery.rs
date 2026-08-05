@@ -18,16 +18,16 @@ use super::names::{self, RecordNameKind, RecordObjectKind, TreeNameKind};
 use super::policy::{validate_completed_tree_budget, validate_package_anchor_consistency};
 use super::records::{
     CatalogAnchor, CatalogSetRecord, PackageRecord, StoredLegalArtifactKind, StoredPayloadIdentity,
-    StoredRuntimePlatformFamily, StoredRuntimeTarget, MAX_CATALOG_SET_PACKAGES,
-    MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
+    StoredRuntimePlatformFamily, StoredRuntimeTarget, MAX_CATALOG_SET_RECORD_BYTES,
+    MAX_PACKAGE_RECORD_BYTES,
 };
 use super::runtime::{
     MaterializationPinRoots, MaterializationRuntime, MaterializationTreeCapability,
 };
 use super::state::{
     MaterializationCheckpoint, MaterializationJournal, MaterializationState,
-    MAX_DRAIN_CATALOG_SELECTIONS, MAX_MATERIALIZATION_CHECKPOINT_BYTES,
-    MAX_MATERIALIZATION_JOURNAL_BYTES, MAX_MATERIALIZATION_STATE_BYTES,
+    MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
+    MAX_MATERIALIZATION_STATE_BYTES,
 };
 use super::storage::{
     map_initialization_fs, read_required_control, read_required_sealed_record,
@@ -1138,54 +1138,37 @@ fn validate_state_references(
         )?;
     }
 
-    // Owners normally pin a package selected by one of the three atomic
-    // catalog slots. During update drain they may retain one additional exact
-    // catalog selection. Bounding that selection by catalog and package key
-    // makes the 32-record/1 GiB repository ceiling operational rather than a
-    // coincidental consequence of the number of authority backend profiles.
-    let mut drain_selections = BTreeMap::<CatalogAnchor, BTreeMap<Digest32, Digest32>>::new();
-    let mut drain_tree_bytes = 0_u64;
+    // Every owner names the exact authenticated set from which its package was
+    // selected. `catalog_pin_ids` retains that whole set, including one bounded
+    // owner-only drain set, so recovery never reconstructs a partial selection
+    // from package catalog anchors.
     for pin in &state.package_pins {
+        let set = records
+            .catalog_sets
+            .get(&pin.catalog_set_record_id)
+            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+        let row = set
+            .packages
+            .iter()
+            .find(|row| row.package_record_id == pin.package_record_id)
+            .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
         let package = records
             .packages
             .get(&pin.package_record_id)
             .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-        require_authenticated_package(package, catalog_recognizer)?;
+        if package.catalog != set.catalog
+            || package.package.package_key != row.package_key
+            || package.manifest.runtime_target != row.runtime_target
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
         bind_live_platform_family(
             &mut live_platform_family,
-            package.manifest.runtime_target,
+            row.runtime_target,
             catalog_recognizer.expected_platform_family(),
         )?;
         if !selected_package_record_ids.contains(&pin.package_record_id) {
-            let (drain_package_count, newly_selected) = {
-                let packages_by_key = drain_selections.entry(package.catalog).or_default();
-                let newly_selected = match packages_by_key.entry(package.package.package_key) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(pin.package_record_id);
-                        true
-                    }
-                    std::collections::btree_map::Entry::Occupied(entry)
-                        if *entry.get() == pin.package_record_id =>
-                    {
-                        false
-                    }
-                    std::collections::btree_map::Entry::Occupied(_) => {
-                        return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-                    }
-                };
-                (packages_by_key.len(), newly_selected)
-            };
-            if newly_selected {
-                drain_tree_bytes = drain_tree_bytes
-                    .checked_add(package.tree_index.tree_bytes)
-                    .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-            }
-            if drain_selections.len() > MAX_DRAIN_CATALOG_SELECTIONS
-                || drain_package_count > MAX_CATALOG_SET_PACKAGES
-                || drain_tree_bytes > MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES
-            {
-                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-            }
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
         package_record_ids.insert(pin.package_record_id);
         tree_ids.insert(package.tree_index.tree_sha256);

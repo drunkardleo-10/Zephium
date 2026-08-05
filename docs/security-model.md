@@ -411,6 +411,45 @@ coordinator and product native backend remain disabled release work.
 it does not prove these rows or their possible native owners absent. A future extension
 coordinator owns bounded drain attempts and higher-level shutdown health.
 
+The subordinate repository package pin is representation-exact as well. Its
+durable identity includes browsing context, exact catalog-set record, historical
+active/rollback role, exact package record, and the Store-native incarnation;
+repository generation is an independent transition clock. Pin acquisition must
+join a freshly product-verified package snapshot to the exact
+`Acquire/NativeAbsentPreparing` Store row and currently rejects private context.
+Idempotent replay requires equality of every persisted field. Same owner with a
+different tuple is an ordinary owner conflict; a duplicate non-zero Store
+incarnation or a missing/mismatched set row is corruption and fails recovery.
+Removal compares the complete persisted identity, so a later acquisition of
+the same package cannot satisfy a stale release. Owner pins retain their full
+authenticated catalog set, and at most one exact set may exist outside the
+candidate/current/previous slots. The 1,024-row durable ceiling covers bounded
+reconciliation of both browsing contexts and does not authorize private
+execution. Materialization schema v3 deliberately rejects the unreleased,
+under-bound schema-v2 live-pin shape rather than guessing missing authority.
+Post-reopen cleanup accepts only a Core-minted
+`Release/NativeAbsentReleasePending` binding and grants no package or runtime
+access. It first excludes a live same-open owner. After a classified frontier
+preflight rejects in-memory or physical object-stage residue, it treats owner
+absence as an idempotent crash-before-pin result without consulting a set
+object. A present owner requires the complete persisted identity plus exact
+set-row/package/backend join before the exact removal transition. A stale
+incarnation, role, context, set, package, or backend is never approximated.
+The repository can recover at most eight sealed catalog-set finals and has no
+production materialization GC yet. Repeated distinct catalog selections can
+hard-stop at that bound; a bounded collector that runs only after
+interrupted-build settlement and preserves all slot and owner-pin closures is
+a release blocker, not optional maintenance.
+The Core acquisition and release bindings prove only a complete structural
+join; they are not Store freshness capabilities. Acquisition is linear at the
+repository boundary: the move-only binding is consumed into the live lease and
+cannot be replayed after conversion to cleanup-only release. The extension
+service must exclusively own the Store journal and repository, freshly
+revalidate the exact row and CAS in the same serialized actor turn before each
+repository call, and expose neither bindings nor raw repository mutation over
+its mailbox. Until that service boundary and its stale/forged-row denial tests
+exist, these low-level APIs are not a release-enablement claim.
+
 Logical content views have three explicit watermarks. Twelve is the warm soft target;
 above it, hidden idle pages become discard candidates. Above the pressure watermark of
 24, eligible hidden pages may be probed without waiting for the long-idle grace. The

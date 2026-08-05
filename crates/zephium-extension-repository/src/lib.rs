@@ -53,10 +53,10 @@ pub use package_lease::{
     ActiveBundledRuntimePackageAccessBuildRefusal, ActiveBundledRuntimePackageRecoveryError,
     ActiveBundledRuntimePackageRecoveryRefusal, BundledCatalogGenerationRole,
     BundledCurrentCatalogSet, BundledCurrentManifestBindings, BundledManifestBindingsError,
-    BundledPackageLeaseError, BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
-    BundledPackageResourceError, BundledRuntimePackageAccessBuildError,
-    RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
-    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
-    RollbackBundledRuntimePackageRecoveryRefusal,
+    BundledPackageLease, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
+    BundledPackageLeaseReleaseOutcome, BundledPackageResourceError,
+    BundledRuntimePackageAccessBuildError, RollbackBundledPackageLease,
+    RollbackBundledPackageReleaseRequest, RollbackBundledRuntimePackageAccessBuildRefusal,
+    RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
 };
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

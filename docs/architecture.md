@@ -614,6 +614,50 @@ consistency checks prevent clock
 reuse from a torn or corrupted cohort; they cannot detect a coherent rollback
 of the entire database without an external anti-rollback anchor.
 
+The extension repository's materialization schema v3 retains the subordinate
+side of that cross-store join. Every durable package pin records the complete
+`(profile, install, regular/private context)` owner key, the exact catalog-set
+record digest, its historical active/rollback role, the exact package-record
+digest, and Store's persistent native incarnation. Repository generation is a
+separate transition CAS clock and is never reused as native incarnation.
+Store incarnation therefore supplies reopened ABA protection, while a consumed
+materialization runtime plus its generation and directory identity protect an
+in-process transition. Candidate/current/previous remain the three atomic set
+slots; all owner pins retain their complete named set, with at most one
+additional owner-only drain set. Recovery validates the package as a row of
+that exact set and retains the whole set closure instead of reconstructing a
+partial drain from catalog anchors. The durable owner inventory is bounded to
+1,024 exact context keys (64 profiles x 8 installs x 2 contexts). That is
+crash-recovery capacity, not private-browsing permission: acquisition remains
+explicitly regular-only until the private runtime contract is implemented.
+The unreleased schema-v2 pin shape lacks these join fields and fails closed.
+Cleanup after repository reopen is a separate, access-free path. It accepts
+only a Core-minted Store binding for `Release/NativeAbsentReleasePending`,
+grants no package or runtime access, and rejects a live lease for the same
+owner in the current repository-open epoch. After a classified frontier
+preflight proves there is no in-memory or physical object-stage residue, an
+absent owner settles before catalog-set lookup so crash-before-pin replay
+remains idempotent. A present owner must match the complete persisted
+owner/set/role/incarnation identity
+and the exact set-row/package/backend join before the existing exact removal
+transition may run.
+The physical recovery inventory currently permits at most eight sealed
+catalog-set finals, but materialization does not yet have a production garbage
+collector. Repeated distinct selections can therefore exhaust that bound.
+Bounded closure GC, ordered after interrupted-build settlement and preserving
+every candidate/current/previous and owner-pin root, remains a release blocker;
+the current ceiling is not a claim of indefinite operation.
+Core package-pin bindings are structural joins, not proof that a Store row is
+still current. Fresh acquisition consumes its move-only binding into the live
+repository lease; the lease exposes eligibility only by borrow and destroys
+the acquisition authority when converted to cleanup-only release. The runtime
+service is therefore the exclusive owner of both the Store journal projection
+and `ExtensionRepository`: immediately before every repository mutation it
+must revalidate the exact current row and CAS in its serialized actor turn.
+Neither raw bindings nor repository methods may cross its bounded mailbox.
+Service tests must prove stale or caller-synthesized rows cannot reach a
+repository transition before extension execution is enabled.
+
 Durable package identity is representation-exact. A bundled authenticated tree
 is tagged `BundledTree` and carries no synthetic archive evidence; a future
 acquired ZIP is tagged separately and binds both a non-zero bounded byte length

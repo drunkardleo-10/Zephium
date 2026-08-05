@@ -2,7 +2,9 @@
 
 use zephium_private_fs::PrivateComponent;
 
-use super::state::{MAX_CATALOG_SET_SLOTS, MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_GENERATION};
+use super::state::{
+    MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_GENERATION, MAX_RETAINED_CATALOG_SELECTIONS,
+};
 use crate::state::Digest32;
 use crate::ExtensionRepositoryError;
 
@@ -11,7 +13,7 @@ pub(crate) const MAX_MATERIALIZATION_ROOT_ENTRIES: usize = 7;
 // of exact stage/retired residue can coexist before later bounded GC runs.
 pub(crate) const MAX_FINAL_PACKAGE_RECORDS: usize = checked_mul(MAX_COMPLETED_PACKAGE_RECORDS, 2);
 pub(crate) const MAX_FINAL_DATA_OBJECTS_PER_KIND: usize = MAX_FINAL_PACKAGE_RECORDS;
-pub(crate) const MAX_CATALOG_SET_RECORDS_PER_STATE: usize = MAX_CATALOG_SET_SLOTS;
+pub(crate) const MAX_CATALOG_SET_RECORDS_PER_STATE: usize = MAX_RETAINED_CATALOG_SELECTIONS;
 pub(crate) const MAX_FINAL_CATALOG_SET_RECORDS: usize =
     checked_mul(MAX_CATALOG_SET_RECORDS_PER_STATE, 2);
 pub(crate) const MAX_RETIRED_TREE_RECORDS: usize = MAX_COMPLETED_PACKAGE_RECORDS;

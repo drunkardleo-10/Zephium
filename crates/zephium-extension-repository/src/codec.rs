@@ -24,9 +24,9 @@ const MAX_AUTHORITY_JSON_COLLECTION_ENTRIES: usize = MAX_PACKAGE_LINE_HIGH_WATER
 
 // The deepest materialization document is journal -> state -> build intent ->
 // package record -> acquired payload -> scalar. Owner-scoped package pins
-// dominate the node count (512 rows, each with four scalar fields).
+// dominate the node count (1,024 rows, each with seven scalar fields).
 const MAX_MATERIALIZATION_JSON_DEPTH: usize = 8;
-const MAX_MATERIALIZATION_JSON_NODES: usize = 4_096;
+const MAX_MATERIALIZATION_JSON_NODES: usize = 16_384;
 const MAX_MATERIALIZATION_JSON_COLLECTION_ENTRIES: usize = MAX_DURABLE_PACKAGE_PINS;
 const _: () = {
     let authority = BoundedJsonLimits::release_catalog();

@@ -5,16 +5,19 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use zephium_core::extensions::{
-    ExtensionGrantCohortError, ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
-    ExtensionInstall, ExtensionInstallCatalog, ExtensionManifestDescriptor,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionRuntimeEligibility,
+    ExtensionCatalogGenerationRole, ExtensionGrantBrowsingContext, ExtensionGrantCohortError,
+    ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionInstall,
+    ExtensionInstallCatalog, ExtensionManifestDescriptor, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackagePinAcquisitionBinding, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibility,
 };
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError,
     BundledPackageAuthority, ProductAdmittedExtensionManifest,
     ProductAdmittedRollbackExtensionManifest, ProductBundledCatalogGenerationRole,
     ProductExtensionManifestAdmissionError, ProductExtensionManifestAuthority,
-    ProductExtensionManifestAuthorityError, MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ProductExtensionManifestAuthorityError, ProductExtensionRuntimeTarget,
+    MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 use zephium_extension_package::{
     CanonicalExtensionTreeIndex, ExtensionReleaseCatalog, ExtensionReleaseCatalogRevision,
@@ -35,6 +38,7 @@ use super::prepare::{
 use super::records::{
     CatalogSetRecord, PackageRecord, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
 };
+use super::state::{DurablePackagePin, HistoricalCatalogRole, StoredBrowsingContext};
 use super::storage::read_required_sealed_record;
 use super::tree_reader::{with_verified_tree_resource, TreeResourceError};
 use super::{MaterializationRuntime, MAX_MATERIALIZATION_STATE_BYTES};
@@ -59,6 +63,74 @@ pub(crate) const MAX_PACKAGE_LEASE_SNAPSHOT_RETAINED_BYTES: usize =
 pub(crate) enum VerifiedCatalogRole {
     Active,
     Rollback,
+}
+
+/// Stable classification while joining a fresh product-verified package
+/// snapshot to one Store-native acquisition row.
+///
+/// Caller-owned binding mismatches are clean refusals. `DurableRowMismatch`
+/// reports repository incoherence and must follow the existing fail-closed
+/// snapshot path.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum PackagePinAdmissionError {
+    #[error("private extension package pins are not supported yet")]
+    PrivateUnsupported,
+    #[error("extension package-pin catalog selection is stale")]
+    StaleCatalogSet,
+    #[error("extension package-pin catalog role differs")]
+    WrongCatalogRole,
+    #[error("extension package-pin package identity differs")]
+    PackageMismatch,
+    #[error("extension package-pin runtime backend differs")]
+    RuntimeBackendMismatch,
+    #[error("extension package-pin durable row differs")]
+    DurableRowMismatch,
+}
+
+/// Failure while atomically loading and Store-binding one authenticated pin.
+#[derive(Debug, Error)]
+pub(crate) enum PackagePinLoadError {
+    #[error("extension package snapshot authentication failed")]
+    Snapshot(#[from] SnapshotLoadError),
+    #[error("extension package snapshot differs from the Store acquisition row")]
+    Admission(#[from] PackagePinAdmissionError),
+}
+
+/// Normalized, non-serializable proof that one freshly authenticated package
+/// snapshot and one Store acquisition row describe the same exact owner.
+///
+/// Product authority stays in this admission layer. The transaction layer
+/// accepts only this closed projection and rechecks its durable set row before
+/// committing the pin.
+#[must_use = "a verified package-pin admission must be committed or discarded"]
+pub(crate) struct VerifiedPackagePinAdmission {
+    repository: PackageLeaseRepositoryIdentity,
+    current_catalog_set_id: Digest32,
+    package_key: Digest32,
+    runtime_backend: ExtensionRuntimeBackendTarget,
+    pin: DurablePackagePin,
+}
+
+impl VerifiedPackagePinAdmission {
+    pub(crate) const fn repository(&self) -> PackageLeaseRepositoryIdentity {
+        self.repository
+    }
+
+    pub(crate) const fn current_catalog_set_id(&self) -> Digest32 {
+        self.current_catalog_set_id
+    }
+
+    pub(crate) const fn package_key(&self) -> Digest32 {
+        self.package_key
+    }
+
+    pub(crate) const fn runtime_backend(&self) -> ExtensionRuntimeBackendTarget {
+        self.runtime_backend
+    }
+
+    pub(crate) const fn pin(&self) -> DurablePackagePin {
+        self.pin
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -328,7 +400,136 @@ impl_snapshot_projection!(
     ProductAdmittedRollbackExtensionManifest
 );
 
-pub(crate) fn load_active_package_snapshot(
+fn verify_active_package_pin_admission(
+    current: &CurrentCatalogSetProjection,
+    snapshot: &VerifiedActivePackageSnapshot,
+    binding: &ExtensionPackagePinAcquisitionBinding,
+) -> Result<VerifiedPackagePinAdmission, PackagePinAdmissionError> {
+    verify_package_pin_admission(
+        current,
+        snapshot.repository,
+        snapshot.record_id,
+        snapshot.package(),
+        snapshot.runtime_target(),
+        VerifiedCatalogRole::Active,
+        binding,
+    )
+}
+
+fn verify_rollback_package_pin_admission(
+    current: &CurrentCatalogSetProjection,
+    snapshot: &VerifiedRollbackPackageSnapshot,
+    binding: &ExtensionPackagePinAcquisitionBinding,
+) -> Result<VerifiedPackagePinAdmission, PackagePinAdmissionError> {
+    verify_package_pin_admission(
+        current,
+        snapshot.repository,
+        snapshot.record_id,
+        snapshot.package(),
+        snapshot.runtime_target(),
+        VerifiedCatalogRole::Rollback,
+        binding,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_package_pin_admission(
+    current: &CurrentCatalogSetProjection,
+    snapshot_repository: PackageLeaseRepositoryIdentity,
+    record_id: Digest32,
+    package: &ExtensionPackageIdentity,
+    runtime_target: ProductExtensionRuntimeTarget,
+    expected_role: VerifiedCatalogRole,
+    binding: &ExtensionPackagePinAcquisitionBinding,
+) -> Result<VerifiedPackagePinAdmission, PackagePinAdmissionError> {
+    if binding.browsing_context() != ExtensionGrantBrowsingContext::Regular {
+        return Err(PackagePinAdmissionError::PrivateUnsupported);
+    }
+    if current.identity.bytes() != binding.catalog_set_digest().bytes() {
+        return Err(PackagePinAdmissionError::StaleCatalogSet);
+    }
+    let (binding_role, historical_role) = match expected_role {
+        VerifiedCatalogRole::Active => (
+            ExtensionCatalogGenerationRole::Active,
+            HistoricalCatalogRole::Active,
+        ),
+        VerifiedCatalogRole::Rollback => (
+            ExtensionCatalogGenerationRole::Rollback,
+            HistoricalCatalogRole::Rollback,
+        ),
+    };
+    if current.role != expected_role || binding.catalog_role() != binding_role {
+        return Err(PackagePinAdmissionError::WrongCatalogRole);
+    }
+    if binding.package() != package {
+        return Err(PackagePinAdmissionError::PackageMismatch);
+    }
+    let row = current
+        .package_row(package.key())
+        .ok_or(PackagePinAdmissionError::DurableRowMismatch)?;
+    if snapshot_repository != current.repository
+        || row.package_record_id != record_id
+        || row.runtime_target.product_target() != runtime_target
+    {
+        return Err(PackagePinAdmissionError::DurableRowMismatch);
+    }
+    if !row
+        .runtime_target
+        .matches_runtime_backend(binding.runtime_backend())
+    {
+        return Err(PackagePinAdmissionError::RuntimeBackendMismatch);
+    }
+    let pin = DurablePackagePin {
+        profile_id: binding.profile(),
+        install_id: binding.install_id(),
+        browsing_context: StoredBrowsingContext::from(binding.browsing_context()),
+        catalog_set_record_id: current.identity,
+        catalog_role: historical_role,
+        package_record_id: record_id,
+        native_incarnation: binding.native_incarnation().get(),
+    };
+    Ok(VerifiedPackagePinAdmission {
+        repository: current.repository,
+        current_catalog_set_id: current.identity,
+        package_key: row.package_key,
+        runtime_backend: binding.runtime_backend(),
+        pin,
+    })
+}
+
+/// Loads and binds one active snapshot without exposing an independently
+/// supplied eligibility value to repository orchestration.
+pub(crate) fn load_active_package_pin_admission(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    exact_catalog_bytes: &[u8],
+    binding: &ExtensionPackagePinAcquisitionBinding,
+) -> Result<(VerifiedActivePackageSnapshot, VerifiedPackagePinAdmission), PackagePinLoadError> {
+    let snapshot =
+        load_active_package_snapshot(runtime, current, exact_catalog_bytes, binding.eligibility())?;
+    let admission = verify_active_package_pin_admission(current, &snapshot, binding)?;
+    Ok((snapshot, admission))
+}
+
+/// Loads and binds one rollback snapshot without exposing an independently
+/// supplied eligibility value to repository orchestration.
+pub(crate) fn load_rollback_package_pin_admission(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    exact_catalog_bytes: &[u8],
+    binding: &ExtensionPackagePinAcquisitionBinding,
+) -> Result<(VerifiedRollbackPackageSnapshot, VerifiedPackagePinAdmission), PackagePinLoadError> {
+    let snapshot = load_rollback_package_snapshot(
+        runtime,
+        current,
+        exact_catalog_bytes,
+        binding.eligibility(),
+    )?;
+    let admission = verify_rollback_package_pin_admission(current, &snapshot, binding)?;
+    Ok((snapshot, admission))
+}
+
+fn load_active_package_snapshot(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
     exact_catalog_bytes: &[u8],
@@ -445,7 +646,7 @@ pub(crate) fn load_active_manifest_bindings(
     finish_manifest_bindings(bindings)
 }
 
-pub(crate) fn load_rollback_package_snapshot(
+fn load_rollback_package_snapshot(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
     exact_catalog_bytes: &[u8],

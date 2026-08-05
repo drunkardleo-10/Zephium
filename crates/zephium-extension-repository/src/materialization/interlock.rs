@@ -6,7 +6,7 @@ use zephium_extension_authority::{
     BundledCatalogGenerationAnchor, BundledPackageAuthority, ProductBundledCatalogGenerationRole,
 };
 
-use super::records::{CatalogAnchor, CatalogSetRecord, PackageRecord};
+use super::records::{CatalogAnchor, CatalogSetRecord};
 use super::runtime::MaterializationRuntime;
 use super::state::{MaterializationBuildIntent, MaterializationState};
 use crate::state::{Digest32, StoredCatalogCheckpoint};
@@ -36,7 +36,6 @@ fn collect_live_catalogs(
         &runtime._state,
         &runtime._build_intent,
         &runtime._catalog_sets,
-        &runtime._package_records,
     )
 }
 
@@ -44,7 +43,6 @@ fn collect_live_catalogs_from(
     state: &MaterializationState,
     runtime_intent: &Option<MaterializationBuildIntent>,
     catalog_sets: &BTreeMap<Digest32, CatalogSetRecord>,
-    packages: &BTreeMap<Digest32, PackageRecord>,
 ) -> Result<BTreeSet<CatalogAnchor>, ExtensionRepositoryError> {
     state.validate()?;
     if &state.build_intent != runtime_intent {
@@ -62,10 +60,16 @@ fn collect_live_catalogs_from(
         catalogs.insert(set.catalog);
     }
     for pin in &state.package_pins {
-        let package = packages
-            .get(&pin.package_record_id)
+        let set = catalog_sets
+            .get(&pin.catalog_set_record_id)
             .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-        catalogs.insert(package.catalog);
+        if !set
+            .packages
+            .iter()
+            .any(|row| row.package_record_id == pin.package_record_id)
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
     }
     Ok(catalogs)
 }
@@ -99,7 +103,8 @@ mod tests {
     use super::*;
     use crate::materialization::records::tests::{catalog_set_fixture, package_record_fixture};
     use crate::materialization::state::{
-        DurablePackagePin, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+        DurablePackagePin, HistoricalCatalogRole, StoredBrowsingContext,
+        MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
@@ -179,6 +184,8 @@ mod tests {
             expected.insert(set.catalog);
             sets.insert(set_id, set);
         }
+        let owner_set_id = crate::state::Digest32::from_bytes([104; 32]);
+        sets.insert(owner_set_id, catalog_set_fixture(&package));
         expected.insert(package.catalog);
         let state = MaterializationState {
             generation: 1,
@@ -189,14 +196,16 @@ mod tests {
             package_pins: vec![DurablePackagePin {
                 profile_id: ProfileId::from(1),
                 install_id: ExtensionInstallId::from(1),
+                browsing_context: StoredBrowsingContext::Regular,
+                catalog_set_record_id: owner_set_id,
+                catalog_role: HistoricalCatalogRole::Rollback,
                 package_record_id: package_id,
-                incarnation: 1,
+                native_incarnation: 1,
             }],
             ..MaterializationState::default()
         };
-        let packages = BTreeMap::from([(package_id, package)]);
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &sets, &packages).unwrap(),
+            collect_live_catalogs_from(&state, &None, &sets).unwrap(),
             expected
         );
     }
@@ -210,26 +219,27 @@ mod tests {
             completed_package_record_ids: vec![package_id],
             ..MaterializationState::default()
         };
-        assert!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new(), &BTreeMap::new())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(collect_live_catalogs_from(&state, &None, &BTreeMap::new())
+            .unwrap()
+            .is_empty());
 
         state.current_catalog_set_id = Some(crate::state::Digest32::from_bytes([50; 32]));
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new(), &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &None, &BTreeMap::new()),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)
         );
         state.current_catalog_set_id = None;
         state.package_pins = vec![DurablePackagePin {
             profile_id: ProfileId::from(1),
             install_id: ExtensionInstallId::from(1),
+            browsing_context: StoredBrowsingContext::Regular,
+            catalog_set_record_id: crate::state::Digest32::from_bytes([51; 32]),
+            catalog_role: HistoricalCatalogRole::Active,
             package_record_id: package_id,
-            incarnation: 1,
+            native_incarnation: 1,
         }];
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new(), &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &None, &BTreeMap::new()),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)
         );
     }
@@ -249,11 +259,11 @@ mod tests {
             ..MaterializationState::default()
         };
         assert_eq!(
-            collect_live_catalogs_from(&state, &Some(intent), &BTreeMap::new(), &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &Some(intent), &BTreeMap::new()),
             Err(ExtensionRepositoryError::CatalogAdvanceBlockedByBuild)
         );
         assert_eq!(
-            collect_live_catalogs_from(&state, &None, &BTreeMap::new(), &BTreeMap::new()),
+            collect_live_catalogs_from(&state, &None, &BTreeMap::new()),
             Err(ExtensionRepositoryError::RecoveryAmbiguous)
         );
     }

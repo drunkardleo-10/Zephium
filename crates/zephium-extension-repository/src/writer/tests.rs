@@ -2,10 +2,21 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zephium_core::extensions::{ExtensionPackageKey, ExtensionPackagePayloadIdentity};
+use zephium_core::extensions::{
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantManifestBinding,
+    ExtensionGrantManifestBindings, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionNativeIncarnation,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryRevision,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinReleaseBinding,
+    ExtensionRuntimeBackendTarget,
+};
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledPackageAuthority,
@@ -18,13 +29,16 @@ use super::*;
 use crate::admission::FaultPoint as CatalogFaultPoint;
 use crate::materialization::{
     add_owner_package_pin, add_owner_package_pin_at_fault, complete_active_package_with_fault,
-    derive_active_catalog_set, derive_rollback_catalog_set, plan_current_catalog_package_pin,
-    plan_owner_package_pin_removal, promote_active_catalog_set_at_fault,
+    current_catalog_set_projection, derive_active_catalog_set, derive_rollback_catalog_set,
+    load_active_package_pin_admission, load_rollback_package_pin_admission,
+    plan_current_catalog_package_pin, plan_owner_package_pin_removal,
+    preflight_package_pin_release, promote_active_catalog_set_at_fault,
     publish_or_reuse_active_package_at_fault, remove_owner_package_pin,
-    remove_owner_package_pin_at_fault, rollback_to_previous_catalog_set_at_fault,
-    stage_active_catalog_set_candidate, stage_active_catalog_set_candidate_at_fault,
-    ObjectPublicationFaultPoint, OwnerPackagePinIdentity, OwnerPackagePinPlan,
-    OwnerPackagePinRemovalPlan, TransitionFaultPoint, VerifiedActiveCatalogSet,
+    remove_owner_package_pin_at_fault, resolve_recovered_package_pin_release,
+    rollback_to_previous_catalog_set_at_fault, stage_active_catalog_set_candidate,
+    stage_active_catalog_set_candidate_at_fault, ObjectPublicationFaultPoint, OwnerPackagePinPlan,
+    OwnerPackagePinRemovalPlan, PackagePinReleaseAdmissionError, RecoveredPackagePinRelease,
+    TransitionFaultPoint, VerifiedActiveCatalogSet, VerifiedPackagePinAdmission,
     VerifiedRollbackCatalogSet,
 };
 use crate::{
@@ -261,6 +275,211 @@ const fn runtime_target() -> ProductExtensionRuntimeTarget {
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
     #[allow(unreachable_code)]
     ProductExtensionRuntimeTarget::MacosCompatibility
+}
+
+const fn runtime_backend() -> ExtensionRuntimeBackendTarget {
+    match runtime_target() {
+        ProductExtensionRuntimeTarget::MacosNative => ExtensionRuntimeBackendTarget::MacosNative,
+        ProductExtensionRuntimeTarget::MacosCompatibility => {
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+        }
+        ProductExtensionRuntimeTarget::LinuxCompatibility => {
+            ExtensionRuntimeBackendTarget::LinuxCompatibility
+        }
+        ProductExtensionRuntimeTarget::WindowsNative => {
+            ExtensionRuntimeBackendTarget::WindowsNative
+        }
+        _ => panic!("unsupported product runtime target in repository E2E fixture"),
+    }
+}
+
+struct PinBindingFixture {
+    cohort: ExtensionGrantCohort,
+    install: ExtensionInstallId,
+}
+
+impl PinBindingFixture {
+    fn active(
+        catalog: &AdmittedBundledCatalog,
+        profile: ProfileId,
+        install: ExtensionInstallId,
+    ) -> Self {
+        let tree = CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
+        let authority = open_product_manifest_authority().unwrap();
+        let manifest = authority
+            .admit_manifest(
+                catalog,
+                runtime_target(),
+                package_key(),
+                &tree,
+                fixture::MANIFEST_BYTES,
+            )
+            .unwrap();
+        Self::from_descriptor(profile, install, Arc::new(manifest.descriptor().clone()))
+    }
+
+    fn rollback(
+        catalog: &AdmittedRollbackBundledCatalog,
+        profile: ProfileId,
+        install: ExtensionInstallId,
+    ) -> Self {
+        let tree = CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
+        let authority = open_product_manifest_authority().unwrap();
+        let manifest = authority
+            .admit_rollback_manifest(
+                catalog,
+                runtime_target(),
+                package_key(),
+                &tree,
+                fixture::MANIFEST_BYTES,
+            )
+            .unwrap();
+        Self::from_descriptor(profile, install, Arc::new(manifest.descriptor().clone()))
+    }
+
+    fn from_descriptor(
+        profile: ProfileId,
+        install_id: ExtensionInstallId,
+        manifest: Arc<zephium_core::extensions::ExtensionManifestDescriptor>,
+    ) -> Self {
+        let install = ExtensionInstall::from_persisted(
+            install_id,
+            ExtensionInstallRevision::INITIAL,
+            manifest.package().clone(),
+            true,
+        );
+        let catalog = ExtensionInstallCatalog::from_persisted(
+            ExtensionInstallCatalogRevision::INITIAL,
+            Some(install_id),
+            vec![install.clone()],
+        )
+        .unwrap();
+        let bindings =
+            ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+                install_id,
+                Arc::clone(&manifest),
+            )])
+            .unwrap();
+        let grants = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+        let cohort =
+            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![grants]).unwrap();
+        Self {
+            cohort,
+            install: install_id,
+        }
+    }
+
+    fn acquisition_binding(
+        &self,
+        current: BundledCatalogSetIdentity,
+        role: ExtensionCatalogGenerationRole,
+        native_incarnation: u64,
+    ) -> ExtensionPackagePinAcquisitionBinding {
+        let eligibility = self
+            .cohort
+            .runtime_eligibility(self.install, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let native_incarnation = ExtensionNativeIncarnation::new(native_incarnation).unwrap();
+        let entry = ExtensionNativeOwnershipEntry::from_persisted(
+            ExtensionNativeOwnershipKey::new(
+                eligibility.profile(),
+                eligibility.install_id(),
+                eligibility.browsing_context(),
+            ),
+            ExtensionNativeOwnershipOperation::new(native_incarnation.get()).unwrap(),
+            ExtensionNativeOwnershipEntryRevision::INITIAL,
+            eligibility.package().clone(),
+            ExtensionCatalogSetDigest::from_bytes(current.bytes()),
+            role,
+            eligibility.catalog_revision(),
+            eligibility.install_revision(),
+            eligibility.grant_revision(),
+            eligibility.grant_digest(),
+            runtime_backend(),
+            native_incarnation,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+        )
+        .unwrap();
+        ExtensionPackagePinAcquisitionBinding::mint(&entry, eligibility).unwrap()
+    }
+}
+
+fn release_binding(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+) -> ExtensionPackagePinReleaseBinding {
+    let entry = ExtensionNativeOwnershipEntry::from_persisted(
+        ExtensionNativeOwnershipKey::new(
+            acquisition.profile(),
+            acquisition.install_id(),
+            acquisition.browsing_context(),
+        ),
+        ExtensionNativeOwnershipOperation::new(acquisition.native_incarnation().get()).unwrap(),
+        ExtensionNativeOwnershipEntryRevision::new(2).unwrap(),
+        acquisition.package().clone(),
+        acquisition.catalog_set_digest(),
+        acquisition.catalog_role(),
+        acquisition.store_catalog_revision(),
+        acquisition.store_install_revision(),
+        acquisition.store_grant_revision(),
+        acquisition.grant_digest(),
+        acquisition.runtime_backend(),
+        acquisition.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Release,
+        ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+    )
+    .unwrap();
+    ExtensionPackagePinReleaseBinding::mint(&entry).unwrap()
+}
+
+fn active_pin_admission(
+    repository: &mut ExtensionRepository,
+    active: &AdmittedBundledCatalog,
+    current: BundledCatalogSetIdentity,
+    profile: ProfileId,
+    install: ExtensionInstallId,
+    native_incarnation: u64,
+) -> VerifiedPackagePinAdmission {
+    let binding = PinBindingFixture::active(active, profile, install).acquisition_binding(
+        current,
+        ExtensionCatalogGenerationRole::Active,
+        native_incarnation,
+    );
+    let runtime = repository.writer_materialization().unwrap();
+    let projection = current_catalog_set_projection(runtime).unwrap().unwrap();
+    let (_, admission) = load_active_package_pin_admission(
+        runtime,
+        &projection,
+        fixture::ACTIVE_CATALOG_BYTES,
+        &binding,
+    )
+    .unwrap();
+    admission
+}
+
+fn rollback_pin_admission(
+    repository: &mut ExtensionRepository,
+    rollback: &AdmittedRollbackBundledCatalog,
+    current: BundledCatalogSetIdentity,
+    profile: ProfileId,
+    install: ExtensionInstallId,
+    native_incarnation: u64,
+) -> VerifiedPackagePinAdmission {
+    let binding = PinBindingFixture::rollback(rollback, profile, install).acquisition_binding(
+        current,
+        ExtensionCatalogGenerationRole::Rollback,
+        native_incarnation,
+    );
+    let runtime = repository.writer_materialization().unwrap();
+    let projection = current_catalog_set_projection(runtime).unwrap().unwrap();
+    let (_, admission) = load_rollback_package_pin_admission(
+        runtime,
+        &projection,
+        fixture::ROLLBACK_CATALOG_BYTES,
+        &binding,
+    )
+    .unwrap();
+    admission
 }
 
 fn fixture_authority() -> (
@@ -982,22 +1201,25 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
     );
     let profile_id = ProfileId::from(7);
     let install_id = ExtensionInstallId::from(11);
-    let current_id = crate::state::Digest32::from_bytes(rollback_id.bytes());
+    let admission = rollback_pin_admission(
+        &mut repository,
+        &rollback,
+        rollback_id,
+        profile_id,
+        install_id,
+        1,
+    );
     let (pin_proof, pin_identity) = {
         let runtime = repository.writer_materialization().unwrap();
-        match plan_current_catalog_package_pin(
-            runtime,
-            current_id,
-            package_key(),
-            profile_id,
-            install_id,
-        )
-        .unwrap()
-        {
-            OwnerPackagePinPlan::Add { proof, pin } => (proof, pin),
+        match plan_current_catalog_package_pin(runtime, &admission).unwrap() {
+            OwnerPackagePinPlan::Add(proof) => {
+                let pin = proof.pin_identity();
+                (proof, pin)
+            }
             OwnerPackagePinPlan::IdempotentReplay { .. } => {
                 panic!("first owner pin unexpectedly replayed")
             }
+            OwnerPackagePinPlan::OwnerConflict => panic!("first owner pin conflicted"),
         }
     };
     let runtime = repository.writer_take_materialization().unwrap();
@@ -1013,49 +1235,46 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
             .len(),
         1
     );
+    let replay_admission = rollback_pin_admission(
+        &mut repository,
+        &rollback,
+        rollback_id,
+        profile_id,
+        install_id,
+        1,
+    );
     assert!(matches!(
         plan_current_catalog_package_pin(
             repository.writer_materialization().unwrap(),
-            current_id,
-            package_key(),
-            profile_id,
-            install_id,
+            &replay_admission,
         ),
         Ok(OwnerPackagePinPlan::IdempotentReplay {
             pin: replayed,
         }) if replayed == pin_identity
     ));
-    let stale_remove_snapshot = durable_repository_snapshot(&harness.repository_path);
-    let wrong_package_record_id = repository
-        .writer_materialization()
-        .unwrap()
-        ._catalog_sets
-        .get(&crate::state::Digest32::from_bytes(active_id.bytes()))
-        .unwrap()
-        .packages[0]
-        .package_record_id;
-    assert_ne!(wrong_package_record_id, pin_identity.package_record_id);
+    let conflicting_admission = rollback_pin_admission(
+        &mut repository,
+        &rollback,
+        rollback_id,
+        profile_id,
+        install_id,
+        2,
+    );
+    let conflict_snapshot = durable_repository_snapshot(&harness.repository_path);
     assert!(matches!(
-        plan_owner_package_pin_removal(
+        plan_current_catalog_package_pin(
             repository.writer_materialization().unwrap(),
-            profile_id,
-            install_id,
-            OwnerPackagePinIdentity {
-                package_record_id: wrong_package_record_id,
-                incarnation: pin_identity.incarnation,
-            },
+            &conflicting_admission,
         ),
-        Ok(OwnerPackagePinRemovalPlan::Stale)
+        Ok(OwnerPackagePinPlan::OwnerConflict)
     ));
     assert_eq!(
         durable_repository_snapshot(&harness.repository_path),
-        stale_remove_snapshot
+        conflict_snapshot
     );
 
     let stale_proof = match plan_owner_package_pin_removal(
         repository.writer_materialization().unwrap(),
-        profile_id,
-        install_id,
         pin_identity,
     )
     .unwrap()
@@ -1066,17 +1285,26 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
     };
     let second_profile = ProfileId::from(8);
     let second_install = ExtensionInstallId::from(12);
-    let (second_add, second_pin_identity) = match plan_current_catalog_package_pin(
-        repository.writer_materialization().unwrap(),
-        current_id,
-        package_key(),
+    let second_admission = rollback_pin_admission(
+        &mut repository,
+        &rollback,
+        rollback_id,
         second_profile,
         second_install,
+        2,
+    );
+    let (second_add, second_pin_identity) = match plan_current_catalog_package_pin(
+        repository.writer_materialization().unwrap(),
+        &second_admission,
     )
     .unwrap()
     {
-        OwnerPackagePinPlan::Add { proof, pin } => (proof, pin),
+        OwnerPackagePinPlan::Add(proof) => {
+            let pin = proof.pin_identity();
+            (proof, pin)
+        }
         OwnerPackagePinPlan::IdempotentReplay { .. } => panic!("second owner unexpectedly exists"),
+        OwnerPackagePinPlan::OwnerConflict => panic!("second owner unexpectedly conflicted"),
     };
     let runtime = repository.writer_take_materialization().unwrap();
     repository
@@ -1094,14 +1322,9 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
         durable_repository_snapshot(&harness.repository_path),
         stale_proof_snapshot
     );
-    for (owner_profile, owner_install, expected_pin) in [
-        (second_profile, second_install, second_pin_identity),
-        (profile_id, install_id, pin_identity),
-    ] {
+    for expected_pin in [second_pin_identity, pin_identity] {
         let proof = match plan_owner_package_pin_removal(
             repository.writer_materialization().unwrap(),
-            owner_profile,
-            owner_install,
             expected_pin,
         )
         .unwrap()
@@ -1122,37 +1345,37 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
         .package_pins
         .is_empty());
 
-    let (reacquire, reacquired_pin) = match plan_current_catalog_package_pin(
-        repository.writer_materialization().unwrap(),
-        current_id,
-        package_key(),
+    let reacquire_admission = rollback_pin_admission(
+        &mut repository,
+        &rollback,
+        rollback_id,
         profile_id,
         install_id,
+        3,
+    );
+    let (reacquire, reacquired_pin) = match plan_current_catalog_package_pin(
+        repository.writer_materialization().unwrap(),
+        &reacquire_admission,
     )
     .unwrap()
     {
-        OwnerPackagePinPlan::Add { proof, pin } => (proof, pin),
+        OwnerPackagePinPlan::Add(proof) => {
+            let pin = proof.pin_identity();
+            (proof, pin)
+        }
         OwnerPackagePinPlan::IdempotentReplay { .. } => {
             panic!("owner unexpectedly remained pinned")
         }
+        OwnerPackagePinPlan::OwnerConflict => panic!("owner unexpectedly conflicted"),
     };
-    assert_eq!(
-        reacquired_pin.package_record_id,
-        pin_identity.package_record_id
-    );
-    assert!(reacquired_pin.incarnation > pin_identity.incarnation);
+    assert_ne!(reacquired_pin, pin_identity);
     let runtime = repository.writer_take_materialization().unwrap();
     repository
         .finish_transition(add_owner_package_pin(runtime, reacquire))
         .unwrap();
     let old_incarnation_snapshot = durable_repository_snapshot(&harness.repository_path);
     assert!(matches!(
-        plan_owner_package_pin_removal(
-            repository.writer_materialization().unwrap(),
-            profile_id,
-            install_id,
-            pin_identity,
-        ),
+        plan_owner_package_pin_removal(repository.writer_materialization().unwrap(), pin_identity,),
         Ok(OwnerPackagePinRemovalPlan::Stale)
     ));
     assert_eq!(
@@ -1161,8 +1384,6 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
     );
     let proof = match plan_owner_package_pin_removal(
         repository.writer_materialization().unwrap(),
-        profile_id,
-        install_id,
         reacquired_pin,
     )
     .unwrap()
@@ -1198,6 +1419,153 @@ fn rollback_materialization_never_lowers_the_active_catalog_floor() {
         Ok(BundledPackageMaterializationOutcome::IdempotentReplay)
     );
     replay.assert_requests(&preparation_requests());
+}
+
+#[test]
+fn reopened_release_resolution_is_exact_idempotent_and_fail_closed() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_active_current(&mut repository, &active);
+    let profile = ProfileId::from(91);
+    let install = ExtensionInstallId::from(101);
+    let fixture = PinBindingFixture::active(&active, profile, install);
+    let acquisition =
+        fixture.acquisition_binding(current, ExtensionCatalogGenerationRole::Active, 1);
+    let release = release_binding(&acquisition);
+
+    preflight_package_pin_release(repository.writer_materialization().unwrap()).unwrap();
+    assert_eq!(
+        resolve_recovered_package_pin_release(
+            repository.writer_materialization().unwrap(),
+            &release,
+        ),
+        Ok(RecoveredPackagePinRelease::AlreadyAbsent)
+    );
+
+    let admission = {
+        let runtime = repository.writer_materialization().unwrap();
+        let projection = current_catalog_set_projection(runtime).unwrap().unwrap();
+        load_active_package_pin_admission(
+            runtime,
+            &projection,
+            fixture::ACTIVE_CATALOG_BYTES,
+            &acquisition,
+        )
+        .unwrap()
+        .1
+    };
+    let proof = match plan_current_catalog_package_pin(
+        repository.writer_materialization().unwrap(),
+        &admission,
+    )
+    .unwrap()
+    {
+        OwnerPackagePinPlan::Add(proof) => proof,
+        OwnerPackagePinPlan::IdempotentReplay { .. } => panic!("owner unexpectedly existed"),
+        OwnerPackagePinPlan::OwnerConflict => panic!("owner unexpectedly conflicted"),
+    };
+    let pin = proof.pin_identity();
+    let runtime = repository.writer_take_materialization().unwrap();
+    repository
+        .finish_transition(add_owner_package_pin(runtime, proof))
+        .unwrap();
+    preflight_package_pin_release(repository.writer_materialization().unwrap()).unwrap();
+    drop(repository);
+    let mut repository = harness.open();
+    assert_eq!(
+        resolve_recovered_package_pin_release(
+            repository.writer_materialization().unwrap(),
+            &release,
+        ),
+        Ok(RecoveredPackagePinRelease::Present(pin))
+    );
+
+    let next_acquisition =
+        fixture.acquisition_binding(current, ExtensionCatalogGenerationRole::Active, 2);
+    let next_release = release_binding(&next_acquisition);
+    assert_eq!(
+        resolve_recovered_package_pin_release(
+            repository.writer_materialization().unwrap(),
+            &next_release,
+        ),
+        Err(PackagePinReleaseAdmissionError::JournalPinMismatch)
+    );
+
+    let removal =
+        match plan_owner_package_pin_removal(repository.writer_materialization().unwrap(), pin)
+            .unwrap()
+        {
+            OwnerPackagePinRemovalPlan::Remove(proof) => proof,
+            OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("owner pin disappeared"),
+            OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
+        };
+    let runtime = repository.writer_take_materialization().unwrap();
+    repository
+        .finish_transition(remove_owner_package_pin(runtime, removal))
+        .unwrap();
+    drop(repository);
+    let mut repository = harness.open();
+    assert_eq!(
+        resolve_recovered_package_pin_release(
+            repository.writer_materialization().unwrap(),
+            &release,
+        ),
+        Ok(RecoveredPackagePinRelease::AlreadyAbsent)
+    );
+
+    let next_admission = {
+        let runtime = repository.writer_materialization().unwrap();
+        let projection = current_catalog_set_projection(runtime).unwrap().unwrap();
+        load_active_package_pin_admission(
+            runtime,
+            &projection,
+            fixture::ACTIVE_CATALOG_BYTES,
+            &next_acquisition,
+        )
+        .unwrap()
+        .1
+    };
+    let next_proof = match plan_current_catalog_package_pin(
+        repository.writer_materialization().unwrap(),
+        &next_admission,
+    )
+    .unwrap()
+    {
+        OwnerPackagePinPlan::Add(proof) => proof,
+        OwnerPackagePinPlan::IdempotentReplay { .. } => panic!("owner unexpectedly existed"),
+        OwnerPackagePinPlan::OwnerConflict => panic!("owner unexpectedly conflicted"),
+    };
+    let next_pin = next_proof.pin_identity();
+    let runtime = repository.writer_take_materialization().unwrap();
+    repository
+        .finish_transition(add_owner_package_pin(runtime, next_proof))
+        .unwrap();
+    drop(repository);
+    let mut repository = harness.open();
+    assert_eq!(
+        resolve_recovered_package_pin_release(
+            repository.writer_materialization().unwrap(),
+            &release,
+        ),
+        Err(PackagePinReleaseAdmissionError::JournalPinMismatch)
+    );
+    assert_eq!(
+        resolve_recovered_package_pin_release(
+            repository.writer_materialization().unwrap(),
+            &next_release,
+        ),
+        Ok(RecoveredPackagePinRelease::Present(next_pin))
+    );
+
+    let mut runtime = repository.writer_take_materialization().unwrap();
+    runtime
+        ._catalog_sets
+        .remove(&crate::state::Digest32::from_bytes(current.bytes()));
+    assert_eq!(
+        resolve_recovered_package_pin_release(&runtime, &next_release),
+        Err(PackagePinReleaseAdmissionError::DurableIncoherence)
+    );
 }
 
 #[test]
@@ -1642,20 +2010,22 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
         let harness = Harness::new();
         let mut repository = harness.open();
         let current = establish_active_current(&mut repository, &active);
-        let current = crate::state::Digest32::from_bytes(current.bytes());
         let profile = ProfileId::from(31);
         let install = ExtensionInstallId::from(41);
+        let admission =
+            active_pin_admission(&mut repository, &active, current, profile, install, 1);
         let (proof, planned_pin) = match plan_current_catalog_package_pin(
             repository.writer_materialization().unwrap(),
-            current,
-            package_key(),
-            profile,
-            install,
+            &admission,
         )
         .unwrap()
         {
-            OwnerPackagePinPlan::Add { proof, pin } => (proof, pin),
+            OwnerPackagePinPlan::Add(proof) => {
+                let pin = proof.pin_identity();
+                (proof, pin)
+            }
             OwnerPackagePinPlan::IdempotentReplay { .. } => panic!("owner unexpectedly existed"),
+            OwnerPackagePinPlan::OwnerConflict => panic!("owner unexpectedly conflicted"),
         };
         let runtime = repository.writer_take_materialization().unwrap();
         assert!(matches!(
@@ -1667,17 +2037,16 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
         drop(repository);
 
         let mut repository = harness.open();
+        let retry_admission =
+            active_pin_admission(&mut repository, &active, current, profile, install, 1);
         match plan_current_catalog_package_pin(
             repository.writer_materialization().unwrap(),
-            current,
-            package_key(),
-            profile,
-            install,
+            &retry_admission,
         )
         .unwrap()
         {
-            OwnerPackagePinPlan::Add { proof, pin } if !committed => {
-                assert_eq!(pin, planned_pin);
+            OwnerPackagePinPlan::Add(proof) if !committed => {
+                assert_eq!(proof.pin_identity(), planned_pin);
                 let runtime = repository.writer_take_materialization().unwrap();
                 repository
                     .finish_transition(add_owner_package_pin(runtime, proof))
@@ -1688,13 +2057,12 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
             }
             _ => panic!("pin-add frontier recovered the wrong exact outcome"),
         }
+        let replay_admission =
+            active_pin_admission(&mut repository, &active, current, profile, install, 1);
         assert!(matches!(
             plan_current_catalog_package_pin(
                 repository.writer_materialization().unwrap(),
-                current,
-                package_key(),
-                profile,
-                install,
+                &replay_admission,
             ),
             Ok(OwnerPackagePinPlan::IdempotentReplay { pin }) if pin == planned_pin
         ));
@@ -1705,37 +2073,35 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
         let harness = Harness::new();
         let mut repository = harness.open();
         let current = establish_active_current(&mut repository, &active);
-        let current = crate::state::Digest32::from_bytes(current.bytes());
         let profile = ProfileId::from(51);
         let install = ExtensionInstallId::from(61);
+        let admission =
+            active_pin_admission(&mut repository, &active, current, profile, install, 1);
         let (add, pin) = match plan_current_catalog_package_pin(
             repository.writer_materialization().unwrap(),
-            current,
-            package_key(),
-            profile,
-            install,
+            &admission,
         )
         .unwrap()
         {
-            OwnerPackagePinPlan::Add { proof, pin } => (proof, pin),
+            OwnerPackagePinPlan::Add(proof) => {
+                let pin = proof.pin_identity();
+                (proof, pin)
+            }
             OwnerPackagePinPlan::IdempotentReplay { .. } => panic!("owner unexpectedly existed"),
+            OwnerPackagePinPlan::OwnerConflict => panic!("owner unexpectedly conflicted"),
         };
         let runtime = repository.writer_take_materialization().unwrap();
         repository
             .finish_transition(add_owner_package_pin(runtime, add))
             .unwrap();
-        let remove = match plan_owner_package_pin_removal(
-            repository.writer_materialization().unwrap(),
-            profile,
-            install,
-            pin,
-        )
-        .unwrap()
-        {
-            OwnerPackagePinRemovalPlan::Remove(proof) => proof,
-            OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("owner pin disappeared"),
-            OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
-        };
+        let remove =
+            match plan_owner_package_pin_removal(repository.writer_materialization().unwrap(), pin)
+                .unwrap()
+            {
+                OwnerPackagePinRemovalPlan::Remove(proof) => proof,
+                OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("owner pin disappeared"),
+                OwnerPackagePinRemovalPlan::Stale => panic!("exact owner pin became stale"),
+            };
         let runtime = repository.writer_take_materialization().unwrap();
         assert!(matches!(
             remove_owner_package_pin_at_fault(runtime, remove, fault),
@@ -1746,13 +2112,8 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
         drop(repository);
 
         let mut repository = harness.open();
-        match plan_owner_package_pin_removal(
-            repository.writer_materialization().unwrap(),
-            profile,
-            install,
-            pin,
-        )
-        .unwrap()
+        match plan_owner_package_pin_removal(repository.writer_materialization().unwrap(), pin)
+            .unwrap()
         {
             OwnerPackagePinRemovalPlan::Remove(proof) if !committed => {
                 let runtime = repository.writer_take_materialization().unwrap();
@@ -1765,12 +2126,7 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
             _ => panic!("pin-remove frontier recovered the wrong exact outcome"),
         }
         assert!(matches!(
-            plan_owner_package_pin_removal(
-                repository.writer_materialization().unwrap(),
-                profile,
-                install,
-                pin,
-            ),
+            plan_owner_package_pin_removal(repository.writer_materialization().unwrap(), pin,),
             Ok(OwnerPackagePinRemovalPlan::IdempotentReplay)
         ));
     }

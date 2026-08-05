@@ -10,9 +10,9 @@ mod runtime_access;
 
 pub use api::{
     ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
-    BundledCurrentCatalogSet, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
-    BundledPackageLeaseReleaseOutcome, BundledPackageResourceError, RollbackBundledPackageLease,
-    RollbackBundledPackageReleaseRequest,
+    BundledCurrentCatalogSet, BundledPackageLease, BundledPackageLeaseError,
+    BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
+    BundledPackageResourceError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
 };
 pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
 pub(crate) use runtime::PackageLeaseRuntime;

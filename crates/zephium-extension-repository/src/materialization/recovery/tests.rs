@@ -6,12 +6,13 @@ use zephium_private_fs::{ByteLimit, LockedPrivateNamespace, PrivateComponent, Pr
 use super::*;
 use crate::materialization::records::tests::{catalog_set_fixture, package_record_fixture};
 use crate::materialization::records::{
-    LegalArtifactAnchor, ManifestAnchor, PackageIdentityAnchor, TreeIndexAnchor,
+    CatalogSetPackageRow, CatalogSetRecord, LegalArtifactAnchor, ManifestAnchor,
+    PackageIdentityAnchor, TreeIndexAnchor, CATALOG_SET_RECORD_SCHEMA_VERSION,
     PACKAGE_RECORD_SCHEMA_VERSION,
 };
 use crate::materialization::state::{
-    DurablePackagePin, MaterializationBuildIntent, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
-    MATERIALIZATION_JOURNAL_SCHEMA_VERSION,
+    DurablePackagePin, HistoricalCatalogRole, MaterializationBuildIntent, StoredBrowsingContext,
+    MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION, MATERIALIZATION_JOURNAL_SCHEMA_VERSION,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
@@ -226,6 +227,24 @@ fn create_sealed_tree(trees: &PrivateDirectory, tree_digest: Digest32, poison_pa
 struct FixtureIds {
     package_id: Digest32,
     catalog_set_id: Digest32,
+}
+
+fn durable_pin(
+    profile: u128,
+    install: u128,
+    catalog_set_record_id: Digest32,
+    package_record_id: Digest32,
+    native_incarnation: u64,
+) -> DurablePackagePin {
+    DurablePackagePin {
+        profile_id: ProfileId::from(profile),
+        install_id: ExtensionInstallId::from(install),
+        browsing_context: StoredBrowsingContext::Regular,
+        catalog_set_record_id,
+        catalog_role: HistoricalCatalogRole::Active,
+        package_record_id,
+        native_incarnation,
+    }
 }
 
 fn install_complete_fixture(handles: &Handles, poison_payload_mode: bool) -> FixtureIds {
@@ -657,12 +676,7 @@ fn only_live_roots_require_current_product_generation_recognition() {
 
     let handles = harness.handles();
     state.candidate_catalog_set_id = None;
-    state.package_pins = vec![DurablePackagePin {
-        profile_id: ProfileId::from(1),
-        install_id: ExtensionInstallId::from(1),
-        package_record_id: ids.package_id,
-        incarnation: 1,
-    }];
+    state.package_pins = vec![durable_pin(1, 1, ids.catalog_set_id, ids.package_id, 1)];
     replace_settled_state(&handles, &state);
     drop(handles);
     assert!(matches!(
@@ -749,7 +763,7 @@ fn every_recovery_frontier_converges_on_one_state() {
 }
 
 #[test]
-fn owner_scoped_package_pins_retain_only_completed_package_roots() {
+fn owner_scoped_package_pins_retain_their_complete_exact_catalog_set() {
     let harness = Harness::new();
     drop(harness.open());
     let handles = harness.handles();
@@ -757,24 +771,123 @@ fn owner_scoped_package_pins_retain_only_completed_package_roots() {
     let state = MaterializationState {
         generation: 1,
         completed_package_record_ids: vec![ids.package_id],
-        package_pins: vec![DurablePackagePin {
-            profile_id: ProfileId::from(1),
-            install_id: ExtensionInstallId::from(1),
-            package_record_id: ids.package_id,
-            incarnation: 1,
-        }],
+        package_pins: vec![durable_pin(1, 1, ids.catalog_set_id, ids.package_id, 1)],
         ..MaterializationState::default()
     };
     replace_settled_state(&handles, &state);
     drop(handles);
 
     let (_, runtime) = harness.open();
-    assert!(runtime._pin_roots._catalog_set_ids.is_empty());
+    assert_eq!(
+        runtime._pin_roots._catalog_set_ids,
+        BTreeSet::from([ids.catalog_set_id])
+    );
     assert_eq!(
         runtime._pin_roots._package_record_ids,
         BTreeSet::from([ids.package_id])
     );
     assert_eq!(runtime._pin_roots._tree_ids.len(), 1);
+}
+
+#[test]
+fn owner_pin_recovery_rejects_missing_set_row_and_package_mapping() {
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let ids = install_complete_fixture(&handles, false);
+    let state = MaterializationState {
+        generation: 1,
+        completed_package_record_ids: vec![ids.package_id],
+        package_pins: vec![durable_pin(
+            1,
+            1,
+            Digest32::from_bytes([240; 32]),
+            ids.package_id,
+            1,
+        )],
+        ..MaterializationState::default()
+    };
+    replace_settled_state(&handles, &state);
+    drop(handles);
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+
+    let baseline = package_record_fixture(20);
+    let mut second = baseline.clone();
+    second.package.package_key = Digest32::from_bytes([211; 32]);
+    second.package.package_row_sha256 = Digest32::from_bytes([212; 32]);
+    second.package.tree_sha256 = Digest32::from_bytes([213; 32]);
+    second.tree_index.tree_sha256 = second.package.tree_sha256;
+    second.tree_index.index_sha256 = Digest32::from_bytes([214; 32]);
+    second.legal.sha256 = Digest32::from_bytes([215; 32]);
+
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let first_ids = install_package_fixture(&handles, &baseline, false);
+    let second_ids = install_package_fixture(&handles, &second, false);
+    let mut completed = vec![first_ids.package_id, second_ids.package_id];
+    completed.sort_unstable();
+    let state = MaterializationState {
+        generation: 1,
+        completed_package_record_ids: completed,
+        package_pins: vec![durable_pin(
+            1,
+            1,
+            first_ids.catalog_set_id,
+            second_ids.package_id,
+            1,
+        )],
+        ..MaterializationState::default()
+    };
+    replace_settled_state(&handles, &state);
+    drop(handles);
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let _first_ids = install_package_fixture(&handles, &baseline, false);
+    let second_ids = install_package_fixture(&handles, &second, false);
+    let mismatched_set = CatalogSetRecord {
+        schema_version: CATALOG_SET_RECORD_SCHEMA_VERSION,
+        catalog: baseline.catalog,
+        packages: vec![CatalogSetPackageRow {
+            package_key: baseline.package.package_key,
+            runtime_target: baseline.manifest.runtime_target,
+            package_record_id: second_ids.package_id,
+        }],
+    };
+    let mismatched_set_id = mismatched_set.record_id().unwrap();
+    write_sealed(
+        &handles.records,
+        &names::catalog_set_record(mismatched_set_id),
+        &mismatched_set.canonical_bytes().unwrap(),
+        MAX_CATALOG_SET_RECORD_BYTES,
+    );
+    let state = MaterializationState {
+        generation: 1,
+        completed_package_record_ids: vec![second_ids.package_id],
+        package_pins: vec![durable_pin(
+            1,
+            1,
+            mismatched_set_id,
+            second_ids.package_id,
+            1,
+        )],
+        ..MaterializationState::default()
+    };
+    replace_settled_state(&handles, &state);
+    drop(handles);
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
 }
 
 #[test]
@@ -1711,18 +1824,8 @@ fn owner_drain_is_one_catalog_sized_selection() {
         generation: 2,
         completed_package_record_ids: completed,
         package_pins: vec![
-            DurablePackagePin {
-                profile_id: ProfileId::from(1),
-                install_id: ExtensionInstallId::from(1),
-                package_record_id: first_ids.package_id,
-                incarnation: 1,
-            },
-            DurablePackagePin {
-                profile_id: ProfileId::from(1),
-                install_id: ExtensionInstallId::from(2),
-                package_record_id: second_ids.package_id,
-                incarnation: 2,
-            },
+            durable_pin(1, 1, first_ids.catalog_set_id, first_ids.package_id, 1),
+            durable_pin(1, 2, second_ids.catalog_set_id, second_ids.package_id, 2),
         ],
         ..MaterializationState::default()
     };
@@ -1738,6 +1841,7 @@ fn owner_drain_is_one_catalog_sized_selection() {
     let handles = harness.handles();
     let baseline = package_record_fixture(120);
     let mut package_ids = Vec::new();
+    let mut set_rows = Vec::new();
     for index in 1..=3_u8 {
         let mut package = baseline.clone();
         package.package.package_key = Digest32::from_bytes([index; 32]);
@@ -1747,17 +1851,39 @@ fn owner_drain_is_one_catalog_sized_selection() {
         package.tree_index.index_sha256 = Digest32::from_bytes([index + 30; 32]);
         package.tree_index.tree_bytes = zephium_extension_package::MAX_EXTENSION_TREE_BYTES;
         package.legal.sha256 = Digest32::from_bytes([index + 40; 32]);
-        package_ids.push(install_package_fixture(&handles, &package, false).package_id);
+        let ids = install_package_fixture(&handles, &package, false);
+        package_ids.push(ids.package_id);
+        set_rows.push(CatalogSetPackageRow {
+            package_key: package.package.package_key,
+            runtime_target: package.manifest.runtime_target,
+            package_record_id: ids.package_id,
+        });
     }
     package_ids.sort_unstable();
+    set_rows.sort_by_key(|row| row.package_key);
+    let oversized_set = CatalogSetRecord {
+        schema_version: CATALOG_SET_RECORD_SCHEMA_VERSION,
+        catalog: baseline.catalog,
+        packages: set_rows,
+    };
+    let oversized_set_id = oversized_set.record_id().unwrap();
+    write_sealed(
+        &handles.records,
+        &names::catalog_set_record(oversized_set_id),
+        &oversized_set.canonical_bytes().unwrap(),
+        MAX_CATALOG_SET_RECORD_BYTES,
+    );
     let package_pins = package_ids
         .iter()
         .enumerate()
-        .map(|(index, package_record_id)| DurablePackagePin {
-            profile_id: ProfileId::from(1),
-            install_id: ExtensionInstallId::from(index as u128 + 1),
-            package_record_id: *package_record_id,
-            incarnation: index as u64 + 1,
+        .map(|(index, package_record_id)| {
+            durable_pin(
+                1,
+                index as u128 + 1,
+                oversized_set_id,
+                *package_record_id,
+                index as u64 + 1,
+            )
         })
         .collect();
     let state = MaterializationState {

@@ -46,11 +46,12 @@ pub(crate) use objects::{
     verify_completed_rollback_package, PackageObjectError, PackageObjectIntentDisposition,
 };
 pub(crate) use package_lease::{
-    current_catalog_set_projection, load_active_manifest_bindings, load_active_package_snapshot,
-    load_rollback_manifest_bindings, load_rollback_package_snapshot,
-    validated_resumable_build_in_progress, CurrentCatalogSetProjection,
-    PackageLeaseRepositoryIdentity, SnapshotLoadError, SnapshotObjectPhase,
-    VerifiedActivePackageSnapshot, VerifiedCatalogRole, VerifiedRollbackPackageSnapshot,
+    current_catalog_set_projection, load_active_manifest_bindings,
+    load_active_package_pin_admission, load_rollback_manifest_bindings,
+    load_rollback_package_pin_admission, validated_resumable_build_in_progress,
+    CurrentCatalogSetProjection, PackageLeaseRepositoryIdentity, PackagePinAdmissionError,
+    PackagePinLoadError, SnapshotLoadError, SnapshotObjectPhase, VerifiedActivePackageSnapshot,
+    VerifiedCatalogRole, VerifiedPackagePinAdmission, VerifiedRollbackPackageSnapshot,
 };
 #[cfg(all(
     test,
@@ -91,8 +92,10 @@ pub(crate) use tree_reader::{with_verified_tree_resource, TreeResourceError};
 #[allow(unused_imports)]
 pub(crate) use transaction::{
     add_owner_package_pin, plan_current_catalog_package_pin, plan_owner_package_pin_removal,
-    remove_owner_package_pin, CurrentCatalogPackagePinProof, OwnerPackagePinIdentity,
+    preflight_package_pin_release, remove_owner_package_pin, resolve_recovered_package_pin_release,
+    verify_package_pin_release_admission, CurrentCatalogPackagePinProof, OwnerPackagePinIdentity,
     OwnerPackagePinPlan, OwnerPackagePinRemovalPlan, OwnerPackagePinRemovalProof,
+    PackagePinReleaseAdmission, PackagePinReleaseAdmissionError, RecoveredPackagePinRelease,
 };
 
 #[cfg(all(

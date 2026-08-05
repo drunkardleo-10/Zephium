@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use zephium_core::extensions::{
     ExtensionAuthorityId, ExtensionCompatibilityTargetId, ExtensionPackageRevision,
+    ExtensionRuntimeBackendTarget,
 };
 use zephium_extension_authority::{
     BundledCatalogGenerationAnchor, BundledCatalogInventoryDigest, ProductExtensionRuntimeTarget,
@@ -176,6 +177,28 @@ impl StoredRuntimeTarget {
             Self::LinuxCompatibility => StoredRuntimePlatformFamily::Linux,
             Self::WindowsNative => StoredRuntimePlatformFamily::Windows,
         }
+    }
+
+    pub(crate) const fn matches_runtime_backend(
+        self,
+        expected: ExtensionRuntimeBackendTarget,
+    ) -> bool {
+        matches!(
+            (self, expected),
+            (
+                Self::MacosNative,
+                ExtensionRuntimeBackendTarget::MacosNative
+            ) | (
+                Self::MacosCompatibility,
+                ExtensionRuntimeBackendTarget::MacosCompatibility
+            ) | (
+                Self::LinuxCompatibility,
+                ExtensionRuntimeBackendTarget::LinuxCompatibility
+            ) | (
+                Self::WindowsNative,
+                ExtensionRuntimeBackendTarget::WindowsNative
+            )
+        )
     }
 }
 
@@ -407,6 +430,36 @@ pub(crate) mod tests {
                 runtime_target: package.manifest.runtime_target,
                 package_record_id: package.record_id().unwrap(),
             }],
+        }
+    }
+
+    #[test]
+    fn stored_runtime_targets_match_only_their_exact_backend() {
+        let pairs = [
+            (
+                StoredRuntimeTarget::MacosNative,
+                ExtensionRuntimeBackendTarget::MacosNative,
+            ),
+            (
+                StoredRuntimeTarget::MacosCompatibility,
+                ExtensionRuntimeBackendTarget::MacosCompatibility,
+            ),
+            (
+                StoredRuntimeTarget::LinuxCompatibility,
+                ExtensionRuntimeBackendTarget::LinuxCompatibility,
+            ),
+            (
+                StoredRuntimeTarget::WindowsNative,
+                ExtensionRuntimeBackendTarget::WindowsNative,
+            ),
+        ];
+        for (stored, expected) in pairs {
+            for (_, candidate) in pairs {
+                assert_eq!(
+                    stored.matches_runtime_backend(candidate),
+                    candidate == expected
+                );
+            }
         }
     }
 

@@ -8,11 +8,17 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
-    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
-    ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionInstall,
-    ExtensionInstallCatalog, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionRuntimeEligibility,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantDigest,
+    ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantRevision,
+    ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionManifestDigest,
+    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePinAcquisitionBinding,
+    ExtensionPackagePinAcquisitionDenial, ExtensionPackagePinReleaseBinding,
+    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
@@ -30,9 +36,9 @@ use zephium_extension_runtime_api::{
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 use super::api::{
-    BundledCatalogGenerationRole, BundledCurrentCatalogSet, BundledPackageLeaseError,
-    BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
-    BundledPackageResourceError,
+    ActiveBundledPackageLease, BundledCatalogGenerationRole, BundledCurrentCatalogSet,
+    BundledPackageLease, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
+    BundledPackageLeaseReleaseOutcome, BundledPackageResourceError, RollbackBundledPackageLease,
 };
 use super::repository::{arm_post_pin_reverify_hook, arm_release_planning_error_hook};
 use super::runtime_access::{
@@ -41,7 +47,8 @@ use super::runtime_access::{
 };
 use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
-    install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
+    current_catalog_set_projection, install_orphan_package_record_stage_for_e2e,
+    install_resumable_package_record_stage_for_e2e, load_active_package_pin_admission,
     open_product_manifest_authority, plan_current_catalog_package_pin,
     plan_owner_package_pin_removal, preflight_package_object_capacity, prepare_rollback_package,
     remove_owner_package_pin, repository_package_io_count,
@@ -229,6 +236,39 @@ const fn runtime_target() -> ProductExtensionRuntimeTarget {
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
     #[allow(unreachable_code)]
     ProductExtensionRuntimeTarget::MacosCompatibility
+}
+
+const fn runtime_backend() -> ExtensionRuntimeBackendTarget {
+    match runtime_target() {
+        ProductExtensionRuntimeTarget::MacosNative => ExtensionRuntimeBackendTarget::MacosNative,
+        ProductExtensionRuntimeTarget::MacosCompatibility => {
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+        }
+        ProductExtensionRuntimeTarget::LinuxCompatibility => {
+            ExtensionRuntimeBackendTarget::LinuxCompatibility
+        }
+        ProductExtensionRuntimeTarget::WindowsNative => {
+            ExtensionRuntimeBackendTarget::WindowsNative
+        }
+        _ => panic!("unsupported product runtime target in repository E2E fixture"),
+    }
+}
+
+const fn alternate_runtime_backend() -> ExtensionRuntimeBackendTarget {
+    match runtime_backend() {
+        ExtensionRuntimeBackendTarget::MacosNative => {
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+        }
+        ExtensionRuntimeBackendTarget::MacosCompatibility => {
+            ExtensionRuntimeBackendTarget::LinuxCompatibility
+        }
+        ExtensionRuntimeBackendTarget::LinuxCompatibility => {
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+        }
+        ExtensionRuntimeBackendTarget::WindowsNative => {
+            ExtensionRuntimeBackendTarget::LinuxCompatibility
+        }
+    }
 }
 
 fn package_key() -> ExtensionPackageKey {
@@ -429,6 +469,141 @@ impl EligibilityFixture {
             .runtime_eligibility(self.install, ExtensionGrantBrowsingContext::Regular)
             .unwrap()
     }
+
+    fn acquisition_binding(
+        &self,
+        current: BundledCatalogSetIdentity,
+        role: ExtensionCatalogGenerationRole,
+    ) -> ExtensionPackagePinAcquisitionBinding {
+        self.acquisition_binding_with(current, role, runtime_backend(), self.native_incarnation())
+    }
+
+    fn native_incarnation(&self) -> ExtensionNativeIncarnation {
+        let value = u128::from_be_bytes(self.install.bytes());
+        let value = u64::try_from(value).expect("repository E2E install IDs fit the Store counter");
+        ExtensionNativeIncarnation::new(value)
+            .expect("repository E2E install IDs are nonzero Store counters")
+    }
+
+    fn acquisition_binding_with(
+        &self,
+        current: BundledCatalogSetIdentity,
+        role: ExtensionCatalogGenerationRole,
+        backend: ExtensionRuntimeBackendTarget,
+        native_incarnation: ExtensionNativeIncarnation,
+    ) -> ExtensionPackagePinAcquisitionBinding {
+        let eligibility = self.eligibility();
+        let entry = acquisition_entry(
+            &eligibility,
+            current,
+            role,
+            backend,
+            native_incarnation,
+            eligibility.grant_revision(),
+            eligibility.grant_digest(),
+        );
+        ExtensionPackagePinAcquisitionBinding::mint(&entry, eligibility).unwrap()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acquisition_entry(
+    eligibility: &ExtensionRuntimeEligibility,
+    current: BundledCatalogSetIdentity,
+    role: ExtensionCatalogGenerationRole,
+    backend: ExtensionRuntimeBackendTarget,
+    native_incarnation: ExtensionNativeIncarnation,
+    grant_revision: ExtensionGrantRevision,
+    grant_digest: ExtensionGrantDigest,
+) -> ExtensionNativeOwnershipEntry {
+    ExtensionNativeOwnershipEntry::from_persisted(
+        ExtensionNativeOwnershipKey::new(
+            eligibility.profile(),
+            eligibility.install_id(),
+            eligibility.browsing_context(),
+        ),
+        ExtensionNativeOwnershipOperation::new(native_incarnation.get()).unwrap(),
+        ExtensionNativeOwnershipEntryRevision::INITIAL,
+        eligibility.package().clone(),
+        ExtensionCatalogSetDigest::from_bytes(current.bytes()),
+        role,
+        eligibility.catalog_revision(),
+        eligibility.install_revision(),
+        grant_revision,
+        grant_digest,
+        backend,
+        native_incarnation,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+    )
+    .unwrap()
+}
+
+fn release_binding(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+) -> ExtensionPackagePinReleaseBinding {
+    release_binding_with(
+        acquisition,
+        acquisition.browsing_context(),
+        acquisition.runtime_backend(),
+        acquisition.native_incarnation(),
+    )
+}
+
+fn release_binding_with(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+    browsing_context: ExtensionGrantBrowsingContext,
+    backend: ExtensionRuntimeBackendTarget,
+    native_incarnation: ExtensionNativeIncarnation,
+) -> ExtensionPackagePinReleaseBinding {
+    let entry = ExtensionNativeOwnershipEntry::from_persisted(
+        ExtensionNativeOwnershipKey::new(
+            acquisition.profile(),
+            acquisition.install_id(),
+            browsing_context,
+        ),
+        ExtensionNativeOwnershipOperation::new(native_incarnation.get()).unwrap(),
+        ExtensionNativeOwnershipEntryRevision::new(4).unwrap(),
+        acquisition.package().clone(),
+        acquisition.catalog_set_digest(),
+        acquisition.catalog_role(),
+        acquisition.store_catalog_revision(),
+        acquisition.store_install_revision(),
+        acquisition.store_grant_revision(),
+        acquisition.grant_digest(),
+        backend,
+        native_incarnation,
+        ExtensionNativeOwnershipIntent::Release,
+        ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+    )
+    .unwrap();
+    ExtensionPackagePinReleaseBinding::mint(&entry).unwrap()
+}
+
+fn acquire_active(
+    repository: &mut ExtensionRepository,
+    binding: ExtensionPackagePinAcquisitionBinding,
+) -> Result<ActiveBundledPackageLease, BundledPackageLeaseError> {
+    match repository.acquire_bundled_package_lease(binding) {
+        Ok(BundledPackageLease::Active(lease)) => Ok(lease),
+        Ok(BundledPackageLease::Rollback(_)) => {
+            panic!("active binding yielded a rollback package lease")
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn acquire_rollback(
+    repository: &mut ExtensionRepository,
+    binding: ExtensionPackagePinAcquisitionBinding,
+) -> Result<RollbackBundledPackageLease, BundledPackageLeaseError> {
+    match repository.acquire_bundled_package_lease(binding) {
+        Ok(BundledPackageLease::Rollback(lease)) => Ok(lease),
+        Ok(BundledPackageLease::Active(_)) => {
+            panic!("rollback binding yielded an active package lease")
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn install_catalog(
@@ -532,9 +707,55 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
     );
     reset_completed_package_verification_count();
     reset_repository_package_io_count();
-    let stale_eligibility = stale_fixture.eligibility();
+    let grant_revision_entry = acquisition_entry(
+        &active_eligibility,
+        active_current,
+        ExtensionCatalogGenerationRole::Active,
+        runtime_backend(),
+        ExtensionNativeIncarnation::INITIAL,
+        active_eligibility.grant_revision().next().unwrap(),
+        active_eligibility.grant_digest(),
+    );
+    assert_eq!(
+        ExtensionPackagePinAcquisitionBinding::mint(
+            &grant_revision_entry,
+            active_fixture.eligibility(),
+        )
+        .unwrap_err(),
+        ExtensionPackagePinAcquisitionDenial::EligibilityGrantRevisionMismatch
+    );
+    let mut mismatched_grant_digest = active_eligibility.grant_digest().bytes();
+    mismatched_grant_digest[0] ^= 0xFF;
+    let grant_digest_entry = acquisition_entry(
+        &active_eligibility,
+        active_current,
+        ExtensionCatalogGenerationRole::Active,
+        runtime_backend(),
+        ExtensionNativeIncarnation::INITIAL,
+        active_eligibility.grant_revision(),
+        ExtensionGrantDigest::from_bytes(mismatched_grant_digest),
+    );
+    assert_eq!(
+        ExtensionPackagePinAcquisitionBinding::mint(
+            &grant_digest_entry,
+            active_fixture.eligibility(),
+        )
+        .unwrap_err(),
+        ExtensionPackagePinAcquisitionDenial::EligibilityGrantDigestMismatch
+    );
+    assert_eq!(repository_package_io_count(), 0);
+    assert_eq!(completed_package_verification_count(), 0);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+
+    let stale_binding =
+        stale_fixture.acquisition_binding(active_current, ExtensionCatalogGenerationRole::Active);
     assert!(matches!(
-        repository.acquire_active_bundled_package_lease(active_current, &stale_eligibility),
+        acquire_active(&mut repository, stale_binding),
         Err(BundledPackageLeaseError::EligibilityMismatch)
     ));
     assert_eq!(repository_package_io_count(), 0);
@@ -618,14 +839,15 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
     assert!(!repository.writer_is_sealed());
     assert_eq!(completed_package_verification_count(), 0);
 
-    let lease = repository
-        .acquire_active_bundled_package_lease(active_current, &active_fixture.eligibility())
-        .unwrap();
+    let active_binding =
+        active_fixture.acquisition_binding(active_current, ExtensionCatalogGenerationRole::Active);
+    let active_release_binding = release_binding(&active_binding);
+    let lease = acquire_active(&mut repository, active_binding).unwrap();
     assert!(completed_package_verification_count() > 0);
     let mut release = lease.into_release_request();
     assert_eq!(
         repository
-            .release_active_bundled_package_lease(&mut release)
+            .release_active_bundled_package_lease(&mut release, &active_release_binding)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -717,14 +939,33 @@ fn active_public_lifecycle_is_exact_and_replay_is_byte_for_byte_read_only() {
     );
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(7), ExtensionInstallId::from(11));
-    let lease = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
-    assert_eq!(lease.package(), owner.eligibility().package());
+    let wrong_backend_binding = owner.acquisition_binding_with(
+        current,
+        ExtensionCatalogGenerationRole::Active,
+        alternate_runtime_backend(),
+        owner.native_incarnation(),
+    );
+    assert!(matches!(
+        acquire_active(&mut repository, wrong_backend_binding),
+        Err(BundledPackageLeaseError::RuntimeBackendMismatch)
+    ));
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let cleanup = release_binding(&binding);
+    let expected_package = binding.package().clone();
+    let lease = acquire_active(&mut repository, binding).unwrap();
+    assert_eq!(lease.package(), &expected_package);
 
     let pinned = harness.snapshot();
+    let concurrent_binding =
+        owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
     assert!(matches!(
-        repository.acquire_active_bundled_package_lease(current, &owner.eligibility()),
+        acquire_active(&mut repository, concurrent_binding),
         Err(BundledPackageLeaseError::LeaseAlreadyOpen)
     ));
     assert_eq!(harness.snapshot(), pinned);
@@ -733,35 +974,202 @@ fn active_public_lifecycle_is_exact_and_replay_is_byte_for_byte_read_only() {
 
     let mut repository = harness.open();
     let before_replay = harness.snapshot();
-    let replay = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let replay_binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let replay = acquire_active(&mut repository, replay_binding).unwrap();
     assert_eq!(harness.snapshot(), before_replay);
     let mut release = replay.into_release_request();
     drop(repository);
     let mut repository = harness.open();
     let before_wrong_open = harness.snapshot();
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &cleanup),
         Err(BundledPackageLeaseReleaseError::WrongRepository)
     );
     assert_eq!(harness.snapshot(), before_wrong_open);
-    let replay = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let replay_binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let replay = acquire_active(&mut repository, replay_binding).unwrap();
     let mut release = replay.into_release_request();
     assert_eq!(
         repository
-            .release_active_bundled_package_lease(&mut release)
+            .release_active_bundled_package_lease(&mut release, &cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
     assert_eq!(
         repository
-            .release_active_bundled_package_lease(&mut release)
+            .release_active_bundled_package_lease(&mut release, &cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::AlreadyReleased
     );
+}
+
+#[test]
+fn reopened_cleanup_reconciliation_is_exact_idempotent_and_corruption_closed() {
+    let (active, rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_active(&mut repository, &active);
+    let owner =
+        EligibilityFixture::active(&active, ProfileId::from(277), ExtensionInstallId::from(281));
+    let acquisition = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let cleanup = release_binding(&acquisition);
+    let wrong_backend = release_binding_with(
+        &acquisition,
+        acquisition.browsing_context(),
+        alternate_runtime_backend(),
+        acquisition.native_incarnation(),
+    );
+    let wrong_incarnation = release_binding_with(
+        &acquisition,
+        acquisition.browsing_context(),
+        acquisition.runtime_backend(),
+        acquisition.native_incarnation().next().unwrap(),
+    );
+    let lease = acquire_active(&mut repository, acquisition).unwrap();
+    let live_snapshot = harness.snapshot();
+    assert_eq!(
+        repository.reconcile_bundled_package_pin_release(&cleanup),
+        Err(BundledPackageLeaseReleaseError::ConcurrentLease)
+    );
+    assert_eq!(harness.snapshot(), live_snapshot);
+    assert!(!repository.writer_is_sealed());
+    drop(lease);
+    drop(repository);
+
+    let mut repository = harness.open();
+    let mut wrong_set_bytes = current.bytes();
+    wrong_set_bytes[0] ^= 0xFF;
+    let wrong_set: BundledCatalogSetIdentity = Digest32::from_bytes(wrong_set_bytes).into();
+    let wrong_set_acquisition =
+        owner.acquisition_binding(wrong_set, ExtensionCatalogGenerationRole::Active);
+    let wrong_set_cleanup = release_binding(&wrong_set_acquisition);
+    let before_mismatches = harness.snapshot();
+    for mismatched in [&wrong_backend, &wrong_incarnation, &wrong_set_cleanup] {
+        assert_eq!(
+            repository.reconcile_bundled_package_pin_release(mismatched),
+            Err(BundledPackageLeaseReleaseError::JournalPinMismatch)
+        );
+        assert_eq!(harness.snapshot(), before_mismatches);
+        assert!(!repository.writer_is_sealed());
+    }
+    assert_eq!(
+        repository
+            .reconcile_bundled_package_pin_release(&cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+
+    let historical_harness = Harness::new();
+    let mut historical_repository = historical_harness.open();
+    let historical_active = establish_active(&mut historical_repository, &active);
+    let historical_owner =
+        EligibilityFixture::active(&active, ProfileId::from(313), ExtensionInstallId::from(317));
+    let historical_acquisition = historical_owner
+        .acquisition_binding(historical_active, ExtensionCatalogGenerationRole::Active);
+    let historical_cleanup = release_binding(&historical_acquisition);
+    let historical_lease =
+        acquire_active(&mut historical_repository, historical_acquisition).unwrap();
+    drop(historical_lease);
+    let historical_rollback = establish_rollback(&mut historical_repository, &active, &rollback);
+    assert_eq!(
+        historical_repository.current_bundled_catalog_set().unwrap(),
+        Some(BundledCurrentCatalogSet {
+            identity: historical_rollback,
+            role: BundledCatalogGenerationRole::Rollback,
+        })
+    );
+    assert_eq!(
+        historical_repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .previous_catalog_set_id,
+        Some(Digest32::from_bytes(historical_active.bytes()))
+    );
+    drop(historical_repository);
+
+    let mut historical_repository = historical_harness.open();
+    assert_eq!(
+        historical_repository
+            .reconcile_bundled_package_pin_release(&historical_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+    assert!(historical_repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+
+    let absent_harness = Harness::new();
+    let mut absent_repository = absent_harness.open();
+    assert!(absent_repository
+        .writer_materialization()
+        .unwrap()
+        ._catalog_sets
+        .is_empty());
+    assert_eq!(
+        absent_repository
+            .reconcile_bundled_package_pin_release(&cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::AlreadyReleased
+    );
+    assert!(absent_repository
+        .writer_materialization()
+        .unwrap()
+        ._catalog_sets
+        .is_empty());
+    assert!(!absent_repository.writer_is_sealed());
+
+    for corrupt_set in [true, false] {
+        let corrupt_harness = Harness::new();
+        let mut corrupt_repository = corrupt_harness.open();
+        let current = establish_active(&mut corrupt_repository, &active);
+        let corrupt_owner = EligibilityFixture::active(
+            &active,
+            ProfileId::from(if corrupt_set { 283 } else { 293 }),
+            ExtensionInstallId::from(if corrupt_set { 307 } else { 311 }),
+        );
+        let corrupt_acquisition =
+            corrupt_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+        let corrupt_cleanup = release_binding(&corrupt_acquisition);
+        let lease = acquire_active(&mut corrupt_repository, corrupt_acquisition).unwrap();
+        drop(lease);
+        drop(corrupt_repository);
+
+        let mut corrupt_repository = corrupt_harness.open();
+        let pin = corrupt_repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .package_pins[0];
+        let record_name = if corrupt_set {
+            format!("{}.catalog-set.json", pin.catalog_set_record_id.to_hex())
+        } else {
+            format!("{}.package.json", pin.package_record_id.to_hex())
+        };
+        fs::remove_file(
+            corrupt_harness
+                .repository_path
+                .join("materialization/records")
+                .join(record_name),
+        )
+        .unwrap();
+        let loaded = corrupt_repository.writer_take_materialization().unwrap();
+        drop(loaded);
+        assert!(matches!(
+            corrupt_repository.reconcile_bundled_package_pin_release(&corrupt_cleanup),
+            Err(BundledPackageLeaseReleaseError::Repository(_))
+        ));
+        assert!(corrupt_repository.writer_is_sealed());
+    }
 }
 
 #[test]
@@ -772,9 +1180,8 @@ fn resource_reads_drain_callback_results_and_integrity_outranks_callback_error()
     let current = establish_active(&mut repository, &active);
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(17), ExtensionInstallId::from(21));
-    let lease = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let lease = acquire_active(&mut repository, binding).unwrap();
     let manifest = PortableRelativePath::parse("manifest.json").unwrap();
     let complete = lease
         .with_resource_reader(&manifest, |reader| {
@@ -828,12 +1235,12 @@ fn resource_callback_reentry_is_explicit_non_poisoning_and_drain_safe() {
         EligibilityFixture::active(&active, ProfileId::from(17), ExtensionInstallId::from(19));
     let second_owner =
         EligibilityFixture::active(&active, ProfileId::from(21), ExtensionInstallId::from(23));
-    let first = repository
-        .acquire_active_bundled_package_lease(current, &first_owner.eligibility())
-        .unwrap();
-    let second = repository
-        .acquire_active_bundled_package_lease(current, &second_owner.eligibility())
-        .unwrap();
+    let first_binding =
+        first_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let second_binding =
+        second_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let first = acquire_active(&mut repository, first_binding).unwrap();
+    let second = acquire_active(&mut repository, second_binding).unwrap();
     let manifest = PortableRelativePath::parse("manifest.json").unwrap();
     let nested_manifest = PortableRelativePath::parse("manifest.json").unwrap();
 
@@ -902,9 +1309,8 @@ fn shared_operation_gate_orders_resource_poison_before_waiting_writer_mutation()
     let current = establish_active(&mut repository, &active);
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(23), ExtensionInstallId::from(25));
-    let lease = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let lease = acquire_active(&mut repository, binding).unwrap();
     let manifest = PortableRelativePath::parse("manifest.json").unwrap();
     harness.corrupt_manifest_same_length();
     let before_writer = harness.snapshot();
@@ -967,66 +1373,111 @@ fn reopened_requests_are_rejected_and_old_incarnation_cannot_remove_replacement(
     let current = establish_active(&mut repository, &active);
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(27), ExtensionInstallId::from(31));
-    let lease = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let first_binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let first_cleanup = release_binding(&first_binding);
+    let next_incarnation = first_binding.native_incarnation().next().unwrap();
+    let wrong_backend_cleanup = release_binding_with(
+        &first_binding,
+        first_binding.browsing_context(),
+        alternate_runtime_backend(),
+        first_binding.native_incarnation(),
+    );
+    let wrong_incarnation_cleanup = release_binding_with(
+        &first_binding,
+        first_binding.browsing_context(),
+        first_binding.runtime_backend(),
+        next_incarnation,
+    );
+    let private_cleanup = release_binding_with(
+        &first_binding,
+        ExtensionGrantBrowsingContext::Private,
+        first_binding.runtime_backend(),
+        first_binding.native_incarnation(),
+    );
+    assert_eq!(
+        private_cleanup.browsing_context(),
+        ExtensionGrantBrowsingContext::Private
+    );
+    let lease = acquire_active(&mut repository, first_binding).unwrap();
     let mut old_release = lease.into_release_request();
     drop(repository);
 
     let mut repository = harness.open();
-    let replacement_live = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let conflict_binding = owner.acquisition_binding_with(
+        current,
+        ExtensionCatalogGenerationRole::Active,
+        runtime_backend(),
+        next_incarnation,
+    );
+    assert!(matches!(
+        acquire_active(&mut repository, conflict_binding),
+        Err(BundledPackageLeaseError::OwnerConflict)
+    ));
+    let replay_binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let replacement_live = acquire_active(&mut repository, replay_binding).unwrap();
     let mut replacement_release = replacement_live.into_release_request();
-    let replacement_pin = replacement_release.core.pin;
     let before_wrong_open = harness.snapshot();
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut old_release),
+        repository.release_active_bundled_package_lease(&mut old_release, &first_cleanup),
         Err(BundledPackageLeaseReleaseError::WrongRepository)
     );
     assert_eq!(harness.snapshot(), before_wrong_open);
 
-    let remove = match plan_owner_package_pin_removal(
-        repository.writer_materialization().unwrap(),
-        owner.eligibility().profile(),
-        owner.install,
-        replacement_pin,
-    )
-    .unwrap()
-    {
-        OwnerPackagePinRemovalPlan::Remove(proof) => proof,
-        OwnerPackagePinRemovalPlan::IdempotentReplay => panic!("old pin disappeared"),
-        OwnerPackagePinRemovalPlan::Stale => panic!("replacement pin unexpectedly changed"),
-    };
-    let runtime = repository.writer_take_materialization().unwrap();
-    repository
-        .finish_transition(remove_owner_package_pin(runtime, remove))
-        .unwrap();
-    let add = match plan_current_catalog_package_pin(
-        repository.writer_materialization().unwrap(),
-        Digest32::from_bytes(current.bytes()),
-        package_key(),
-        owner.eligibility().profile(),
-        owner.install,
-    )
-    .unwrap()
-    {
-        OwnerPackagePinPlan::Add { proof, pin } => {
-            assert_ne!(pin.incarnation, replacement_pin.incarnation);
-            proof
-        }
-        OwnerPackagePinPlan::IdempotentReplay { .. } => panic!("pin was not removed"),
-    };
-    let runtime = repository.writer_take_materialization().unwrap();
-    repository
-        .finish_transition(add_owner_package_pin(runtime, add))
-        .unwrap();
+    let before_mismatches = harness.snapshot();
+    assert_eq!(
+        repository.release_active_bundled_package_lease(
+            &mut replacement_release,
+            &wrong_backend_cleanup,
+        ),
+        Err(BundledPackageLeaseReleaseError::JournalPinMismatch)
+    );
+    assert_eq!(
+        repository.release_active_bundled_package_lease(
+            &mut replacement_release,
+            &wrong_incarnation_cleanup,
+        ),
+        Err(BundledPackageLeaseReleaseError::JournalPinMismatch)
+    );
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut replacement_release, &private_cleanup,),
+        Err(BundledPackageLeaseReleaseError::JournalPinMismatch)
+    );
+    assert_eq!(harness.snapshot(), before_mismatches);
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut replacement_release, &first_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let second_binding = owner.acquisition_binding_with(
+        current,
+        ExtensionCatalogGenerationRole::Active,
+        runtime_backend(),
+        next_incarnation,
+    );
+    let second_cleanup = release_binding(&second_binding);
+    let second_live = acquire_active(&mut repository, second_binding).unwrap();
+    let mut second_release = second_live.into_release_request();
     let replacement_snapshot = harness.snapshot();
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut replacement_release),
-        Err(BundledPackageLeaseReleaseError::StaleLease)
+        repository.release_active_bundled_package_lease(&mut replacement_release, &second_cleanup,),
+        Err(BundledPackageLeaseReleaseError::JournalPinMismatch)
+    );
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut replacement_release, &first_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::AlreadyReleased
     );
     assert_eq!(harness.snapshot(), replacement_snapshot);
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut second_release, &second_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
 }
 
 #[test]
@@ -1044,21 +1495,23 @@ fn rollback_is_nominal_and_acquisition_corruption_fails_closed() {
     );
     let owner =
         EligibilityFixture::rollback(&rollback, ProfileId::from(37), ExtensionInstallId::from(41));
+    let wrong_role_binding =
+        owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
     assert!(matches!(
-        repository.acquire_active_bundled_package_lease(current, &owner.eligibility()),
+        acquire_active(&mut repository, wrong_role_binding),
         Err(BundledPackageLeaseError::WrongCatalogRole)
     ));
-    let lease = repository
-        .acquire_rollback_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Rollback);
+    let lease = acquire_rollback(&mut repository, binding).unwrap();
     assert_eq!(lease.catalog_revision(), rollback.revision());
     drop(lease);
     drop(repository);
 
     let mut repository = harness.open();
     harness.corrupt_manifest_same_length();
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Rollback);
     assert!(matches!(
-        repository.acquire_rollback_bundled_package_lease(current, &owner.eligibility()),
+        acquire_rollback(&mut repository, binding),
         Err(BundledPackageLeaseError::DurableObjectMismatch)
     ));
     assert!(repository.writer_is_sealed());
@@ -1090,6 +1543,7 @@ fn post_pin_corruption_returns_no_lease_and_retry_replays_the_durable_pin() {
     let current = establish_active(&mut repository, &active);
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(47), ExtensionInstallId::from(51));
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
     let repository_path = harness.repository_path.clone();
     arm_post_pin_reverify_hook(move || {
         let manifest = find_named(&repository_path, "manifest.json");
@@ -1098,7 +1552,7 @@ fn post_pin_corruption_returns_no_lease_and_retry_replays_the_durable_pin() {
         fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400)).unwrap();
     });
     assert!(matches!(
-        repository.acquire_active_bundled_package_lease(current, &owner.eligibility()),
+        acquire_active(&mut repository, binding),
         Err(BundledPackageLeaseError::DurableObjectMismatch)
     ));
     assert!(repository.writer_is_sealed());
@@ -1107,9 +1561,8 @@ fn post_pin_corruption_returns_no_lease_and_retry_replays_the_durable_pin() {
     harness.replace_manifest(fixture::MANIFEST_BYTES);
     let mut repository = harness.open();
     let before_replay = harness.snapshot();
-    let lease = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let replay_binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let lease = acquire_active(&mut repository, replay_binding).unwrap();
     assert_eq!(harness.snapshot(), before_replay);
     drop(lease);
 }
@@ -1122,8 +1575,10 @@ fn coherent_unrelated_build_intent_and_stage_are_retryable_and_read_only() {
     let current = establish_active(&mut repository, &active);
     let release_owner =
         EligibilityFixture::active(&active, ProfileId::from(61), ExtensionInstallId::from(67));
-    let mut release = repository
-        .acquire_active_bundled_package_lease(current, &release_owner.eligibility())
+    let release_acquisition =
+        release_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let release_cleanup = release_binding(&release_acquisition);
+    let mut release = acquire_active(&mut repository, release_acquisition)
         .unwrap()
         .into_release_request();
     repository
@@ -1180,15 +1635,17 @@ fn coherent_unrelated_build_intent_and_stage_are_retryable_and_read_only() {
 
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(53), ExtensionInstallId::from(59));
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let cleanup = release_binding(&binding);
     assert!(matches!(
-        repository.acquire_active_bundled_package_lease(current, &owner.eligibility()),
+        acquire_active(&mut repository, binding),
         Err(BundledPackageLeaseError::BuildInProgress)
     ));
     assert_eq!(harness.snapshot(), before);
     assert!(!repository.writer_is_sealed());
 
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &release_cleanup),
         Err(BundledPackageLeaseReleaseError::BuildInProgress)
     );
     assert_eq!(harness.snapshot(), before);
@@ -1214,16 +1671,15 @@ fn coherent_unrelated_build_intent_and_stage_are_retryable_and_read_only() {
         })
     );
 
-    let acquired = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
-        .unwrap();
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let acquired = acquire_active(&mut repository, binding).unwrap();
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &release_cleanup),
         Ok(BundledPackageLeaseReleaseOutcome::Released)
     );
     let mut acquired_release = acquired.into_release_request();
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut acquired_release),
+        repository.release_active_bundled_package_lease(&mut acquired_release, &cleanup),
         Ok(BundledPackageLeaseReleaseOutcome::Released)
     );
     assert!(!repository.writer_is_sealed());
@@ -1241,15 +1697,22 @@ fn orphan_stage_residue_is_validated_before_absent_or_stale_release_outcomes() {
             ProfileId::from(if replace_pin { 79 } else { 83 }),
             ExtensionInstallId::from(if replace_pin { 89 } else { 97 }),
         );
-        let mut release = repository
-            .acquire_active_bundled_package_lease(current, &owner.eligibility())
+        let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+        let release = acquire_active(&mut repository, binding)
             .unwrap()
             .into_release_request();
         let original_pin = release.core.pin;
+        let original_durable_pin = {
+            let pins = &repository
+                .writer_materialization()
+                .unwrap()
+                ._state
+                .package_pins;
+            assert_eq!(pins.len(), 1);
+            pins[0]
+        };
         let removal = match plan_owner_package_pin_removal(
             repository.writer_materialization().unwrap(),
-            owner.eligibility().profile(),
-            owner.install,
             original_pin,
         )
         .unwrap()
@@ -1264,39 +1727,82 @@ fn orphan_stage_residue_is_validated_before_absent_or_stale_release_outcomes() {
             .unwrap();
 
         if replace_pin {
+            let replacement_binding = owner.acquisition_binding_with(
+                current,
+                ExtensionCatalogGenerationRole::Active,
+                runtime_backend(),
+                owner.native_incarnation().next().unwrap(),
+            );
+            let (_, admission) = {
+                let runtime = repository.writer_materialization().unwrap();
+                let current = current_catalog_set_projection(runtime).unwrap().unwrap();
+                load_active_package_pin_admission(
+                    runtime,
+                    &current,
+                    fixture::ACTIVE_CATALOG_BYTES,
+                    &replacement_binding,
+                )
+                .unwrap()
+            };
             let addition = match plan_current_catalog_package_pin(
                 repository.writer_materialization().unwrap(),
-                Digest32::from_bytes(current.bytes()),
-                package_key(),
-                owner.eligibility().profile(),
-                owner.install,
+                &admission,
             )
             .unwrap()
             {
-                OwnerPackagePinPlan::Add { proof, pin } => {
-                    assert_ne!(pin.incarnation, original_pin.incarnation);
-                    proof
-                }
+                OwnerPackagePinPlan::Add(proof) => proof,
                 OwnerPackagePinPlan::IdempotentReplay { .. } => {
                     panic!("removed owner pin unexpectedly replayed")
+                }
+                OwnerPackagePinPlan::OwnerConflict => {
+                    panic!("removed owner pin unexpectedly conflicted")
                 }
             };
             let runtime = repository.writer_take_materialization().unwrap();
             repository
                 .finish_transition(add_owner_package_pin(runtime, addition))
                 .unwrap();
+            let replacement = repository
+                .writer_materialization()
+                .unwrap()
+                ._state
+                .package_pins[0];
+            assert_eq!(
+                replacement.native_incarnation,
+                owner.native_incarnation().next().unwrap().get()
+            );
+            assert_ne!(
+                replacement.native_incarnation,
+                original_durable_pin.native_incarnation
+            );
         }
 
         install_orphan_package_record_stage_for_e2e(
             repository.writer_materialization().unwrap(),
-            original_pin.package_record_id,
+            original_durable_pin.package_record_id,
         )
         .unwrap();
-        let result = repository.release_active_bundled_package_lease(&mut release);
-        assert!(
-            matches!(result, Err(BundledPackageLeaseReleaseError::Repository(_))),
-            "unvalidated residue escaped through a release fast path: {result:?}"
+        let orphan_stage = harness
+            .repository_path
+            .join("materialization/records")
+            .join(format!(
+                "{}.package.stage",
+                original_durable_pin.package_record_id.to_hex()
+            ));
+        assert!(orphan_stage.exists());
+        let staged = harness.snapshot();
+        drop(release);
+        drop(repository);
+
+        let reopened = ExtensionRepository::open(
+            LockedPrivateNamespace::open_or_create(&harness.repository_path).unwrap(),
         );
+        assert!(matches!(
+            reopened,
+            Err(ExtensionRepositoryError::RecoveryAmbiguous)
+        ));
+        assert_eq!(harness.snapshot(), staged);
+        assert!(orphan_stage.exists());
     }
 }
 
@@ -1308,8 +1814,9 @@ fn clean_transient_release_failure_is_read_only_and_the_same_request_retries() {
     let current = establish_active(&mut repository, &active);
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(71), ExtensionInstallId::from(73));
-    let mut release = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let cleanup = release_binding(&binding);
+    let mut release = acquire_active(&mut repository, binding)
         .unwrap()
         .into_release_request();
     let before = harness.snapshot();
@@ -1318,7 +1825,7 @@ fn clean_transient_release_failure_is_read_only_and_the_same_request_retries() {
         ExtensionRepositoryError::FileSystem(PrivateFsError::LockUnavailable),
     ));
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &cleanup),
         Err(BundledPackageLeaseReleaseError::Repository(
             ExtensionRepositoryError::FileSystem(PrivateFsError::LockUnavailable)
         ))
@@ -1327,11 +1834,11 @@ fn clean_transient_release_failure_is_read_only_and_the_same_request_retries() {
     assert!(!repository.writer_is_sealed());
 
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &cleanup),
         Ok(BundledPackageLeaseReleaseOutcome::Released)
     );
     assert_eq!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &cleanup),
         Ok(BundledPackageLeaseReleaseOutcome::AlreadyReleased)
     );
     assert!(!repository.writer_is_sealed());
@@ -1346,8 +1853,9 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
 
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(211), ExtensionInstallId::from(223));
-    let mut access = repository
-        .acquire_active_bundled_package_lease(current, &owner.eligibility())
+    let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let cleanup = release_binding(&binding);
+    let mut access = acquire_active(&mut repository, binding)
         .unwrap()
         .into_runtime_package_access()
         .unwrap();
@@ -1406,8 +1914,10 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
 
     let nested_owner =
         EligibilityFixture::active(&active, ProfileId::from(227), ExtensionInstallId::from(229));
-    let mut nested_access = repository
-        .acquire_active_bundled_package_lease(current, &nested_owner.eligibility())
+    let nested_binding =
+        nested_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let nested_cleanup = release_binding(&nested_binding);
+    let mut nested_access = acquire_active(&mut repository, nested_binding)
         .unwrap()
         .into_runtime_package_access()
         .unwrap();
@@ -1449,7 +1959,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         .unwrap();
     assert_eq!(
         repository
-            .release_active_bundled_package_lease(&mut nested_release)
+            .release_active_bundled_package_lease(&mut nested_release, &nested_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -1469,15 +1979,17 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
             .unwrap();
     assert_eq!(
         repository
-            .release_active_bundled_package_lease(&mut release)
+            .release_active_bundled_package_lease(&mut release, &cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
 
     let passive_owner =
         EligibilityFixture::active(&active, ProfileId::from(233), ExtensionInstallId::from(239));
-    let passive_access = repository
-        .acquire_active_bundled_package_lease(current, &passive_owner.eligibility())
+    let passive_binding =
+        passive_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let passive_cleanup = release_binding(&passive_binding);
+    let passive_access = acquire_active(&mut repository, passive_binding)
         .unwrap()
         .into_runtime_package_access()
         .unwrap();
@@ -1502,9 +2014,9 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         "provider Drop must remain passive"
     );
 
-    let replayed_lease = repository
-        .acquire_active_bundled_package_lease(current, &passive_owner.eligibility())
-        .unwrap();
+    let passive_replay_binding =
+        passive_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let replayed_lease = acquire_active(&mut repository, passive_replay_binding).unwrap();
     arm_provider_retained_bytes_override(usize::MAX);
     let refusal = replayed_lease
         .into_runtime_package_access()
@@ -1518,15 +2030,17 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let mut release = refusal.try_into_lease().unwrap().into_release_request();
     assert_eq!(
         repository
-            .release_active_bundled_package_lease(&mut release)
+            .release_active_bundled_package_lease(&mut release, &passive_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
 
     let corrupt_owner =
         EligibilityFixture::active(&active, ProfileId::from(241), ExtensionInstallId::from(251));
-    let mut corrupt_access = repository
-        .acquire_active_bundled_package_lease(current, &corrupt_owner.eligibility())
+    let corrupt_binding =
+        corrupt_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let corrupt_cleanup = release_binding(&corrupt_binding);
+    let mut corrupt_access = acquire_active(&mut repository, corrupt_binding)
         .unwrap()
         .into_runtime_package_access()
         .unwrap();
@@ -1547,7 +2061,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         )
         .unwrap();
     assert!(matches!(
-        repository.release_active_bundled_package_lease(&mut release),
+        repository.release_active_bundled_package_lease(&mut release, &corrupt_cleanup),
         Err(BundledPackageLeaseReleaseError::Repository(
             ExtensionRepositoryError::Sealed
         ))
@@ -1563,8 +2077,10 @@ fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
     let active_current = establish_active(&mut active_repository, &active);
     let active_owner =
         EligibilityFixture::active(&active, ProfileId::from(257), ExtensionInstallId::from(263));
-    let active_access = active_repository
-        .acquire_active_bundled_package_lease(active_current, &active_owner.eligibility())
+    let active_binding =
+        active_owner.acquisition_binding(active_current, ExtensionCatalogGenerationRole::Active);
+    let active_cleanup = release_binding(&active_binding);
+    let active_access = acquire_active(&mut active_repository, active_binding)
         .unwrap()
         .into_runtime_package_access()
         .unwrap();
@@ -1585,7 +2101,7 @@ fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
         .unwrap();
     assert_eq!(
         active_repository
-            .release_active_bundled_package_lease(&mut active_release)
+            .release_active_bundled_package_lease(&mut active_release, &active_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -1598,8 +2114,10 @@ fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
         ProfileId::from(269),
         ExtensionInstallId::from(271),
     );
-    let rollback_access = rollback_repository
-        .acquire_rollback_bundled_package_lease(rollback_current, &rollback_owner.eligibility())
+    let rollback_binding = rollback_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_cleanup = release_binding(&rollback_binding);
+    let rollback_access = acquire_rollback(&mut rollback_repository, rollback_binding)
         .unwrap()
         .into_runtime_package_access()
         .unwrap();
@@ -1620,7 +2138,7 @@ fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
         .unwrap();
     assert_eq!(
         rollback_repository
-            .release_rollback_bundled_package_lease(&mut rollback_release)
+            .release_rollback_bundled_package_lease(&mut rollback_release, &rollback_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );

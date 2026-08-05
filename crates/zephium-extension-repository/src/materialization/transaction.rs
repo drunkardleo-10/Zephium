@@ -6,11 +6,10 @@
 //! sealed-root handles, or build-stage projections from surviving a durable
 //! state change.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use zephium_core::extensions::ExtensionPackageKey;
-use zephium_core::ids::{ExtensionInstallId, ProfileId};
-use zephium_extension_package::MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES;
+use zephium_core::extensions::{
+    ExtensionPackageIdentity, ExtensionPackagePayloadIdentity, ExtensionPackagePinReleaseBinding,
+    ExtensionRuntimeBackendTarget,
+};
 use zephium_private_fs::{ByteLimit, DirectoryIdentity, FileIdentity, PrivateFsError};
 
 use super::catalog_set::{
@@ -22,16 +21,20 @@ use super::objects::{
     PackageObjectCapacity, PackageObjectError, VerifiedActivePackageClosure,
     VerifiedRollbackPackageClosure,
 };
+use super::package_lease::VerifiedPackagePinAdmission;
 use super::policy::{
     next_durable_generation, validate_completed_tree_budget, validate_package_anchor_consistency,
 };
 use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
-use super::records::{CatalogAnchor, CatalogSetRecord, PackageRecord, StoredRuntimePlatformFamily};
+use super::records::{
+    CatalogSetRecord, PackageIdentityAnchor, PackageRecord, StoredPayloadIdentity,
+    StoredRuntimePlatformFamily,
+};
 use super::runtime::MaterializationRuntime;
 use super::state::{
-    DurablePackagePin, MaterializationBuildIntent, MaterializationCheckpoint,
-    MaterializationJournal, MaterializationState, MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
-    MATERIALIZATION_JOURNAL_SCHEMA_VERSION, MAX_DRAIN_CATALOG_SELECTIONS,
+    DurablePackagePin, HistoricalCatalogRole, MaterializationBuildIntent,
+    MaterializationCheckpoint, MaterializationJournal, MaterializationState, StoredBrowsingContext,
+    MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION, MATERIALIZATION_JOURNAL_SCHEMA_VERSION,
     MAX_MATERIALIZATION_JOURNAL_BYTES, MAX_MATERIALIZATION_STATE_BYTES,
 };
 use super::storage::{read_required_control, remove_required_control, write_checkpoint};
@@ -264,21 +267,189 @@ pub(crate) struct CurrentCatalogPackagePinProof {
     records_parent: DirectoryIdentity,
     current_catalog_set_id: Digest32,
     package_key: Digest32,
-    package_record_id: Digest32,
-    pin_incarnation: u64,
-    profile_id: ProfileId,
-    install_id: ExtensionInstallId,
+    runtime_backend: ExtensionRuntimeBackendTarget,
+    pin: DurablePackagePin,
+}
+
+impl CurrentCatalogPackagePinProof {
+    pub(crate) fn pin_identity(&self) -> OwnerPackagePinIdentity {
+        self.pin.into()
+    }
 }
 
 /// Exact durable identity of one owner pin incarnation.
 ///
-/// The package record alone is insufficient for compare-and-swap removal: an
-/// owner may release and later reacquire the same record. The incarnation is
-/// the generation committed by the add transition and survives recovery.
+/// Store's native incarnation prevents owner ABA across repository reopen.
+/// The consuming transition proof separately binds the current repository
+/// generation and directory identity for in-process compare-and-swap safety.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerPackagePinIdentity {
-    pub(crate) package_record_id: Digest32,
-    pub(crate) incarnation: u64,
+pub(crate) struct OwnerPackagePinIdentity(DurablePackagePin);
+
+impl From<DurablePackagePin> for OwnerPackagePinIdentity {
+    fn from(pin: DurablePackagePin) -> Self {
+        Self(pin)
+    }
+}
+
+impl OwnerPackagePinIdentity {
+    /// Compares the Store-owned portion of this exact repository pin.
+    ///
+    /// Package-record identity is deliberately resolved through the recovered
+    /// catalog set by `verify_package_pin_release_admission`; it cannot be
+    /// reconstructed from a Store package identity alone.
+    pub(crate) fn matches_release_binding_identity(
+        self,
+        binding: &ExtensionPackagePinReleaseBinding,
+    ) -> bool {
+        self.0.profile_id == binding.profile()
+            && self.0.install_id == binding.install_id()
+            && self.0.browsing_context == StoredBrowsingContext::from(binding.browsing_context())
+            && self.0.catalog_set_record_id.bytes() == binding.catalog_set_digest().bytes()
+            && self.0.catalog_role == HistoricalCatalogRole::from(binding.catalog_role())
+            && self.0.native_incarnation == binding.native_incarnation().get()
+    }
+}
+
+/// Read-only disposition of an exact release binding against recovered pins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PackagePinReleaseAdmission {
+    /// The complete pin and its authenticated set/package/backend join exist.
+    Present,
+    /// No pin exists for the exact owner; no catalog-set object is required.
+    AlreadyAbsent,
+}
+
+/// Exact durable pin resolved from a Store-owned release row after reopen.
+///
+/// The present variant is intentionally opaque: only this module can mint the
+/// complete repository identity consumed by the removal transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecoveredPackagePinRelease {
+    /// The Store row exactly names one coherent durable repository pin.
+    Present(OwnerPackagePinIdentity),
+    /// The owner has no durable pin, including a crash before pin commit.
+    AlreadyAbsent,
+}
+
+/// Closed refusal while verifying one Store-authorized package-pin release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PackagePinReleaseAdmissionError {
+    /// Store and repository identify different owner/package/backend state.
+    JournalPinMismatch,
+    /// Recovered repository state is internally incoherent.
+    DurableIncoherence,
+}
+
+/// Validates the complete materialization frontier before any release replay.
+///
+/// This preflight is intentionally separate from Store-binding resolution so
+/// transient filesystem failures retain their clean retry classification.
+/// Both same-process release and reopened reconciliation must run it before an
+/// `AlreadyAbsent` fast path; otherwise physical object-stage residue could be
+/// reported as settled without first proving the repository frontier clean.
+pub(crate) fn preflight_package_pin_release(
+    runtime: &MaterializationRuntime,
+) -> Result<(), MaterializationTransitionError> {
+    validate_runtime(runtime)?;
+    require_no_object_stages(runtime)
+}
+
+/// Resolves a Store release binding against one complete repository pin.
+///
+/// Absence is checked before any catalog-set lookup so crash-before-pin
+/// recovery remains a truthful `AlreadyAbsent`. Presence requires the complete
+/// set row, package record, package identity, and backend join.
+pub(crate) fn verify_package_pin_release_admission(
+    runtime: &MaterializationRuntime,
+    expected_pin: OwnerPackagePinIdentity,
+    binding: &ExtensionPackagePinReleaseBinding,
+) -> Result<PackagePinReleaseAdmission, PackagePinReleaseAdmissionError> {
+    if !expected_pin.matches_release_binding_identity(binding) {
+        return Err(PackagePinReleaseAdmissionError::JournalPinMismatch);
+    }
+    match resolve_recovered_package_pin_release(runtime, binding)? {
+        RecoveredPackagePinRelease::Present(pin) if pin == expected_pin => {
+            Ok(PackagePinReleaseAdmission::Present)
+        }
+        RecoveredPackagePinRelease::Present(_) => {
+            Err(PackagePinReleaseAdmissionError::JournalPinMismatch)
+        }
+        RecoveredPackagePinRelease::AlreadyAbsent => Ok(PackagePinReleaseAdmission::AlreadyAbsent),
+    }
+}
+
+/// Resolves one authenticated Store release row after repository reopen.
+///
+/// Callers must first run `preflight_package_pin_release` and preserve its
+/// transition-error classification. This function repeats the in-memory state
+/// validation defensively but deliberately does not collapse filesystem
+/// preflight failures into an admission error.
+///
+/// Absence is returned before catalog-set lookup so crash-before-pin replay is
+/// independent of objects that were never retained. Presence requires the
+/// exact owner, context, historical set and role, Store native incarnation,
+/// package identity, selected backend, and coherent durable set/package join.
+pub(crate) fn resolve_recovered_package_pin_release(
+    runtime: &MaterializationRuntime,
+    binding: &ExtensionPackagePinReleaseBinding,
+) -> Result<RecoveredPackagePinRelease, PackagePinReleaseAdmissionError> {
+    validate_runtime(runtime).map_err(|_| PackagePinReleaseAdmissionError::DurableIncoherence)?;
+    let owner = (
+        binding.profile(),
+        binding.install_id(),
+        StoredBrowsingContext::from(binding.browsing_context()),
+    );
+    let index = match runtime
+        ._state
+        .package_pins
+        .binary_search_by_key(&owner, DurablePackagePin::owner_key)
+    {
+        Ok(index) => index,
+        Err(_) => return Ok(RecoveredPackagePinRelease::AlreadyAbsent),
+    };
+    let pin = runtime._state.package_pins[index];
+    let pin_identity = OwnerPackagePinIdentity::from(pin);
+    if !pin_identity.matches_release_binding_identity(binding) {
+        return Err(PackagePinReleaseAdmissionError::JournalPinMismatch);
+    }
+    validate_present_package_pin_release(runtime, pin, binding)?;
+    Ok(RecoveredPackagePinRelease::Present(pin_identity))
+}
+
+fn validate_present_package_pin_release(
+    runtime: &MaterializationRuntime,
+    pin: DurablePackagePin,
+    binding: &ExtensionPackagePinReleaseBinding,
+) -> Result<(), PackagePinReleaseAdmissionError> {
+    let set = runtime
+        ._catalog_sets
+        .get(&pin.catalog_set_record_id)
+        .ok_or(PackagePinReleaseAdmissionError::DurableIncoherence)?;
+    validate_catalog_set_completed_projection(runtime, set)
+        .map_err(|_| PackagePinReleaseAdmissionError::DurableIncoherence)?;
+    let row = set
+        .packages
+        .iter()
+        .find(|row| row.package_record_id == pin.package_record_id)
+        .ok_or(PackagePinReleaseAdmissionError::DurableIncoherence)?;
+    let package = runtime
+        ._package_records
+        .get(&pin.package_record_id)
+        .ok_or(PackagePinReleaseAdmissionError::DurableIncoherence)?;
+    if package.catalog != set.catalog
+        || package.package.package_key != row.package_key
+        || package.manifest.runtime_target != row.runtime_target
+    {
+        return Err(PackagePinReleaseAdmissionError::DurableIncoherence);
+    }
+    if !package_identity_matches(&package.package, binding.package())
+        || !row
+            .runtime_target
+            .matches_runtime_backend(binding.runtime_backend())
+    {
+        return Err(PackagePinReleaseAdmissionError::JournalPinMismatch);
+    }
+    Ok(())
 }
 
 /// Exact owner-pin admission result. A replay carries no transition proof, so
@@ -286,25 +457,26 @@ pub(crate) struct OwnerPackagePinIdentity {
 #[allow(dead_code)]
 pub(crate) enum OwnerPackagePinPlan {
     /// The owner is absent; consume this proof in the exact add transition.
-    Add {
-        proof: CurrentCatalogPackagePinProof,
-        pin: OwnerPackagePinIdentity,
-    },
-    /// The owner already names the same current package record.
+    Add(CurrentCatalogPackagePinProof),
+    /// The owner already names the same complete Store-bound pin tuple.
     IdempotentReplay { pin: OwnerPackagePinIdentity },
+    /// The exact owner key names a different durable Store-bound tuple.
+    OwnerConflict,
 }
 
 #[allow(dead_code)]
 pub(crate) fn plan_current_catalog_package_pin(
     runtime: &MaterializationRuntime,
-    expected_current: Digest32,
-    package_key: ExtensionPackageKey,
-    profile_id: ProfileId,
-    install_id: ExtensionInstallId,
+    admission: &VerifiedPackagePinAdmission,
 ) -> Result<OwnerPackagePinPlan, MaterializationTransitionError> {
     validate_runtime(runtime)?;
     require_no_object_stages(runtime)?;
-    if runtime._state.current_catalog_set_id != Some(expected_current)
+    let repository = admission.repository();
+    let expected_current = admission.current_catalog_set_id();
+    if runtime._root.identity() != repository.root
+        || runtime._records.identity() != repository.records
+        || runtime._trees.identity() != repository.trees
+        || runtime._state.current_catalog_set_id != Some(expected_current)
         || runtime._state.build_intent.is_some()
         || runtime._build_intent.is_some()
     {
@@ -314,7 +486,7 @@ pub(crate) fn plan_current_catalog_package_pin(
         ._catalog_sets
         .get(&expected_current)
         .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
-    let key = Digest32::from_bytes(package_key.bytes());
+    let key = admission.package_key();
     let row = set
         .packages
         .binary_search_by_key(&key, |row| row.package_key)
@@ -322,43 +494,58 @@ pub(crate) fn plan_current_catalog_package_pin(
         .and_then(|index| set.packages.get(index))
         .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
     validate_catalog_set_completed_projection(runtime, set)?;
-    let owner = (profile_id, install_id);
+    let pin = admission.pin();
+    if row.package_record_id != pin.package_record_id
+        || pin.catalog_set_record_id != expected_current
+        || !row
+            .runtime_target
+            .matches_runtime_backend(admission.runtime_backend())
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let owner = pin.owner_key();
     match runtime
         ._state
         .package_pins
-        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+        .binary_search_by_key(&owner, DurablePackagePin::owner_key)
     {
-        Ok(index)
-            if runtime._state.package_pins[index].package_record_id == row.package_record_id =>
-        {
-            let existing = runtime._state.package_pins[index];
-            return Ok(OwnerPackagePinPlan::IdempotentReplay {
-                pin: OwnerPackagePinIdentity {
-                    package_record_id: existing.package_record_id,
-                    incarnation: existing.incarnation,
-                },
-            });
+        Ok(index) if runtime._state.package_pins[index] == pin => {
+            return Ok(OwnerPackagePinPlan::IdempotentReplay { pin: pin.into() });
         }
-        Ok(_) => return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous)),
+        Ok(_) => return Ok(OwnerPackagePinPlan::OwnerConflict),
         Err(_) => {}
     }
-    let pin = OwnerPackagePinIdentity {
-        package_record_id: row.package_record_id,
-        incarnation: next_generation(runtime._state.generation)?,
-    };
-    Ok(OwnerPackagePinPlan::Add {
-        proof: CurrentCatalogPackagePinProof {
-            state_generation: runtime._state.generation,
-            records_parent: runtime._records.identity(),
-            current_catalog_set_id: expected_current,
-            package_key: key,
-            package_record_id: row.package_record_id,
-            pin_incarnation: pin.incarnation,
-            profile_id,
-            install_id,
-        },
+    Ok(OwnerPackagePinPlan::Add(CurrentCatalogPackagePinProof {
+        state_generation: runtime._state.generation,
+        records_parent: runtime._records.identity(),
+        current_catalog_set_id: expected_current,
+        package_key: key,
+        runtime_backend: admission.runtime_backend(),
         pin,
-    })
+    }))
+}
+
+fn package_identity_matches(
+    stored: &PackageIdentityAnchor,
+    expected: &ExtensionPackageIdentity,
+) -> bool {
+    let payload_matches = match (stored.payload, expected.payload()) {
+        (StoredPayloadIdentity::BundledTree, ExtensionPackagePayloadIdentity::BundledTree) => true,
+        (
+            StoredPayloadIdentity::AcquiredZip { length, sha256 },
+            ExtensionPackagePayloadIdentity::AcquiredZip {
+                length: expected_length,
+                sha256: expected_sha256,
+            },
+        ) => length == expected_length.get() && sha256.bytes() == expected_sha256.bytes(),
+        _ => false,
+    };
+    stored.authority_id.bytes() == expected.authority().bytes()
+        && stored.package_key.bytes() == expected.key().bytes()
+        && stored.revision == expected.revision().get()
+        && payload_matches
+        && stored.manifest_sha256.bytes() == expected.manifest_sha256().bytes()
+        && stored.tree_sha256.bytes() == expected.tree_sha256().bytes()
 }
 
 /// Adds one exact owner/package pin. Existing owners are never replaced in
@@ -382,7 +569,6 @@ fn add_owner_package_pin_with_fault(
     if runtime._state.generation != proof.state_generation
         || runtime._records.identity() != proof.records_parent
         || runtime._state.current_catalog_set_id != Some(proof.current_catalog_set_id)
-        || next_generation(runtime._state.generation)? != proof.pin_incarnation
     {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
@@ -391,28 +577,24 @@ fn add_owner_package_pin_with_fault(
         .get(&proof.current_catalog_set_id)
         .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
     if !set.packages.iter().any(|row| {
-        row.package_key == proof.package_key && row.package_record_id == proof.package_record_id
+        row.package_key == proof.package_key
+            && row.package_record_id == proof.pin.package_record_id
+            && row
+                .runtime_target
+                .matches_runtime_backend(proof.runtime_backend)
     }) {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
-    let owner = (proof.profile_id, proof.install_id);
+    let owner = proof.pin.owner_key();
     let mut next = runtime._state.clone();
     let insertion = next
         .package_pins
-        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+        .binary_search_by_key(&owner, DurablePackagePin::owner_key)
         .map_or_else(Ok, |_| {
             Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous))
         })?;
-    next.package_pins.insert(
-        insertion,
-        DurablePackagePin {
-            profile_id: proof.profile_id,
-            install_id: proof.install_id,
-            package_record_id: proof.package_record_id,
-            incarnation: proof.pin_incarnation,
-        },
-    );
-    next.generation = proof.pin_incarnation;
+    next.package_pins.insert(insertion, proof.pin);
+    next.generation = next_generation(runtime._state.generation)?;
     next.validate()
         .map_err(MaterializationTransitionError::Clean)?;
     validate_next_state_references(&runtime, &next)?;
@@ -424,29 +606,24 @@ fn add_owner_package_pin_with_fault(
 pub(crate) struct OwnerPackagePinRemovalProof {
     state_generation: u64,
     records_parent: DirectoryIdentity,
-    profile_id: ProfileId,
-    install_id: ExtensionInstallId,
-    package_record_id: Digest32,
-    pin_incarnation: u64,
+    pin: DurablePackagePin,
 }
 
 /// Read-only exact removal plan. Absence is a truthful replay and carries no
 /// transition capability.
 #[allow(dead_code)]
 pub(crate) enum OwnerPackagePinRemovalPlan {
-    /// The exact owner/record mapping is present.
+    /// The exact complete owner/set/package/native-incarnation mapping is present.
     Remove(OwnerPackagePinRemovalProof),
     /// The owner is already absent.
     IdempotentReplay,
-    /// The owner was rebound to another package record or incarnation.
+    /// The owner was rebound to another durable tuple or Store incarnation.
     Stale,
 }
 
 #[allow(dead_code)]
 pub(crate) fn plan_owner_package_pin_removal(
     runtime: &MaterializationRuntime,
-    profile_id: ProfileId,
-    install_id: ExtensionInstallId,
     expected_pin: OwnerPackagePinIdentity,
 ) -> Result<OwnerPackagePinRemovalPlan, MaterializationTransitionError> {
     validate_runtime(runtime)?;
@@ -454,29 +631,24 @@ pub(crate) fn plan_owner_package_pin_removal(
     if runtime._state.build_intent.is_some() || runtime._build_intent.is_some() {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
-    let owner = (profile_id, install_id);
+    let owner = expected_pin.0.owner_key();
     let index = match runtime
         ._state
         .package_pins
-        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+        .binary_search_by_key(&owner, DurablePackagePin::owner_key)
     {
         Ok(index) => index,
         Err(_) => return Ok(OwnerPackagePinRemovalPlan::IdempotentReplay),
     };
     let pin = runtime._state.package_pins[index];
-    if pin.package_record_id != expected_pin.package_record_id
-        || pin.incarnation != expected_pin.incarnation
-    {
+    if OwnerPackagePinIdentity::from(pin) != expected_pin {
         return Ok(OwnerPackagePinRemovalPlan::Stale);
     }
     Ok(OwnerPackagePinRemovalPlan::Remove(
         OwnerPackagePinRemovalProof {
             state_generation: runtime._state.generation,
             records_parent: runtime._records.identity(),
-            profile_id,
-            install_id,
-            package_record_id: expected_pin.package_record_id,
-            pin_incarnation: expected_pin.incarnation,
+            pin,
         },
     ))
 }
@@ -503,15 +675,13 @@ fn remove_owner_package_pin_with_fault(
     {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
-    let owner = (proof.profile_id, proof.install_id);
+    let owner = proof.pin.owner_key();
     let mut next = runtime._state.clone();
     let index = next
         .package_pins
-        .binary_search_by_key(&owner, |pin| (pin.profile_id, pin.install_id))
+        .binary_search_by_key(&owner, DurablePackagePin::owner_key)
         .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
-    if next.package_pins[index].package_record_id != proof.package_record_id
-        || next.package_pins[index].incarnation != proof.pin_incarnation
-    {
+    if next.package_pins[index] != proof.pin {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
     next.package_pins.remove(index);
@@ -625,7 +795,6 @@ fn validate_next_state_references(
     state
         .validate()
         .map_err(|_| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
-    let mut selected = BTreeSet::new();
     let mut live_family = None;
     for catalog_set_id in state.catalog_pin_ids() {
         let set = runtime
@@ -638,49 +807,30 @@ fn validate_next_state_references(
                 &mut live_family,
                 row.runtime_target.platform_family(),
             )?;
-            selected.insert(row.package_record_id);
         }
     }
 
-    let mut drain_selections = BTreeMap::<CatalogAnchor, BTreeMap<Digest32, Digest32>>::new();
-    let mut drain_tree_bytes = 0_u64;
     for pin in &state.package_pins {
+        let set = runtime
+            ._catalog_sets
+            .get(&pin.catalog_set_record_id)
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        let row = set
+            .packages
+            .iter()
+            .find(|row| row.package_record_id == pin.package_record_id)
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
         let package = runtime
             ._package_records
             .get(&pin.package_record_id)
             .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
-        bind_transition_platform_family(
-            &mut live_family,
-            package.manifest.runtime_target.platform_family(),
-        )?;
-        if selected.contains(&pin.package_record_id) {
-            continue;
-        }
-        let drain_package_count = {
-            let packages = drain_selections.entry(package.catalog).or_default();
-            match packages.entry(package.package.package_key) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(pin.package_record_id);
-                    drain_tree_bytes = drain_tree_bytes
-                        .checked_add(package.tree_index.tree_bytes)
-                        .ok_or_else(|| {
-                            before_journal(ExtensionRepositoryError::RecoveryAmbiguous)
-                        })?;
-                }
-                std::collections::btree_map::Entry::Occupied(entry)
-                    if *entry.get() == pin.package_record_id => {}
-                std::collections::btree_map::Entry::Occupied(_) => {
-                    return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
-                }
-            }
-            packages.len()
-        };
-        if drain_selections.len() > MAX_DRAIN_CATALOG_SELECTIONS
-            || drain_package_count > super::records::MAX_CATALOG_SET_PACKAGES
-            || drain_tree_bytes > MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES
+        if package.catalog != set.catalog
+            || package.package.package_key != row.package_key
+            || package.manifest.runtime_target != row.runtime_target
         {
             return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
         }
+        bind_transition_platform_family(&mut live_family, row.runtime_target.platform_family())?;
     }
     Ok(())
 }
