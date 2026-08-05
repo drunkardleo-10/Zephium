@@ -6,19 +6,161 @@
 //! order. A fresh combined inventory mints an in-memory absence proof for the
 //! second transition, which alone may clear the intent.
 
-use std::collections::BTreeSet;
-
-use zephium_private_fs::{OpenedPrivateDirectory, PrivateFsError};
+use zephium_private_fs::{OpenedPrivateDirectory, PrivateFsError, TreeRemovalReport};
 
 use crate::materialization::{
     self, begin_garbage_collection, complete_garbage_collection, prove_garbage_collection_absence,
-    remove_tree_directory, CatalogAnchor, MaterializationGarbageCollectionIntent,
-    MaterializationRuntime, MaterializationTransitionError, TreeCleanupError,
+    remove_tree_directory, remove_tree_directory_bounded, CatalogAnchor,
+    MaterializationGarbageCollectionIntent, MaterializationRuntime, MaterializationTransitionError,
+    TreeCleanupError, MAX_GC_CATALOG_OBJECT_TARGETS, MAX_GC_CATALOG_SET_TARGETS,
+    MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS, MAX_GC_TREE_ENTRIES,
+    MAX_GC_TREE_JOBS,
 };
 use crate::names;
 use crate::operation::RepositoryOperationGuard;
-use crate::storage::{map_recovery_fs, validate_named_catalog_object};
 use crate::{ExtensionRepository, ExtensionRepositoryError};
+
+const MATERIALIZATION_TRANSITION_DURABILITY_SYNCS: usize = 13;
+const TREE_OBJECT_RETIREMENT_DURABILITY_SYNCS: usize = 2;
+const MAX_GC_COHORT_REGULAR_TARGETS: usize =
+    1 + MAX_GC_CATALOG_SET_TARGETS + MAX_GC_PACKAGE_RECORD_TARGETS + MAX_GC_DATA_OBJECT_TARGETS * 2;
+const MAX_GC_RESIDUE_REGULAR_TARGETS: usize =
+    MAX_GC_CATALOG_OBJECT_TARGETS + MAX_GC_DATA_OBJECT_TARGETS * 2;
+const MAX_GC_REGULAR_TARGETS: usize =
+    if MAX_GC_COHORT_REGULAR_TARGETS > MAX_GC_RESIDUE_REGULAR_TARGETS {
+        MAX_GC_COHORT_REGULAR_TARGETS
+    } else {
+        MAX_GC_RESIDUE_REGULAR_TARGETS
+    };
+const MAX_GC_LOGICAL_TARGETS: usize = MAX_GC_REGULAR_TARGETS + MAX_GC_TREE_JOBS;
+const MAX_GC_TREE_DIRECTORY_NODES: usize = MAX_GC_TREE_ENTRIES + MAX_GC_TREE_JOBS;
+const MAX_GC_FRESH_DURABILITY_SYNCS: usize = 128;
+const MAX_GC_PENDING_DURABILITY_SYNCS: usize = 96;
+const MAX_GC_PHYSICAL_DURABILITY_SYNCS: usize =
+    MAX_GC_PENDING_DURABILITY_SYNCS - MATERIALIZATION_TRANSITION_DURABILITY_SYNCS;
+const MAX_GC_PENDING_CONTROL_BYTES_WRITTEN: usize =
+    materialization::MAX_MATERIALIZATION_JOURNAL_BYTES
+        + materialization::MAX_MATERIALIZATION_STATE_BYTES
+        + materialization::MAX_MATERIALIZATION_CHECKPOINT_BYTES;
+const MAX_GC_FRESH_CONTROL_BYTES_WRITTEN: usize = 2 * MAX_GC_PENDING_CONTROL_BYTES_WRITTEN;
+
+const _: () = assert!(MAX_GC_REGULAR_TARGETS == 57);
+const _: () = assert!(MAX_GC_LOGICAL_TARGETS == 65);
+const _: () = assert!(MAX_GC_TREE_DIRECTORY_NODES == 32_776);
+const _: () =
+    assert!(MAX_GC_FRESH_CONTROL_BYTES_WRITTEN == 2 * MAX_GC_PENDING_CONTROL_BYTES_WRITTEN);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GarbageCollectionWork {
+    state_transitions: usize,
+    regular_targets_removed: usize,
+    tree_jobs: usize,
+    tree_object_retirements: usize,
+    tree_entries: usize,
+    tree_maximum_depth: usize,
+    tree_regular_files_removed: usize,
+    tree_directories_removed: usize,
+    tree_directories_unsealed: usize,
+    tree_directory_syncs: usize,
+}
+
+impl GarbageCollectionWork {
+    fn record_tree(&mut self, report: TreeRemovalReport) -> Result<(), PhysicalCollectionError> {
+        self.tree_jobs = checked_work_add(self.tree_jobs, 1)?;
+        self.tree_entries = checked_work_add(self.tree_entries, report.observed_entries())?;
+        self.tree_maximum_depth = self.tree_maximum_depth.max(report.maximum_depth());
+        self.tree_regular_files_removed = checked_work_add(
+            self.tree_regular_files_removed,
+            report.regular_files_removed(),
+        )?;
+        self.tree_directories_removed =
+            checked_work_add(self.tree_directories_removed, report.directories_removed())?;
+        self.tree_directories_unsealed = checked_work_add(
+            self.tree_directories_unsealed,
+            report.directories_unsealed(),
+        )?;
+        self.tree_directory_syncs =
+            checked_work_add(self.tree_directory_syncs, report.directory_syncs())?;
+        Ok(())
+    }
+
+    fn durability_syncs(self) -> Option<usize> {
+        self.state_transitions
+            .checked_mul(MATERIALIZATION_TRANSITION_DURABILITY_SYNCS)?
+            .checked_add(self.regular_targets_removed)?
+            .checked_add(
+                self.tree_object_retirements
+                    .checked_mul(TREE_OBJECT_RETIREMENT_DURABILITY_SYNCS)?,
+            )?
+            .checked_add(self.tree_directory_syncs)
+    }
+
+    fn physical_durability_syncs(self) -> Option<usize> {
+        self.regular_targets_removed
+            .checked_add(
+                self.tree_object_retirements
+                    .checked_mul(TREE_OBJECT_RETIREMENT_DURABILITY_SYNCS)?,
+            )?
+            .checked_add(self.tree_directory_syncs)
+    }
+
+    fn validate_physical(self) -> Result<(), ExtensionRepositoryError> {
+        if self.regular_targets_removed > MAX_GC_REGULAR_TARGETS
+            || self.tree_jobs > MAX_GC_TREE_JOBS
+            || self.tree_object_retirements > self.tree_jobs
+            || self.tree_entries > MAX_GC_TREE_ENTRIES
+            || self.tree_maximum_depth
+                > zephium_extension_package::MAX_EXTENSION_RELATIVE_PATH_DEPTH
+            || self.tree_directories_removed > MAX_GC_TREE_DIRECTORY_NODES
+            || self.tree_regular_files_removed
+                + self.tree_directories_removed.saturating_sub(self.tree_jobs)
+                != self.tree_entries
+            || self.tree_directories_unsealed > self.tree_directories_removed
+            || self.tree_directory_syncs != self.tree_jobs
+            || self
+                .physical_durability_syncs()
+                .is_none_or(|syncs| syncs > MAX_GC_PHYSICAL_DURABILITY_SYNCS)
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        Ok(())
+    }
+
+    fn validate(self, expected_state_transitions: usize) -> Result<(), ExtensionRepositoryError> {
+        self.validate_physical()?;
+        let sync_ceiling = match expected_state_transitions {
+            0 => 0,
+            1 => MAX_GC_PENDING_DURABILITY_SYNCS,
+            2 => MAX_GC_FRESH_DURABILITY_SYNCS,
+            _ => return Err(ExtensionRepositoryError::RecoveryAmbiguous),
+        };
+        if self.state_transitions != expected_state_transitions
+            || self
+                .durability_syncs()
+                .is_none_or(|syncs| syncs > sync_ceiling)
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        Ok(())
+    }
+}
+
+fn checked_work_add(left: usize, right: usize) -> Result<usize, PhysicalCollectionError> {
+    left.checked_add(right)
+        .ok_or(PhysicalCollectionError::MustSeal(
+            ExtensionRepositoryError::SettlementAmbiguous,
+        ))
+}
+
+pub(crate) struct GarbageCollectionSettlement {
+    settled_targets: usize,
+    work: GarbageCollectionWork,
+}
+
+struct GarbageCollectionOperation {
+    outcome: BundledPackageGarbageCollectionOutcome,
+    work: GarbageCollectionWork,
+}
 
 /// Result of one explicit bounded garbage-collection operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,26 +189,44 @@ impl ExtensionRepository {
     ) -> Result<BundledPackageGarbageCollectionOutcome, ExtensionRepositoryError> {
         let runtime = self.runtime.clone();
         let operation = runtime.enter().map_err(|error| error.repository_error())?;
+        let GarbageCollectionOperation { outcome, work } =
+            self.collect_bundled_package_garbage_under_gate(&operation)?;
+        let _ = work;
+        Ok(outcome)
+    }
+
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    fn collect_bundled_package_garbage_measured(
+        &mut self,
+    ) -> Result<GarbageCollectionOperation, ExtensionRepositoryError> {
+        let runtime = self.runtime.clone();
+        let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.collect_bundled_package_garbage_under_gate(&operation)
     }
 
     fn collect_bundled_package_garbage_under_gate(
         &mut self,
         _operation: &RepositoryOperationGuard<'_>,
-    ) -> Result<BundledPackageGarbageCollectionOutcome, ExtensionRepositoryError> {
+    ) -> Result<GarbageCollectionOperation, ExtensionRepositoryError> {
         if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
+        self.validate_outer_destructive_boundary_or_seal()?;
         if self.writer_materialization()?._gc_intent.is_some() {
-            let settled_targets = self.settle_pending_garbage_collection()?;
+            let settlement = self.settle_pending_garbage_collection_after_outer_validation()?;
             let more_garbage = self.fresh_garbage_is_present()?;
-            return Ok(BundledPackageGarbageCollectionOutcome::Collected {
-                settled_targets,
-                more_garbage,
+            return Ok(GarbageCollectionOperation {
+                outcome: BundledPackageGarbageCollectionOutcome::Collected {
+                    settled_targets: settlement.settled_targets,
+                    more_garbage,
+                },
+                work: settlement.work,
             });
         }
-
-        self.refresh_outer_authority_or_seal()?;
         let high_water = self
             .writer_catalog_high_water()
             .map(CatalogAnchor::from_high_water);
@@ -77,16 +237,30 @@ impl ExtensionRepository {
             &catalog_object_ids,
         )?;
         let Some(plan) = plan else {
-            return Ok(BundledPackageGarbageCollectionOutcome::NoGarbage);
+            let work = GarbageCollectionWork::default();
+            work.validate(0)?;
+            return Ok(GarbageCollectionOperation {
+                outcome: BundledPackageGarbageCollectionOutcome::NoGarbage,
+                work,
+            });
         };
 
         let runtime = self.writer_take_materialization()?;
         self.finish_collection_transition(begin_garbage_collection(runtime, plan))?;
-        let settled_targets = self.settle_pending_garbage_collection()?;
+        let mut settlement = self.settle_pending_garbage_collection_after_outer_validation()?;
+        settlement.work.state_transitions = settlement
+            .work
+            .state_transitions
+            .checked_add(1)
+            .ok_or(ExtensionRepositoryError::SettlementAmbiguous)?;
+        settlement.work.validate(2)?;
         let more_garbage = self.fresh_garbage_is_present()?;
-        Ok(BundledPackageGarbageCollectionOutcome::Collected {
-            settled_targets,
-            more_garbage,
+        Ok(GarbageCollectionOperation {
+            outcome: BundledPackageGarbageCollectionOutcome::Collected {
+                settled_targets: settlement.settled_targets,
+                more_garbage,
+            },
+            work: settlement.work,
         })
     }
 
@@ -94,13 +268,22 @@ impl ExtensionRepository {
     /// collector before it considers a fresh plan.
     pub(crate) fn settle_pending_garbage_collection(
         &mut self,
-    ) -> Result<usize, ExtensionRepositoryError> {
+    ) -> Result<GarbageCollectionSettlement, ExtensionRepositoryError> {
         if self.writer_is_sealed() {
             return Err(ExtensionRepositoryError::Sealed);
         }
-        self.refresh_outer_authority_or_seal()?;
+        self.validate_outer_destructive_boundary_or_seal()?;
+        self.settle_pending_garbage_collection_after_outer_validation()
+    }
+
+    fn settle_pending_garbage_collection_after_outer_validation(
+        &mut self,
+    ) -> Result<GarbageCollectionSettlement, ExtensionRepositoryError> {
         let Some(intent) = self.writer_materialization()?._gc_intent.clone() else {
-            return Ok(0);
+            return Ok(GarbageCollectionSettlement {
+                settled_targets: 0,
+                work: GarbageCollectionWork::default(),
+            });
         };
         let settled_targets = intent.catalog_set_record_ids.len()
             + intent.package_record_ids.len()
@@ -109,29 +292,39 @@ impl ExtensionRepository {
             + intent.retired_trees.len()
             + intent.tree_objects.len()
             + intent.catalog_object_ids.len();
+        if settled_targets > MAX_GC_LOGICAL_TARGETS {
+            self.writer_seal();
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        let mut work = GarbageCollectionWork::default();
 
         let runtime = self.writer_take_materialization()?;
-        if let Err(error) = delete_inner_garbage_targets(&runtime, &intent) {
+        if let Err(error) = delete_inner_garbage_targets(&runtime, &intent, &mut work) {
             drop(runtime);
             return Err(self.finish_physical_failure(error));
         }
-        // Trees may be large. Re-read the exact outer state/checkpoint/journal
-        // and actual catalog inventory at the boundary immediately before the
-        // first outer unlink rather than relying on the pre-tree snapshot.
-        if let Err(error) = self.refresh_outer_authority_or_seal() {
+        // Trees may be large. Re-read the exact outer controls and compare the
+        // complete catalog namespace with the authenticated identity cache at
+        // the boundary immediately before the first outer unlink.
+        if let Err(error) = self.validate_outer_destructive_boundary_or_seal() {
             drop(runtime);
             return Err(error);
         }
-        if let Err(error) = self.delete_outer_catalog_targets(&intent) {
+        if let Err(error) = self.delete_outer_catalog_targets(&intent, &mut work) {
             drop(runtime);
             return Err(self.finish_physical_failure(error));
         }
+        if let Err(error) = work.validate_physical() {
+            drop(runtime);
+            self.writer_seal();
+            return Err(error);
+        }
         drop(runtime);
 
-        // Reinventory both namespaces after the final physical mutation. This
-        // replaces every cached outer identity before recovery validates the
-        // partial frontier and before the absence proof is constructed.
-        self.refresh_outer_authority_or_seal()?;
+        // Prove that every successful unlink was reflected exactly in the
+        // identity cache before recovery validates the partial frontier and
+        // before the absence proof is constructed.
+        self.validate_outer_destructive_boundary_or_seal()?;
         self.writer_recover_materialization_or_seal()?;
         let catalog_object_ids = self.writer_catalog_object_ids().clone();
         let catalogs_parent = self.writer_catalogs().identity();
@@ -147,12 +340,21 @@ impl ExtensionRepository {
             proof,
             catalogs_parent,
         ))?;
-        Ok(settled_targets)
+        work.state_transitions = 1;
+        if let Err(error) = work.validate(1) {
+            self.writer_seal();
+            return Err(error);
+        }
+        Ok(GarbageCollectionSettlement {
+            settled_targets,
+            work,
+        })
     }
 
     fn delete_outer_catalog_targets(
-        &self,
+        &mut self,
         intent: &MaterializationGarbageCollectionIntent,
+        work: &mut GarbageCollectionWork,
     ) -> Result<(), PhysicalCollectionError> {
         // Recheck the monotonic outer root immediately before catalog-object
         // deletion; even an internal stale plan may never erase high-water.
@@ -165,17 +367,22 @@ impl ExtensionRepository {
                     ExtensionRepositoryError::RecoveryAmbiguous,
                 ));
             }
-            remove_present_regular(
+            let was_present = self.writer_catalog_object_ids().contains(target);
+            if remove_present_regular(
                 self.writer_catalogs(),
                 &names::catalog_file(*target),
-                self.writer_catalog_object_ids().contains(target),
-            )?;
+                was_present,
+            )? {
+                work.regular_targets_removed = checked_work_add(work.regular_targets_removed, 1)?;
+                self.writer_forget_deleted_catalog_object(*target)
+                    .map_err(PhysicalCollectionError::MustSeal)?;
+            }
         }
         Ok(())
     }
 
     fn fresh_garbage_is_present(&mut self) -> Result<bool, ExtensionRepositoryError> {
-        self.refresh_outer_authority_or_seal()?;
+        self.validate_outer_controls_or_seal()?;
         let high_water = self
             .writer_catalog_high_water()
             .map(CatalogAnchor::from_high_water);
@@ -194,34 +401,23 @@ impl ExtensionRepository {
         }
     }
 
-    fn refresh_catalog_object_inventory(&mut self) -> Result<(), ExtensionRepositoryError> {
-        let entries = self
-            .writer_catalogs()
-            .list_components(names::MAX_CATALOG_OBJECT_ENTRIES)
-            .map_err(map_recovery_fs)?;
-        let mut ids = BTreeSet::new();
-        for entry in entries {
-            let (digest, stage) = names::parse_catalog_file(entry.as_str())
-                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-            if stage || !ids.insert(digest) {
-                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+    fn validate_outer_controls_or_seal(&mut self) -> Result<(), ExtensionRepositoryError> {
+        let validation = self.writer_validate_outer_controls();
+        match validation {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.writer_seal();
+                Err(error)
             }
-            validate_named_catalog_object(self.writer_catalogs(), &entry, digest)?;
         }
-        if self
-            .writer_catalog_high_water()
-            .is_some_and(|high_water| !ids.contains(&high_water.catalog_sha256))
-        {
-            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-        }
-        self.writer_replace_catalog_object_ids(ids);
-        Ok(())
     }
 
-    fn refresh_outer_authority_or_seal(&mut self) -> Result<(), ExtensionRepositoryError> {
+    fn validate_outer_destructive_boundary_or_seal(
+        &mut self,
+    ) -> Result<(), ExtensionRepositoryError> {
         let validation = self
-            .refresh_catalog_object_inventory()
-            .and_then(|()| self.writer_validate_outer_settled_projection());
+            .writer_validate_outer_controls()
+            .and_then(|()| self.writer_validate_catalog_object_inventory());
         match validation {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -269,8 +465,7 @@ impl ExtensionRepository {
             }
             PhysicalCollectionError::Clean(error) => {
                 let recovery = self
-                    .refresh_catalog_object_inventory()
-                    .and_then(|()| self.writer_validate_outer_settled_projection())
+                    .validate_outer_destructive_boundary_or_seal()
                     .and_then(|()| self.writer_recover_materialization());
                 match recovery {
                     Ok(()) => error,
@@ -287,36 +482,45 @@ impl ExtensionRepository {
 fn delete_inner_garbage_targets(
     runtime: &MaterializationRuntime,
     intent: &MaterializationGarbageCollectionIntent,
+    work: &mut GarbageCollectionWork,
 ) -> Result<(), PhysicalCollectionError> {
     // Metadata first: a surviving package marker always retains its whole
     // closure. Outer authenticated catalog bytes remain last.
     for target in &intent.catalog_set_record_ids {
-        remove_present_regular(
+        if remove_present_regular(
             &runtime._records,
             &materialization::gc_catalog_set_record(*target),
             runtime._catalog_sets.contains_key(target),
-        )?;
+        )? {
+            work.regular_targets_removed = checked_work_add(work.regular_targets_removed, 1)?;
+        }
     }
     for target in &intent.package_record_ids {
-        remove_present_regular(
+        if remove_present_regular(
             &runtime._records,
             &materialization::gc_package_record(*target),
             runtime._package_records.contains_key(target),
-        )?;
+        )? {
+            work.regular_targets_removed = checked_work_add(work.regular_targets_removed, 1)?;
+        }
     }
     for target in &intent.tree_index_ids {
-        remove_present_regular(
+        if remove_present_regular(
             &runtime._records,
             &materialization::gc_tree_index_object(*target),
             runtime._tree_index_ids.contains(target),
-        )?;
+        )? {
+            work.regular_targets_removed = checked_work_add(work.regular_targets_removed, 1)?;
+        }
     }
     for target in &intent.legal_artifact_ids {
-        remove_present_regular(
+        if remove_present_regular(
             &runtime._records,
             &materialization::gc_legal_object(*target),
             runtime._legal_artifact_ids.contains(target),
-        )?;
+        )? {
+            work.regular_targets_removed = checked_work_add(work.regular_targets_removed, 1)?;
+        }
     }
 
     for target in &intent.retired_trees {
@@ -329,13 +533,14 @@ fn delete_inner_garbage_targets(
                 ._trees
                 .open_private_child_any_mode(&name)
                 .map_err(map_physical_fs)?;
-            remove_tree_directory(opened).map_err(map_tree_cleanup)?;
+            let report = remove_tree_directory(opened).map_err(map_tree_cleanup)?;
+            work.record_tree(report)?;
         }
     }
     for target in &intent.tree_objects {
         let retired_name = materialization::gc_tree_retired(target.tree_sha256, intent.generation)
             .map_err(PhysicalCollectionError::Clean)?;
-        let opened = if runtime._tree_object_ids.contains(&target.tree_sha256) {
+        let (opened, freshly_retired) = if runtime._tree_object_ids.contains(&target.tree_sha256) {
             let object_name = materialization::gc_tree_object(target.tree_sha256);
             let object = runtime
                 ._trees
@@ -344,22 +549,41 @@ fn delete_inner_garbage_targets(
             let retired = object
                 .publish_noreplace(&runtime._trees, &retired_name)
                 .map_err(map_tree_transition)?;
-            Some(OpenedPrivateDirectory::Sealed(retired))
+            work.tree_object_retirements = checked_work_add(work.tree_object_retirements, 1)?;
+            (Some(OpenedPrivateDirectory::Sealed(retired)), true)
         } else if runtime
             ._retired_tree_ids
             .contains(&(target.tree_sha256, intent.generation))
         {
-            Some(
-                runtime
-                    ._trees
-                    .open_private_child_any_mode(&retired_name)
-                    .map_err(map_physical_fs)?,
+            (
+                Some(
+                    runtime
+                        ._trees
+                        .open_private_child_any_mode(&retired_name)
+                        .map_err(map_physical_fs)?,
+                ),
+                false,
             )
         } else {
-            None
+            (None, false)
         };
         if let Some(opened) = opened {
-            remove_tree_directory(opened).map_err(map_tree_cleanup)?;
+            let max_entries = target.known_total_entry_count.map_or(
+                zephium_extension_package::MAX_EXTENSION_TREE_ENTRIES,
+                |entries| entries as usize,
+            );
+            let report =
+                remove_tree_directory_bounded(opened, max_entries).map_err(map_tree_cleanup)?;
+            if freshly_retired
+                && target
+                    .known_total_entry_count
+                    .is_some_and(|expected| report.observed_entries() != expected as usize)
+            {
+                return Err(PhysicalCollectionError::MustSeal(
+                    ExtensionRepositoryError::SettlementAmbiguous,
+                ));
+            }
+            work.record_tree(report)?;
         }
     }
     Ok(())
@@ -369,7 +593,7 @@ fn remove_present_regular(
     directory: &zephium_private_fs::PrivateDirectory,
     name: &zephium_private_fs::PrivateComponent,
     present: bool,
-) -> Result<(), PhysicalCollectionError> {
+) -> Result<bool, PhysicalCollectionError> {
     if present
         && !directory
             .remove_verified_regular(name)
@@ -379,7 +603,7 @@ fn remove_present_regular(
             ExtensionRepositoryError::RecoveryAmbiguous,
         ));
     }
-    Ok(())
+    Ok(present)
 }
 
 enum PhysicalCollectionError {

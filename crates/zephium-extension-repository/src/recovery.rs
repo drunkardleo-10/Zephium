@@ -1,20 +1,23 @@
 //! Read-only repository preflight and exact journal recovery.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_CATALOG_BYTES};
-use zephium_private_fs::{LockedPrivateNamespace, PrivateComponent, PrivateDirectory};
+use zephium_private_fs::{
+    FileIdentity, LockedPrivateNamespace, PrivateComponent, PrivateDirectory,
+};
 
+use crate::catalog_cache::ProductCatalogAdmissionCache;
 use crate::codec;
 use crate::materialization::{self, MaterializationRuntime};
-use crate::names::{self, catalog_file, checkpoint_stage, state_file, state_stage};
+use crate::names::{self, checkpoint_stage, state_file, state_stage};
 use crate::state::{
-    validate_catalog_lines, RecoveryCheckpoint, RepositoryState, TransitionJournal,
+    PackageLineHighWater, RecoveryCheckpoint, RepositoryState, TransitionJournal,
     MAX_CHECKPOINT_BYTES, MAX_JOURNAL_BYTES, MAX_STATE_BYTES,
 };
 use crate::storage::{
     atomic_write_control, map_recovery_fs, read_required_recovery, read_required_state,
-    remove_required, validate_named_catalog_object, write_checkpoint,
+    remove_required, validate_catalog_object_cache, validate_named_catalog_object,
+    write_checkpoint, CatalogObjectIdentities, ValidatedCatalogObject,
 };
 use crate::ExtensionRepositoryError;
 
@@ -23,6 +26,8 @@ pub(crate) struct OpenedRepository {
     pub(crate) catalogs: PrivateDirectory,
     pub(crate) journals: PrivateDirectory,
     pub(crate) catalog_object_ids: BTreeSet<crate::state::Digest32>,
+    pub(crate) catalog_object_identities: CatalogObjectIdentities,
+    pub(crate) catalog_admission_cache: ProductCatalogAdmissionCache,
     pub(crate) state: RepositoryState,
     pub(crate) state_bytes: Vec<u8>,
     pub(crate) materialization: MaterializationRuntime,
@@ -51,7 +56,7 @@ pub(crate) fn open_repository(
     let (state, state_bytes) = read_state(root)?;
     let checkpoint = read_checkpoint(root)?;
     let disposition = assess_recovery(
-        &catalogs,
+        &catalog_inventory,
         &state,
         &state_bytes,
         checkpoint,
@@ -80,11 +85,17 @@ pub(crate) fn open_repository(
         journal_inventory.prepared,
         disposition,
     )?;
+    let mut catalog_admission_cache = ProductCatalogAdmissionCache::new();
+    let catalog_recovery = materialization::ProductCatalogRecovery::new(
+        &catalogs,
+        &catalog_inventory.ids,
+        &catalog_inventory.identities,
+        &mut catalog_admission_cache,
+        state.checkpoint(),
+    );
     let materialization = materialization::open_or_recover(
         root,
-        &catalogs,
-        &catalog_inventory.finals,
-        state.checkpoint(),
+        catalog_recovery,
         root_shape.has_materialization,
         materialization::FaultPoint::None,
     )?;
@@ -92,7 +103,9 @@ pub(crate) fn open_repository(
         namespace,
         catalogs,
         journals,
-        catalog_object_ids: catalog_inventory.finals,
+        catalog_object_ids: catalog_inventory.ids,
+        catalog_object_identities: catalog_inventory.identities,
+        catalog_admission_cache,
         state,
         state_bytes,
         materialization,
@@ -186,16 +199,56 @@ fn validate_root_shape(root: &PrivateDirectory) -> Result<RootShape, ExtensionRe
 
 struct CatalogInventory {
     stages: Vec<PrivateComponent>,
-    finals: BTreeSet<crate::state::Digest32>,
+    ids: BTreeSet<crate::state::Digest32>,
+    identities: CatalogObjectIdentities,
+    state_projections: BTreeMap<crate::state::Digest32, CatalogStateProjection>,
+}
+
+struct CatalogStateProjection {
+    authority_id: crate::state::Digest32,
+    revision: u64,
+    length: u64,
+    digest: crate::state::Digest32,
+    package_lines: Box<[PackageLineHighWater]>,
+}
+
+impl CatalogStateProjection {
+    fn from_validated(
+        validated: ValidatedCatalogObject,
+    ) -> Result<(FileIdentity, Self), ExtensionRepositoryError> {
+        let package_lines = validated
+            .catalog
+            .packages()
+            .iter()
+            .map(PackageLineHighWater::from_package)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
+        let projection = Self {
+            authority_id: crate::state::Digest32::from_bytes(validated.catalog.authority().bytes()),
+            revision: validated.catalog.revision().get(),
+            length: validated.length,
+            digest: crate::state::Digest32::from_bytes(validated.catalog.digest().bytes()),
+            package_lines,
+        };
+        Ok((validated.identity, projection))
+    }
 }
 
 fn inspect_catalogs(
     catalogs: &PrivateDirectory,
 ) -> Result<CatalogInventory, ExtensionRepositoryError> {
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    crate::storage::note_catalog_inventory_pass();
     let entries = catalogs
         .list_components(names::MAX_CATALOG_OBJECT_ENTRIES)
         .map_err(map_recovery_fs)?;
-    let mut finals = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    let mut identities = CatalogObjectIdentities::new();
+    let mut state_projections = BTreeMap::new();
     let mut stages = Vec::new();
     for entry in entries {
         let (digest, stage) = names::parse_catalog_file(entry.as_str())
@@ -206,21 +259,29 @@ fn inspect_catalogs(
             }
             stages.push((entry, digest));
         } else {
-            validate_named_catalog_object(catalogs, &entry, digest)?;
-            if !finals.insert(digest) {
+            let (identity, projection) = CatalogStateProjection::from_validated(
+                validate_named_catalog_object(catalogs, &entry, digest)?,
+            )?;
+            if !ids.insert(digest)
+                || identities.insert(digest, identity).is_some()
+                || state_projections.insert(digest, projection).is_some()
+            {
                 return Err(ExtensionRepositoryError::RecoveryAmbiguous);
             }
         }
     }
     if stages
         .iter()
-        .any(|(_, stage_digest)| finals.contains(stage_digest))
+        .any(|(_, stage_digest)| ids.contains(stage_digest))
     {
         return Err(ExtensionRepositoryError::RecoveryAmbiguous);
     }
+    validate_catalog_object_cache(&ids, &identities)?;
     Ok(CatalogInventory {
         stages: stages.into_iter().map(|(name, _)| name).collect(),
-        finals,
+        ids,
+        identities,
+        state_projections,
     })
 }
 
@@ -240,7 +301,7 @@ fn initialize_controls(
     }
     let pristine_materialization =
         materialization::is_pristine_for_outer_initialization(root, shape.has_materialization)?;
-    if !catalogs.finals.is_empty()
+    if !catalogs.ids.is_empty()
         || !catalogs.stages.is_empty()
         || !journals.stages.is_empty()
         || journals.prepared.is_some()
@@ -369,7 +430,7 @@ enum RecoveryDisposition {
 }
 
 fn assess_recovery(
-    catalogs: &PrivateDirectory,
+    catalogs: &CatalogInventory,
     state: &RepositoryState,
     state_bytes: &[u8],
     checkpoint: RecoveryCheckpoint,
@@ -546,27 +607,33 @@ fn apply_recovery(
 }
 
 fn validate_state_catalog(
-    catalogs: &PrivateDirectory,
+    catalogs: &CatalogInventory,
     state: &RepositoryState,
 ) -> Result<(), ExtensionRepositoryError> {
     state.validate()?;
     let Some(checkpoint) = state.checkpoint() else {
         return Ok(());
     };
-    let name = catalog_file(checkpoint.catalog_sha256);
-    let bytes = read_required_state(catalogs, &name, MAX_EXTENSION_RELEASE_CATALOG_BYTES)?;
-    if u64::try_from(bytes.len()).ok() != Some(checkpoint.catalog_length)
-        || codec::digest(&bytes) != checkpoint.catalog_sha256
+    let catalog = catalogs
+        .state_projections
+        .get(&checkpoint.catalog_sha256)
+        .ok_or(ExtensionRepositoryError::StateCorrupt)?;
+    if catalog.authority_id != checkpoint.authority_id
+        || catalog.revision != checkpoint.revision
+        || catalog.length != checkpoint.catalog_length
+        || catalog.digest != checkpoint.catalog_sha256
     {
         return Err(ExtensionRepositoryError::StateCorrupt);
     }
-    let catalog = ExtensionReleaseCatalog::parse_canonical(&bytes)
-        .map_err(|_| ExtensionRepositoryError::StateCorrupt)?;
-    if catalog.authority().bytes() != checkpoint.authority_id.bytes()
-        || catalog.revision().get() != checkpoint.revision
-        || catalog.digest().bytes() != checkpoint.catalog_sha256.bytes()
-    {
-        return Err(ExtensionRepositoryError::StateCorrupt);
+    for candidate in &catalog.package_lines {
+        let durable = state
+            .line(candidate.package_key)
+            .ok_or(ExtensionRepositoryError::StateCorrupt)?;
+        if durable.revision != candidate.revision
+            || durable.package_row_sha256 != candidate.package_row_sha256
+        {
+            return Err(ExtensionRepositoryError::StateCorrupt);
+        }
     }
-    validate_catalog_lines(state, &catalog)
+    Ok(())
 }

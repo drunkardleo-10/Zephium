@@ -17,6 +17,7 @@
 compile_error!("the internal repository E2E authority is forbidden in optimized builds");
 
 mod admission;
+mod catalog_cache;
 mod catalog_selection;
 mod codec;
 mod error;

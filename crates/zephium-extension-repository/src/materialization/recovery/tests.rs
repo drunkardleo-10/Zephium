@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zephium_extension_authority::ProductBundledCatalogGenerationRole;
 use zephium_private_fs::{ByteLimit, LockedPrivateNamespace, PrivateComponent, PrivateDirectory};
 
 use super::*;
+use crate::catalog_cache::validate_role_against_high_water;
 use crate::materialization::records::tests::{catalog_set_fixture, package_record_fixture};
 use crate::materialization::records::{
     CatalogSetPackageRow, CatalogSetRecord, LegalArtifactAnchor, ManifestAnchor,
@@ -1516,21 +1518,46 @@ fn existing_catalog_only_repository_migrates_without_reinitializing_it() {
 
 #[test]
 fn product_generation_recognition_is_lazy_and_never_trusts_structural_metadata_alone() {
-    let empty =
-        CatalogGenerationRecognizer::open(CatalogGenerationPolicy::Product, false, None, None)
-            .unwrap();
-    assert!(empty.product.is_none());
+    let harness = Harness::new();
+    let namespace = harness.namespace();
+    let catalogs = namespace
+        .directory()
+        .create_new_private_child(&crate::names::catalogs_directory())
+        .unwrap();
+    let catalog_ids = BTreeSet::new();
+    let catalog_identities = CatalogObjectIdentities::new();
+    let mut cache = ProductCatalogAdmissionCache::new();
+    let empty = CatalogGenerationRecognizer::open(
+        CatalogGenerationInput::Product(ProductCatalogRecovery {
+            catalog_objects: &catalogs,
+            catalog_object_ids: &catalog_ids,
+            catalog_object_identities: &catalog_identities,
+            catalog_cache: &mut cache,
+            catalog_high_water: None,
+        }),
+        false,
+    )
+    .unwrap();
+    assert!(empty.product_cache.is_some());
+    drop(empty);
 
     let mut structural_only = package_record_fixture(19).catalog;
     structural_only.catalog_length = 1;
-    if let Ok(mut recognizer) =
-        CatalogGenerationRecognizer::open(CatalogGenerationPolicy::Product, true, None, None)
-    {
-        assert_eq!(
-            recognizer.authenticate(structural_only),
-            Err(ExtensionRepositoryError::RecoveryAmbiguous)
-        );
-    }
+    let mut recognizer = CatalogGenerationRecognizer::open(
+        CatalogGenerationInput::Product(ProductCatalogRecovery {
+            catalog_objects: &catalogs,
+            catalog_object_ids: &catalog_ids,
+            catalog_object_identities: &catalog_identities,
+            catalog_cache: &mut cache,
+            catalog_high_water: Some(structural_only),
+        }),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        recognizer.authenticate(structural_only),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
 }
 
 fn catalog_bound_package_fixture() -> (ExtensionReleaseCatalog, PackageRecord) {
@@ -1671,7 +1698,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
     let mut active = package.catalog;
     active.revision = 2;
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Active,
             active,
             Some(active),
@@ -1682,7 +1709,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
     let mut different_active = active;
     different_active.catalog_sha256 = Digest32::from_bytes([111; 32]);
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Active,
             different_active,
             Some(active),
@@ -1693,7 +1720,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
     let mut rollback = active;
     rollback.revision = active.revision - 1;
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Rollback,
             rollback,
             Some(active),
@@ -1705,7 +1732,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
     // an approved rollback. Existing roots must remain open at equality while
     // the new active root remains blocked until the outer state advances.
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Rollback,
             rollback,
             Some(rollback),
@@ -1713,7 +1740,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
         Ok(())
     );
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Active,
             active,
             Some(rollback),
@@ -1723,7 +1750,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
     let mut equivocated_at_high_water = rollback;
     equivocated_at_high_water.catalog_sha256 = Digest32::from_bytes([113; 32]);
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Rollback,
             equivocated_at_high_water,
             Some(rollback),
@@ -1732,7 +1759,7 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
     );
     rollback.authority_id = Digest32::from_bytes([112; 32]);
     assert_eq!(
-        validate_catalog_role_against_high_water(
+        validate_role_against_high_water(
             ProductBundledCatalogGenerationRole::Rollback,
             rollback,
             Some(active),
@@ -1744,30 +1771,19 @@ fn active_and_rollback_roots_are_bound_to_the_outer_high_water() {
 #[test]
 fn live_catalog_set_is_a_complete_exact_catalog_projection() {
     let (catalog, package) = catalog_bound_package_fixture();
-    let mut recognizer = CatalogGenerationRecognizer {
-        product: None,
-        catalog_objects: None,
-        catalog_high_water: None,
-        admitted_catalogs: BTreeMap::from([(package.catalog, Some(catalog))]),
-        structural_test_recognizes: false,
-    };
     let mut set = catalog_set_fixture(&package);
-    assert_eq!(recognizer.validate_catalog_set_projection(&set), Ok(()));
+    assert_eq!(validate_catalog_set_against_catalog(&set, &catalog), Ok(()));
 
     set.packages[0].package_key = Digest32::from_bytes([108; 32]);
     assert_eq!(
-        recognizer.validate_catalog_set_projection(&set),
+        validate_catalog_set_against_catalog(&set, &catalog),
         Err(ExtensionRepositoryError::RecoveryAmbiguous)
     );
     set.packages.clear();
     assert_eq!(
-        recognizer.validate_catalog_set_projection(&set),
+        validate_catalog_set_against_catalog(&set, &catalog),
         Err(ExtensionRepositoryError::RecoveryAmbiguous)
     );
-
-    // Keep the variable mutable so this test also compiles through the same
-    // authenticator shape used by production recovery.
-    assert!(recognizer.authenticate(package.catalog).is_ok());
 }
 
 #[test]
@@ -3110,10 +3126,11 @@ fn one_catalog_set_cannot_exceed_the_authenticated_catalog_tree_budget() {
     let mut selected_package_roots = BTreeSet::new();
     let mut live_platform_family = None;
     let mut recognizer = CatalogGenerationRecognizer::open(
-        CatalogGenerationPolicy::StructuralTestFixture { recognizes: true },
+        CatalogGenerationInput::StructuralTestFixture {
+            catalog_object_ids: None,
+            recognizes: true,
+        },
         true,
-        None,
-        None,
     )
     .unwrap();
     recognizer.authenticate(set.catalog).unwrap();

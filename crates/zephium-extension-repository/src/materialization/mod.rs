@@ -14,6 +14,12 @@ mod catalog_set;
 mod cleanup;
 mod gc;
 mod interlock;
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) mod measurement;
 mod names;
 mod objects;
 mod package_lease;
@@ -86,7 +92,9 @@ pub(crate) use prepare::{
 pub(crate) use records::{
     CatalogAnchor, MAX_CATALOG_SET_PACKAGES, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
 };
-pub(crate) use recovery::{is_pristine_for_outer_initialization, open_or_recover, FaultPoint};
+pub(crate) use recovery::{
+    is_pristine_for_outer_initialization, open_or_recover, FaultPoint, ProductCatalogRecovery,
+};
 pub(crate) use runtime::MaterializationRuntime;
 pub(crate) use settlement::{
     authenticate_interrupted_package, InterruptedPackageAuthenticationError,
@@ -106,8 +114,8 @@ pub(crate) use state::MATERIALIZATION_GC_INTENT_SCHEMA_VERSION;
 pub(crate) use state::{
     MaterializationGarbageCollectionIntent, MAX_COMPLETED_PACKAGE_RECORDS,
     MAX_DURABLE_PACKAGE_PINS, MAX_GC_CATALOG_OBJECT_TARGETS, MAX_GC_CATALOG_SET_TARGETS,
-    MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS, MAX_GC_TREE_JOBS,
-    MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
+    MAX_GC_DATA_OBJECT_TARGETS, MAX_GC_PACKAGE_RECORD_TARGETS, MAX_GC_TREE_ENTRIES,
+    MAX_GC_TREE_JOBS, MAX_MATERIALIZATION_CHECKPOINT_BYTES, MAX_MATERIALIZATION_JOURNAL_BYTES,
     MAX_MATERIALIZATION_STATE_BYTES,
 };
 pub(crate) use transaction::{
@@ -117,7 +125,9 @@ pub(crate) use transaction::{
     rollback_to_previous_catalog_set, stage_active_catalog_set_candidate,
     stage_rollback_catalog_set_candidate, MaterializationTransitionError,
 };
-pub(crate) use tree_cleanup::{remove_tree_directory, TreeCleanupError};
+pub(crate) use tree_cleanup::{
+    remove_tree_directory, remove_tree_directory_bounded, TreeCleanupError,
+};
 pub(crate) use tree_reader::{with_verified_tree_resource, TreeResourceError};
 // Kept crate-private so durable owner retention is reachable only through the
 // package-lease layer's authenticated package access and pinning authority.

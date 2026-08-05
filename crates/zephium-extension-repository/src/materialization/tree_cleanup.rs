@@ -7,8 +7,12 @@
 
 use zephium_extension_package::{MAX_EXTENSION_RELATIVE_PATH_DEPTH, MAX_EXTENSION_TREE_ENTRIES};
 use zephium_private_fs::{
-    OpenedPrivateDirectory, PrivateChildKind, PrivateFsError, PrivateFsTransitionError,
+    OpenedPrivateDirectory, PrivateFsError, PrivateFsTransitionError, TreeRemovalLimits,
+    TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH, MAX_TREE_REMOVAL_ENTRIES,
 };
+
+const _: () = assert!(MAX_EXTENSION_TREE_ENTRIES <= MAX_TREE_REMOVAL_ENTRIES);
+const _: () = assert!(MAX_EXTENSION_RELATIVE_PATH_DEPTH <= MAX_TREE_REMOVAL_DEPTH);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TreeCleanupError {
@@ -19,65 +23,37 @@ pub(crate) enum TreeCleanupError {
 
 pub(crate) fn remove_tree_directory(
     opened: OpenedPrivateDirectory,
-) -> Result<usize, TreeCleanupError> {
-    let mut observed_entries = 0_usize;
-    clear_and_remove_directory(opened, 0, &mut observed_entries)?;
-    Ok(observed_entries)
+) -> Result<TreeRemovalReport, TreeCleanupError> {
+    remove_tree_directory_bounded(opened, MAX_EXTENSION_TREE_ENTRIES)
 }
 
-fn clear_and_remove_directory(
+pub(crate) fn remove_tree_directory_bounded(
     opened: OpenedPrivateDirectory,
-    depth: usize,
-    observed_entries: &mut usize,
-) -> Result<(), TreeCleanupError> {
-    let directory = match opened {
-        OpenedPrivateDirectory::Writable(directory) => directory,
-        OpenedPrivateDirectory::Sealed(directory) => directory.unseal().map_err(map_transition)?,
-    };
-    let names = directory
-        .list_entry_names(MAX_EXTENSION_TREE_ENTRIES)
-        .map_err(map_filesystem)?;
-    for name in names {
-        let child_depth = depth.checked_add(1).ok_or(TreeCleanupError::InvalidShape)?;
-        if child_depth > MAX_EXTENSION_RELATIVE_PATH_DEPTH {
-            return Err(TreeCleanupError::InvalidShape);
-        }
-        *observed_entries = observed_entries
-            .checked_add(1)
-            .ok_or(TreeCleanupError::InvalidShape)?;
-        if *observed_entries > MAX_EXTENSION_TREE_ENTRIES {
-            return Err(TreeCleanupError::InvalidShape);
-        }
-        let kind = directory
-            .inspect_entry(&name)
-            .map_err(map_filesystem)?
-            .ok_or(TreeCleanupError::InvalidShape)?;
-        match kind {
-            PrivateChildKind::RegularFile(_) => {
-                if !directory
-                    .remove_verified_entry_regular(&name)
-                    .map_err(map_filesystem)?
-                {
-                    return Err(TreeCleanupError::InvalidShape);
-                }
-            }
-            PrivateChildKind::Directory(identity) => {
-                let child = directory
-                    .open_entry_child_any_mode(&name)
-                    .map_err(map_filesystem)?;
-                if child.identity() != identity {
-                    return Err(TreeCleanupError::SettlementAmbiguous);
-                }
-                clear_and_remove_directory(child, child_depth, observed_entries)?;
-            }
-        }
+    max_entries: usize,
+) -> Result<TreeRemovalReport, TreeCleanupError> {
+    if max_entries > MAX_EXTENSION_TREE_ENTRIES {
+        return Err(TreeCleanupError::InvalidShape);
     }
-    directory.remove_empty().map_err(map_transition)
+    let limits = TreeRemovalLimits::new(max_entries, MAX_EXTENSION_RELATIVE_PATH_DEPTH)
+        .map_err(map_filesystem)?;
+    let report = opened.remove_tree_bounded(limits).map_err(map_transition)?;
+    if report.observed_entries() > max_entries
+        || report.maximum_depth() > MAX_EXTENSION_RELATIVE_PATH_DEPTH
+        || report.regular_files_removed() + report.directories_removed().saturating_sub(1)
+            != report.observed_entries()
+        || report.directories_unsealed() > report.directories_removed()
+        || report.directory_syncs() != 1
+    {
+        return Err(TreeCleanupError::SettlementAmbiguous);
+    }
+    Ok(report)
 }
 
 fn map_transition<State>(error: PrivateFsTransitionError<State>) -> TreeCleanupError {
     let (error, state) = error.into_parts();
-    if state.is_some() && !is_terminal(error) {
+    if state.is_some() && is_invalid_shape(error) {
+        TreeCleanupError::InvalidShape
+    } else if state.is_some() && !is_terminal(error) {
         TreeCleanupError::Filesystem(error)
     } else {
         TreeCleanupError::SettlementAmbiguous
@@ -87,11 +63,18 @@ fn map_transition<State>(error: PrivateFsTransitionError<State>) -> TreeCleanupE
 fn map_filesystem(error: PrivateFsError) -> TreeCleanupError {
     if is_terminal(error) {
         TreeCleanupError::SettlementAmbiguous
-    } else if error == PrivateFsError::BoundExceeded {
+    } else if is_invalid_shape(error) {
         TreeCleanupError::InvalidShape
     } else {
         TreeCleanupError::Filesystem(error)
     }
+}
+
+const fn is_invalid_shape(error: PrivateFsError) -> bool {
+    matches!(
+        error,
+        PrivateFsError::BoundExceeded | PrivateFsError::Unsafe
+    )
 }
 
 const fn is_terminal(error: PrivateFsError) -> bool {

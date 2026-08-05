@@ -700,53 +700,129 @@ fn verify_internal_authority_cannot_link_into_shipping_code() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_repository_e2e_tests() {
-    const TEST_SUITES: [(&str, usize); 3] = [
-        ("writer::repository_e2e_tests::", 20),
-        ("package_lease::repository_e2e::", 14),
-        ("garbage_collection::tests::", 4),
+    // Prefix selections cover modules that exist only under the internal
+    // authority cfg. Exact selections cover cfg-only cases embedded in modules
+    // whose regular-build tests already ran in the workspace suite.
+    const TEST_SELECTIONS: [(&str, usize, bool); 8] = [
+        ("writer::repository_e2e_tests::", 22, false),
+        ("package_lease::repository_e2e::", 14, false),
+        ("garbage_collection::tests::", 10, false),
+        ("materialization::measurement::tests::", 3, false),
+        (
+            "admission::tests::production_seeded_catalog_can_be_forgotten_and_reseeded_with_a_new_identity",
+            1,
+            true,
+        ),
+        (
+            "admission::tests::catalog_inventory_revalidates_bytes_without_reparsing_catalogs",
+            1,
+            true,
+        ),
+        (
+            "admission::tests::active_catalog_is_structurally_parsed_once_during_open",
+            1,
+            true,
+        ),
+        (
+            "catalog_cache::tests::nonforgeable_seed_paths_and_authority_charge_clear_together",
+            1,
+            true,
+        ),
     ];
-    let mut commands = Vec::with_capacity(TEST_SUITES.len());
-    for (prefix, expected) in TEST_SUITES {
-        let base = vec![
+    let regular_inventory = list_extension_repository_tests(false);
+    let internal_inventory = list_extension_repository_tests(true);
+    let internal_only = internal_inventory
+        .difference(&regular_inventory)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = std::collections::BTreeSet::new();
+    let mut commands = Vec::with_capacity(TEST_SELECTIONS.len());
+    for (filter, expected, exact) in TEST_SELECTIONS {
+        let matches = internal_inventory
+            .iter()
+            .filter(|name| {
+                if exact {
+                    name.as_str() == filter
+                } else {
+                    name.starts_with(filter)
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matches.len() != expected {
+            eprintln!(
+                "internal repository E2E selection {filter} contains {} tests, expected {expected}",
+                matches.len()
+            );
+            exit(1);
+        }
+        for name in matches {
+            if !selected.insert(name.clone()) {
+                eprintln!("internal repository E2E test is selected more than once: {name}");
+                exit(1);
+            }
+        }
+
+        let mut base = vec![
             "test",
             "--locked",
             "-p",
             "zephium-extension-repository",
             "--lib",
-            prefix,
+            filter,
             "--",
-            // APFS durability cases intentionally quarantine ambiguous concurrent
-            // settlements. Serialize this crash matrix so the gate is deterministic.
-            "--test-threads=1",
         ];
-        let mut list_args = base.clone();
-        list_args.push("--list");
-        let output = internal_repository_command(&list_args)
-            .output()
-            .unwrap_or_else(|error| {
-                panic!("failed to list internal repository E2E tests: {error}")
-            });
-        if !output.status.success() {
-            eprintln!("internal repository E2E test inventory failed to compile");
-            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-            exit(output.status.code().unwrap_or(1));
+        if exact {
+            base.push("--exact");
         }
-        let count = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| line.starts_with(prefix) && line.ends_with(": test"))
-            .count();
-        if count != expected {
-            eprintln!(
-                "internal repository E2E suite {prefix} contains {count} tests, expected {expected}"
-            );
-            exit(1);
-        }
+        // APFS durability cases intentionally quarantine ambiguous concurrent
+        // settlements. Serialize this crash matrix so the gate is deterministic.
+        base.push("--test-threads=1");
         commands.push(base);
+    }
+    if selected != internal_only {
+        eprintln!("internal repository E2E selections must cover every cfg-only test exactly once");
+        for name in internal_only.difference(&selected) {
+            eprintln!("unselected internal-only test: {name}");
+        }
+        for name in selected.difference(&internal_only) {
+            eprintln!("redundant regular-build test selection: {name}");
+        }
+        exit(1);
     }
     for command in commands {
         run_with_internal_repository_cfg(&command);
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn list_extension_repository_tests(internal: bool) -> std::collections::BTreeSet<String> {
+    let args = [
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-repository",
+        "--lib",
+        "--",
+        "--list",
+    ];
+    let output = if internal {
+        internal_repository_command(&args).output()
+    } else {
+        Command::new("cargo").args(args).output()
+    }
+    .unwrap_or_else(|error| panic!("failed to list extension repository tests: {error}"));
+    if !output.status.success() {
+        eprintln!("extension repository test inventory failed to compile");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        exit(output.status.code().unwrap_or(1));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test"))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(target_os = "macos")]

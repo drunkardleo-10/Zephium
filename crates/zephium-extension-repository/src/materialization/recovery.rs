@@ -4,10 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use zephium_core::extensions::ExtensionPackagePayloadIdentity;
-use zephium_extension_authority::{BundledPackageAuthority, ProductBundledCatalogGenerationRole};
 use zephium_extension_package::{
     ExtensionReleaseCatalog, ExtensionReleaseLegalArtifactKind, MAX_EXTENSION_LEGAL_NOTICE_BYTES,
-    MAX_EXTENSION_RELEASE_CATALOG_BYTES, MAX_EXTENSION_TREE_INDEX_BYTES,
+    MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 use zephium_private_fs::{
     OpenedPrivateDirectory, PrivateComponent, PrivateDirectory, SealedPrivateDirectory,
@@ -35,10 +34,13 @@ use super::storage::{
     map_initialization_fs, read_required_control, read_required_sealed_record,
     remove_required_control, verify_required_sealed_record, write_checkpoint,
 };
+use crate::catalog_cache::{
+    CachedProductCatalogAdmission, CachedProductCatalogAuthentication, ProductCatalogAdmissionCache,
+};
 use crate::codec;
 use crate::state::{digest_package_row, Digest32, StoredCatalogCheckpoint};
 use crate::storage::{
-    atomic_write_control, map_recovery_fs, read_required_recovery as read_catalog_object,
+    atomic_write_control, map_recovery_fs, validate_catalog_object_cache, CatalogObjectIdentities,
 };
 use crate::ExtensionRepositoryError;
 
@@ -62,23 +64,51 @@ pub(crate) enum FaultPoint {
     AfterJournalRetirement,
 }
 
+pub(crate) struct ProductCatalogRecovery<'a> {
+    catalog_objects: &'a PrivateDirectory,
+    catalog_object_ids: &'a BTreeSet<Digest32>,
+    catalog_object_identities: &'a CatalogObjectIdentities,
+    catalog_cache: &'a mut ProductCatalogAdmissionCache,
+    catalog_high_water: Option<CatalogAnchor>,
+}
+
+impl<'a> ProductCatalogRecovery<'a> {
+    pub(crate) fn new(
+        catalog_objects: &'a PrivateDirectory,
+        catalog_object_ids: &'a BTreeSet<Digest32>,
+        catalog_object_identities: &'a CatalogObjectIdentities,
+        catalog_cache: &'a mut ProductCatalogAdmissionCache,
+        catalog_high_water: Option<&StoredCatalogCheckpoint>,
+    ) -> Self {
+        Self {
+            catalog_objects,
+            catalog_object_ids,
+            catalog_object_identities,
+            catalog_cache,
+            catalog_high_water: catalog_high_water.map(catalog_anchor_from_high_water),
+        }
+    }
+}
+
 pub(crate) fn open_or_recover(
     repository_root: &PrivateDirectory,
-    catalog_objects: &PrivateDirectory,
-    catalog_object_ids: &BTreeSet<Digest32>,
-    catalog_high_water: Option<&StoredCatalogCheckpoint>,
+    catalog_recovery: ProductCatalogRecovery<'_>,
     materialization_exists: bool,
     fault: FaultPoint,
 ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
-    open_or_recover_with_policy(
+    let runtime = open_or_recover_with_policy(
         repository_root,
-        Some(catalog_objects),
-        Some(catalog_object_ids),
-        catalog_high_water.map(catalog_anchor_from_high_water),
+        CatalogGenerationInput::Product(catalog_recovery),
         materialization_exists,
         fault,
-        CatalogGenerationPolicy::Product,
-    )
+    )?;
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    super::measurement::note_completed_pass();
+    Ok(runtime)
 }
 
 /// Proves that an existing materialization namespace contains only its exact
@@ -147,12 +177,12 @@ pub(super) fn open_or_recover_test_fixture(
 ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
     open_or_recover_with_policy(
         repository_root,
-        None,
-        None,
-        None,
+        CatalogGenerationInput::StructuralTestFixture {
+            catalog_object_ids: None,
+            recognizes: true,
+        },
         materialization_exists,
         fault,
-        CatalogGenerationPolicy::StructuralTestFixture { recognizes: true },
     )
 }
 
@@ -170,12 +200,12 @@ pub(super) fn open_or_recover_test_fixture_with_catalog_ids(
 ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
     open_or_recover_with_policy(
         repository_root,
-        None,
-        Some(catalog_object_ids),
-        None,
+        CatalogGenerationInput::StructuralTestFixture {
+            catalog_object_ids: Some(catalog_object_ids),
+            recognizes: true,
+        },
         materialization_exists,
         fault,
-        CatalogGenerationPolicy::StructuralTestFixture { recognizes: true },
     )
 }
 
@@ -187,23 +217,20 @@ fn open_or_recover_unrecognized_test_fixture(
 ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
     open_or_recover_with_policy(
         repository_root,
-        None,
-        None,
-        None,
+        CatalogGenerationInput::StructuralTestFixture {
+            catalog_object_ids: None,
+            recognizes: false,
+        },
         materialization_exists,
         fault,
-        CatalogGenerationPolicy::StructuralTestFixture { recognizes: false },
     )
 }
 
 fn open_or_recover_with_policy(
     repository_root: &PrivateDirectory,
-    catalog_objects: Option<&PrivateDirectory>,
-    catalog_object_ids: Option<&BTreeSet<Digest32>>,
-    catalog_high_water: Option<CatalogAnchor>,
+    catalog_generation: CatalogGenerationInput<'_>,
     materialization_exists: bool,
     fault: FaultPoint,
-    catalog_policy: CatalogGenerationPolicy,
 ) -> Result<MaterializationRuntime, ExtensionRepositoryError> {
     let root = if materialization_exists {
         repository_root
@@ -258,12 +285,10 @@ fn open_or_recover_with_policy(
             .prepared
             .as_ref()
             .is_some_and(|(_, journal)| state_requires_catalog_authority(&journal.next_state));
-    let mut catalog_recognizer = CatalogGenerationRecognizer::open(
-        catalog_policy,
-        requires_catalog_authority,
-        catalog_objects,
-        catalog_high_water,
-    )?;
+    let catalog_object_ids = catalog_generation.catalog_object_ids();
+    let catalog_high_water = catalog_generation.catalog_high_water();
+    let mut catalog_recognizer =
+        CatalogGenerationRecognizer::open(catalog_generation, requires_catalog_authority)?;
     let disposition = assess_recovery(
         &state,
         &state_bytes,
@@ -457,128 +482,170 @@ fn open_or_recover_with_policy(
     })
 }
 
-#[derive(Clone, Copy)]
-enum CatalogGenerationPolicy {
-    Product,
+enum CatalogGenerationInput<'a> {
+    Product(ProductCatalogRecovery<'a>),
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     StructuralTestFixture {
+        catalog_object_ids: Option<&'a BTreeSet<Digest32>>,
         recognizes: bool,
     },
 }
 
+impl<'a> CatalogGenerationInput<'a> {
+    fn catalog_object_ids(&self) -> Option<&'a BTreeSet<Digest32>> {
+        match self {
+            Self::Product(recovery) => Some(recovery.catalog_object_ids),
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            Self::StructuralTestFixture {
+                catalog_object_ids, ..
+            } => *catalog_object_ids,
+        }
+    }
+
+    fn catalog_high_water(&self) -> Option<CatalogAnchor> {
+        match self {
+            Self::Product(recovery) => recovery.catalog_high_water,
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            Self::StructuralTestFixture { .. } => None,
+        }
+    }
+}
+
 struct CatalogGenerationRecognizer<'a> {
-    product: Option<BundledPackageAuthority>,
     catalog_objects: Option<&'a PrivateDirectory>,
+    catalog_object_ids: Option<&'a BTreeSet<Digest32>>,
+    catalog_object_identities: Option<&'a CatalogObjectIdentities>,
+    product_cache: Option<&'a mut ProductCatalogAdmissionCache>,
     catalog_high_water: Option<CatalogAnchor>,
-    admitted_catalogs: BTreeMap<CatalogAnchor, Option<ExtensionReleaseCatalog>>,
+    authenticated_product_catalogs: BTreeMap<CatalogAnchor, CachedProductCatalogAuthentication>,
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    authenticated_structural_catalogs: BTreeSet<CatalogAnchor>,
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     structural_test_recognizes: bool,
 }
 
 impl<'a> CatalogGenerationRecognizer<'a> {
     fn open(
-        policy: CatalogGenerationPolicy,
+        input: CatalogGenerationInput<'a>,
         requires_catalog_authority: bool,
-        catalog_objects: Option<&'a PrivateDirectory>,
-        catalog_high_water: Option<CatalogAnchor>,
     ) -> Result<Self, ExtensionRepositoryError> {
-        if !requires_catalog_authority {
-            return Ok(Self {
-                product: None,
-                catalog_objects,
-                catalog_high_water,
-                admitted_catalogs: BTreeMap::new(),
-                #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-                structural_test_recognizes: false,
-            });
-        }
-        match policy {
-            CatalogGenerationPolicy::Product => {
-                let authority = BundledPackageAuthority::product()
-                    .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
-                let high_water =
-                    catalog_high_water.ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-                if high_water
-                    .generation_anchor()
-                    .ok()
-                    .and_then(|anchor| authority.recognize_generation(&anchor))
-                    .is_none()
-                {
+        match input {
+            CatalogGenerationInput::Product(recovery) => {
+                validate_catalog_object_cache(
+                    recovery.catalog_object_ids,
+                    recovery.catalog_object_identities,
+                )?;
+                if requires_catalog_authority && recovery.catalog_high_water.is_none() {
                     return Err(ExtensionRepositoryError::RecoveryAmbiguous);
                 }
                 Ok(Self {
-                    product: Some(authority),
-                    catalog_objects,
-                    catalog_high_water: Some(high_water),
-                    admitted_catalogs: BTreeMap::new(),
+                    catalog_objects: Some(recovery.catalog_objects),
+                    catalog_object_ids: Some(recovery.catalog_object_ids),
+                    catalog_object_identities: Some(recovery.catalog_object_identities),
+                    product_cache: Some(recovery.catalog_cache),
+                    catalog_high_water: recovery.catalog_high_water,
+                    authenticated_product_catalogs: BTreeMap::new(),
+                    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+                    authenticated_structural_catalogs: BTreeSet::new(),
                     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
                     structural_test_recognizes: false,
                 })
             }
             #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-            CatalogGenerationPolicy::StructuralTestFixture { recognizes } => Ok(Self {
-                product: None,
+            CatalogGenerationInput::StructuralTestFixture {
+                catalog_object_ids,
+                recognizes,
+            } => Ok(Self {
                 catalog_objects: None,
+                catalog_object_ids,
+                catalog_object_identities: None,
+                product_cache: None,
                 catalog_high_water: None,
-                admitted_catalogs: BTreeMap::new(),
+                authenticated_product_catalogs: BTreeMap::new(),
+                authenticated_structural_catalogs: BTreeSet::new(),
                 structural_test_recognizes: recognizes,
             }),
         }
     }
 
     fn authenticate(&mut self, catalog: CatalogAnchor) -> Result<(), ExtensionRepositoryError> {
-        if self.admitted_catalogs.contains_key(&catalog) {
+        if self.authenticated_product_catalogs.contains_key(&catalog) || {
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            {
+                self.authenticated_structural_catalogs.contains(&catalog)
+            }
+            #[cfg(not(all(test, any(target_os = "macos", target_os = "linux"))))]
+            {
+                false
+            }
+        } {
             return Ok(());
         }
-        if let Some(authority) = &self.product {
-            let role = catalog
-                .generation_anchor()
-                .ok()
-                .and_then(|anchor| authority.recognize_generation(&anchor))
-                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-            validate_catalog_role_against_high_water(role, catalog, self.catalog_high_water)?;
+        if let Some(cache) = self.product_cache.as_deref_mut() {
             let objects = self
                 .catalog_objects
                 .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-            let bytes = read_catalog_object(
+            let object_ids = self
+                .catalog_object_ids
+                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+            let object_identities = self
+                .catalog_object_identities
+                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+            if !object_ids.contains(&catalog.catalog_sha256) {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
+            let expected_identity = object_identities
+                .get(&catalog.catalog_sha256)
+                .copied()
+                .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
+            let authentication = cache.authenticate_catalog_object(
                 objects,
-                &crate::names::catalog_file(catalog.catalog_sha256),
-                MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+                catalog,
+                expected_identity,
+                self.catalog_high_water,
             )?;
-            if u64::try_from(bytes.len()).ok() != Some(catalog.catalog_length) {
-                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-            }
-            let admitted = match role {
-                ProductBundledCatalogGenerationRole::Active => authority
-                    .admit_catalog(&bytes)
-                    .map(|witness| witness.catalog().clone()),
-                ProductBundledCatalogGenerationRole::Rollback => authority
-                    .admit_rollback_catalog(&bytes)
-                    .map(|witness| witness.catalog().clone()),
-            }
-            .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
-            if admitted.authority().bytes() != catalog.authority_id.bytes()
-                || admitted.revision().get() != catalog.revision
-                || admitted.digest().bytes() != catalog.catalog_sha256.bytes()
+            #[cfg(all(
+                test,
+                zephium_internal_repository_e2e,
+                any(target_os = "macos", target_os = "linux")
+            ))]
             {
-                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+                super::measurement::note_catalog_read(authentication.bytes_read());
+                if authentication.cache_hit() {
+                    super::measurement::note_catalog_cache_hit();
+                } else {
+                    super::measurement::note_catalog_admission_attempt(authentication.bytes_read());
+                }
             }
-            self.admitted_catalogs.insert(catalog, Some(admitted));
+            self.authenticated_product_catalogs
+                .insert(catalog, authentication.authentication());
             return Ok(());
         }
         #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
         if self.structural_test_recognizes {
-            self.admitted_catalogs.insert(catalog, None);
+            if self
+                .catalog_object_ids
+                .is_some_and(|ids| !ids.contains(&catalog.catalog_sha256))
+            {
+                return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+            }
+            self.authenticated_structural_catalogs.insert(catalog);
             return Ok(());
         }
         Err(ExtensionRepositoryError::RecoveryAmbiguous)
     }
 
     fn validate_package(&self, package: &PackageRecord) -> Result<(), ExtensionRepositoryError> {
-        match self.admitted_catalogs.get(&package.catalog) {
-            Some(Some(catalog)) => validate_package_against_catalog(package, catalog),
+        match self.authenticated_product_catalog(package.catalog)? {
+            Some(admission) => validate_package_against_catalog(package, admission.catalog()),
             #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-            Some(None) if self.structural_test_recognizes => Ok(()),
+            None if self.structural_test_recognizes
+                && self
+                    .authenticated_structural_catalogs
+                    .contains(&package.catalog) =>
+            {
+                Ok(())
+            }
             _ => Err(ExtensionRepositoryError::RecoveryAmbiguous),
         }
     }
@@ -587,29 +654,37 @@ impl<'a> CatalogGenerationRecognizer<'a> {
         &self,
         set: &CatalogSetRecord,
     ) -> Result<(), ExtensionRepositoryError> {
-        match self.admitted_catalogs.get(&set.catalog) {
-            Some(Some(catalog)) => {
-                if catalog.packages().len() != set.packages.len()
-                    || catalog
-                        .packages()
-                        .iter()
-                        .zip(&set.packages)
-                        .any(|(package, row)| {
-                            package.identity().key().bytes() != row.package_key.bytes()
-                        })
-                {
-                    return Err(ExtensionRepositoryError::RecoveryAmbiguous);
-                }
+        match self.authenticated_product_catalog(set.catalog)? {
+            Some(admission) => validate_catalog_set_against_catalog(set, admission.catalog()),
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            None if self.structural_test_recognizes
+                && self
+                    .authenticated_structural_catalogs
+                    .contains(&set.catalog) =>
+            {
                 Ok(())
             }
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-            Some(None) if self.structural_test_recognizes => Ok(()),
             _ => Err(ExtensionRepositoryError::RecoveryAmbiguous),
         }
     }
 
+    fn authenticated_product_catalog(
+        &self,
+        anchor: CatalogAnchor,
+    ) -> Result<Option<CachedProductCatalogAdmission<'_>>, ExtensionRepositoryError> {
+        let Some(authentication) = self.authenticated_product_catalogs.get(&anchor).copied() else {
+            return Ok(None);
+        };
+        let Some(cache) = self.product_cache.as_deref() else {
+            return Ok(None);
+        };
+        cache
+            .lookup_authenticated(authentication, self.catalog_high_water)
+            .map(Some)
+    }
+
     const fn expected_platform_family(&self) -> Option<StoredRuntimePlatformFamily> {
-        if self.product.is_none() {
+        if self.product_cache.is_none() {
             return None;
         }
         #[cfg(target_os = "macos")]
@@ -623,20 +698,17 @@ impl<'a> CatalogGenerationRecognizer<'a> {
     }
 }
 
-fn validate_catalog_role_against_high_water(
-    role: ProductBundledCatalogGenerationRole,
-    catalog: CatalogAnchor,
-    high_water: Option<CatalogAnchor>,
+fn validate_catalog_set_against_catalog(
+    set: &CatalogSetRecord,
+    catalog: &ExtensionReleaseCatalog,
 ) -> Result<(), ExtensionRepositoryError> {
-    let high_water = high_water.ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-    let valid = match role {
-        ProductBundledCatalogGenerationRole::Active => catalog == high_water,
-        ProductBundledCatalogGenerationRole::Rollback => {
-            catalog.authority_id == high_water.authority_id
-                && (catalog.revision < high_water.revision || catalog == high_water)
-        }
-    };
-    if !valid {
+    if catalog.packages().len() != set.packages.len()
+        || catalog
+            .packages()
+            .iter()
+            .zip(&set.packages)
+            .any(|(package, row)| package.identity().key().bytes() != row.package_key.bytes())
+    {
         return Err(ExtensionRepositoryError::RecoveryAmbiguous);
     }
     Ok(())

@@ -192,6 +192,26 @@ fn record(repository: &mut ExtensionRepository, witness: &TestCatalogWitness, by
     );
 }
 
+fn assert_catalog_identity_cache_is_exact(repository: &ExtensionRepository) {
+    assert_eq!(
+        repository.catalog_object_ids.len(),
+        repository.catalog_object_identities.len()
+    );
+    assert!(repository
+        .catalog_object_ids
+        .iter()
+        .eq(repository.catalog_object_identities.keys()));
+    for (digest, expected_identity) in &repository.catalog_object_identities {
+        assert_eq!(
+            repository
+                .catalogs
+                .regular_identity(&catalog_file(*digest))
+                .unwrap(),
+            Some(*expected_identity)
+        );
+    }
+}
+
 #[test]
 fn records_replays_and_advances_one_exact_authority_history() {
     let harness = Harness::new();
@@ -224,13 +244,202 @@ fn records_replays_and_advances_one_exact_authority_history() {
         Digest32::from_bytes(second_witness.checkpoint.catalog_digest().bytes()),
     ]);
     assert_eq!(repository.catalog_object_ids, expected_catalog_objects);
+    assert_catalog_identity_cache_is_exact(&repository);
+    let expected_catalog_identities = repository.catalog_object_identities.clone();
     drop(repository);
 
     let recovered = harness.open();
     assert_eq!(recovered.state.generation, 2);
     assert_eq!(recovered.state.package_line_high_waters.len(), 1);
     assert_eq!(recovered.catalog_object_ids, expected_catalog_objects);
+    assert_eq!(
+        recovered.catalog_object_identities,
+        expected_catalog_identities
+    );
+    assert_catalog_identity_cache_is_exact(&recovered);
     assert!(recovered.materialization.is_some());
+}
+
+#[test]
+fn catalog_identity_cache_rejects_replacement_and_internal_disagreement() {
+    let replacement_harness = Harness::new();
+    let bytes = one_package_catalog(1, 1, 1, 0);
+    let witness = TestCatalogWitness::new(&bytes);
+    let digest = codec::digest(&bytes);
+    let mut repository = replacement_harness.open();
+    record(&mut repository, &witness, &bytes);
+    assert_catalog_identity_cache_is_exact(&repository);
+    let original_identity = repository.catalog_object_identities[&digest];
+    let stage = catalog_stage(digest);
+    let replacement_identity = repository
+        .catalogs
+        .write_new_synced(
+            &stage,
+            &bytes,
+            ByteLimit::new(MAX_EXTENSION_RELEASE_CATALOG_BYTES).unwrap(),
+        )
+        .unwrap();
+    assert_ne!(replacement_identity, original_identity);
+    assert_eq!(
+        repository
+            .catalogs
+            .replace_verified_regular(&stage, &catalog_file(digest))
+            .unwrap(),
+        replacement_identity
+    );
+    assert_eq!(
+        repository.writer_validate_catalog_object_inventory(),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
+
+    let disagreement_harness = Harness::new();
+    let mut repository = disagreement_harness.open();
+    record(&mut repository, &witness, &bytes);
+    repository.catalog_object_identities.remove(&digest);
+    assert_eq!(
+        repository.writer_validate_catalog_object_inventory(),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
+}
+
+#[test]
+fn deleted_catalog_is_forgotten_from_both_cache_projections_exactly_once() {
+    let harness = Harness::new();
+    let bytes = one_package_catalog(1, 1, 1, 0);
+    let witness = TestCatalogWitness::new(&bytes);
+    let digest = codec::digest(&bytes);
+    let mut repository = harness.open();
+    record(&mut repository, &witness, &bytes);
+
+    assert!(repository
+        .catalogs
+        .remove_verified_regular(&catalog_file(digest))
+        .unwrap());
+    assert_eq!(
+        repository.writer_forget_deleted_catalog_object(digest),
+        Ok(())
+    );
+    assert!(repository.catalog_object_ids.is_empty());
+    assert!(repository.catalog_object_identities.is_empty());
+    assert_eq!(
+        repository.writer_validate_catalog_object_inventory(),
+        Ok(())
+    );
+    assert_eq!(
+        repository.writer_forget_deleted_catalog_object(digest),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    );
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+#[test]
+fn production_seeded_catalog_can_be_forgotten_and_reseeded_with_a_new_identity() {
+    let harness = Harness::new();
+    let authority = zephium_extension_authority::BundledPackageAuthority::product().unwrap();
+    let active = authority
+        .admit_catalog(crate::repository_e2e_fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let rollback = authority
+        .admit_rollback_catalog(crate::repository_e2e_fixture::ROLLBACK_CATALOG_BYTES)
+        .unwrap();
+    let mut repository = harness.open();
+    let outcome = repository
+        .writer_record_bundled_catalog_with_fault(
+            &active,
+            crate::repository_e2e_fixture::ACTIVE_CATALOG_BYTES,
+            FaultPoint::None,
+        )
+        .unwrap();
+    assert_eq!(outcome, BundledCatalogRecordOutcome::Recorded);
+    repository
+        .writer_ensure_rollback_catalog(
+            &rollback,
+            crate::repository_e2e_fixture::ROLLBACK_CATALOG_BYTES,
+        )
+        .unwrap();
+    let digest = Digest32::from_bytes(rollback.catalog_digest().bytes());
+    let name = catalog_file(digest);
+    let original_identity = repository
+        .catalog_object_identities
+        .get(&digest)
+        .copied()
+        .unwrap();
+    // Retaining the unlinked inode through recreation makes identity reuse
+    // impossible instead of relying on filesystem allocation behavior.
+    let retired_handle =
+        std::fs::File::open(harness.root.join("catalogs").join(name.as_str())).unwrap();
+    assert!(repository.catalogs.remove_verified_regular(&name).unwrap());
+    repository
+        .writer_forget_deleted_catalog_object(digest)
+        .unwrap();
+    repository
+        .writer_ensure_rollback_catalog(
+            &rollback,
+            crate::repository_e2e_fixture::ROLLBACK_CATALOG_BYTES,
+        )
+        .unwrap();
+    let replacement_identity = repository
+        .catalog_object_identities
+        .get(&digest)
+        .copied()
+        .unwrap();
+    assert_ne!(replacement_identity, original_identity);
+    drop(retired_handle);
+    assert_eq!(
+        repository.writer_validate_catalog_object_inventory(),
+        Ok(())
+    );
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+#[test]
+fn catalog_inventory_revalidates_bytes_without_reparsing_catalogs() {
+    let harness = Harness::new();
+    let bytes = one_package_catalog(1, 1, 1, 0);
+    let witness = TestCatalogWitness::new(&bytes);
+    let mut repository = harness.open();
+    record(&mut repository, &witness, &bytes);
+
+    let measurement = crate::storage::CatalogValidationMeasurement::begin();
+    assert_eq!(
+        repository.writer_validate_catalog_object_inventory(),
+        Ok(())
+    );
+    assert_eq!(
+        measurement.snapshot(),
+        crate::storage::CatalogValidationCounts {
+            inventory_passes: 1,
+            content_revalidated_catalogs: 1,
+            content_revalidated_catalog_bytes: bytes.len(),
+            fully_validated_catalogs: 0,
+            fully_validated_catalog_bytes: 0,
+        }
+    );
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+#[test]
+fn active_catalog_is_structurally_parsed_once_during_open() {
+    let harness = Harness::new();
+    let bytes = one_package_catalog(1, 1, 1, 0);
+    let witness = TestCatalogWitness::new(&bytes);
+    let mut repository = harness.open();
+    record(&mut repository, &witness, &bytes);
+    drop(repository);
+
+    let measurement = crate::storage::CatalogValidationMeasurement::begin();
+    let reopened = harness.open();
+    assert!(!reopened.writer_is_sealed());
+    assert_eq!(
+        measurement.snapshot(),
+        crate::storage::CatalogValidationCounts {
+            inventory_passes: 1,
+            content_revalidated_catalogs: 0,
+            content_revalidated_catalog_bytes: 0,
+            fully_validated_catalogs: 1,
+            fully_validated_catalog_bytes: bytes.len(),
+        }
+    );
 }
 
 #[test]

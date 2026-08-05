@@ -921,6 +921,27 @@ mod tests {
             retired_trees: Vec::new(),
         };
         intent.validate(1).unwrap();
+        let regular_targets = intent.catalog_object_ids.len()
+            + intent.catalog_set_record_ids.len()
+            + intent.package_record_ids.len()
+            + intent.tree_index_ids.len()
+            + intent.legal_artifact_ids.len();
+        let tree_jobs = intent.tree_objects.len() + intent.retired_trees.len();
+        let charged_tree_entries = intent
+            .tree_objects
+            .iter()
+            .map(|target| target.known_total_entry_count.unwrap() as usize)
+            .sum::<usize>();
+        assert_eq!(regular_targets, 57);
+        assert_eq!(tree_jobs, 8);
+        assert_eq!(regular_targets + tree_jobs, 65);
+        assert_eq!(charged_tree_entries, 32_768);
+        assert_eq!(
+            2 * (MAX_MATERIALIZATION_JOURNAL_BYTES
+                + MAX_MATERIALIZATION_STATE_BYTES
+                + MAX_MATERIALIZATION_CHECKPOINT_BYTES),
+            2_129_920
+        );
         assert!(intent.retained_bytes() <= MAX_GC_INTENT_RETAINED_BYTES);
         let state = MaterializationState {
             generation: 1,
