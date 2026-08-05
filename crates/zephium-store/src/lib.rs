@@ -9,4 +9,7 @@ mod pane;
 #[cfg(target_os = "windows")]
 mod windows_file_identity;
 
-pub use actor::SqliteStore;
+pub use actor::{
+    ExtensionNativeOwnershipStoreAuthority, ExtensionNativeOwnershipStoreAuthorityClaimError,
+    ExtensionNativeOwnershipStoreCallOutcome, SqliteStore,
+};

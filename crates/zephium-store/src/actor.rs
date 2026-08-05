@@ -4,11 +4,14 @@
 //! one per event; visits and loads are immediate. Loads and shutdown flush
 //! pending state first.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -79,6 +82,18 @@ const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES: usize = checked_con
     MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
     MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 );
+const EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX: usize =
+    checked_const_add(MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES, 1);
+const EXTENSION_NATIVE_OWNERSHIP_MAX_ADMISSION_STATE: usize = checked_const_add(
+    checked_const_mul(
+        MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
+        EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX,
+    ),
+    MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES,
+);
+const EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE: usize = usize::MAX;
+
+const _: () = assert!(EXTENSION_NATIVE_OWNERSHIP_MAX_ADMISSION_STATE < usize::MAX);
 
 const fn checked_const_add(left: usize, right: usize) -> usize {
     match left.checked_add(right) {
@@ -303,34 +318,121 @@ impl Drop for ExtensionGrantRequestPermit {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 struct ExtensionNativeOwnershipMutationAdmission {
-    count: usize,
-    retained_bytes: usize,
+    // One CAS word keeps count and retained-byte reservation exact together.
+    // `usize::MAX` is reserved as a permanent fail-closed poison sentinel.
+    state: AtomicUsize,
+}
+
+impl ExtensionNativeOwnershipMutationAdmission {
+    const fn decode(state: usize) -> (usize, usize) {
+        (
+            state / EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX,
+            state % EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX,
+        )
+    }
+
+    fn encode(count: usize, retained_bytes: usize) -> Option<usize> {
+        count
+            .checked_mul(EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX)
+            .and_then(|base| base.checked_add(retained_bytes))
+    }
+
+    fn reserve(&self, retained_bytes: usize) -> bool {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            if current == EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE {
+                return false;
+            }
+            let (count, bytes) = Self::decode(current);
+            let Some(next_count) = count.checked_add(1) else {
+                return false;
+            };
+            let Some(next_bytes) = bytes.checked_add(retained_bytes) else {
+                return false;
+            };
+            if next_count > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS
+                || next_bytes > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES
+            {
+                return false;
+            }
+            let Some(next) = Self::encode(next_count, next_bytes) else {
+                return false;
+            };
+            match self.state.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release(&self, retained_bytes: usize) {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            if current == EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE {
+                return;
+            }
+            let (count, bytes) = Self::decode(current);
+            let Some(next_count) = count.checked_sub(1) else {
+                self.poison();
+                return;
+            };
+            let Some(next_bytes) = bytes.checked_sub(retained_bytes) else {
+                self.poison();
+                return;
+            };
+            let Some(next) = Self::encode(next_count, next_bytes) else {
+                self.poison();
+                return;
+            };
+            match self.state.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn poison(&self) {
+        // This branch represents an impossible accounting invariant. Racing
+        // reservations are conservatively discarded into the same permanent
+        // sentinel; no future mutation can be admitted from corrupted state.
+        self.state.store(
+            EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE,
+            Ordering::Release,
+        );
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> Option<(usize, usize)> {
+        let state = self.state.load(Ordering::Acquire);
+        (state != EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE).then(|| Self::decode(state))
+    }
 }
 
 struct ExtensionNativeOwnershipMutationPermit {
-    admission: Arc<Mutex<ExtensionNativeOwnershipMutationAdmission>>,
+    admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
     retained_bytes: usize,
 }
 
 impl ExtensionNativeOwnershipMutationPermit {
     fn acquire(
-        admission: &Arc<Mutex<ExtensionNativeOwnershipMutationAdmission>>,
+        admission: &Arc<ExtensionNativeOwnershipMutationAdmission>,
         retained_bytes: usize,
     ) -> Option<Self> {
-        let mut state = admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let next_count = state.count.checked_add(1)?;
-        let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
-        if next_count > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS
-            || next_bytes > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES
-        {
+        if !admission.reserve(retained_bytes) {
             return None;
         }
-        state.count = next_count;
-        state.retained_bytes = next_bytes;
         Some(Self {
             admission: admission.clone(),
             retained_bytes,
@@ -340,20 +442,7 @@ impl ExtensionNativeOwnershipMutationPermit {
 
 impl Drop for ExtensionNativeOwnershipMutationPermit {
     fn drop(&mut self) {
-        let mut state = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (Some(count), Some(retained_bytes)) = (
-            state.count.checked_sub(1),
-            state.retained_bytes.checked_sub(self.retained_bytes),
-        ) else {
-            state.count = usize::MAX;
-            state.retained_bytes = usize::MAX;
-            return;
-        };
-        state.count = count;
-        state.retained_bytes = retained_bytes;
+        self.admission.release(self.retained_bytes);
     }
 }
 
@@ -527,6 +616,167 @@ struct ActorLifecycle {
     terminal_admitted: bool,
 }
 
+/// Definite result of trying to claim the process's sole native-ownership
+/// storage capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionNativeOwnershipStoreAuthorityClaimError {
+    /// This actor lifetime has already issued its capability. Dropping the
+    /// capability never makes the journal broadly reachable again.
+    AlreadyClaimed,
+    /// Terminal actor ownership has transferred or clean shutdown completed.
+    StoreUnavailable,
+}
+
+impl fmt::Display for ExtensionNativeOwnershipStoreAuthorityClaimError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::AlreadyClaimed => "extension native-ownership store authority already claimed",
+            Self::StoreUnavailable => "extension native-ownership store actor is unavailable",
+        })
+    }
+}
+
+impl std::error::Error for ExtensionNativeOwnershipStoreAuthorityClaimError {}
+
+/// Settlement of one deadline-bounded native-ownership store operation.
+///
+/// Admission and observation are deliberately separate. Once a command has
+/// entered the actor, losing the caller's observation window cannot prove
+/// whether SQLite committed it; reconciliation must start with an exact load.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionNativeOwnershipStoreCallOutcome<T> {
+    Completed(T),
+    /// The operation never entered the actor and cannot have changed durable
+    /// state. A full mailbox, exhausted retained-memory budget, expired
+    /// deadline, or terminal lifecycle all produce this definite result.
+    NotAdmitted,
+    /// The operation entered the actor but its completion was not observed by
+    /// the deadline. The callback and any retained-memory permit remain owned
+    /// by the actor until it executes or drops the command.
+    TimedOutAfterAdmission,
+}
+
+/// Move-only capability for the global native-extension ownership journal.
+///
+/// The broad [`Store`] port intentionally cannot reach this crash-critical
+/// state. One concrete [`SqliteStore`] actor lifetime can mint this authority
+/// once, after which the extension coordinator may move it onto its single
+/// worker thread. It is `Send` but deliberately neither `Clone` nor `Sync`.
+///
+/// ```compile_fail
+/// use zephium_store::ExtensionNativeOwnershipStoreAuthority;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<ExtensionNativeOwnershipStoreAuthority>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_store::ExtensionNativeOwnershipStoreAuthority;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<ExtensionNativeOwnershipStoreAuthority>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_core::ports::store::Store;
+/// fn broad_store_cannot_load_the_journal(store: &impl Store) {
+///     store.load_extension_native_ownership_journal(Box::new(|_| {}));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_core::extensions::{
+///     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
+/// };
+/// use zephium_core::ports::store::Store;
+/// fn broad_store_cannot_mutate_the_journal(
+///     store: &impl Store,
+///     expected: ExtensionNativeOwnershipJournalRevision,
+///     mutation: ExtensionNativeOwnershipJournalMutation,
+/// ) {
+///     store.mutate_extension_native_ownership_journal(
+///         expected,
+///         mutation,
+///         Box::new(|_| {}),
+///     );
+/// }
+/// ```
+pub struct ExtensionNativeOwnershipStoreAuthority {
+    store: Arc<SqliteStore>,
+    // Cell is Send + !Sync. The marker therefore preserves move-to-worker
+    // support while preventing shared references from becoming cross-thread
+    // ambient journal authority.
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+impl ExtensionNativeOwnershipStoreAuthority {
+    /// Loads the exact complete reconciliation journal under one caller-owned
+    /// deadline. Corrupt or over-limit durable state is returned as the
+    /// inner load failure; it is never confused with non-admission.
+    pub fn load_until(
+        &self,
+        deadline: Instant,
+    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_native_ownership_journal(deadline, done)
+        {
+            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_native_ownership_call(result, deadline)
+    }
+
+    /// Applies one exact complete-journal CAS under one caller-owned deadline.
+    /// A timeout after actor admission is uncertainty even when the inner
+    /// mutation would normally have a definite refusal outcome.
+    pub fn mutate_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        deadline: Instant,
+    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
+    {
+        if Instant::now() >= deadline {
+            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_mutate_extension_native_ownership_journal(expected, mutation, deadline, done)
+        {
+            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_native_ownership_call(result, deadline)
+    }
+}
+
+fn observe_extension_native_ownership_call<T>(
+    result: Receiver<T>,
+    deadline: Instant,
+) -> ExtensionNativeOwnershipStoreCallOutcome<T> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission;
+    }
+    match result.recv_timeout(remaining) {
+        Ok(outcome) => ExtensionNativeOwnershipStoreCallOutcome::Completed(outcome),
+        // Once admitted, actor exit or callback loss is at least as uncertain
+        // as expiry. The process-boundary policy treats either as requiring a
+        // fresh-process reconciliation rather than guessing settlement.
+        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+            ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission
+        }
+    }
+}
+
 pub struct SqliteStore {
     tx: SyncSender<Cmd>,
     latest_session: Arc<Mutex<Option<SessionState>>>,
@@ -536,10 +786,10 @@ pub struct SqliteStore {
     page_permission_mutation_admission: Arc<Mutex<PagePermissionMutationAdmission>>,
     extension_install_mutation_admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
     extension_grant_request_admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
-    extension_native_ownership_mutation_admission:
-        Arc<Mutex<ExtensionNativeOwnershipMutationAdmission>>,
+    extension_native_ownership_mutation_admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
+    extension_native_ownership_authority_claimed: AtomicBool,
 }
 
 impl SqliteStore {
@@ -582,9 +832,8 @@ impl SqliteStore {
             Arc::new(Mutex::new(ExtensionInstallMutationAdmission::default()));
         let extension_grant_request_admission =
             Arc::new(Mutex::new(ExtensionGrantRequestAdmission::default()));
-        let extension_native_ownership_mutation_admission = Arc::new(Mutex::new(
-            ExtensionNativeOwnershipMutationAdmission::default(),
-        ));
+        let extension_native_ownership_mutation_admission =
+            Arc::new(ExtensionNativeOwnershipMutationAdmission::default());
         let (actor_exited, actor_exit) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("zephium-store".into())
@@ -629,7 +878,109 @@ impl SqliteStore {
                 terminal_admitted: false,
             }),
             shutdown_clean: AtomicBool::new(false),
+            extension_native_ownership_authority_claimed: AtomicBool::new(false),
         })
+    }
+
+    /// Mints the only public path to this actor lifetime's native-ownership
+    /// journal. The claim bit is intentionally never reset, including when
+    /// the returned capability is dropped.
+    pub fn claim_extension_native_ownership_authority(
+        self: &Arc<Self>,
+    ) -> Result<
+        ExtensionNativeOwnershipStoreAuthority,
+        ExtensionNativeOwnershipStoreAuthorityClaimError,
+    > {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return Err(ExtensionNativeOwnershipStoreAuthorityClaimError::StoreUnavailable);
+        }
+        self.extension_native_ownership_authority_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ExtensionNativeOwnershipStoreAuthorityClaimError::AlreadyClaimed)?;
+        drop(lifecycle);
+        Ok(ExtensionNativeOwnershipStoreAuthority {
+            store: self.clone(),
+            _not_sync: PhantomData,
+        })
+    }
+
+    fn try_load_extension_native_ownership_journal(
+        &self,
+        deadline: Instant,
+        done: ExtensionNativeOwnershipJournalLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionNativeOwnershipJournal(done))
+            .is_ok()
+    }
+
+    fn try_mutate_extension_native_ownership_journal(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        deadline: Instant,
+        done: ExtensionNativeOwnershipJournalMutationDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let retained_bytes = mutation.retained_bytes();
+        if retained_bytes > MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES {
+            return false;
+        }
+        let Some(permit) = ExtensionNativeOwnershipMutationPermit::acquire(
+            &self.extension_native_ownership_mutation_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        self.try_enqueue_extension_native_ownership_mutation(
+            expected, mutation, permit, deadline, done,
+        )
+    }
+
+    fn try_enqueue_extension_native_ownership_mutation(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        permit: ExtensionNativeOwnershipMutationPermit,
+        deadline: Instant,
+        done: ExtensionNativeOwnershipJournalMutationDone,
+    ) -> bool {
+        // Reservation and failed-send release use lock-free CAS loops.
+        // Recheck after reservation so descheduling at that frontier cannot
+        // enqueue a durable mutation after the caller's absolute deadline.
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::MutateExtensionNativeOwnershipJournal(
+                expected, mutation, permit, done,
+            ))
+            .is_ok()
     }
 
     /// Waits for the latest queued session snapshot to commit, but never past
@@ -1009,52 +1360,6 @@ impl Store for SqliteStore {
                 write,
                 permit,
                 done,
-            ))
-            .is_ok()
-    }
-
-    fn load_extension_native_ownership_journal(
-        &self,
-        done: ExtensionNativeOwnershipJournalLoadDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionNativeOwnershipJournal(done))
-            .is_ok()
-    }
-
-    fn mutate_extension_native_ownership_journal(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        mutation: ExtensionNativeOwnershipJournalMutation,
-        done: ExtensionNativeOwnershipJournalMutationDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        let retained_bytes = mutation.retained_bytes();
-        if retained_bytes > MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES {
-            return false;
-        }
-        let Some(permit) = ExtensionNativeOwnershipMutationPermit::acquire(
-            &self.extension_native_ownership_mutation_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::MutateExtensionNativeOwnershipJournal(
-                expected, mutation, permit, done,
             ))
             .is_ok()
     }

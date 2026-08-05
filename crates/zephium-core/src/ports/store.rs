@@ -4,9 +4,8 @@ use crate::extensions::{
     ExtensionGrantMutation, ExtensionGrantRevision, ExtensionInstall, ExtensionInstallCatalog,
     ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionManifestDescriptor, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
-    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipOperation,
-    MAX_EXTENSION_GRANT_RETAINED_BYTES,
+    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipOperation, MAX_EXTENSION_GRANT_RETAINED_BYTES,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 use crate::permissions::{
@@ -406,9 +405,9 @@ pub struct ExtensionNativeOwnershipJournalMutationApplied {
 /// `OutcomeUnknown` means the transaction entered commit but settlement was
 /// not observable; callers must reload the complete journal before issuing
 /// another native call or mutation. `SessionRecoveryRequired`, `Invalid`,
-/// `LimitReached`, and `RevisionExhausted` prove no commit was attempted. A
-/// `false` return from the Store method is separate definite actor
-/// non-admission and transfers no callback ownership.
+/// `LimitReached`, and `RevisionExhausted` prove no commit was attempted. The
+/// concrete Store authority reports definite actor non-admission separately;
+/// it is not represented by this persistence outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionNativeOwnershipJournalMutationOutcome {
     Applied(ExtensionNativeOwnershipJournalMutationApplied),
@@ -587,30 +586,6 @@ pub trait Store {
         _manifest: Arc<ExtensionManifestDescriptor>,
         _write: ExtensionGrantWrite,
         _done: Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Loads the exact complete native-ownership journal from shared meta
-    /// storage. This state intentionally survives profile deletion and
-    /// per-profile database degradation. `true` transfers exactly-once
-    /// callback ownership; `false` is definite non-admission.
-    fn load_extension_native_ownership_journal(
-        &self,
-        _done: Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Applies one journal begin, transition, or clear after comparing the
-    /// exact complete-journal revision. Callers must commit `NativeMayOwn`
-    /// before entering any native ownership-changing call and must not clear
-    /// before definite native absence plus subordinate resource release.
-    /// Session recovery admits only exact release-directed transitions and
-    /// clear operations; it rejects every ownership-acquiring mutation.
-    fn mutate_extension_native_ownership_journal(
-        &self,
-        _expected: ExtensionNativeOwnershipJournalRevision,
-        _mutation: ExtensionNativeOwnershipJournalMutation,
-        _done: Box<dyn FnOnce(ExtensionNativeOwnershipJournalMutationOutcome) + Send>,
     ) -> bool {
         false
     }

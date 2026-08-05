@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::{params, Connection};
+use std::sync::Barrier;
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::extensions::{
     ApiPermissionName, ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
@@ -71,15 +72,16 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         extension_grant_request_admission: Arc::new(Mutex::new(
             ExtensionGrantRequestAdmission::default(),
         )),
-        extension_native_ownership_mutation_admission: Arc::new(Mutex::new(
+        extension_native_ownership_mutation_admission: Arc::new(
             ExtensionNativeOwnershipMutationAdmission::default(),
-        )),
+        ),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
             exited,
             terminal_admitted: false,
         }),
         shutdown_clean: AtomicBool::new(false),
+        extension_native_ownership_authority_claimed: AtomicBool::new(false),
     }
 }
 
@@ -486,30 +488,24 @@ fn native_ownership_preparation(
     )
 }
 
-fn load_native_ownership_journal(store: &impl Store) -> ExtensionNativeOwnershipJournalLoadOutcome {
-    let (reply, outcome) = mpsc::sync_channel(1);
-    assert!(
-        store.load_extension_native_ownership_journal(Box::new(move |result| {
-            let _ = reply.send(result);
-        }))
-    );
-    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+fn load_native_ownership_journal(
+    authority: &ExtensionNativeOwnershipStoreAuthority,
+) -> ExtensionNativeOwnershipJournalLoadOutcome {
+    match authority.load_until(Instant::now() + STORE_RPC_TIMEOUT) {
+        ExtensionNativeOwnershipStoreCallOutcome::Completed(outcome) => outcome,
+        other => panic!("native-ownership journal load did not settle: {other:?}"),
+    }
 }
 
 fn mutate_native_ownership_journal(
-    store: &impl Store,
+    authority: &ExtensionNativeOwnershipStoreAuthority,
     expected: ExtensionNativeOwnershipJournalRevision,
     mutation: ExtensionNativeOwnershipJournalMutation,
 ) -> ExtensionNativeOwnershipJournalMutationOutcome {
-    let (reply, outcome) = mpsc::sync_channel(1);
-    assert!(store.mutate_extension_native_ownership_journal(
-        expected,
-        mutation,
-        Box::new(move |result| {
-            let _ = reply.send(result);
-        }),
-    ));
-    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    match authority.mutate_until(expected, mutation, Instant::now() + STORE_RPC_TIMEOUT) {
+        ExtensionNativeOwnershipStoreCallOutcome::Completed(outcome) => outcome,
+        other => panic!("native-ownership journal mutation did not settle: {other:?}"),
+    }
 }
 
 #[test]
@@ -1718,11 +1714,12 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
     let profile = ProfileId::from(1);
     let install = ExtensionInstallId::from(901);
     {
-        let store = SqliteStore::open(dir.path()).unwrap();
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let authority = store.claim_extension_native_ownership_authority().unwrap();
         store.save_session(sample());
         assert!(store.flush());
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(initial) =
-            load_native_ownership_journal(&store)
+            load_native_ownership_journal(&authority)
         else {
             panic!("initial native-ownership journal did not load");
         };
@@ -1732,7 +1729,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         );
         let ExtensionNativeOwnershipJournalMutationOutcome::Applied(begun) =
             mutate_native_ownership_journal(
-                &store,
+                &authority,
                 initial.revision(),
                 ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                     profile, install,
@@ -1750,7 +1747,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         );
         assert_eq!(
             mutate_native_ownership_journal(
-                &store,
+                &authority,
                 begun.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                     profile, install
@@ -1760,7 +1757,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
             "begin replaced an unresolved owner row"
         );
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(after_duplicate) =
-            load_native_ownership_journal(&store)
+            load_native_ownership_journal(&authority)
         else {
             panic!("native-ownership journal did not reload after duplicate begin");
         };
@@ -1769,7 +1766,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         assert_eq!(after_duplicate.entries(), std::slice::from_ref(&preparing));
         assert_eq!(
             mutate_native_ownership_journal(
-                &store,
+                &authority,
                 initial.revision(),
                 ExtensionNativeOwnershipJournalMutation::transition(
                     preparing.cas(),
@@ -1783,7 +1780,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         );
         let ExtensionNativeOwnershipJournalMutationOutcome::Applied(may_own) =
             mutate_native_ownership_journal(
-                &store,
+                &authority,
                 begun.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::transition(
                     preparing.cas(),
@@ -1801,7 +1798,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         );
         let ExtensionNativeOwnershipJournalMutationOutcome::Applied(owned) =
             mutate_native_ownership_journal(
-                &store,
+                &authority,
                 may_own.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
                     may_own_entry.cas(),
@@ -1828,9 +1825,12 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
     }
 
     {
-        let reopened = SqliteStore::open(dir.path()).unwrap();
+        let reopened = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let authority = reopened
+            .claim_extension_native_ownership_authority()
+            .unwrap();
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) =
-            load_native_ownership_journal(&reopened)
+            load_native_ownership_journal(&authority)
         else {
             panic!("restarted native-ownership journal did not load");
         };
@@ -1856,7 +1856,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         // journals release intent before asking the backend to remove it.
         let ExtensionNativeOwnershipJournalMutationOutcome::Applied(releasing) =
             mutate_native_ownership_journal(
-                &reopened,
+                &authority,
                 journal.revision(),
                 ExtensionNativeOwnershipJournalMutation::transition(
                     entry.cas(),
@@ -1870,7 +1870,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         let releasing_entry = releasing.entry.as_deref().unwrap().clone();
         let ExtensionNativeOwnershipJournalMutationOutcome::Applied(absent) =
             mutate_native_ownership_journal(
-                &reopened,
+                &authority,
                 releasing.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::transition(
                     releasing_entry.cas(),
@@ -1884,14 +1884,14 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         let absent_entry = absent.entry.as_deref().unwrap().clone();
         assert!(matches!(
             mutate_native_ownership_journal(
-                &reopened,
+                &authority,
                 absent.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::clear(absent_entry.cas()),
             ),
             ExtensionNativeOwnershipJournalMutationOutcome::Applied(_)
         ));
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(cleared) =
-            load_native_ownership_journal(&reopened)
+            load_native_ownership_journal(&authority)
         else {
             panic!("cleared native-ownership journal did not load");
         };
@@ -1904,9 +1904,12 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         );
     }
 
-    let second_restart = SqliteStore::open(dir.path()).unwrap();
+    let second_restart = Arc::new(SqliteStore::open(dir.path()).unwrap());
+    let authority = second_restart
+        .claim_extension_native_ownership_authority()
+        .unwrap();
     let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(cleared) =
-        load_native_ownership_journal(&second_restart)
+        load_native_ownership_journal(&authority)
     else {
         panic!("second restarted native-ownership journal did not load");
     };
@@ -1914,7 +1917,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
     assert_eq!(cleared.operation_high_water().unwrap().get(), 1);
     let ExtensionNativeOwnershipJournalMutationOutcome::Applied(second) =
         mutate_native_ownership_journal(
-            &second_restart,
+            &authority,
             cleared.revision(),
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 profile,
@@ -1938,11 +1941,12 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&sample()).unwrap();
     hub.make_next_extension_native_ownership_commit_ambiguous();
-    let store = SqliteStore::spawn(hub).unwrap();
+    let store = Arc::new(SqliteStore::spawn(hub).unwrap());
+    let authority = store.claim_extension_native_ownership_authority().unwrap();
 
     assert_eq!(
         mutate_native_ownership_journal(
-            &store,
+            &authority,
             ExtensionNativeOwnershipJournalRevision::INITIAL,
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 profile, install,
@@ -1951,7 +1955,7 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
         ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown
     );
     let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(reconciled) =
-        load_native_ownership_journal(&store)
+        load_native_ownership_journal(&authority)
     else {
         panic!("ambiguous native-ownership commit could not be reconciled");
     };
@@ -1961,53 +1965,111 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
 }
 
 #[test]
+fn native_ownership_authority_is_send_and_claimed_once_per_actor_lifetime() {
+    fn assert_send<T: Send>() {}
+    assert_send::<ExtensionNativeOwnershipStoreAuthority>();
+
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    drop(authority);
+    assert!(matches!(
+        store.claim_extension_native_ownership_authority(),
+        Err(ExtensionNativeOwnershipStoreAuthorityClaimError::AlreadyClaimed)
+    ));
+}
+
+#[test]
+fn native_ownership_load_deadline_separates_non_admission_from_uncertainty() {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let store = Arc::new(test_store_with_sender(tx));
+    let authority = store.claim_extension_native_ownership_authority().unwrap();
+
+    assert_eq!(
+        authority.load_until(Instant::now()),
+        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+    );
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+    store.tx.try_send(Cmd::SaveWake).unwrap();
+    assert_eq!(
+        authority.load_until(Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+    );
+    assert!(matches!(
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap(),
+        Cmd::SaveWake
+    ));
+
+    assert_eq!(
+        authority.load_until(Instant::now() + Duration::from_millis(10)),
+        ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission
+    );
+    let Cmd::LoadExtensionNativeOwnershipJournal(done) =
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    else {
+        panic!("authority admitted the wrong actor command");
+    };
+    done(ExtensionNativeOwnershipJournalLoadOutcome::Failed);
+
+    store
+        .lifecycle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .terminal_admitted = true;
+    assert_eq!(
+        authority.load_until(Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+    );
+}
+
+#[test]
 fn native_ownership_actor_admission_is_count_and_byte_bounded() {
     let (tx, rx) = mpsc::sync_channel(MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS + 1);
-    let store = test_store_with_sender(tx);
+    let store = Arc::new(test_store_with_sender(tx));
+    let authority = store.claim_extension_native_ownership_authority().unwrap();
     for index in 0..MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS {
-        assert!(store.mutate_extension_native_ownership_journal(
+        assert!(store.try_mutate_extension_native_ownership_journal(
             ExtensionNativeOwnershipJournalRevision::INITIAL,
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 ProfileId::from(1),
                 ExtensionInstallId::from(index as u128 + 1),
             )),
+            Instant::now() + STORE_RPC_TIMEOUT,
             Box::new(|_| {}),
         ));
     }
-    let rejected_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let rejected_callback = rejected_completions.clone();
-    assert!(!store.mutate_extension_native_ownership_journal(
-        ExtensionNativeOwnershipJournalRevision::INITIAL,
-        ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-            ProfileId::from(1),
-            ExtensionInstallId::from(999),
-        )),
-        Box::new(move |_| {
-            rejected_callback.fetch_add(1, Ordering::Relaxed);
-        }),
-    ));
-    assert_eq!(rejected_completions.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        authority.mutate_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                ProfileId::from(1),
+                ExtensionInstallId::from(999),
+            )),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+    );
     drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
-    assert!(store.mutate_extension_native_ownership_journal(
-        ExtensionNativeOwnershipJournalRevision::INITIAL,
-        ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-            ProfileId::from(1),
-            ExtensionInstallId::from(1_000),
-        )),
-        Box::new(|_| {}),
-    ));
+    assert_eq!(
+        authority.mutate_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                ProfileId::from(1),
+                ExtensionInstallId::from(1_000),
+            )),
+            Instant::now() + Duration::from_millis(10),
+        ),
+        ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission
+    );
     drop(rx);
-    let admission = store
-        .extension_native_ownership_mutation_admission
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(admission.count, 0);
-    assert_eq!(admission.retained_bytes, 0);
-    drop(admission);
+    assert_eq!(
+        store
+            .extension_native_ownership_mutation_admission
+            .snapshot(),
+        Some((0, 0))
+    );
 
-    let accounting = Arc::new(Mutex::new(
-        ExtensionNativeOwnershipMutationAdmission::default(),
-    ));
+    let accounting = Arc::new(ExtensionNativeOwnershipMutationAdmission::default());
     let full = ExtensionNativeOwnershipMutationPermit::acquire(
         &accounting,
         MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES,
@@ -2015,24 +2077,143 @@ fn native_ownership_actor_admission_is_count_and_byte_bounded() {
     .unwrap();
     assert!(ExtensionNativeOwnershipMutationPermit::acquire(&accounting, 1).is_none());
     drop(full);
+    assert_eq!(accounting.snapshot(), Some((0, 0)));
+}
+
+#[test]
+fn native_ownership_mutation_cannot_enqueue_after_its_deadline() {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let store = Arc::new(test_store_with_sender(tx));
+    let mutation = ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+        ProfileId::from(1),
+        ExtensionInstallId::from(1),
+    ));
+    let permit = ExtensionNativeOwnershipMutationPermit::acquire(
+        &store.extension_native_ownership_mutation_admission,
+        mutation.retained_bytes(),
+    )
+    .unwrap();
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let callback_count = callbacks.clone();
+
+    assert!(!store.try_enqueue_extension_native_ownership_mutation(
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        mutation,
+        permit,
+        Instant::now(),
+        Box::new(move |_| {
+            callback_count.fetch_add(1, Ordering::Relaxed);
+        }),
+    ));
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    assert_eq!(callbacks.load(Ordering::Relaxed), 0);
     assert_eq!(
-        *accounting
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        ExtensionNativeOwnershipMutationAdmission::default()
+        store
+            .extension_native_ownership_mutation_admission
+            .snapshot(),
+        Some((0, 0))
     );
 }
 
 #[test]
+fn native_ownership_failed_enqueue_releases_its_exact_permit() {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let store = Arc::new(test_store_with_sender(tx));
+    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    store.tx.try_send(Cmd::SaveWake).unwrap();
+
+    assert_eq!(
+        authority.mutate_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                ProfileId::from(1),
+                ExtensionInstallId::from(1),
+            )),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+    );
+    assert_eq!(
+        store
+            .extension_native_ownership_mutation_admission
+            .snapshot(),
+        Some((0, 0))
+    );
+    assert!(matches!(
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap(),
+        Cmd::SaveWake
+    ));
+}
+
+#[test]
+fn native_ownership_atomic_admission_cannot_oversubscribe() {
+    const RACERS: usize = 64;
+
+    let admission = Arc::new(ExtensionNativeOwnershipMutationAdmission::default());
+    let start = Arc::new(Barrier::new(RACERS + 1));
+    let release = Arc::new(Barrier::new(RACERS + 1));
+    let (result_tx, result_rx) = mpsc::channel();
+    let mut racers = Vec::with_capacity(RACERS);
+    for _ in 0..RACERS {
+        let admission = admission.clone();
+        let start = start.clone();
+        let release = release.clone();
+        let result_tx = result_tx.clone();
+        racers.push(thread::spawn(move || {
+            start.wait();
+            let permit = ExtensionNativeOwnershipMutationPermit::acquire(
+                &admission,
+                MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+            );
+            result_tx.send(permit.is_some()).unwrap();
+            release.wait();
+            drop(permit);
+        }));
+    }
+    drop(result_tx);
+
+    start.wait();
+    let successes = (0..RACERS)
+        .map(|_| result_rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap())
+        .filter(|admitted| *admitted)
+        .count();
+    assert_eq!(successes, MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS);
+    assert_eq!(
+        admission.snapshot(),
+        Some((
+            MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
+            MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES,
+        ))
+    );
+
+    release.wait();
+    for racer in racers {
+        racer.join().unwrap();
+    }
+    assert_eq!(admission.snapshot(), Some((0, 0)));
+}
+
+#[test]
+fn native_ownership_admission_corruption_poison_is_permanent() {
+    let admission = Arc::new(ExtensionNativeOwnershipMutationAdmission::default());
+
+    admission.release(1);
+
+    assert_eq!(admission.snapshot(), None);
+    assert!(ExtensionNativeOwnershipMutationPermit::acquire(&admission, 1).is_none());
+}
+
+#[test]
 fn profile_deletion_waits_for_native_ownership_release_and_clear() {
-    let store = SqliteStore::in_memory().unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let authority = store.claim_extension_native_ownership_authority().unwrap();
     store.save_session(two_profile_sample());
     assert!(store.flush());
     let profile = ProfileId::from(3);
     let install = ExtensionInstallId::from(903);
     let ExtensionNativeOwnershipJournalMutationOutcome::Applied(begun) =
         mutate_native_ownership_journal(
-            &store,
+            &authority,
             ExtensionNativeOwnershipJournalRevision::INITIAL,
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 profile, install,
@@ -2050,7 +2231,7 @@ fn profile_deletion_waits_for_native_ownership_release_and_clear() {
     let preparing = begun.entry.as_deref().unwrap().clone();
     let ExtensionNativeOwnershipJournalMutationOutcome::Applied(release) =
         mutate_native_ownership_journal(
-            &store,
+            &authority,
             begun.journal_revision,
             ExtensionNativeOwnershipJournalMutation::transition(
                 preparing.cas(),
@@ -2064,7 +2245,7 @@ fn profile_deletion_waits_for_native_ownership_release_and_clear() {
     let release_entry = release.entry.as_deref().unwrap().clone();
     assert!(matches!(
         mutate_native_ownership_journal(
-            &store,
+            &authority,
             release.journal_revision,
             ExtensionNativeOwnershipJournalMutation::clear(release_entry.cas()),
         ),
