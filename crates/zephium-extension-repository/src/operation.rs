@@ -25,6 +25,7 @@ pub(crate) struct RepositoryRuntime {
 struct RepositoryRuntimeInner {
     operation_gate: RepositoryOperationGate,
     health: RepositoryHealth,
+    delegated_callback_active: AtomicBool,
 }
 
 impl RepositoryRuntime {
@@ -33,12 +34,21 @@ impl RepositoryRuntime {
             inner: Arc::new(RepositoryRuntimeInner {
                 operation_gate: RepositoryOperationGate::new(),
                 health: RepositoryHealth::new(),
+                delegated_callback_active: AtomicBool::new(false),
             }),
         }
     }
 
     pub(crate) fn enter(&self) -> Result<RepositoryOperationGuard<'_>, RepositoryOperationError> {
-        self.inner.operation_gate.enter(&self.inner.health)
+        if self.delegated_callback_active() {
+            return Err(RepositoryOperationError::CallbackReentry);
+        }
+        let guard = self.inner.operation_gate.enter(&self.inner.health)?;
+        if self.delegated_callback_active() {
+            drop(guard);
+            return Err(RepositoryOperationError::CallbackReentry);
+        }
+        Ok(guard)
     }
 
     pub(crate) fn is_healthy(&self) -> bool {
@@ -47,6 +57,30 @@ impl RepositoryRuntime {
 
     pub(crate) fn poison(&self) {
         self.inner.health.poison();
+    }
+
+    /// Starts a provider-only cross-thread callback barrier.
+    ///
+    /// The caller must hold this runtime's operation guard, start the barrier,
+    /// and only then release that guard. [`Self::enter`] rechecks after lock
+    /// acquisition, closing the handoff race for threads already waiting.
+    pub(crate) fn begin_delegated_callback(
+        &self,
+    ) -> Result<RepositoryDelegatedCallbackBarrier<'_>, RepositoryOperationError> {
+        if self
+            .inner
+            .delegated_callback_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.poison();
+            return Err(RepositoryOperationError::Poisoned);
+        }
+        Ok(RepositoryDelegatedCallbackBarrier { runtime: self })
+    }
+
+    fn delegated_callback_active(&self) -> bool {
+        self.inner.delegated_callback_active.load(Ordering::Acquire)
     }
 
     #[cfg(all(
@@ -86,6 +120,25 @@ struct ExternalCallbackScope {
 impl Drop for ExternalCallbackScope {
     fn drop(&mut self) {
         EXTERNAL_CALLBACK_ACTIVE.with(|active| active.set(self.previous));
+    }
+}
+
+/// Panic-safe provider callback handoff for one repository runtime.
+pub(crate) struct RepositoryDelegatedCallbackBarrier<'runtime> {
+    runtime: &'runtime RepositoryRuntime,
+}
+
+impl Drop for RepositoryDelegatedCallbackBarrier<'_> {
+    fn drop(&mut self) {
+        let callback_unwound = std::thread::panicking();
+        let was_active = self
+            .runtime
+            .inner
+            .delegated_callback_active
+            .swap(false, Ordering::AcqRel);
+        if callback_unwound || !was_active {
+            self.runtime.poison();
+        }
     }
 }
 
@@ -282,5 +335,92 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(runtime.enter().is_ok());
+    }
+
+    #[test]
+    fn delegated_callback_barrier_is_runtime_local_and_restores_entry() {
+        let runtime = RepositoryRuntime::new();
+        let unrelated = RepositoryRuntime::new();
+        let operation = runtime.enter().expect("operation");
+        let barrier = runtime
+            .begin_delegated_callback()
+            .expect("callback barrier");
+        drop(operation);
+        let worker_runtime = runtime.clone();
+        let rejected = std::thread::spawn(move || {
+            matches!(
+                worker_runtime.enter(),
+                Err(RepositoryOperationError::CallbackReentry)
+            )
+        })
+        .join()
+        .expect("worker");
+        assert!(rejected);
+        assert!(unrelated.enter().is_ok());
+        assert!(runtime.is_healthy());
+        drop(barrier);
+        assert!(runtime.enter().is_ok());
+    }
+
+    #[test]
+    fn delegated_callback_handoff_waits_for_preexisting_operation() {
+        let runtime = RepositoryRuntime::new();
+        let holder_runtime = runtime.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_holder_tx, release_holder_rx) = std::sync::mpsc::sync_channel(0);
+        let holder = std::thread::spawn(move || {
+            let operation = holder_runtime.enter().expect("holder operation");
+            held_tx.send(()).expect("held");
+            release_holder_rx.recv().expect("release holder");
+            drop(operation);
+        });
+        held_rx.recv().expect("holder entered");
+
+        let handoff_runtime = runtime.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_barrier_tx, release_barrier_rx) = std::sync::mpsc::sync_channel(0);
+        let handoff = std::thread::spawn(move || {
+            let operation = handoff_runtime.enter().expect("handoff operation");
+            let barrier = handoff_runtime
+                .begin_delegated_callback()
+                .expect("callback barrier");
+            drop(operation);
+            started_tx.send(()).expect("barrier started");
+            release_barrier_rx.recv().expect("release barrier");
+            drop(barrier);
+        });
+        assert!(matches!(
+            started_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release_holder_tx.send(()).expect("release holder");
+        started_rx.recv().expect("barrier started after drain");
+        assert!(matches!(
+            runtime.enter(),
+            Err(RepositoryOperationError::CallbackReentry)
+        ));
+        release_barrier_tx.send(()).expect("release barrier");
+        holder.join().expect("holder");
+        handoff.join().expect("handoff");
+        assert!(runtime.enter().is_ok());
+    }
+
+    #[test]
+    fn delegated_callback_unwind_restores_entry_barrier_but_poisons_health() {
+        let runtime = RepositoryRuntime::new();
+        let result = std::panic::catch_unwind(|| {
+            let operation = runtime.enter().expect("operation");
+            let _barrier = runtime
+                .begin_delegated_callback()
+                .expect("callback barrier");
+            drop(operation);
+            panic!("adapter callback panic");
+        });
+        assert!(result.is_err());
+        assert!(!runtime.is_healthy());
+        assert!(matches!(
+            runtime.enter(),
+            Err(RepositoryOperationError::Unhealthy)
+        ));
     }
 }

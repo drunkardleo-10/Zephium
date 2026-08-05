@@ -281,6 +281,12 @@ macro_rules! impl_snapshot_projection {
                 self.manifest.catalog_revision()
             }
 
+            pub(crate) const fn runtime_target(
+                &self,
+            ) -> zephium_extension_authority::ProductExtensionRuntimeTarget {
+                self.manifest.runtime_target()
+            }
+
             pub(crate) const fn index(&self) -> &CanonicalExtensionTreeIndex {
                 &self.index
             }

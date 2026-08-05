@@ -701,7 +701,7 @@ fn verify_internal_authority_cannot_link_into_shipping_code() {
 fn run_internal_repository_e2e_tests() {
     const TEST_SUITES: [(&str, usize); 2] = [
         ("writer::repository_e2e_tests::", 10),
-        ("package_lease::repository_e2e::", 11),
+        ("package_lease::repository_e2e::", 13),
     ];
     let mut commands = Vec::with_capacity(TEST_SUITES.len());
     for (prefix, expected) in TEST_SUITES {

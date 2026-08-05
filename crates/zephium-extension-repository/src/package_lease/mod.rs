@@ -6,6 +6,7 @@ mod policy;
 mod repository;
 mod resource;
 mod runtime;
+mod runtime_access;
 
 pub use api::{
     ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
@@ -15,6 +16,12 @@ pub use api::{
 };
 pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
 pub(crate) use runtime::PackageLeaseRuntime;
+pub use runtime_access::{
+    ActiveBundledRuntimePackageAccessBuildRefusal, ActiveBundledRuntimePackageRecoveryError,
+    ActiveBundledRuntimePackageRecoveryRefusal, BundledRuntimePackageAccessBuildError,
+    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
+    RollbackBundledRuntimePackageRecoveryRefusal,
+};
 
 #[cfg(test)]
 mod tests;

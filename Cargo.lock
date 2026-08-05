@@ -6291,6 +6291,7 @@ dependencies = [
  "zephium-core",
  "zephium-extension-authority",
  "zephium-extension-package",
+ "zephium-extension-runtime-api",
  "zephium-private-fs",
 ]
 

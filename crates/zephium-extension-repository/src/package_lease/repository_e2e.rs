@@ -19,6 +19,13 @@ use zephium_extension_authority::{
     ProductExtensionManifestAuthority, ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::{CanonicalExtensionTreeIndex, PortableRelativePath};
+use zephium_extension_runtime_api::{
+    ExtensionPackageAccessBuildError, ExtensionPackageAccessError, ExtensionPackageAccessView,
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeActivationRequest,
+    ExtensionRuntimeActivationSettlement, ExtensionRuntimeFailure, ExtensionRuntimeLifecyclePort,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+};
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 use super::api::{
@@ -27,6 +34,10 @@ use super::api::{
     BundledPackageResourceError,
 };
 use super::repository::{arm_post_pin_reverify_hook, arm_release_planning_error_hook};
+use super::runtime_access::{
+    arm_provider_retained_bytes_override, ActiveBundledRuntimePackageRecoveryError,
+    BundledRuntimePackageAccessBuildError, RollbackBundledRuntimePackageRecoveryError,
+};
 use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
     install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
@@ -435,6 +446,45 @@ fn install_catalog(
         )],
     )
     .unwrap()
+}
+
+struct CompatibilityNativeRootGate;
+
+impl ExtensionRuntimeLifecyclePort for CompatibilityNativeRootGate {
+    fn retained_bytes(&self) -> usize {
+        0
+    }
+
+    fn activate(
+        &mut self,
+        access: &mut ExtensionPackageAccessView<'_>,
+    ) -> ExtensionRuntimeActivationDisposition {
+        assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
+        let mut visitor_called = false;
+        assert_eq!(
+            access.visit_native_root(&mut |_root: &Path| {
+                visitor_called = true;
+                Ok(())
+            }),
+            Err(ExtensionPackageAccessError::NativeRootUnavailable)
+        );
+        assert!(!visitor_called);
+        ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::PackageRejected)
+    }
+
+    fn retire(
+        &mut self,
+        _access: &mut ExtensionPackageAccessView<'_>,
+    ) -> ExtensionRuntimeRetirementDisposition {
+        panic!("rejected compatibility root probe cannot retire")
+    }
+
+    fn reconcile_ownership(
+        &mut self,
+        _access: &mut ExtensionPackageAccessView<'_>,
+    ) -> ExtensionRuntimeOwnershipDisposition {
+        panic!("rejected compatibility root probe cannot reconcile")
+    }
 }
 
 #[test]
@@ -1284,4 +1334,293 @@ fn clean_transient_release_failure_is_read_only_and_the_same_request_retries() {
         Ok(BundledPackageLeaseReleaseOutcome::AlreadyReleased)
     );
     assert!(!repository.writer_is_sealed());
+}
+
+#[test]
+fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_active(&mut repository, &active);
+
+    let owner =
+        EligibilityFixture::active(&active, ProfileId::from(211), ExtensionInstallId::from(223));
+    let mut access = repository
+        .acquire_active_bundled_package_lease(current, &owner.eligibility())
+        .unwrap()
+        .into_runtime_package_access()
+        .unwrap();
+    let expected_index =
+        CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
+    {
+        let resources = access.resources();
+        assert_eq!(resources.entries().len(), expected_index.files().len());
+        for (ordinal, (entry, expected)) in resources
+            .entries()
+            .iter()
+            .zip(expected_index.files())
+            .enumerate()
+        {
+            assert_eq!(entry.path(), expected.path().as_str());
+            assert_eq!(entry.declared_bytes(), expected.length());
+            assert_eq!(entry.sha256(), expected.sha256());
+            assert!(entry.resource().authenticates(
+                resources.digest(),
+                u32::try_from(ordinal).unwrap(),
+                expected.path().as_str(),
+                expected.length(),
+                expected.sha256(),
+            ));
+        }
+    }
+
+    let mut manifest_bytes = Vec::new();
+    assert_eq!(
+        access.visit_manifest(&mut |reader: &mut dyn Read| {
+            reader
+                .read_to_end(&mut manifest_bytes)
+                .map_err(|_| ExtensionRuntimeVisitorError::ReadFailed)?;
+            Ok(())
+        }),
+        Ok(Ok(()))
+    );
+    assert_eq!(manifest_bytes, fixture::MANIFEST_BYTES);
+
+    let manifest_resource = access
+        .resources()
+        .entry("manifest.json")
+        .unwrap()
+        .resource();
+    let mut general_resource_bytes = Vec::new();
+    assert_eq!(
+        access.visit_resource(manifest_resource, &mut |reader: &mut dyn Read| {
+            reader
+                .read_to_end(&mut general_resource_bytes)
+                .map_err(|_| ExtensionRuntimeVisitorError::ReadFailed)?;
+            Ok(())
+        },),
+        Ok(Ok(()))
+    );
+    assert_eq!(general_resource_bytes, fixture::MANIFEST_BYTES);
+
+    let nested_owner =
+        EligibilityFixture::active(&active, ProfileId::from(227), ExtensionInstallId::from(229));
+    let mut nested_access = repository
+        .acquire_active_bundled_package_lease(current, &nested_owner.eligibility())
+        .unwrap()
+        .into_runtime_package_access()
+        .unwrap();
+    assert_eq!(
+        access.visit_manifest(&mut |reader: &mut dyn Read| {
+            assert_eq!(
+                nested_access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())),
+                Err(ExtensionPackageAccessError::CallbackReentry)
+            );
+            let cross_thread_result = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| repository.current_bundled_catalog_set())
+                    .join()
+                    .expect("cross-thread callback probe")
+            });
+            assert!(matches!(
+                cross_thread_result,
+                Err(BundledPackageLeaseError::Repository(
+                    ExtensionRepositoryError::CallbackReentry
+                ))
+            ));
+            let mut bytes = Vec::new();
+            reader
+                .read_to_end(&mut bytes)
+                .map_err(|_| ExtensionRuntimeVisitorError::ReadFailed)?;
+            assert_eq!(bytes, fixture::MANIFEST_BYTES);
+            Ok(())
+        }),
+        Ok(Ok(()))
+    );
+    assert_eq!(
+        nested_access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())),
+        Ok(Ok(()))
+    );
+    let mut nested_release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            nested_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut nested_release)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let request =
+        ExtensionRuntimeActivationRequest::try_new(access, Box::new(CompatibilityNativeRootGate))
+            .unwrap();
+    let access = match request.settle() {
+        ExtensionRuntimeActivationSettlement::Rejected { access, failure } => {
+            assert_eq!(failure, ExtensionRuntimeFailure::PackageRejected);
+            access
+        }
+        settlement => panic!("unexpected native-root gate settlement: {settlement:?}"),
+    };
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(access)
+            .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let passive_owner =
+        EligibilityFixture::active(&active, ProfileId::from(233), ExtensionInstallId::from(239));
+    let passive_access = repository
+        .acquire_active_bundled_package_lease(current, &passive_owner.eligibility())
+        .unwrap()
+        .into_runtime_package_access()
+        .unwrap();
+    assert_eq!(
+        repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .package_pins
+            .len(),
+        1
+    );
+    drop(passive_access);
+    assert_eq!(
+        repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .package_pins
+            .len(),
+        1,
+        "provider Drop must remain passive"
+    );
+
+    let replayed_lease = repository
+        .acquire_active_bundled_package_lease(current, &passive_owner.eligibility())
+        .unwrap();
+    arm_provider_retained_bytes_override(usize::MAX);
+    let refusal = replayed_lease
+        .into_runtime_package_access()
+        .expect_err("overflowing provider accounting must be refused");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimePackageAccessBuildError::PackageAccess(
+            ExtensionPackageAccessBuildError::RetainedBytesOverflow
+        )
+    );
+    let mut release = refusal.try_into_lease().unwrap().into_release_request();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let corrupt_owner =
+        EligibilityFixture::active(&active, ProfileId::from(241), ExtensionInstallId::from(251));
+    let mut corrupt_access = repository
+        .acquire_active_bundled_package_lease(current, &corrupt_owner.eligibility())
+        .unwrap()
+        .into_runtime_package_access()
+        .unwrap();
+    harness.corrupt_manifest_same_length();
+    assert_eq!(
+        corrupt_access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())),
+        Err(ExtensionPackageAccessError::ResourceIdentityMismatch)
+    );
+    assert!(matches!(
+        repository.current_bundled_catalog_set(),
+        Err(BundledPackageLeaseError::Repository(
+            ExtensionRepositoryError::Sealed
+        ))
+    ));
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            corrupt_access,
+        )
+        .unwrap();
+    assert!(matches!(
+        repository.release_active_bundled_package_lease(&mut release),
+        Err(BundledPackageLeaseReleaseError::Repository(
+            ExtensionRepositoryError::Sealed
+        ))
+    ));
+}
+
+#[test]
+fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
+    let (active, rollback) = catalogs();
+
+    let active_harness = Harness::new();
+    let mut active_repository = active_harness.open();
+    let active_current = establish_active(&mut active_repository, &active);
+    let active_owner =
+        EligibilityFixture::active(&active, ProfileId::from(257), ExtensionInstallId::from(263));
+    let active_access = active_repository
+        .acquire_active_bundled_package_lease(active_current, &active_owner.eligibility())
+        .unwrap()
+        .into_runtime_package_access()
+        .unwrap();
+    let wrong_role =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            active_access,
+        )
+        .expect_err("active access must not become rollback release authority");
+    assert_eq!(
+        wrong_role.reason(),
+        RollbackBundledRuntimePackageRecoveryError::WrongProviderRole
+    );
+    let active_access = wrong_role.try_into_access().unwrap();
+    let mut active_release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            active_access,
+        )
+        .unwrap();
+    assert_eq!(
+        active_repository
+            .release_active_bundled_package_lease(&mut active_release)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_harness = Harness::new();
+    let mut rollback_repository = rollback_harness.open();
+    let rollback_current = establish_rollback(&mut rollback_repository, &active, &rollback);
+    let rollback_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(269),
+        ExtensionInstallId::from(271),
+    );
+    let rollback_access = rollback_repository
+        .acquire_rollback_bundled_package_lease(rollback_current, &rollback_owner.eligibility())
+        .unwrap()
+        .into_runtime_package_access()
+        .unwrap();
+    let wrong_role =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            rollback_access,
+        )
+        .expect_err("rollback access must not become active release authority");
+    assert_eq!(
+        wrong_role.reason(),
+        ActiveBundledRuntimePackageRecoveryError::WrongProviderRole
+    );
+    let rollback_access = wrong_role.try_into_access().unwrap();
+    let mut rollback_release =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            rollback_access,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(&mut rollback_release)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
 }

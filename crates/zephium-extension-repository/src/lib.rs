@@ -49,9 +49,14 @@ pub use materialization::{
     BundledReleaseSourceError,
 };
 pub use package_lease::{
-    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
+    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest,
+    ActiveBundledRuntimePackageAccessBuildRefusal, ActiveBundledRuntimePackageRecoveryError,
+    ActiveBundledRuntimePackageRecoveryRefusal, BundledCatalogGenerationRole,
     BundledCurrentCatalogSet, BundledCurrentManifestBindings, BundledManifestBindingsError,
     BundledPackageLeaseError, BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
-    BundledPackageResourceError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
+    BundledPackageResourceError, BundledRuntimePackageAccessBuildError,
+    RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
+    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
+    RollbackBundledRuntimePackageRecoveryRefusal,
 };
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};
