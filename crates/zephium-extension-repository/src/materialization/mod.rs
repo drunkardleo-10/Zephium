@@ -19,6 +19,7 @@ mod prepare;
 mod records;
 mod recovery;
 mod runtime;
+mod settlement;
 mod source;
 mod state;
 mod storage;
@@ -30,6 +31,10 @@ pub(crate) use catalog_set::{
     derive_active_catalog_set, derive_rollback_catalog_set, VerifiedActiveCatalogSet,
     VerifiedRollbackCatalogSet,
 };
+pub(crate) use cleanup::{
+    inspect_package_build_commit_marker, reconcile_build_stages_for_abort, CleanupError,
+    PackageBuildCommitMarker,
+};
 #[cfg(all(
     test,
     zephium_internal_repository_e2e,
@@ -38,8 +43,13 @@ pub(crate) use catalog_set::{
 pub(crate) use cleanup::{
     install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
 };
-pub(crate) use cleanup::{reconcile_build_stages_for_abort, CleanupError};
 pub(crate) use interlock::validate_catalog_advance;
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use objects::publish_intent_package_record_marker_for_e2e;
 pub(crate) use objects::{
     preflight_package_object_capacity, publish_or_reuse_active_package,
     publish_or_reuse_rollback_package, verify_completed_active_package,
@@ -68,6 +78,10 @@ pub(crate) use records::{
 };
 pub(crate) use recovery::{is_pristine_for_outer_initialization, open_or_recover, FaultPoint};
 pub(crate) use runtime::MaterializationRuntime;
+pub(crate) use settlement::{
+    authenticate_interrupted_package, InterruptedPackageAuthenticationError,
+    VerifiedInterruptedPackageClosure,
+};
 pub use source::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,

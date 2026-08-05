@@ -17,16 +17,19 @@ use zephium_private_fs::PrivateFsError;
 
 use crate::materialization::{
     abort_package_build, begin_active_package_build, begin_rollback_package_build,
-    complete_active_package, complete_rollback_package, open_product_manifest_authority,
-    preflight_package_object_capacity, prepare_active_package, prepare_rollback_package,
-    publish_or_reuse_active_package, publish_or_reuse_rollback_package,
+    complete_active_package, complete_rollback_package, inspect_package_build_commit_marker,
+    open_product_manifest_authority, preflight_package_object_capacity, prepare_active_package,
+    prepare_rollback_package, publish_or_reuse_active_package, publish_or_reuse_rollback_package,
     reconcile_build_stages_for_abort, verify_completed_active_package,
     verify_completed_rollback_package, BundledReleaseByteSource, BundledReleaseSourceError,
-    CleanupError, MaterializationRuntime, MaterializationTransitionError, PackageObjectError,
-    PackageObjectIntentDisposition, PreparationError, PreparedActivePackage,
+    CleanupError, MaterializationRuntime, MaterializationTransitionError, PackageBuildCommitMarker,
+    PackageObjectError, PackageObjectIntentDisposition, PreparationError, PreparedActivePackage,
     PreparedRollbackPackage,
 };
-use crate::{ExtensionRepository, ExtensionRepositoryError};
+use crate::{
+    BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome, ExtensionRepository,
+    ExtensionRepositoryError,
+};
 
 /// Result of exactly materializing one bundled extension package.
 ///
@@ -105,23 +108,20 @@ pub enum BundledPackageMaterializationError {
     /// from its authenticated identity.
     #[error("extension package durable object closure is not exact")]
     DurableObjectMismatch,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExistingBuild {
-    None,
-    MatchingWithoutStages,
-    MatchingWithStages,
-    Different,
+    /// A previously interrupted package build could not be settled before this
+    /// request consulted its external byte source.
+    #[error("interrupted extension package build settlement failed: {0}")]
+    InterruptedBuildSettlement(#[source] BundledPackageBuildSettlementError),
 }
 
 impl ExtensionRepository {
     /// Materializes one exact package from the ordinary active product catalog.
     ///
-    /// Read-only package preparation occurs first. The authenticated catalog is
-    /// then recorded through the repository's monotonic high-water protocol,
-    /// which may remain durable if a later clean package-source error occurs.
-    /// Retrying the same request is exact and idempotent.
+    /// Any durable prior build settles source-free before package preparation
+    /// can invoke the supplied adapter. The authenticated catalog is then
+    /// recorded through the repository's monotonic high-water protocol, which
+    /// may remain durable if a later clean package-source error occurs. Retrying
+    /// the same request is exact and idempotent.
     pub fn materialize_active_bundled_package<S: BundledReleaseByteSource>(
         &mut self,
         catalog: &AdmittedBundledCatalog,
@@ -133,6 +133,30 @@ impl ExtensionRepository {
         let runtime = self.runtime.clone();
         let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
+        let interrupted_record = self
+            .writer_materialization()?
+            ._build_intent
+            .as_ref()
+            .map(|intent| intent.package_record.clone());
+        let settlement = self
+            .settle_interrupted_bundled_package_build_under_gate()
+            .map_err(BundledPackageMaterializationError::InterruptedBuildSettlement)?;
+        if settlement == BundledPackageBuildSettlementOutcome::Completed
+            && interrupted_record.as_ref().is_some_and(|record| {
+                record.catalog.generation_anchor().ok() == Some(catalog.generation_anchor())
+                    && record.package.package_key.bytes() == package_key.bytes()
+                    && record.manifest.runtime_target.product_target() == runtime_target
+            })
+        {
+            // Settlement freshly re-admitted the repository-owned catalog and
+            // completed this exact closure without consulting `source`. Bind
+            // the caller's independent authority witness and exact bytes before
+            // returning so a forged or equivocated retry can never inherit it.
+            self.writer_stage_active_catalog_candidate(catalog, exact_catalog_bytes)?;
+            let _catalog_record =
+                self.record_bundled_catalog_under_gate(&operation, catalog, exact_catalog_bytes)?;
+            return Ok(BundledPackageMaterializationOutcome::Materialized);
+        }
         let manifest_authority =
             open_product_manifest_authority().map_err(map_preparation_error)?;
         let prepared = prepare_active_package(
@@ -144,26 +168,10 @@ impl ExtensionRepository {
             source,
         )
         .map_err(map_preparation_error)?;
-
-        // Authenticate, monotonic-plan, and exact-CAS-stage the candidate
-        // before an unrelated resumable intent may be aborted. The catalog
-        // object is inert until `record_bundled_catalog` advances authority.
+        // Authenticate, monotonic-plan, and exact-CAS-stage the candidate after
+        // settlement has proved no prior build remains. The catalog object is
+        // inert until `record_bundled_catalog` advances authority.
         self.writer_stage_active_catalog_candidate(catalog, exact_catalog_bytes)?;
-
-        let existing = {
-            let runtime = self.writer_materialization()?;
-            match runtime._build_intent.as_ref() {
-                None => ExistingBuild::None,
-                Some(intent) if &intent.package_record != prepared.record() => {
-                    ExistingBuild::Different
-                }
-                Some(_) if runtime._build_stage.is_some() || !runtime._record_stages.is_empty() => {
-                    ExistingBuild::MatchingWithStages
-                }
-                Some(_) => ExistingBuild::MatchingWithoutStages,
-            }
-        };
-        self.reconcile_existing_build(existing)?;
 
         // This call owns every outer high-water and package-line interlock. A
         // writer must never publish an active package around that authority.
@@ -189,6 +197,27 @@ impl ExtensionRepository {
         let runtime = self.runtime.clone();
         let _operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()?;
+        let interrupted_record = self
+            .writer_materialization()?
+            ._build_intent
+            .as_ref()
+            .map(|intent| intent.package_record.clone());
+        let settlement = self
+            .settle_interrupted_bundled_package_build_under_gate()
+            .map_err(BundledPackageMaterializationError::InterruptedBuildSettlement)?;
+        if settlement == BundledPackageBuildSettlementOutcome::Completed
+            && interrupted_record.as_ref().is_some_and(|record| {
+                record.catalog.generation_anchor().ok() == Some(catalog.generation_anchor())
+                    && record.package.package_key.bytes() == package_key.bytes()
+                    && record.manifest.runtime_target.product_target() == runtime_target
+            })
+        {
+            // Rollback catalog publication remains inert and cannot lower the
+            // active floor. This also revalidates the caller's exact bytes
+            // before returning the source-free completion result.
+            self.writer_ensure_rollback_catalog(catalog, exact_catalog_bytes)?;
+            return Ok(BundledPackageMaterializationOutcome::Materialized);
+        }
         let manifest_authority =
             open_product_manifest_authority().map_err(map_preparation_error)?;
         let prepared = prepare_rollback_package(
@@ -200,25 +229,10 @@ impl ExtensionRepository {
             source,
         )
         .map_err(map_preparation_error)?;
-
         // Rollback catalog publication is inert and does not lower the outer
-        // floor. Complete it before replacing an unrelated resumable intent.
+        // floor. Source-free settlement above proved no prior intent remains.
         self.writer_ensure_rollback_catalog(catalog, exact_catalog_bytes)?;
 
-        let existing = {
-            let runtime = self.writer_materialization()?;
-            match runtime._build_intent.as_ref() {
-                None => ExistingBuild::None,
-                Some(intent) if &intent.package_record != prepared.record() => {
-                    ExistingBuild::Different
-                }
-                Some(_) if runtime._build_stage.is_some() || !runtime._record_stages.is_empty() => {
-                    ExistingBuild::MatchingWithStages
-                }
-                Some(_) => ExistingBuild::MatchingWithoutStages,
-            }
-        };
-        self.reconcile_existing_build(existing)?;
         self.drive_rollback_materialization(prepared, source)
     }
 
@@ -265,7 +279,9 @@ impl ExtensionRepository {
                         }
                         Err(error) => {
                             let public_error = map_publication_error(error);
-                            self.abort_after_clean_publication_failure(runtime)?;
+                            if self.settle_after_clean_publication_failure(runtime)? {
+                                return Ok(BundledPackageMaterializationOutcome::Materialized);
+                            }
                             return Err(public_error);
                         }
                     };
@@ -339,7 +355,9 @@ impl ExtensionRepository {
                         }
                         Err(error) => {
                             let public_error = map_publication_error(error);
-                            self.abort_after_clean_publication_failure(runtime)?;
+                            if self.settle_after_clean_publication_failure(runtime)? {
+                                return Ok(BundledPackageMaterializationOutcome::Materialized);
+                            }
                             return Err(public_error);
                         }
                     };
@@ -381,47 +399,50 @@ impl ExtensionRepository {
         }
     }
 
-    fn reconcile_existing_build(
-        &mut self,
-        existing: ExistingBuild,
-    ) -> Result<(), BundledPackageMaterializationError> {
-        match existing {
-            ExistingBuild::None | ExistingBuild::MatchingWithoutStages => return Ok(()),
-            ExistingBuild::MatchingWithStages | ExistingBuild::Different => {}
-        }
-
-        let mut runtime = self.writer_take_materialization()?;
-        let stages_absent = match reconcile_build_stages_for_abort(&mut runtime) {
-            Ok(proof) => proof,
-            Err(error) => {
-                drop(runtime);
-                return Err(self.finish_cleanup_failure(error));
-            }
-        };
-
-        if existing == ExistingBuild::MatchingWithStages {
-            // Partial stage bytes are not authority and are intentionally
-            // discarded. The durable exact intent remains resumable.
-            let _ = stages_absent;
-            drop(runtime);
-            return self.recover_consumed_runtime();
-        }
-
-        self.finish_transition(abort_package_build(runtime, stages_absent))
-    }
-
-    fn abort_after_clean_publication_failure(
+    fn settle_after_clean_publication_failure(
         &mut self,
         mut runtime: MaterializationRuntime,
-    ) -> Result<(), BundledPackageMaterializationError> {
-        let stages_absent = match reconcile_build_stages_for_abort(&mut runtime) {
-            Ok(proof) => proof,
+    ) -> Result<bool, BundledPackageMaterializationError> {
+        let marker = match inspect_package_build_commit_marker(&runtime) {
+            Ok(marker) => marker,
             Err(error) => {
                 drop(runtime);
                 return Err(self.finish_cleanup_failure(error));
             }
         };
-        self.finish_transition(abort_package_build(runtime, stages_absent))
+        match marker {
+            PackageBuildCommitMarker::Absent(marker_absent) => {
+                let abortable = match reconcile_build_stages_for_abort(&mut runtime, marker_absent)
+                {
+                    Ok(proof) => proof,
+                    Err(CleanupError::CommitMarkerPresent) => {
+                        drop(runtime);
+                        self.recover_consumed_runtime()?;
+                        return self
+                            .settle_interrupted_bundled_package_build_under_gate()
+                            .map(|outcome| {
+                                outcome == BundledPackageBuildSettlementOutcome::Completed
+                            })
+                            .map_err(
+                                BundledPackageMaterializationError::InterruptedBuildSettlement,
+                            );
+                    }
+                    Err(error) => {
+                        drop(runtime);
+                        return Err(self.finish_cleanup_failure(error));
+                    }
+                };
+                self.finish_transition(abort_package_build(runtime, abortable))?;
+                Ok(false)
+            }
+            PackageBuildCommitMarker::Present => {
+                drop(runtime);
+                self.recover_consumed_runtime()?;
+                self.settle_interrupted_bundled_package_build_under_gate()
+                    .map(|outcome| outcome == BundledPackageBuildSettlementOutcome::Completed)
+                    .map_err(BundledPackageMaterializationError::InterruptedBuildSettlement)
+            }
+        }
     }
 
     pub(crate) fn finish_transition<Committed>(
@@ -558,9 +579,9 @@ fn map_cleanup_error(error: CleanupError) -> BundledPackageMaterializationError 
     match error {
         CleanupError::Filesystem(error) => ExtensionRepositoryError::FileSystem(error).into(),
         CleanupError::SettlementAmbiguous => ExtensionRepositoryError::SettlementAmbiguous.into(),
-        CleanupError::BuildStateMismatch | CleanupError::ExactMismatch => {
-            ExtensionRepositoryError::RecoveryAmbiguous.into()
-        }
+        CleanupError::BuildStateMismatch
+        | CleanupError::ExactMismatch
+        | CleanupError::CommitMarkerPresent => ExtensionRepositoryError::RecoveryAmbiguous.into(),
     }
 }
 
@@ -608,6 +629,7 @@ const fn cleanup_error_requires_sealing(error: CleanupError) -> bool {
     match error {
         CleanupError::BuildStateMismatch
         | CleanupError::ExactMismatch
+        | CleanupError::CommitMarkerPresent
         | CleanupError::SettlementAmbiguous => true,
         CleanupError::Filesystem(error) => filesystem_error_requires_sealing(error),
     }

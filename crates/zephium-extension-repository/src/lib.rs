@@ -32,6 +32,7 @@ mod recovery;
 ))]
 #[path = "../../zephium-extension-authority/src/repository_e2e_fixture.rs"]
 mod repository_e2e_fixture;
+mod settlement;
 mod state;
 mod storage;
 mod writer;
@@ -59,4 +60,5 @@ pub use package_lease::{
     RollbackBundledPackageReleaseRequest, RollbackBundledRuntimePackageAccessBuildRefusal,
     RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
 };
+pub use settlement::{BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome};
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

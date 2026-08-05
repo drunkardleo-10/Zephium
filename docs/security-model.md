@@ -435,6 +435,20 @@ absence as an idempotent crash-before-pin result without consulting a set
 object. A present owner requires the complete persisted identity plus exact
 set-row/package/backend join before the exact removal transition. A stale
 incarnation, role, context, set, package, or backend is never approximated.
+Bundled package settlement is source-free and precedes every fresh package
+callback. A package-record final is the last-published commit marker. An intent
+may be aborted only after repository-minted proofs establish that its marker
+and every exact build stage are absent, with marker absence revalidated in the
+abort transition. A present marker can never take the abort path, including in
+the same process before its runtime map has been refreshed. Instead, stored
+catalog and manifest bytes must pass current product admission and the complete
+active or rollback object closure must verify from repository-owned bytes.
+There is no source-backed repair after commitment. Missing or corrupt closure
+members, a corrupt marker, or an unrooted package-record final fail closed with
+path-free public errors. Tests cover no-build, pre-marker abort, active and
+rollback completion, source-callback counts, publication/completion crash
+frontiers, stale same-process state, missing closure members, corrupt markers,
+and unrooted markers.
 The repository can recover at most eight sealed catalog-set finals and has no
 production materialization GC yet. Repeated distinct catalog selections can
 hard-stop at that bound; a bounded collector that runs only after

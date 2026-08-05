@@ -302,9 +302,9 @@ pub(crate) fn validated_resumable_build_in_progress(
 
 fn map_build_validation_error(error: CleanupError) -> SnapshotLoadError {
     match error {
-        CleanupError::BuildStateMismatch | CleanupError::ExactMismatch => {
-            SnapshotLoadError::DurableMismatch
-        }
+        CleanupError::BuildStateMismatch
+        | CleanupError::ExactMismatch
+        | CleanupError::CommitMarkerPresent => SnapshotLoadError::DurableMismatch,
         CleanupError::SettlementAmbiguous => {
             SnapshotLoadError::Repository(ExtensionRepositoryError::SettlementAmbiguous)
         }

@@ -160,7 +160,12 @@ impl ExtensionRepository {
         self.runtime.poison();
     }
 
-    pub(crate) fn package_lease_read_catalog_object(
+    /// Freshly reads one digest-addressed authenticated catalog object.
+    ///
+    /// This neutral repository primitive is shared by package leases and
+    /// interrupted-build settlement; neither caller may treat bytes as product
+    /// authority until it independently re-admits them.
+    pub(crate) fn read_authenticated_catalog_object(
         &mut self,
         digest: Digest32,
     ) -> Result<Vec<u8>, ExtensionRepositoryError> {

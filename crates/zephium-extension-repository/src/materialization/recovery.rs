@@ -272,6 +272,11 @@ fn open_or_recover_with_policy(
         disposition,
         fault,
     )?;
+    // Enforce commit-marker reachability only after any exact prepared journal
+    // has been applied. During completion recovery the current state may still
+    // name the build intent while the prepared successor names the completed
+    // ledger; the converged state is the sole durable root projection.
+    validate_package_record_roots(&state, &record_inventory)?;
     let pin_roots = validate_state_references(
         &state,
         &record_inventory,
@@ -1179,6 +1184,35 @@ fn validate_state_references(
         _package_record_ids: package_record_ids,
         _tree_ids: tree_ids,
     })
+}
+
+/// Rejects orphan package-record commit markers.
+///
+/// Tree, index, and legal finals published before the marker may remain inert
+/// after an abort and are deliberately reusable. A package-record final is
+/// different: publication orders it last and permanently commits the exact
+/// build to source-free completion. It must therefore be rooted by either the
+/// completed ledger or the one exact live intent, never by neither.
+fn validate_package_record_roots(
+    state: &MaterializationState,
+    records: &RecordInventory,
+) -> Result<(), ExtensionRepositoryError> {
+    for (record_id, record) in &records.packages {
+        if state
+            .completed_package_record_ids
+            .binary_search(record_id)
+            .is_ok()
+        {
+            continue;
+        }
+        let rooted_by_intent = state.build_intent.as_ref().is_some_and(|intent| {
+            intent.package_record_id == *record_id && intent.package_record == *record
+        });
+        if !rooted_by_intent {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+    }
+    Ok(())
 }
 
 fn validate_completed_package_closure<'a>(

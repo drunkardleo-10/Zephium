@@ -641,6 +641,22 @@ remains idempotent. A present owner must match the complete persisted
 owner/set/role/incarnation identity
 and the exact set-row/package/backend join before the existing exact removal
 transition may run.
+Interrupted package builds settle at a source-free boundary before any new
+bundled-resource adapter callback. The package-record final is published last
+and is the durable commit marker for its complete object closure. While that
+marker is freshly proven absent, recovery may remove only the exact stages
+owned by the one durable intent, reprove both marker and stage absence, and
+abort the intent. Once the marker is present, abort is permanently forbidden:
+the repository rereads its own authenticated catalog object, re-admits the
+catalog and stored manifest through product policy, freshly verifies the
+index, legal artifact, tree, and package record, and consumes a role-specific
+active or rollback completion transition. The public settlement API accepts no
+source, and a retry of that same catalog/package/runtime returns after
+settlement without consulting its source. Missing, corrupt, or mismatched
+post-marker state fails closed and remains unrepairable by the package source.
+Every package-record final discovered during recovery must be rooted by either
+the exact sole build intent or the completed ledger; unrooted commit markers
+are ambiguous durable state, not inert garbage.
 The physical recovery inventory currently permits at most eight sealed
 catalog-set finals, but materialization does not yet have a production garbage
 collector. Repeated distinct selections can therefore exhaust that bound.

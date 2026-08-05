@@ -425,6 +425,65 @@ pub(crate) fn publish_or_reuse_rollback_package<S: BundledReleaseByteSource>(
     )
 }
 
+/// Reauthenticates a marker-committed active build entirely from durable
+/// repository objects.
+///
+/// This operation never consults a package byte source. The package-record
+/// final is only a commit marker; every catalog, manifest, index, legal, tree,
+/// and record binding must still be freshly verified before a completion
+/// capability is returned.
+pub(crate) fn verify_interrupted_active_package(
+    runtime: &MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedActivePackage,
+) -> Result<VerifiedActivePackageClosure, PackageObjectError> {
+    let view = PreparedPackageView {
+        package_source: prepared.package_source(),
+        tree_index: prepared.tree_index(),
+        tree_index_bytes: prepared.tree_index_bytes(),
+        manifest_bytes: prepared.manifest_bytes(),
+        record: prepared.record(),
+    };
+    let verified = verify_interrupted_package(runtime, capacity, view)?;
+    Ok(VerifiedActivePackageClosure(VerifiedPackageClosure {
+        intent_generation: verified.intent_generation,
+        record_id: verified.record_id,
+        record: verified.record,
+        tree_root: verified.tree_root,
+        records_parent: verified.records_parent,
+        trees_parent: verified.trees_parent,
+        stages_absent: verified.stages_absent,
+        prepared,
+    }))
+}
+
+/// Reauthenticates a marker-committed rollback build entirely from durable
+/// repository objects while retaining the nominal rollback witness.
+pub(crate) fn verify_interrupted_rollback_package(
+    runtime: &MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedRollbackPackage,
+) -> Result<VerifiedRollbackPackageClosure, PackageObjectError> {
+    let view = PreparedPackageView {
+        package_source: prepared.package_source(),
+        tree_index: prepared.tree_index(),
+        tree_index_bytes: prepared.tree_index_bytes(),
+        manifest_bytes: prepared.manifest_bytes(),
+        record: prepared.record(),
+    };
+    let verified = verify_interrupted_package(runtime, capacity, view)?;
+    Ok(VerifiedRollbackPackageClosure(VerifiedPackageClosure {
+        intent_generation: verified.intent_generation,
+        record_id: verified.record_id,
+        record: verified.record,
+        tree_root: verified.tree_root,
+        records_parent: verified.records_parent,
+        trees_parent: verified.trees_parent,
+        stages_absent: verified.stages_absent,
+        prepared,
+    }))
+}
+
 fn publish_or_reuse_rollback_package_with_fault<S: BundledReleaseByteSource>(
     runtime: &mut MaterializationRuntime,
     capacity: PackageObjectCapacity,
@@ -689,6 +748,9 @@ pub(crate) enum ObjectPublicationFaultPoint {
     AfterTreeIndex,
     AfterLegal,
     AfterPackageRecord,
+    /// Test-only transient I/O failure after the commit marker is durable.
+    #[cfg(test)]
+    AfterPackageRecordTransientFailure,
     AfterClosureVerification,
 }
 
@@ -696,6 +758,12 @@ fn fail_after_object_publication(
     configured: ObjectPublicationFaultPoint,
     reached: ObjectPublicationFaultPoint,
 ) -> Result<(), PackageObjectError> {
+    #[cfg(test)]
+    if configured == ObjectPublicationFaultPoint::AfterPackageRecordTransientFailure
+        && reached == ObjectPublicationFaultPoint::AfterPackageRecord
+    {
+        return Err(PackageObjectError::Filesystem(PrivateFsError::Io));
+    }
     #[cfg(test)]
     if configured == reached {
         return Err(PackageObjectError::SettlementAmbiguous);
@@ -741,6 +809,36 @@ fn verify_completed_package(
         tree_root,
         records_parent: capacity.records_parent,
         trees_parent: capacity.trees_parent,
+    })
+}
+
+fn verify_interrupted_package(
+    runtime: &MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedPackageView<'_>,
+) -> Result<VerifiedPackageObjects, PackageObjectError> {
+    validate_capacity_and_intent(runtime, &capacity, &prepared)?;
+    validate_prepared_package(&prepared)?;
+    if capacity.missing != MissingPackageObjects::default() {
+        // Publication orders the package record last. Once that marker exists,
+        // a missing predecessor is durable incoherence, never an incomplete
+        // build that may be repaired from an external source.
+        return Err(PackageObjectError::ExactMismatch);
+    }
+    let intent_generation = capacity
+        .expected_intent_generation
+        .ok_or(PackageObjectError::BuildStateMismatch)?;
+    let package_record_bytes = canonical_package_record_bytes(&capacity, &prepared)?;
+    let tree_root = verify_complete_final_closure(runtime, &prepared, &package_record_bytes)?;
+    let stages_absent = prove_build_stages_absent(runtime).map_err(map_cleanup_error)?;
+    Ok(VerifiedPackageObjects {
+        intent_generation,
+        record_id: capacity.package_record_id,
+        record: prepared.record.clone(),
+        tree_root,
+        records_parent: capacity.records_parent,
+        trees_parent: capacity.trees_parent,
+        stages_absent,
     })
 }
 
@@ -895,9 +993,9 @@ fn map_cleanup_error(error: CleanupError) -> PackageObjectError {
         CleanupError::BuildStateMismatch => PackageObjectError::BuildStateMismatch,
         // A stage appearing after every publication reported settlement is no
         // longer a clean validation failure. Completion must seal/recover.
-        CleanupError::ExactMismatch | CleanupError::SettlementAmbiguous => {
-            PackageObjectError::SettlementAmbiguous
-        }
+        CleanupError::ExactMismatch
+        | CleanupError::CommitMarkerPresent
+        | CleanupError::SettlementAmbiguous => PackageObjectError::SettlementAmbiguous,
         CleanupError::Filesystem(error) => map_inventory_fs(error),
     }
 }
@@ -1464,6 +1562,53 @@ fn ensure_package_record_final(
         capacity.missing.package_record,
     )?;
     Ok(bytes)
+}
+
+/// Deterministically publishes the current intent's exact commit marker.
+///
+/// This internal E2E hook models a marker appearing after settlement's first
+/// absence observation while deliberately leaving the recovered runtime map
+/// stale. It uses the production exact-CAS publication primitive and accepts
+/// no package byte source.
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) fn publish_intent_package_record_marker_for_e2e(
+    runtime: &MaterializationRuntime,
+) -> Result<(), PackageObjectError> {
+    let intent = runtime
+        ._build_intent
+        .as_ref()
+        .ok_or(PackageObjectError::BuildStateMismatch)?;
+    if runtime._state.build_intent.as_ref() != Some(intent)
+        || runtime._state.generation != intent.generation
+    {
+        return Err(PackageObjectError::BuildStateMismatch);
+    }
+    let bytes = intent
+        .package_record
+        .canonical_bytes()
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    if bytes.len() > MAX_PACKAGE_RECORD_BYTES
+        || Digest32::from_bytes(Sha256::digest(&bytes).into()) != intent.package_record_id
+    {
+        return Err(PackageObjectError::ExactMismatch);
+    }
+    let expectation = RegularExpectation {
+        length: u64::try_from(bytes.len()).map_err(|_| PackageObjectError::ExactMismatch)?,
+        sha256: intent.package_record_id.bytes(),
+        exact_bytes: Some(&bytes),
+    };
+    ensure_bytes_regular_object(
+        &runtime._records,
+        &names::package_record_stage(intent.package_record_id),
+        &names::package_record(intent.package_record_id),
+        &bytes,
+        expectation,
+        true,
+    )
 }
 
 fn canonical_package_record_bytes(

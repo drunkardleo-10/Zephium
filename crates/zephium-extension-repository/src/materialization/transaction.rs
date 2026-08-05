@@ -15,7 +15,11 @@ use zephium_private_fs::{ByteLimit, DirectoryIdentity, FileIdentity, PrivateFsEr
 use super::catalog_set::{
     CatalogSetTransitionProof, VerifiedActiveCatalogSet, VerifiedRollbackCatalogSet,
 };
-use super::cleanup::{BuildStagesAbsent, CleanupError};
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+use super::cleanup::{
+    inspect_package_build_commit_marker, reconcile_build_stages_for_abort, PackageBuildCommitMarker,
+};
+use super::cleanup::{AbortablePackageBuild, BuildStagesAbsent, CleanupError};
 use super::names::{self, RecordNameKind, TreeNameKind};
 use super::objects::{
     PackageObjectCapacity, PackageObjectError, VerifiedActivePackageClosure,
@@ -915,20 +919,18 @@ fn begin_package_build_with_fault(
 /// by a later exact build. This operation never removes or rewrites a final.
 pub(crate) fn abort_package_build(
     runtime: MaterializationRuntime,
-    stages_absent: BuildStagesAbsent,
+    abortable: AbortablePackageBuild,
 ) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
-    abort_package_build_with_fault(runtime, stages_absent, TransitionFaultPoint::None)
+    abort_package_build_with_fault(runtime, abortable, TransitionFaultPoint::None)
 }
 
 pub(super) fn abort_package_build_with_fault(
     runtime: MaterializationRuntime,
-    stages_absent: BuildStagesAbsent,
+    abortable: AbortablePackageBuild,
     fault: TransitionFaultPoint,
 ) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
     validate_runtime(&runtime)?;
-    stages_absent
-        .validate(&runtime)
-        .map_err(map_cleanup_error)?;
+    abortable.validate(&runtime).map_err(map_cleanup_error)?;
     if runtime._state.build_intent.is_none() {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
@@ -1410,7 +1412,9 @@ fn map_begin_proof_error(_error: PackageObjectError) -> MaterializationTransitio
 
 fn map_cleanup_error(error: CleanupError) -> MaterializationTransitionError {
     match error {
-        CleanupError::BuildStateMismatch | CleanupError::ExactMismatch => {
+        CleanupError::BuildStateMismatch
+        | CleanupError::ExactMismatch
+        | CleanupError::CommitMarkerPresent => {
             must_seal(ExtensionRepositoryError::RecoveryAmbiguous)
         }
         CleanupError::SettlementAmbiguous => {
@@ -1530,7 +1534,6 @@ mod tests {
         use zephium_private_fs::{LockedPrivateNamespace, PrivateDirectory};
 
         use super::*;
-        use crate::materialization::cleanup::prove_build_stages_absent;
         use crate::materialization::names::{
             self, MAX_MATERIALIZATION_JOURNAL_ENTRIES, MAX_MATERIALIZATION_ROOT_ENTRIES,
             MAX_RECORD_ENTRIES, MAX_TREE_ENTRIES,
@@ -1917,7 +1920,7 @@ mod tests {
                 .unwrap();
                 drop(committed);
 
-                let durable_intent = harness.recover();
+                let mut durable_intent = harness.recover();
                 assert_recovered_shape(
                     &durable_intent,
                     &record,
@@ -1925,10 +1928,16 @@ mod tests {
                     Some(1),
                     PackageObjectIntentDisposition::AlreadyCommitted,
                 );
-                let stages_absent = prove_build_stages_absent(&durable_intent).unwrap();
+                let PackageBuildCommitMarker::Absent(marker_absent) =
+                    inspect_package_build_commit_marker(&durable_intent).unwrap()
+                else {
+                    panic!("abort fixture unexpectedly contains a commit marker");
+                };
+                let abortable =
+                    reconcile_build_stages_for_abort(&mut durable_intent, marker_absent).unwrap();
                 injected_crash(abort_package_build_with_fault(
                     durable_intent,
-                    stages_absent,
+                    abortable,
                     fault,
                 ));
                 assert_eq!(observe_frontier(&harness), expected_frontier);

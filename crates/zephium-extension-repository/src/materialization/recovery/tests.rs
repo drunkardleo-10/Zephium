@@ -950,7 +950,7 @@ fn writable_final_metadata_and_tree_roots_are_refused() {
 }
 
 #[test]
-fn inert_package_records_may_dangle_but_completed_records_require_full_closure() {
+fn package_record_commit_markers_must_be_rooted_and_completed_records_require_full_closure() {
     let harness = Harness::new();
     drop(harness.open());
     let handles = harness.handles();
@@ -964,10 +964,12 @@ fn inert_package_records_may_dangle_but_completed_records_require_full_closure()
     );
     drop(handles);
 
-    // Canonical final records outside current/prepared state are inert. They
-    // are inventoried and decoded, but cannot poison recovery through missing
-    // dependencies.
-    assert!(harness.open_with_fault(FaultPoint::None).is_ok());
+    // Package-record finals are commit markers, not inert residue. An orphan
+    // marker is rejected even when its canonical record bytes are valid.
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
 
     let handles = harness.handles();
     let state = MaterializationState {
@@ -1656,9 +1658,12 @@ fn content_address_conflicts_are_scoped_to_completed_records_and_build_intent() 
     );
     drop(handles);
 
-    // Neither record participates in recovery yet, so their conflicting
-    // claims about one content address remain inert.
-    assert!(harness.open_with_fault(FaultPoint::None).is_ok());
+    // Package-record finals may no longer remain unrooted, independent of the
+    // content-address conflict they would otherwise describe.
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
 
     let first_id = first.record_id().unwrap();
     let second_id = second.record_id().unwrap();
@@ -1671,8 +1676,11 @@ fn content_address_conflicts_are_scoped_to_completed_records_and_build_intent() 
     replace_settled_state(&handles, &state);
     drop(handles);
 
-    // A conflicting inert final cannot poison a valid completed closure.
-    assert!(harness.open_with_fault(FaultPoint::None).is_ok());
+    // Rooting only one marker still leaves the other orphaned and is rejected.
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
 
     let handles = harness.handles();
     let state = MaterializationState {
@@ -1759,9 +1767,16 @@ fn only_referenced_catalog_sets_bind_rows_to_package_key_and_runtime() {
             &set.canonical_bytes().unwrap(),
             MAX_CATALOG_SET_RECORD_BYTES,
         );
+        // Root the package marker while leaving the malformed catalog set
+        // unselected. Unlike package-record markers, catalog-set finals remain
+        // inert until a slot or owner pin names them.
+        let state = MaterializationState {
+            generation: 1,
+            completed_package_record_ids: vec![second_id],
+            ..MaterializationState::default()
+        };
+        replace_settled_state(&handles, &state);
         drop(handles);
-
-        // The set is canonical metadata, but not a recovery root yet.
         assert!(harness.open_with_fault(FaultPoint::None).is_ok());
 
         let handles = harness.handles();

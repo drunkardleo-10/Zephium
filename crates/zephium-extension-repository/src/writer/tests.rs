@@ -23,7 +23,7 @@ use zephium_extension_authority::{
     ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::CanonicalExtensionTreeIndex;
-use zephium_private_fs::LockedPrivateNamespace;
+use zephium_private_fs::{ByteLimit, LockedPrivateNamespace, PrivateComponent};
 
 use super::*;
 use crate::admission::FaultPoint as CatalogFaultPoint;
@@ -39,12 +39,13 @@ use crate::materialization::{
     stage_active_catalog_set_candidate_at_fault, ObjectPublicationFaultPoint, OwnerPackagePinPlan,
     OwnerPackagePinRemovalPlan, PackagePinReleaseAdmissionError, RecoveredPackagePinRelease,
     TransitionFaultPoint, VerifiedActiveCatalogSet, VerifiedPackagePinAdmission,
-    VerifiedRollbackCatalogSet,
+    VerifiedRollbackCatalogSet, MAX_PACKAGE_RECORD_BYTES,
 };
 use crate::{
     BundledCatalogRecordOutcome, BundledCatalogSetError, BundledCatalogSetIdentity,
     BundledCatalogSetPromotionOutcome, BundledCatalogSetRollbackOutcome,
-    BundledCatalogSetStageOutcome, BundledPackageRuntimeSelection,
+    BundledCatalogSetStageOutcome, BundledPackageBuildSettlementError,
+    BundledPackageBuildSettlementOutcome, BundledPackageRuntimeSelection,
     BundledReleaseCatalogSourceIdentity, BundledReleasePackageSourceIdentity,
     BundledReleaseResource, BundledReleaseResourceKind,
 };
@@ -638,6 +639,21 @@ fn begin_active_intent(repository: &mut ExtensionRepository, prepared: &Prepared
         .unwrap();
 }
 
+fn begin_rollback_intent(repository: &mut ExtensionRepository, prepared: &PreparedRollbackPackage) {
+    let capacity = {
+        let runtime = repository.writer_materialization().unwrap();
+        preflight_package_object_capacity(runtime, prepared.record()).unwrap()
+    };
+    assert_eq!(
+        capacity.intent_disposition(),
+        PackageObjectIntentDisposition::RequiresCommit
+    );
+    let runtime = repository.writer_take_materialization().unwrap();
+    repository
+        .finish_transition(begin_rollback_package_build(runtime, capacity, prepared))
+        .unwrap();
+}
+
 fn publish_active_closure(
     repository: &mut ExtensionRepository,
     prepared: PreparedActivePackage,
@@ -1024,6 +1040,439 @@ fn clean_post_callback_failure_aborts_and_exact_retry_reuses_inert_finals() {
         Ok(BundledPackageMaterializationOutcome::IdempotentReplay)
     );
     replay.assert_requests(&preparation_requests());
+}
+
+#[test]
+fn public_interrupted_build_settlement_is_source_free_for_no_build_and_abort() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::NoBuild)
+    );
+
+    assert_eq!(
+        repository.record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES),
+        Ok(BundledCatalogRecordOutcome::Recorded)
+    );
+    let mut source = FixtureSource::active(&active);
+    let prepared = prepare_active(&active, &mut source);
+    begin_active_intent(&mut repository, &prepared);
+    let callback_count = source.requests.len();
+
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::AbortedIncomplete)
+    );
+    assert_eq!(source.requests.len(), callback_count);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._build_intent
+        .is_none());
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::NoBuild)
+    );
+}
+
+#[test]
+fn marker_committed_active_and_rollback_builds_complete_without_source_callbacks() {
+    let (_authority, active, rollback) = fixture_authority();
+
+    let active_harness = Harness::new();
+    let mut active_repository = active_harness.open();
+    let _ = active_repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut active_source = FixtureSource::active(&active);
+    let active_prepared = prepare_active(&active, &mut active_source);
+    begin_active_intent(&mut active_repository, &active_prepared);
+    let (active_runtime, active_closure) =
+        publish_active_closure(&mut active_repository, active_prepared, &mut active_source);
+    let active_callback_count = active_source.requests.len();
+    drop(active_closure);
+    drop(active_runtime);
+    active_repository.writer_recover_materialization().unwrap();
+    assert_eq!(
+        active_repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::Completed)
+    );
+    assert_eq!(active_source.requests.len(), active_callback_count);
+    assert_eq!(
+        active_repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::NoBuild)
+    );
+
+    let rollback_harness = Harness::new();
+    let mut rollback_repository = rollback_harness.open();
+    let _ = rollback_repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    rollback_repository
+        .writer_ensure_rollback_catalog(&rollback, fixture::ROLLBACK_CATALOG_BYTES)
+        .unwrap();
+    let manifest_authority = open_product_manifest_authority().unwrap();
+    let mut rollback_source = FixtureSource::rollback(&rollback);
+    let rollback_prepared = prepare_rollback_package(
+        &rollback,
+        fixture::ROLLBACK_CATALOG_BYTES,
+        &manifest_authority,
+        runtime_target(),
+        package_key(),
+        &mut rollback_source,
+    )
+    .unwrap();
+    begin_rollback_intent(&mut rollback_repository, &rollback_prepared);
+    let capacity = preflight_package_object_capacity(
+        rollback_repository.writer_materialization().unwrap(),
+        rollback_prepared.record(),
+    )
+    .unwrap();
+    let mut rollback_runtime = rollback_repository.writer_take_materialization().unwrap();
+    let rollback_closure = publish_or_reuse_rollback_package(
+        &mut rollback_runtime,
+        capacity,
+        rollback_prepared,
+        &mut rollback_source,
+    )
+    .unwrap();
+    let rollback_callback_count = rollback_source.requests.len();
+    drop(rollback_closure);
+    drop(rollback_runtime);
+    rollback_repository
+        .writer_recover_materialization()
+        .unwrap();
+    assert_eq!(
+        rollback_repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::Completed)
+    );
+    assert_eq!(rollback_source.requests.len(), rollback_callback_count);
+    assert_eq!(
+        rollback_repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::NoBuild)
+    );
+}
+
+#[test]
+fn same_request_marker_completion_returns_before_every_source_callback() {
+    let (_authority, active, rollback) = fixture_authority();
+
+    let active_harness = Harness::new();
+    let mut active_repository = active_harness.open();
+    let _ = active_repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut active_build_source = FixtureSource::active(&active);
+    let active_prepared = prepare_active(&active, &mut active_build_source);
+    begin_active_intent(&mut active_repository, &active_prepared);
+    let (active_runtime, active_closure) = publish_active_closure(
+        &mut active_repository,
+        active_prepared,
+        &mut active_build_source,
+    );
+    drop(active_closure);
+    drop(active_runtime);
+    active_repository.writer_recover_materialization().unwrap();
+
+    let mut active_retry_source = FixtureSource::active(&active);
+    assert_eq!(
+        active_repository.materialize_active_bundled_package(
+            &active,
+            fixture::ACTIVE_CATALOG_BYTES,
+            runtime_target(),
+            package_key(),
+            &mut active_retry_source,
+        ),
+        Ok(BundledPackageMaterializationOutcome::Materialized)
+    );
+    assert!(active_retry_source.requests.is_empty());
+
+    let rollback_harness = Harness::new();
+    let mut rollback_repository = rollback_harness.open();
+    let _ = rollback_repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    rollback_repository
+        .writer_ensure_rollback_catalog(&rollback, fixture::ROLLBACK_CATALOG_BYTES)
+        .unwrap();
+    let manifest_authority = open_product_manifest_authority().unwrap();
+    let mut rollback_build_source = FixtureSource::rollback(&rollback);
+    let rollback_prepared = prepare_rollback_package(
+        &rollback,
+        fixture::ROLLBACK_CATALOG_BYTES,
+        &manifest_authority,
+        runtime_target(),
+        package_key(),
+        &mut rollback_build_source,
+    )
+    .unwrap();
+    begin_rollback_intent(&mut rollback_repository, &rollback_prepared);
+    let capacity = preflight_package_object_capacity(
+        rollback_repository.writer_materialization().unwrap(),
+        rollback_prepared.record(),
+    )
+    .unwrap();
+    let mut rollback_runtime = rollback_repository.writer_take_materialization().unwrap();
+    let rollback_closure = publish_or_reuse_rollback_package(
+        &mut rollback_runtime,
+        capacity,
+        rollback_prepared,
+        &mut rollback_build_source,
+    )
+    .unwrap();
+    drop(rollback_closure);
+    drop(rollback_runtime);
+    rollback_repository
+        .writer_recover_materialization()
+        .unwrap();
+
+    let mut rollback_retry_source = FixtureSource::rollback(&rollback);
+    assert_eq!(
+        rollback_repository.materialize_rollback_bundled_package(
+            &rollback,
+            fixture::ROLLBACK_CATALOG_BYTES,
+            runtime_target(),
+            package_key(),
+            &mut rollback_retry_source,
+        ),
+        Ok(BundledPackageMaterializationOutcome::Materialized)
+    );
+    assert!(rollback_retry_source.requests.is_empty());
+}
+
+#[test]
+fn same_process_post_marker_transient_failure_cannot_abort_with_a_stale_runtime_map() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let _ = repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut source = FixtureSource::active(&active);
+    let prepared = prepare_active(&active, &mut source);
+    let record_id = prepared.record().record_id().unwrap();
+    begin_active_intent(&mut repository, &prepared);
+    let capacity = preflight_package_object_capacity(
+        repository.writer_materialization().unwrap(),
+        prepared.record(),
+    )
+    .unwrap();
+    let mut runtime = repository.writer_take_materialization().unwrap();
+    assert!(matches!(
+        publish_or_reuse_active_package_at_fault(
+            &mut runtime,
+            capacity,
+            prepared,
+            &mut source,
+            ObjectPublicationFaultPoint::AfterPackageRecordTransientFailure,
+        ),
+        Err(PackageObjectError::Filesystem(
+            zephium_private_fs::PrivateFsError::Io
+        ))
+    ));
+    assert!(!runtime._package_records.contains_key(&record_id));
+    assert!(matches!(
+        inspect_package_build_commit_marker(&runtime),
+        Ok(PackageBuildCommitMarker::Present)
+    ));
+    let callback_count = source.requests.len();
+
+    assert!(repository
+        .settle_after_clean_publication_failure(runtime)
+        .unwrap());
+    assert_eq!(source.requests.len(), callback_count);
+    let recovered = repository.writer_materialization().unwrap();
+    assert!(recovered._build_intent.is_none());
+    assert!(recovered
+        ._state
+        .completed_package_record_ids
+        .binary_search(&record_id)
+        .is_ok());
+}
+
+#[test]
+fn marker_appearing_after_first_absence_observation_completes_without_source_callbacks() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let _ = repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut source = FixtureSource::active(&active);
+    let prepared = prepare_active(&active, &mut source);
+    let record_id = prepared.record().record_id().unwrap();
+    begin_active_intent(&mut repository, &prepared);
+    let capacity = preflight_package_object_capacity(
+        repository.writer_materialization().unwrap(),
+        prepared.record(),
+    )
+    .unwrap();
+    let mut runtime = repository.writer_take_materialization().unwrap();
+    assert!(matches!(
+        publish_or_reuse_active_package_at_fault(
+            &mut runtime,
+            capacity,
+            prepared,
+            &mut source,
+            ObjectPublicationFaultPoint::AfterLegal,
+        ),
+        Err(PackageObjectError::SettlementAmbiguous)
+    ));
+    drop(runtime);
+    repository.writer_recover_materialization().unwrap();
+    assert!(matches!(
+        inspect_package_build_commit_marker(repository.writer_materialization().unwrap()),
+        Ok(PackageBuildCommitMarker::Absent(_))
+    ));
+    let callback_count = source.requests.len();
+
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build_at_fault(
+            crate::settlement::InterruptedBuildSettlementFaultPoint::
+                PublishMarkerAfterFirstAbsenceObservation,
+        ),
+        Ok(BundledPackageBuildSettlementOutcome::Completed)
+    );
+    assert_eq!(source.requests.len(), callback_count);
+    let recovered = repository.writer_materialization().unwrap();
+    assert!(recovered._build_intent.is_none());
+    assert!(recovered
+        ._state
+        .completed_package_record_ids
+        .binary_search(&record_id)
+        .is_ok());
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build(),
+        Ok(BundledPackageBuildSettlementOutcome::NoBuild)
+    );
+}
+
+#[test]
+fn different_build_settlement_failure_precedes_every_new_source_callback() {
+    let (_authority, active, rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let _ = repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut active_source = FixtureSource::active(&active);
+    let active_prepared = prepare_active(&active, &mut active_source);
+    begin_active_intent(&mut repository, &active_prepared);
+
+    let foreign_stage = PrivateComponent::new(format!("{}.index.stage", "ee".repeat(32))).unwrap();
+    let _ = repository
+        .writer_materialization()
+        .unwrap()
+        ._records
+        .write_new_synced(&foreign_stage, b"foreign", ByteLimit::new(32).unwrap())
+        .unwrap();
+    let mut rollback_source = FixtureSource::rollback(&rollback);
+    assert!(matches!(
+        repository.materialize_rollback_bundled_package(
+            &rollback,
+            fixture::ROLLBACK_CATALOG_BYTES,
+            runtime_target(),
+            package_key(),
+            &mut rollback_source,
+        ),
+        Err(BundledPackageMaterializationError::InterruptedBuildSettlement(_))
+    ));
+    assert!(rollback_source.requests.is_empty());
+}
+
+#[test]
+fn marker_present_with_missing_predecessor_fails_closed_without_abort() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let _ = repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut source = FixtureSource::active(&active);
+    let prepared = prepare_active(&active, &mut source);
+    let legal_id = prepared.record().legal.sha256.to_hex();
+    begin_active_intent(&mut repository, &prepared);
+    let (runtime, closure) = publish_active_closure(&mut repository, prepared, &mut source);
+    drop(closure);
+    drop(runtime);
+    drop(repository);
+
+    fs::remove_file(
+        harness
+            .repository_path
+            .join(format!("materialization/records/{legal_id}.legal")),
+    )
+    .unwrap();
+    let mut repository = harness.open();
+    assert_eq!(
+        repository.settle_interrupted_bundled_package_build(),
+        Err(BundledPackageBuildSettlementError::DurableObjectMismatch)
+    );
+    assert!(repository.writer_is_sealed());
+}
+
+#[test]
+fn recovery_rejects_an_unrooted_package_record_commit_marker() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let mut source = FixtureSource::active(&active);
+    let prepared = prepare_active(&active, &mut source);
+    let record = prepared.record().clone();
+    let record_id = record.record_id().unwrap();
+    let record_bytes = record.canonical_bytes().unwrap();
+    let final_name = PrivateComponent::new(format!("{}.package.json", record_id.to_hex())).unwrap();
+    let records = &repository.writer_materialization().unwrap()._records;
+    records
+        .write_new_synced(
+            &final_name,
+            &record_bytes,
+            ByteLimit::new(MAX_PACKAGE_RECORD_BYTES).unwrap(),
+        )
+        .unwrap();
+    records.seal_verified_regular(&final_name).unwrap().unwrap();
+    drop(repository);
+
+    let namespace = LockedPrivateNamespace::open_or_create(&harness.repository_path).unwrap();
+    assert!(matches!(
+        ExtensionRepository::open(namespace),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+}
+
+#[test]
+fn recovery_rejects_a_corrupt_package_record_commit_marker_without_aborting() {
+    let (_authority, active, _rollback) = fixture_authority();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let _ = repository
+        .record_bundled_catalog(&active, fixture::ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let mut source = FixtureSource::active(&active);
+    let prepared = prepare_active(&active, &mut source);
+    let record_id = prepared.record().record_id().unwrap();
+    begin_active_intent(&mut repository, &prepared);
+    let (runtime, closure) = publish_active_closure(&mut repository, prepared, &mut source);
+    drop(closure);
+    drop(runtime);
+    drop(repository);
+
+    let marker = harness.repository_path.join(format!(
+        "materialization/records/{}.package.json",
+        record_id.to_hex()
+    ));
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&marker, b"corrupt package record marker").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o400)).unwrap();
+
+    let namespace = LockedPrivateNamespace::open_or_create(&harness.repository_path).unwrap();
+    assert!(matches!(
+        ExtensionRepository::open(namespace),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+            | Err(ExtensionRepositoryError::StateCorrupt)
+    ));
 }
 
 #[test]
@@ -1690,13 +2139,10 @@ fn every_object_publication_frontier_reuses_only_exact_inert_finals() {
             ObjectPublicationFaultPoint::AfterLegal,
             preparation_requests().to_vec(),
         ),
-        (
-            ObjectPublicationFaultPoint::AfterPackageRecord,
-            preparation_requests().to_vec(),
-        ),
+        (ObjectPublicationFaultPoint::AfterPackageRecord, Vec::new()),
         (
             ObjectPublicationFaultPoint::AfterClosureVerification,
-            preparation_requests().to_vec(),
+            Vec::new(),
         ),
     ] {
         let (_authority, active, _rollback) = fixture_authority();
@@ -1764,26 +2210,31 @@ fn every_object_publication_frontier_reuses_only_exact_inert_finals() {
 
 #[test]
 fn every_completion_frontier_recovers_to_exactly_one_outcome() {
-    for (fault, expected_outcome) in [
+    for (fault, expected_outcome, expected_retry_requests) in [
         (
             TransitionFaultPoint::AfterJournalStage,
             BundledPackageMaterializationOutcome::Materialized,
+            Vec::new(),
         ),
         (
             TransitionFaultPoint::AfterJournalPublication,
             BundledPackageMaterializationOutcome::IdempotentReplay,
+            preparation_requests().to_vec(),
         ),
         (
             TransitionFaultPoint::AfterState,
             BundledPackageMaterializationOutcome::IdempotentReplay,
+            preparation_requests().to_vec(),
         ),
         (
             TransitionFaultPoint::AfterCheckpoint,
             BundledPackageMaterializationOutcome::IdempotentReplay,
+            preparation_requests().to_vec(),
         ),
         (
             TransitionFaultPoint::AfterJournalRetirement,
             BundledPackageMaterializationOutcome::IdempotentReplay,
+            preparation_requests().to_vec(),
         ),
     ] {
         let (_authority, active, _rollback) = fixture_authority();
@@ -1820,7 +2271,7 @@ fn every_completion_frontier_recovers_to_exactly_one_outcome() {
             ),
             Ok(expected_outcome)
         );
-        retry.assert_requests(&preparation_requests());
+        retry.assert_requests(&expected_retry_requests);
     }
 
     for (fault, candidate_committed) in [

@@ -131,7 +131,7 @@ impl ExtensionRepository {
         if current.build_in_progress() {
             return Err(BundledManifestBindingsError::BuildInProgress);
         }
-        let exact_catalog = self.package_lease_read_catalog_object(current.catalog_digest())?;
+        let exact_catalog = self.read_authenticated_catalog_object(current.catalog_digest())?;
         let (role, bindings) = match current.role() {
             VerifiedCatalogRole::Active => (
                 BundledCatalogGenerationRole::Active,

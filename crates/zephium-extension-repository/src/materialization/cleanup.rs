@@ -37,6 +37,10 @@ pub(crate) enum CleanupError {
     /// exact bounded shape owned by the current build.
     #[error("extension package cleanup inventory is not exact")]
     ExactMismatch,
+    /// The package-record commit marker exists, so abort is permanently
+    /// forbidden and source-free completion must be attempted instead.
+    #[error("extension package cleanup observed the package commit marker")]
+    CommitMarkerPresent,
     /// A private-filesystem operation failed before any consuming transition
     /// could have committed.
     #[error("extension package cleanup filesystem failed: {0}")]
@@ -45,6 +49,73 @@ pub(crate) enum CleanupError {
     /// was already quarantined. The owning repository must seal itself.
     #[error("extension package cleanup settlement is ambiguous")]
     SettlementAmbiguous,
+}
+
+/// Fresh physical disposition of the package-record commit marker.
+///
+/// Presence is deliberately only a routing fact. Completion must still
+/// reauthenticate the exact marker and the complete package closure. Absence
+/// carries a non-forgeable proof that can be consumed only by abort cleanup.
+#[must_use = "a package build commit marker disposition must be settled"]
+pub(crate) enum PackageBuildCommitMarker {
+    /// No package-record final existed at the exact physical observation.
+    Absent(PackageRecordFinalAbsent),
+    /// A package-record final exists; the durable intent may never be aborted.
+    Present,
+}
+
+/// Fresh, exact-runtime-bound proof that the package-record final is absent.
+///
+/// The proof is neither cloneable nor serializable. The consuming transition
+/// rechecks physical absence, so a stale observation cannot authorize abort.
+#[must_use = "package-record absence must be consumed by exact abort cleanup"]
+pub(crate) struct PackageRecordFinalAbsent {
+    root_identity: DirectoryIdentity,
+    records_identity: DirectoryIdentity,
+    intent_generation: u64,
+    package_record_id: Digest32,
+}
+
+impl PackageRecordFinalAbsent {
+    fn validate(&self, runtime: &MaterializationRuntime) -> Result<(), CleanupError> {
+        let intent = IntentStageIdentity::from_runtime(runtime)?;
+        if runtime._root.identity() != self.root_identity
+            || runtime._records.identity() != self.records_identity
+            || intent.generation != self.intent_generation
+            || intent.package_record_id != self.package_record_id
+            || runtime
+                ._package_records
+                .contains_key(&self.package_record_id)
+        {
+            return Err(CleanupError::BuildStateMismatch);
+        }
+        match runtime
+            ._records
+            .regular_identity(&names::package_record(self.package_record_id))
+            .map_err(map_filesystem)?
+        {
+            None => Ok(()),
+            Some(_) => Err(CleanupError::CommitMarkerPresent),
+        }
+    }
+}
+
+/// Linear proof that an interrupted build is physically safe to abort.
+///
+/// Both stage absence and package-record-final absence are revalidated inside
+/// the consuming journal transition. Content-addressed finals published before
+/// the marker remain inert and are never removed by abort.
+#[must_use = "an abortable package build must be consumed by the abort transition"]
+pub(crate) struct AbortablePackageBuild {
+    stages_absent: BuildStagesAbsent,
+    package_record_absent: PackageRecordFinalAbsent,
+}
+
+impl AbortablePackageBuild {
+    pub(super) fn validate(&self, runtime: &MaterializationRuntime) -> Result<(), CleanupError> {
+        self.stages_absent.validate(runtime)?;
+        self.package_record_absent.validate(runtime)
+    }
 }
 
 /// Linear proof that the current intent owns no physical writer stage.
@@ -104,6 +175,36 @@ pub(super) fn prove_build_stages_absent(
     Ok(proof(runtime, intent))
 }
 
+/// Freshly classifies the package-record final for the current durable intent.
+///
+/// A present marker is never interpreted as a completed package. It only
+/// permanently selects the source-free completion path over abort.
+pub(crate) fn inspect_package_build_commit_marker(
+    runtime: &MaterializationRuntime,
+) -> Result<PackageBuildCommitMarker, CleanupError> {
+    let intent = IntentStageIdentity::from_runtime(runtime)?;
+    let marker = names::package_record(intent.package_record_id);
+    match runtime
+        ._records
+        .regular_identity(&marker)
+        .map_err(map_filesystem)?
+    {
+        Some(_) => Ok(PackageBuildCommitMarker::Present),
+        None if runtime
+            ._package_records
+            .contains_key(&intent.package_record_id) =>
+        {
+            Err(CleanupError::ExactMismatch)
+        }
+        None => Ok(PackageBuildCommitMarker::Absent(PackageRecordFinalAbsent {
+            root_identity: runtime._root.identity(),
+            records_identity: runtime._records.identity(),
+            intent_generation: intent.generation,
+            package_record_id: intent.package_record_id,
+        })),
+    }
+}
+
 /// Removes only exact stage residue owned by the current durable build intent.
 ///
 /// The complete bounded inventories are parsed before any removal. A foreign
@@ -111,7 +212,7 @@ pub(super) fn prove_build_stages_absent(
 /// cleanup rescans both directories, proves all retained final/retired names
 /// unchanged and every stage absent, then clears the corresponding live
 /// projections and returns an exact-runtime-bound linear proof.
-pub(crate) fn reconcile_build_stages_for_abort(
+pub(crate) fn reconcile_build_stages_preserving_intent(
     runtime: &mut MaterializationRuntime,
 ) -> Result<BuildStagesAbsent, CleanupError> {
     let intent = IntentStageIdentity::from_runtime(runtime)?;
@@ -162,6 +263,27 @@ pub(crate) fn reconcile_build_stages_for_abort(
     let proof = proof(runtime, intent);
     proof.validate(runtime)?;
     Ok(proof)
+}
+
+/// Removes exact writer stages only while the package commit marker is absent.
+///
+/// Marker absence is checked before cleanup and freshly proved again after it.
+/// The consuming transition performs a third physical check immediately before
+/// journaling the abort.
+pub(crate) fn reconcile_build_stages_for_abort(
+    runtime: &mut MaterializationRuntime,
+    marker_absent: PackageRecordFinalAbsent,
+) -> Result<AbortablePackageBuild, CleanupError> {
+    marker_absent.validate(runtime)?;
+    let stages_absent = reconcile_build_stages_preserving_intent(runtime)?;
+    let package_record_absent = match inspect_package_build_commit_marker(runtime)? {
+        PackageBuildCommitMarker::Absent(proof) => proof,
+        PackageBuildCommitMarker::Present => return Err(CleanupError::CommitMarkerPresent),
+    };
+    Ok(AbortablePackageBuild {
+        stages_absent,
+        package_record_absent,
+    })
 }
 
 /// Freshly validates one coherent resumable build without removing residue.
@@ -612,9 +734,14 @@ mod tests {
             _record_stages: projected_stages,
         };
 
-        let proof = reconcile_build_stages_for_abort(&mut runtime).unwrap();
-        assert_eq!(proof.intent_generation, generation);
-        assert_eq!(proof.package_record_id, package_record_id);
+        let PackageBuildCommitMarker::Absent(marker_absent) =
+            inspect_package_build_commit_marker(&runtime).unwrap()
+        else {
+            panic!("fixture unexpectedly contains a package commit marker");
+        };
+        let proof = reconcile_build_stages_for_abort(&mut runtime, marker_absent).unwrap();
+        assert_eq!(proof.stages_absent.intent_generation, generation);
+        assert_eq!(proof.stages_absent.package_record_id, package_record_id);
         proof.validate(&runtime).unwrap();
         assert!(runtime._build_stage.is_none());
         assert!(runtime._record_stages.is_empty());

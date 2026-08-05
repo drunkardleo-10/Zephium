@@ -103,7 +103,7 @@ impl ExtensionRepository {
         let Some(current) = projection else {
             return Ok(None);
         };
-        let exact_catalog = self.package_lease_read_catalog_object(current.catalog_digest())?;
+        let exact_catalog = self.read_authenticated_catalog_object(current.catalog_digest())?;
         let authority = BundledPackageAuthority::product()
             .map_err(BundledPackageLeaseError::CatalogAuthority)?;
         let admitted_anchor = match current.role() {
@@ -418,7 +418,7 @@ impl ExtensionRepository {
         BundledPackageLeaseError,
     > {
         let current = self.require_current(expected_current)?;
-        let catalog = self.package_lease_read_catalog_object(current.catalog_digest())?;
+        let catalog = self.read_authenticated_catalog_object(current.catalog_digest())?;
         let (fresh, admission) = load_active_package_pin_admission(
             self.writer_materialization()?,
             &current,
@@ -442,7 +442,7 @@ impl ExtensionRepository {
         BundledPackageLeaseError,
     > {
         let current = self.require_current(expected_current)?;
-        let catalog = self.package_lease_read_catalog_object(current.catalog_digest())?;
+        let catalog = self.read_authenticated_catalog_object(current.catalog_digest())?;
         let (fresh, admission) = load_rollback_package_pin_admission(
             self.writer_materialization()?,
             &current,
