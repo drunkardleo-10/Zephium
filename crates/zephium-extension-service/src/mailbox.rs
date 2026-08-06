@@ -139,6 +139,15 @@ impl<T> Mailbox<T> {
         self.lock().entries.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn exhaust_normal_counter_for_test(&self) {
+        let mut state = self.lock();
+        debug_assert!(!state.closed);
+        debug_assert!(!state.shutdown_enqueued);
+        debug_assert!(state.entries.is_empty());
+        state.accepted_normal = u64::MAX;
+    }
+
     fn lock(&self) -> MutexGuard<'_, State<T>> {
         self.state
             .lock()

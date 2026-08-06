@@ -431,9 +431,13 @@ impl ExtensionServiceOwner {
             CurrentStartupObservation::Settled(outcome) => {
                 ExtensionServiceStartupWait::Settled(outcome)
             }
+            CurrentStartupObservation::AdmissionFailedClosed => {
+                ExtensionServiceStartupWait::AdmissionFailedClosed(self.status.snapshot())
+            }
             CurrentStartupObservation::Idle => {
+                self.startup.fail_closed_admission(None);
                 self.status.publish(ExtensionServicePhase::Failed);
-                ExtensionServiceStartupWait::NotAdmitted(self.status.snapshot())
+                ExtensionServiceStartupWait::AdmissionFailedClosed(self.status.snapshot())
             }
         }
     }
@@ -447,57 +451,118 @@ impl ExtensionServiceOwner {
     /// admitting a concurrent one.
     #[must_use = "extension activation requires an explicit Ready settlement"]
     pub fn retry_startup_until(&mut self, deadline: Instant) -> ExtensionServiceStartupWait {
+        match self.admit_startup_retry_until(deadline, deadline) {
+            Some(outcome) => outcome,
+            None => self.wait_for_startup_until(deadline),
+        }
+    }
+
+    /// Admits at most one retry using an operation deadline without coupling
+    /// it to the caller's observation window.
+    ///
+    /// `None` means an existing or newly admitted attempt should be observed;
+    /// `Some` is already a definite settlement/refusal and admits no work.
+    pub(crate) fn admit_startup_retry_until(
+        &mut self,
+        operation_deadline: Instant,
+        admission_deadline: Instant,
+    ) -> Option<ExtensionServiceStartupWait> {
         match self.startup.current() {
-            CurrentStartupObservation::Await(attempt) => {
-                return self.wait_for_startup_attempt_until(attempt, deadline);
-            }
+            CurrentStartupObservation::Await(_) => return None,
             CurrentStartupObservation::Settled(outcome)
                 if !matches!(outcome, ExtensionServiceStartupOutcome::Unavailable(_)) =>
             {
-                return ExtensionServiceStartupWait::Settled(outcome);
+                return Some(ExtensionServiceStartupWait::Settled(outcome));
             }
             CurrentStartupObservation::Settled(_) => {}
+            CurrentStartupObservation::AdmissionFailedClosed => {
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
+            }
             CurrentStartupObservation::Idle => {
+                self.startup.fail_closed_admission(None);
                 self.status.publish(ExtensionServicePhase::Failed);
-                return ExtensionServiceStartupWait::NotAdmitted(self.status.snapshot());
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
             }
         }
-        if Instant::now() >= deadline {
-            return ExtensionServiceStartupWait::TimedOut(self.status.snapshot());
+        if Instant::now() >= admission_deadline || Instant::now() >= operation_deadline {
+            return Some(ExtensionServiceStartupWait::TimedOut(
+                self.status.snapshot(),
+            ));
         }
-        let attempt = match self.startup.reserve_retry() {
+        let attempt = match self.startup.reserve_retry_until(admission_deadline) {
             StartupRetryReservation::Settled(outcome) => {
-                return ExtensionServiceStartupWait::Settled(outcome);
+                return Some(ExtensionServiceStartupWait::Settled(outcome));
             }
-            StartupRetryReservation::Observe(attempt) => {
-                return self.wait_for_startup_attempt_until(attempt, deadline);
-            }
+            StartupRetryReservation::Observe(_) => return None,
             StartupRetryReservation::Reserved(attempt) => attempt,
+            StartupRetryReservation::AdmissionFailedClosed => {
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
+            }
+            StartupRetryReservation::DeadlineElapsed => {
+                return Some(ExtensionServiceStartupWait::TimedOut(
+                    self.status.snapshot(),
+                ));
+            }
             StartupRetryReservation::Exhausted | StartupRetryReservation::InvariantViolation => {
+                self.startup.fail_closed_admission(None);
                 self.status.publish(ExtensionServicePhase::Failed);
-                return ExtensionServiceStartupWait::NotAdmitted(self.status.snapshot());
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
             }
         };
-        match self
-            .mailbox
-            .try_push_normal(WorkerCommand::RetryStartup { attempt, deadline })
-        {
+        if Instant::now() >= admission_deadline || Instant::now() >= operation_deadline {
+            if self.startup.cancel_retry_reservation(attempt) {
+                return Some(ExtensionServiceStartupWait::TimedOut(
+                    self.status.snapshot(),
+                ));
+            }
+            self.startup.fail_closed_admission(Some(attempt));
+            self.status.publish(ExtensionServicePhase::Failed);
+            return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                self.status.snapshot(),
+            ));
+        }
+        match self.mailbox.try_push_normal(WorkerCommand::RetryStartup {
+            attempt,
+            deadline: operation_deadline,
+        }) {
             crate::mailbox::NormalAdmission::Accepted => {}
-            crate::mailbox::NormalAdmission::Full(_)
-            | crate::mailbox::NormalAdmission::Sealed(_)
-            | crate::mailbox::NormalAdmission::Closed(_) => {
-                if !self.startup.cancel_retry_reservation(attempt) {
+            crate::mailbox::NormalAdmission::Full(_) => {
+                if self.startup.cancel_retry_reservation(attempt) {
+                    return Some(ExtensionServiceStartupWait::RetryableNotAdmitted(
+                        self.status.snapshot(),
+                    ));
+                } else {
+                    self.startup.fail_closed_admission(Some(attempt));
                     self.status.publish(ExtensionServicePhase::Failed);
                 }
-                return ExtensionServiceStartupWait::NotAdmitted(self.status.snapshot());
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
+            }
+            crate::mailbox::NormalAdmission::Sealed(_)
+            | crate::mailbox::NormalAdmission::Closed(_) => {
+                self.startup.fail_closed_admission(Some(attempt));
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
             }
             crate::mailbox::NormalAdmission::CounterExhausted(_) => {
-                let _ = self.startup.cancel_retry_reservation(attempt);
+                self.startup.fail_closed_admission(Some(attempt));
                 self.status.publish(ExtensionServicePhase::ShutdownQueued);
-                return ExtensionServiceStartupWait::NotAdmitted(self.status.snapshot());
+                return Some(ExtensionServiceStartupWait::AdmissionFailedClosed(
+                    self.status.snapshot(),
+                ));
             }
         }
-        self.wait_for_startup_attempt_until(attempt, deadline)
+        None
     }
 
     fn wait_for_startup_attempt_until(
@@ -511,8 +576,9 @@ impl ExtensionServiceOwner {
                 ExtensionServiceStartupWait::TimedOut(self.status.snapshot())
             }
             StartupAttemptWait::InvariantViolation => {
+                self.startup.fail_closed_admission(None);
                 self.status.publish(ExtensionServicePhase::Failed);
-                ExtensionServiceStartupWait::NotAdmitted(self.status.snapshot())
+                ExtensionServiceStartupWait::AdmissionFailedClosed(self.status.snapshot())
             }
         }
     }
@@ -1079,6 +1145,155 @@ mod tests {
         ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactoryPort))
     }
 
+    fn settled_unavailable_owner_for_admission_test() -> ExtensionServiceOwner {
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        let status = Arc::new(SharedStatus::new(worker));
+        let startup = Arc::new(SharedStartupOutcome::new(Some(StartupAttempt::INITIAL)));
+        let unavailable =
+            ExtensionServiceStartupOutcome::Unavailable(ExtensionServiceStartupUnavailable::new(
+                worker,
+                ExtensionServiceStartupUnavailableReason::ReconciliationPending,
+            ));
+        assert!(startup.settle(StartupAttempt::INITIAL, unavailable));
+        status.publish_startup(ExtensionServicePhase::StartupUnavailable);
+        let (_completion_tx, completion) = mpsc::sync_channel(1);
+        ExtensionServiceOwner {
+            worker,
+            mailbox: Arc::new(Mailbox::new()),
+            status,
+            startup,
+            cancellation: Arc::new(WorkerCancellation::new()),
+            completion,
+            thread: None,
+            _not_sync: PhantomData,
+        }
+    }
+
+    #[test]
+    fn startup_retry_classifies_only_exact_mailbox_capacity_as_retryable() {
+        let mut owner = settled_unavailable_owner_for_admission_test();
+        for _ in 0..EXTENSION_SERVICE_NORMAL_CAPACITY {
+            assert!(matches!(
+                owner.mailbox.try_push_normal(WorkerCommand::Drive),
+                NormalAdmission::Accepted
+            ));
+        }
+
+        assert!(matches!(
+            owner.retry_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::RetryableNotAdmitted(snapshot)
+                if snapshot.phase() == ExtensionServicePhase::StartupUnavailable
+        ));
+        assert!(matches!(
+            owner.startup.current(),
+            CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn startup_retry_classifies_sealed_closed_and_exhausted_admission_as_terminal() {
+        let mut sealed = settled_unavailable_owner_for_admission_test();
+        assert_eq!(
+            sealed.mailbox.try_push_shutdown(),
+            ShutdownAdmission::Accepted
+        );
+        assert!(matches!(
+            sealed.retry_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(_)
+        ));
+        assert!(matches!(
+            sealed.wait_for_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(_)
+        ));
+        assert!(matches!(
+            sealed.retry_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(_)
+        ));
+        assert_eq!(
+            sealed
+                .startup
+                .reserve_retry_until(Instant::now() + Duration::from_secs(1)),
+            StartupRetryReservation::AdmissionFailedClosed
+        );
+
+        let mut closed = settled_unavailable_owner_for_admission_test();
+        closed.mailbox.close();
+        assert!(matches!(
+            closed.retry_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(_)
+        ));
+
+        let mut retry_exhausted = settled_unavailable_owner_for_admission_test();
+        retry_exhausted.startup.exhaust_retry_counter_for_test();
+        assert!(matches!(
+            retry_exhausted.retry_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(snapshot)
+                if snapshot.phase() == ExtensionServicePhase::Failed
+        ));
+
+        let mut command_counter_exhausted = settled_unavailable_owner_for_admission_test();
+        command_counter_exhausted
+            .mailbox
+            .exhaust_normal_counter_for_test();
+        assert!(matches!(
+            command_counter_exhausted
+                .retry_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(snapshot)
+                if snapshot.phase() == ExtensionServicePhase::ShutdownQueued
+        ));
+    }
+
+    #[test]
+    fn lifecycle_retry_admission_keeps_operation_and_observation_deadlines_distinct() {
+        let mut owner = settled_unavailable_owner_for_admission_test();
+        let observation_deadline = Instant::now() + Duration::from_millis(100);
+        let operation_deadline = Instant::now() + Duration::from_secs(8);
+
+        assert!(owner
+            .admit_startup_retry_until(operation_deadline, observation_deadline)
+            .is_none());
+        let Delivery::Normal(WorkerCommand::RetryStartup { attempt, deadline }) =
+            owner.mailbox.receive()
+        else {
+            panic!("retry command was not admitted");
+        };
+        assert_eq!(deadline, operation_deadline);
+        assert!(deadline > observation_deadline);
+        assert!(owner.startup.is_active(attempt));
+        owner.startup.fail_closed_admission(Some(attempt));
+    }
+
+    #[test]
+    fn expired_observation_deadline_cannot_admit_a_longer_operation() {
+        let mut owner = settled_unavailable_owner_for_admission_test();
+        assert!(matches!(
+            owner.admit_startup_retry_until(
+                Instant::now() + Duration::from_secs(8),
+                Instant::now(),
+            ),
+            Some(ExtensionServiceStartupWait::TimedOut(_))
+        ));
+        assert_eq!(owner.mailbox.len(), 0);
+        assert!(matches!(
+            owner.startup.current(),
+            CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn startup_observation_without_an_attempt_is_terminal() {
+        let owner = ExtensionServiceOwner::spawn_empty_for_test().unwrap();
+        assert!(matches!(
+            owner.wait_for_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::AdmissionFailedClosed(snapshot)
+                if snapshot.phase() == ExtensionServicePhase::Failed
+        ));
+        assert!(matches!(
+            owner.shutdown(),
+            ExtensionServiceShutdownOutcome::Complete(_)
+        ));
+    }
+
     #[test]
     fn owner_is_send_and_handle_is_send_sync() {
         assert_send::<ExtensionServiceOwner>();
@@ -1507,6 +1722,46 @@ mod tests {
         // duplicate commands.
         assert_eq!(evidence.accepted_normal_commands(), 3);
         assert_eq!(evidence.completed_normal_commands(), 3);
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn lifecycle_observation_slice_does_not_shorten_retry_operation_deadline() {
+        let (_app_data, store, mut owner) = production_launch_fixture(Instant::now());
+        assert!(matches!(
+            owner.wait_for_startup_until(Instant::now() + Duration::from_secs(1)),
+            ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Unavailable(_))
+        ));
+
+        let (release_tx, release) = mpsc::sync_channel(0);
+        assert!(matches!(
+            owner.try_block_for_test(release),
+            NormalAdmission::Accepted
+        ));
+        assert_eq!(
+            ExtensionServiceLifecycle::settle_startup_until(
+                &mut owner,
+                Instant::now() + Duration::from_millis(20),
+            ),
+            zephium_core::ports::extensions::ExtensionServiceStartupOutcome::TimedOut
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            ExtensionServiceLifecycle::settle_startup_until(
+                &mut owner,
+                Instant::now() + Duration::from_secs(5),
+            ),
+            zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready
+        );
+        assert!(matches!(
+            owner.shutdown(),
+            ExtensionServiceShutdownOutcome::Complete(_)
+        ));
         assert_eq!(
             store.shutdown_until(Instant::now() + Duration::from_secs(5)),
             StoreShutdownOutcome::Clean

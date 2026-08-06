@@ -282,9 +282,16 @@ pub enum ExtensionServiceStartupOutcome {
 pub enum ExtensionServiceStartupWait {
     /// A definite startup outcome is available.
     Settled(ExtensionServiceStartupOutcome),
-    /// The owner-directed retry did not enter the bounded worker mailbox. The
-    /// snapshot is informational; no new startup frontier was executed.
-    NotAdmitted(ExtensionServiceStatusSnapshot),
+    /// The owner-directed retry definitely encountered only transient mailbox
+    /// capacity. Its active reservation was rolled back and no startup
+    /// frontier ran, so the same owner may retry later. The monotonic attempt
+    /// number remains consumed and is never reused.
+    RetryableNotAdmitted(ExtensionServiceStatusSnapshot),
+    /// Startup admission could not proceed because the worker was idle,
+    /// sealed, closed, exhausted, or internally inconsistent. This is a
+    /// terminal fail-closed result for application bootstrap, not permission
+    /// to keep retrying a blank process forever.
+    AdmissionFailedClosed(ExtensionServiceStatusSnapshot),
     /// The observation deadline elapsed. The included lifecycle snapshot is
     /// informational and is not readiness or cleanup evidence.
     TimedOut(ExtensionServiceStatusSnapshot),
@@ -301,6 +308,7 @@ impl StartupAttempt {
 pub(crate) enum CurrentStartupObservation {
     Await(StartupAttempt),
     Settled(ExtensionServiceStartupOutcome),
+    AdmissionFailedClosed,
     Idle,
 }
 
@@ -309,6 +317,8 @@ pub(crate) enum StartupRetryReservation {
     Reserved(StartupAttempt),
     Observe(StartupAttempt),
     Settled(ExtensionServiceStartupOutcome),
+    AdmissionFailedClosed,
+    DeadlineElapsed,
     Exhausted,
     InvariantViolation,
 }
@@ -325,6 +335,7 @@ struct StartupState {
     active_attempt: Option<StartupAttempt>,
     settled_attempt: Option<StartupAttempt>,
     outcome: Option<ExtensionServiceStartupOutcome>,
+    admission_failed_closed: bool,
 }
 
 /// Worker-private, repeatable observation of startup settlement.
@@ -341,6 +352,7 @@ impl SharedStartupOutcome {
                 active_attempt: initial_attempt,
                 settled_attempt: None,
                 outcome: None,
+                admission_failed_closed: false,
             }),
             changed: Condvar::new(),
         }
@@ -348,7 +360,9 @@ impl SharedStartupOutcome {
 
     pub(crate) fn current(&self) -> CurrentStartupObservation {
         let state = self.lock();
-        if let Some(attempt) = state.active_attempt {
+        if state.admission_failed_closed {
+            CurrentStartupObservation::AdmissionFailedClosed
+        } else if let Some(attempt) = state.active_attempt {
             CurrentStartupObservation::Await(attempt)
         } else if let Some(outcome) = state.outcome {
             CurrentStartupObservation::Settled(outcome)
@@ -357,8 +371,11 @@ impl SharedStartupOutcome {
         }
     }
 
-    pub(crate) fn reserve_retry(&self) -> StartupRetryReservation {
+    pub(crate) fn reserve_retry_until(&self, deadline: Instant) -> StartupRetryReservation {
         let mut state = self.lock();
+        if state.admission_failed_closed {
+            return StartupRetryReservation::AdmissionFailedClosed;
+        }
         if let Some(attempt) = state.active_attempt {
             return StartupRetryReservation::Observe(attempt);
         }
@@ -366,6 +383,9 @@ impl SharedStartupOutcome {
             Some(ExtensionServiceStartupOutcome::Unavailable(_)) => {}
             Some(outcome) => return StartupRetryReservation::Settled(outcome),
             None => return StartupRetryReservation::InvariantViolation,
+        }
+        if Instant::now() >= deadline {
+            return StartupRetryReservation::DeadlineElapsed;
         }
         let Some(next) = state.highest_attempt.checked_add(1) else {
             return StartupRetryReservation::Exhausted;
@@ -378,7 +398,7 @@ impl SharedStartupOutcome {
 
     pub(crate) fn cancel_retry_reservation(&self, attempt: StartupAttempt) -> bool {
         let mut state = self.lock();
-        if state.active_attempt != Some(attempt) {
+        if state.admission_failed_closed || state.active_attempt != Some(attempt) {
             return false;
         }
         state.active_attempt = None;
@@ -386,8 +406,25 @@ impl SharedStartupOutcome {
         true
     }
 
+    /// Latches a terminal owner-admission failure into the shared startup
+    /// state. Once latched, neither direct observation nor a later lifecycle
+    /// call can reinterpret the previous retryable outcome or reserve another
+    /// attempt.
+    pub(crate) fn fail_closed_admission(&self, reserved: Option<StartupAttempt>) {
+        let mut state = self.lock();
+        if state.admission_failed_closed {
+            return;
+        }
+        if reserved.is_some_and(|attempt| state.active_attempt == Some(attempt)) {
+            state.active_attempt = None;
+        }
+        state.admission_failed_closed = true;
+        self.changed.notify_all();
+    }
+
     pub(crate) fn is_active(&self, attempt: StartupAttempt) -> bool {
-        self.lock().active_attempt == Some(attempt)
+        let state = self.lock();
+        !state.admission_failed_closed && state.active_attempt == Some(attempt)
     }
 
     pub(crate) fn settle(
@@ -396,7 +433,7 @@ impl SharedStartupOutcome {
         outcome: ExtensionServiceStartupOutcome,
     ) -> bool {
         let mut state = self.lock();
-        if state.active_attempt != Some(attempt) {
+        if state.admission_failed_closed || state.active_attempt != Some(attempt) {
             return false;
         }
         state.active_attempt = None;
@@ -413,6 +450,9 @@ impl SharedStartupOutcome {
     ) -> StartupAttemptWait {
         let mut state = self.lock();
         loop {
+            if state.admission_failed_closed {
+                return StartupAttemptWait::InvariantViolation;
+            }
             if state.settled_attempt == Some(attempt) {
                 return match state.outcome {
                     Some(outcome) => StartupAttemptWait::Settled(outcome),
@@ -439,6 +479,17 @@ impl SharedStartupOutcome {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn exhaust_retry_counter_for_test(&self) {
+        let mut state = self.lock();
+        debug_assert!(matches!(
+            state.outcome,
+            Some(ExtensionServiceStartupOutcome::Unavailable(_))
+        ));
+        debug_assert!(state.active_attempt.is_none());
+        state.highest_attempt = u64::MAX;
+    }
+
     fn lock(&self) -> MutexGuard<'_, StartupState> {
         self.state
             .lock()
@@ -449,6 +500,19 @@ impl SharedStartupOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unavailable_state() -> SharedStartupOutcome {
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        let state = SharedStartupOutcome::new(Some(StartupAttempt::INITIAL));
+        assert!(state.settle(
+            StartupAttempt::INITIAL,
+            ExtensionServiceStartupOutcome::Unavailable(ExtensionServiceStartupUnavailable::new(
+                worker,
+                ExtensionServiceStartupUnavailableReason::ReconciliationPending,
+            ),),
+        ));
+        state
+    }
 
     fn absolute_fixture(component: &str) -> PathBuf {
         std::env::current_dir().unwrap().join(component)
@@ -500,5 +564,65 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<ExtensionRepositoryRoot>();
         assert_send::<ExtensionServiceLaunchInput>();
+    }
+
+    #[test]
+    fn cancelled_retry_never_reuses_its_monotonic_attempt() {
+        let state = unavailable_state();
+        let first =
+            match state.reserve_retry_until(Instant::now() + std::time::Duration::from_secs(1)) {
+                StartupRetryReservation::Reserved(attempt) => attempt,
+                outcome => panic!("unexpected reservation: {outcome:?}"),
+            };
+        assert!(state.cancel_retry_reservation(first));
+        let second =
+            match state.reserve_retry_until(Instant::now() + std::time::Duration::from_secs(1)) {
+                StartupRetryReservation::Reserved(attempt) => attempt,
+                outcome => panic!("unexpected reservation: {outcome:?}"),
+            };
+
+        assert_ne!(first, second);
+        assert!(state.cancel_retry_reservation(second));
+    }
+
+    #[test]
+    fn expired_admission_deadline_does_not_reserve_an_attempt() {
+        let state = unavailable_state();
+        assert_eq!(
+            state.reserve_retry_until(Instant::now()),
+            StartupRetryReservation::DeadlineElapsed
+        );
+        assert!(matches!(
+            state.current(),
+            CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn terminal_admission_failure_is_sticky_and_rejects_settlement() {
+        let state = unavailable_state();
+        let attempt =
+            match state.reserve_retry_until(Instant::now() + std::time::Duration::from_secs(1)) {
+                StartupRetryReservation::Reserved(attempt) => attempt,
+                outcome => panic!("unexpected reservation: {outcome:?}"),
+            };
+        state.fail_closed_admission(Some(attempt));
+
+        assert_eq!(
+            state.current(),
+            CurrentStartupObservation::AdmissionFailedClosed
+        );
+        assert_eq!(
+            state.reserve_retry_until(Instant::now() + std::time::Duration::from_secs(1)),
+            StartupRetryReservation::AdmissionFailedClosed
+        );
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        assert!(!state.settle(
+            attempt,
+            ExtensionServiceStartupOutcome::Unavailable(ExtensionServiceStartupUnavailable::new(
+                worker,
+                ExtensionServiceStartupUnavailableReason::ReconciliationPending,
+            ),),
+        ));
     }
 }
