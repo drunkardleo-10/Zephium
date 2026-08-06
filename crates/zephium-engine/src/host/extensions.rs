@@ -992,6 +992,7 @@ mod tests {
     use wry::{NavigationEvent, NavigationEventPhase, NavigationId};
     use zephium_core::extensions::{
         ApiPermissionName, ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
+        ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
         ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
         ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
         ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
@@ -999,9 +1000,13 @@ mod tests {
         ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
         ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
         ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
-        ExtensionManifestResourceDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeEligibility,
-        ExtensionRuntimeGeneration, ExtensionTreeDigest, ExtensionUserInvocationKind,
+        ExtensionManifestResourceDigest, ExtensionNativeOwnershipJournal,
+        ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipKey,
+        ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackagePinAcquisitionBinding,
+        ExtensionPackagePinHeldBinding, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+        ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority, ExtensionTreeDigest,
+        ExtensionUserInvocationKind,
     };
     use zephium_core::ids::ExtensionInstallId;
     use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
@@ -1066,7 +1071,8 @@ mod tests {
     }
 
     struct TestRuntime {
-        eligibility: ExtensionRuntimeEligibility,
+        _held_pin: ExtensionPackagePinHeldBinding,
+        operation_authority: ExtensionRuntimeOperationAuthority,
         fingerprint: ExtensionRuntimeFingerprint,
     }
 
@@ -1080,7 +1086,7 @@ mod tests {
         }
 
         fn active_tab_witness(&self) -> ExtensionActiveTabGrantWitness {
-            self.eligibility
+            self.operation_authority
                 .mint_active_tab_grant_witness(
                     &self.fingerprint,
                     ExtensionUserInvocationKind::ToolbarAction,
@@ -1092,7 +1098,7 @@ mod tests {
             &self,
             purpose: ExtensionDocumentPurpose,
         ) -> ExtensionDocumentAuthorityWitness {
-            self.eligibility
+            self.operation_authority
                 .mint_document_authority_witness(&self.fingerprint, purpose)
                 .unwrap()
         }
@@ -1225,11 +1231,43 @@ mod tests {
         let eligibility = cohort
             .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
             .unwrap();
-        let fingerprint = eligibility.fingerprint(
-            ExtensionRuntimeGeneration::new(generation).expect("nonzero test generation"),
+        let generation =
+            ExtensionRuntimeGeneration::new(generation).expect("nonzero test generation");
+        let preparation = ExtensionNativeOwnershipPreparation::new(
+            ExtensionNativeOwnershipKey::new(
+                profile,
+                install_id,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            eligibility.package().clone(),
+            ExtensionCatalogSetDigest::from_bytes([7; 32]),
+            ExtensionCatalogGenerationRole::Active,
+            eligibility.catalog_revision(),
+            eligibility.install_revision(),
+            eligibility.grant_revision(),
+            eligibility.grant_digest(),
+            ExtensionRuntimeBackendTarget::LinuxCompatibility,
         );
-        TestRuntime {
+        let journal = ExtensionNativeOwnershipJournal::empty();
+        let journal_revision = journal.revision();
+        let applied = journal
+            .apply(
+                journal_revision,
+                ExtensionNativeOwnershipJournalMutation::begin(preparation),
+            )
+            .expect("test ownership journal enters NativeAbsentPreparing");
+        let acquisition = ExtensionPackagePinAcquisitionBinding::mint(
+            applied.entry().expect("begin retains one exact entry"),
             eligibility,
+        )
+        .expect("test eligibility matches the exact acquisition row");
+        let (held_pin, operation_authority) = acquisition
+            .into_runtime_parts(generation)
+            .into_held_binding_and_operation_authority();
+        let fingerprint = operation_authority.fingerprint().clone();
+        TestRuntime {
+            _held_pin: held_pin,
+            operation_authority,
             fingerprint,
         }
     }

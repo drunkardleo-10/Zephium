@@ -19,8 +19,11 @@ use super::{
     ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipEntryRevision,
     ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
+    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility, ExtensionRuntimeGeneration,
+    ExtensionRuntimeOperationAuthority,
 };
+
+const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 
 /// Stable fail-closed refusal to join runtime eligibility to an acquisition row.
 ///
@@ -60,6 +63,44 @@ impl fmt::Display for ExtensionPackagePinAcquisitionDenial {
 }
 
 impl Error for ExtensionPackagePinAcquisitionDenial {}
+
+fn acquisition_denial(
+    entry: &ExtensionNativeOwnershipEntry,
+    eligibility: &ExtensionRuntimeEligibility,
+) -> Option<ExtensionPackagePinAcquisitionDenial> {
+    if entry.intent() != ExtensionNativeOwnershipIntent::Acquire {
+        return Some(ExtensionPackagePinAcquisitionDenial::OwnershipIntentMismatch);
+    }
+    if entry.phase() != ExtensionNativeOwnershipPhase::NativeAbsentPreparing {
+        return Some(ExtensionPackagePinAcquisitionDenial::OwnershipPhaseMismatch);
+    }
+    let key = entry.key();
+    if key.browsing_context() != eligibility.browsing_context() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityBrowsingContextMismatch);
+    }
+    if key.profile() != eligibility.profile() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityProfileMismatch);
+    }
+    if key.install_id() != eligibility.install_id() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityInstallMismatch);
+    }
+    if entry.package() != eligibility.package() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityPackageMismatch);
+    }
+    if entry.store_catalog_revision() != eligibility.catalog_revision() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityCatalogRevisionMismatch);
+    }
+    if entry.store_install_revision() != eligibility.install_revision() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityInstallRevisionMismatch);
+    }
+    if entry.store_grant_revision() != eligibility.grant_revision() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityGrantRevisionMismatch);
+    }
+    if entry.grant_digest() != eligibility.grant_digest() {
+        return Some(ExtensionPackagePinAcquisitionDenial::EligibilityGrantDigestMismatch);
+    }
+    None
+}
 
 /// Stable fail-closed refusal to project a cleanup-only release row.
 ///
@@ -228,36 +269,8 @@ impl ExtensionPackagePinAcquisitionBinding {
         entry: &ExtensionNativeOwnershipEntry,
         eligibility: ExtensionRuntimeEligibility,
     ) -> Result<Self, ExtensionPackagePinAcquisitionDenial> {
-        if entry.intent() != ExtensionNativeOwnershipIntent::Acquire {
-            return Err(ExtensionPackagePinAcquisitionDenial::OwnershipIntentMismatch);
-        }
-        if entry.phase() != ExtensionNativeOwnershipPhase::NativeAbsentPreparing {
-            return Err(ExtensionPackagePinAcquisitionDenial::OwnershipPhaseMismatch);
-        }
-        let key = entry.key();
-        if key.browsing_context() != eligibility.browsing_context() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityBrowsingContextMismatch);
-        }
-        if key.profile() != eligibility.profile() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityProfileMismatch);
-        }
-        if key.install_id() != eligibility.install_id() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityInstallMismatch);
-        }
-        if entry.package() != eligibility.package() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityPackageMismatch);
-        }
-        if entry.store_catalog_revision() != eligibility.catalog_revision() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityCatalogRevisionMismatch);
-        }
-        if entry.store_install_revision() != eligibility.install_revision() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityInstallRevisionMismatch);
-        }
-        if entry.store_grant_revision() != eligibility.grant_revision() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityGrantRevisionMismatch);
-        }
-        if entry.grant_digest() != eligibility.grant_digest() {
-            return Err(ExtensionPackagePinAcquisitionDenial::EligibilityGrantDigestMismatch);
+        if let Some(reason) = acquisition_denial(entry, &eligibility) {
+            return Err(reason);
         }
 
         Ok(Self {
@@ -266,13 +279,14 @@ impl ExtensionPackagePinAcquisitionBinding {
         })
     }
 
-    /// Exact move-only runtime eligibility carried by this composite.
+    /// Exact move-only runtime eligibility carried by this pre-handoff composite.
     ///
-    /// The repository may borrow this for package/manifest validation. The
-    /// serialized runtime service retains the composite while this journal
-    /// incarnation is unresolved so it can later mint runtime fingerprints
-    /// and operation witnesses. Eligibility is intentionally not recoverable
-    /// independently from the binding.
+    /// The repository may borrow this for package and manifest validation,
+    /// then must consume the composite through [`Self::into_runtime_parts`]
+    /// before package access crosses into the native host. Only the resulting
+    /// [`ExtensionRuntimeOperationAuthority`] may mint operation witnesses for
+    /// the exact generation; the held pin deliberately cannot. Eligibility is
+    /// intentionally not recoverable independently from this binding.
     pub const fn eligibility(&self) -> &ExtensionRuntimeEligibility {
         &self.eligibility
     }
@@ -280,6 +294,23 @@ impl ExtensionPackagePinAcquisitionBinding {
     /// Conservative heap-plus-inline charge while this authority is retained.
     pub fn retained_bytes(&self) -> usize {
         size_of::<Self>().saturating_add(self.eligibility.retained_heap_bytes())
+    }
+
+    /// Linearly separates runtime operation authority from the held pin.
+    ///
+    /// The opaque result keeps both pieces together until the repository has
+    /// completed every fallible package-access preparation step. After it is
+    /// consumed, the held binding must remain captive in the access provider
+    /// and every refusal must recombine the exact operation authority before
+    /// reconstructing an acquisition binding.
+    pub fn into_runtime_parts(
+        self,
+        generation: ExtensionRuntimeGeneration,
+    ) -> ExtensionPackagePinRuntimeParts {
+        ExtensionPackagePinRuntimeParts {
+            held: ExtensionPackagePinHeldBinding { entry: self.entry },
+            operation_authority: self.eligibility.into_operation_authority(generation),
+        }
     }
 
     binding_identity_accessors!();
@@ -296,6 +327,180 @@ impl fmt::Debug for ExtensionPackagePinAcquisitionBinding {
             .field("backend", &self.runtime_backend())
             .field("journal", &"<redacted>")
             .field("eligibility", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Opaque linear handoff of a held repository pin and runtime authority.
+///
+/// This intermediate exists so a caller cannot accidentally extract one piece
+/// while fallible package-access preparation is still underway. It is
+/// move-only, process-local, and has no public fields.
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionPackagePinRuntimeParts;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionPackagePinRuntimeParts>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionPackagePinRuntimeParts;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<ExtensionPackagePinRuntimeParts>();
+/// ```
+#[must_use = "runtime handoff parts must stay paired until package access is bound"]
+pub struct ExtensionPackagePinRuntimeParts {
+    held: ExtensionPackagePinHeldBinding,
+    operation_authority: ExtensionRuntimeOperationAuthority,
+}
+
+impl ExtensionPackagePinRuntimeParts {
+    /// Consumes the opaque handoff at the exact package-access ownership edge.
+    pub fn into_held_binding_and_operation_authority(
+        self,
+    ) -> (
+        ExtensionPackagePinHeldBinding,
+        ExtensionRuntimeOperationAuthority,
+    ) {
+        (self.held, self.operation_authority)
+    }
+
+    /// Conservative logical charge retained by both linear pieces.
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(self.operation_authority.retained_heap_bytes())
+    }
+}
+
+impl fmt::Debug for ExtensionPackagePinRuntimeParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionPackagePinRuntimeParts")
+            .field("held_pin", &"<redacted>")
+            .field("operation_authority", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Move-only same-process authority retaining one exact durable package pin.
+///
+/// The repository keeps this compact value inside delegated package access;
+/// it intentionally contains no manifest/grant owners and cannot mint runtime
+/// operation capabilities. Reopened cleanup cannot reconstruct it. When
+/// package-access construction refuses before activation, the repository may
+/// recombine it only with the exact operation authority split from the same
+/// Store-bound fields.
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionPackagePinHeldBinding;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionPackagePinHeldBinding>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionPackagePinHeldBinding;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionPackagePinHeldBinding>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionPackagePinHeldBinding;
+/// fn cannot_mint(binding: &ExtensionPackagePinHeldBinding) {
+///     let _ = binding.eligibility();
+/// }
+/// ```
+#[must_use = "the exact held package pin must remain captive until teardown settlement"]
+pub struct ExtensionPackagePinHeldBinding {
+    entry: ExtensionNativeOwnershipEntry,
+}
+
+impl ExtensionPackagePinHeldBinding {
+    /// Reconstructs the original acquisition binding only from an exact pair.
+    ///
+    /// A mismatch is an internal authority-routing defect. The refusal keeps
+    /// both capabilities captive so neither can be reused or silently dropped
+    /// as if a valid acquisition had been recovered.
+    pub fn try_recombine(
+        self,
+        operation_authority: ExtensionRuntimeOperationAuthority,
+    ) -> Result<ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinRecombineRefusal> {
+        if let Some(reason) = acquisition_denial(&self.entry, operation_authority.eligibility()) {
+            return Err(ExtensionPackagePinRecombineRefusal {
+                reason,
+                parts: Box::new(ExtensionPackagePinRuntimeParts {
+                    held: self,
+                    operation_authority,
+                }),
+            });
+        }
+        Ok(ExtensionPackagePinAcquisitionBinding {
+            entry: self.entry,
+            eligibility: operation_authority.into_eligibility(),
+        })
+    }
+
+    /// Conservative inline charge for the compact held-pin authority.
+    pub const fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+    }
+
+    binding_identity_accessors!();
+}
+
+impl fmt::Debug for ExtensionPackagePinHeldBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionPackagePinHeldBinding")
+            .field("owner", &"<redacted>")
+            .field("package", &"<redacted>")
+            .field("role", &self.catalog_role())
+            .field("backend", &self.runtime_backend())
+            .field("journal", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Fail-closed result of attempting to join unrelated linear authorities.
+///
+/// A mismatch is impossible in a correct runtime pipeline. Both exact pieces
+/// remain recoverable only so the serialized coordinator can quarantine them
+/// while the durable journal drives cleanup; neither piece is discarded by
+/// the failed join.
+#[must_use = "a recombination mismatch retains both authorities in quarantine"]
+pub struct ExtensionPackagePinRecombineRefusal {
+    reason: ExtensionPackagePinAcquisitionDenial,
+    parts: Box<ExtensionPackagePinRuntimeParts>,
+}
+
+impl ExtensionPackagePinRecombineRefusal {
+    /// Stable, identity-free reason the exact join was refused.
+    pub const fn reason(&self) -> ExtensionPackagePinAcquisitionDenial {
+        self.reason
+    }
+
+    /// Recovers both exact capabilities for explicit coordinator quarantine.
+    pub fn into_parts(
+        self,
+    ) -> (
+        ExtensionPackagePinHeldBinding,
+        ExtensionRuntimeOperationAuthority,
+    ) {
+        (*self.parts).into_held_binding_and_operation_authority()
+    }
+
+    /// Conservative logical charge retained by the quarantined pair.
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.parts.retained_bytes())
+            .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+    }
+}
+
+impl fmt::Debug for ExtensionPackagePinRecombineRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionPackagePinRecombineRefusal")
+            .field("reason", &self.reason)
+            .field("authority", &"<redacted>")
             .finish()
     }
 }
@@ -487,9 +692,10 @@ mod tests {
         )
     }
 
-    fn runtime_eligibility() -> ExtensionRuntimeEligibility {
-        let profile = ProfileId::from(11);
-        let install_id = ExtensionInstallId::from(13);
+    fn runtime_eligibility_for(
+        profile: ProfileId,
+        install_id: ExtensionInstallId,
+    ) -> ExtensionRuntimeEligibility {
         let manifest = manifest(package(17));
         let install = ExtensionInstall::from_persisted(
             install_id,
@@ -525,6 +731,10 @@ mod tests {
             .unwrap()
             .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
             .unwrap()
+    }
+
+    fn runtime_eligibility() -> ExtensionRuntimeEligibility {
+        runtime_eligibility_for(ProfileId::from(11), ExtensionInstallId::from(13))
     }
 
     struct EntryFixture {
@@ -634,6 +844,77 @@ mod tests {
         assert_eq!(binding.eligibility().package(), entry.package());
         assert!(binding.retained_bytes() >= size_of::<ExtensionPackagePinAcquisitionBinding>());
         assert!(binding.retained_bytes() >= binding.eligibility().retained_bytes());
+    }
+
+    #[test]
+    fn runtime_split_preserves_exact_generation_pin_and_recombination() {
+        let eligibility = runtime_eligibility();
+        let fixture = EntryFixture::from_eligibility(&eligibility);
+        let entry = fixture.acquisition();
+        let generation = ExtensionRuntimeGeneration::new(31).unwrap();
+        let binding = ExtensionPackagePinAcquisitionBinding::mint(&entry, eligibility).unwrap();
+        let parts = binding.into_runtime_parts(generation);
+
+        assert!(parts.retained_bytes() >= size_of::<ExtensionPackagePinRuntimeParts>());
+        assert_eq!(
+            format!("{parts:?}"),
+            "ExtensionPackagePinRuntimeParts { held_pin: \"<redacted>\", operation_authority: \"<redacted>\" }"
+        );
+        let (held, operation_authority) = parts.into_held_binding_and_operation_authority();
+        assert_eq!(held.key(), entry.key());
+        assert_eq!(held.package(), entry.package());
+        assert_eq!(held.runtime_backend(), entry.runtime_backend());
+        assert_eq!(held.journal_entry_cas(), entry.cas());
+        assert_eq!(
+            held.retained_bytes(),
+            size_of::<ExtensionPackagePinHeldBinding>()
+        );
+        assert_eq!(
+            operation_authority.fingerprint().instance().generation(),
+            generation
+        );
+        assert_eq!(
+            operation_authority.fingerprint().instance().profile(),
+            entry.key().profile()
+        );
+        assert_eq!(operation_authority.fingerprint().package(), entry.package());
+
+        let recombined = held.try_recombine(operation_authority).unwrap();
+        assert_eq!(recombined.key(), entry.key());
+        assert_eq!(recombined.package(), entry.package());
+        assert_eq!(recombined.eligibility().profile(), entry.key().profile());
+        assert_eq!(recombined.eligibility().package(), entry.package());
+    }
+
+    #[test]
+    fn runtime_recombination_refusal_retains_both_exact_capabilities() {
+        let eligibility = runtime_eligibility();
+        let fixture = EntryFixture::from_eligibility(&eligibility);
+        let entry = fixture.acquisition();
+        let binding = ExtensionPackagePinAcquisitionBinding::mint(&entry, eligibility).unwrap();
+        let (held, _exact_authority) = binding
+            .into_runtime_parts(ExtensionRuntimeGeneration::new(37).unwrap())
+            .into_held_binding_and_operation_authority();
+        let wrong_authority =
+            runtime_eligibility_for(ProfileId::from(41), ExtensionInstallId::from(13))
+                .into_operation_authority(ExtensionRuntimeGeneration::new(43).unwrap());
+
+        let refusal = held.try_recombine(wrong_authority).unwrap_err();
+        assert_eq!(
+            refusal.reason(),
+            ExtensionPackagePinAcquisitionDenial::EligibilityProfileMismatch
+        );
+        assert!(refusal.retained_bytes() >= size_of::<ExtensionPackagePinRecombineRefusal>());
+        assert_eq!(
+            format!("{refusal:?}"),
+            "ExtensionPackagePinRecombineRefusal { reason: EligibilityProfileMismatch, authority: \"<redacted>\" }"
+        );
+        let (held, wrong_authority) = refusal.into_parts();
+        assert_eq!(held.key(), entry.key());
+        assert_eq!(
+            wrong_authority.fingerprint().instance().profile(),
+            ProfileId::from(41)
+        );
     }
 
     #[test]

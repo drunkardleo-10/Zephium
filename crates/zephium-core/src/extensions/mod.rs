@@ -81,12 +81,14 @@ pub use native_ownership::{
 };
 pub use package_pin::{
     ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinAcquisitionDenial,
+    ExtensionPackagePinHeldBinding, ExtensionPackagePinRecombineRefusal,
     ExtensionPackagePinReleaseBinding, ExtensionPackagePinReleaseDenial,
+    ExtensionPackagePinRuntimeParts,
 };
 pub use runtime::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness,
     ExtensionOperationAuthorityDenial, ExtensionRuntimeEligibility,
-    ExtensionRuntimeEligibilityDenial,
+    ExtensionRuntimeEligibilityDenial, ExtensionRuntimeOperationAuthority,
 };
 pub use transient::{
     ExtensionDocumentPurpose, ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration,

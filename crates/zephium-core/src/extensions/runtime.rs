@@ -6,7 +6,9 @@
 //! user-intent prerequisites. An authenticated repository package lease and a
 //! backend runtime admission are still required before any native execution.
 
+use std::cell::Cell;
 use std::fmt;
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
@@ -44,7 +46,7 @@ pub enum ExtensionOperationAuthorityDenial {
 /// transient `activeTab` scope for one exact runtime.
 ///
 /// This type has no public constructor and is minted only by
-/// [`ExtensionRuntimeEligibility::mint_active_tab_grant_witness`]. Identity
+/// [`ExtensionRuntimeOperationAuthority::mint_active_tab_grant_witness`]. Identity
 /// getters remain non-authorizing: the engine must require possession of this
 /// value and join it with its own trusted user gesture, current native runtime
 /// owner, and committed document.
@@ -386,6 +388,18 @@ impl ExtensionRuntimeEligibility {
             .saturating_add(self.grants.retained_bytes())
     }
 
+    pub(super) fn into_operation_authority(
+        self,
+        generation: ExtensionRuntimeGeneration,
+    ) -> ExtensionRuntimeOperationAuthority {
+        let fingerprint = self.fingerprint(generation);
+        ExtensionRuntimeOperationAuthority {
+            eligibility: self,
+            fingerprint,
+            not_sync: PhantomData,
+        }
+    }
+
     /// Projects a complete, non-authorizing reconciliation fingerprint.
     ///
     /// A runtime coordinator uses this to detect any durable input change and
@@ -412,60 +426,6 @@ impl ExtensionRuntimeEligibility {
         })
     }
 
-    /// Mints transient `activeTab` authority for one exact trusted invocation.
-    ///
-    /// The caller submits only the complete runtime fingerprint and a closed
-    /// browser invocation. Profile, install, package, grant, and browsing
-    /// authority are derived from this eligibility and cannot be supplied as
-    /// an independently assembled bag. The engine must still join the witness
-    /// with a trusted user gesture and its exact current native document.
-    pub fn mint_active_tab_grant_witness(
-        &self,
-        runtime: &ExtensionRuntimeFingerprint,
-        invocation: ExtensionUserInvocationKind,
-    ) -> Result<ExtensionActiveTabGrantWitness, ExtensionOperationAuthorityDenial> {
-        if !self.matches_runtime_fingerprint(runtime) {
-            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
-        }
-        if self.decide_api(invocation_api_permission(invocation))
-            != ExtensionApiGrantDecision::Granted
-        {
-            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
-        }
-        Ok(ExtensionActiveTabGrantWitness {
-            runtime: runtime.clone(),
-            invocation,
-        })
-    }
-
-    /// Mints one exact closed document-purpose capability.
-    ///
-    /// This proves only the purpose-specific API authority and exact runtime
-    /// snapshot. No URL is accepted here. The engine must derive its current
-    /// committed URL and evaluate durable scope through the returned witness,
-    /// then join either that result or exact transient `activeTab` document
-    /// authority with native view identity.
-    pub fn mint_document_authority_witness(
-        &self,
-        runtime: &ExtensionRuntimeFingerprint,
-        purpose: ExtensionDocumentPurpose,
-    ) -> Result<ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial> {
-        if !self.matches_runtime_fingerprint(runtime) {
-            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
-        }
-        if self.decide_api(document_purpose_api_permission(purpose))
-            != ExtensionApiGrantDecision::Granted
-        {
-            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
-        }
-        Ok(ExtensionDocumentAuthorityWitness {
-            runtime: runtime.clone(),
-            purpose,
-            manifest: Arc::clone(&self.manifest),
-            grants: Arc::clone(&self.grants),
-        })
-    }
-
     /// Evaluates one exact declared API permission against this snapshot.
     ///
     /// A granted result is still insufficient for an operation: the runtime
@@ -484,17 +444,167 @@ impl ExtensionRuntimeEligibility {
         self.grants
             .decide_url_scope(&self.manifest, url, self.browsing_context)
     }
+}
 
-    fn matches_runtime_fingerprint(&self, runtime: &ExtensionRuntimeFingerprint) -> bool {
-        let instance = runtime.instance();
-        instance.profile() == self.profile
-            && instance.install_id() == self.install_id
-            && runtime.catalog_revision() == self.catalog_revision
-            && runtime.install_revision() == self.install_revision
-            && runtime.grant_revision() == self.grant_revision
-            && runtime.grant_digest() == self.grant_digest
-            && runtime.package() == self.manifest.package()
-            && runtime.browsing_context() == self.browsing_context
+/// Move-only authority for privileged operations against one exact runtime.
+///
+/// This capability can only be created when the package-pin acquisition
+/// binding is linearly split for runtime handoff. It owns the complete Store
+/// eligibility and the one process-local generation fingerprint derived from
+/// it. The native host must retain this value alongside authenticated package
+/// access and exact native ownership; none of those inputs is sufficient on
+/// its own.
+///
+/// The capability deliberately cannot be cloned:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionRuntimeOperationAuthority;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionRuntimeOperationAuthority>();
+/// ```
+///
+/// It is movable to the serialized runtime owner, but deliberately cannot be
+/// shared across threads:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionRuntimeOperationAuthority;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<ExtensionRuntimeOperationAuthority>();
+/// ```
+///
+/// Its fields are not a public construction surface:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionRuntimeOperationAuthority;
+/// let _ = ExtensionRuntimeOperationAuthority {
+///     eligibility: panic!("not constructible"),
+///     fingerprint: panic!("not constructible"),
+///     not_sync: std::marker::PhantomData,
+/// };
+/// ```
+///
+/// It is process-local authority and cannot cross a serialization boundary:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionRuntimeOperationAuthority;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeOperationAuthority>();
+/// ```
+///
+/// A bare Store eligibility cannot mint operation witnesses:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::{
+///     ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint,
+///     ExtensionUserInvocationKind,
+/// };
+/// fn cannot_mint(
+///     eligibility: &ExtensionRuntimeEligibility,
+///     runtime: &ExtensionRuntimeFingerprint,
+/// ) {
+///     let _ = eligibility.mint_active_tab_grant_witness(
+///         runtime,
+///         ExtensionUserInvocationKind::ToolbarAction,
+///     );
+/// }
+/// ```
+#[must_use = "runtime operation authority must remain joined with native and package authority"]
+pub struct ExtensionRuntimeOperationAuthority {
+    eligibility: ExtensionRuntimeEligibility,
+    fingerprint: ExtensionRuntimeFingerprint,
+    not_sync: PhantomData<Cell<()>>,
+}
+
+impl ExtensionRuntimeOperationAuthority {
+    /// Complete exact runtime generation this capability authorizes.
+    ///
+    /// The fingerprint remains non-authorizing identity when separated from
+    /// this move-only capability.
+    pub const fn fingerprint(&self) -> &ExtensionRuntimeFingerprint {
+        &self.fingerprint
+    }
+
+    /// Conservative logical heap-plus-inline charge retained by this authority.
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(self.eligibility.retained_heap_bytes())
+    }
+
+    pub(super) fn retained_heap_bytes(&self) -> usize {
+        self.eligibility.retained_heap_bytes()
+    }
+
+    /// Mints transient `activeTab` authority for one exact trusted invocation.
+    ///
+    /// The caller must submit the complete runtime fingerprint it is operating
+    /// against. The engine must still join the returned witness with a trusted
+    /// user gesture and its exact current native document.
+    pub fn mint_active_tab_grant_witness(
+        &self,
+        runtime: &ExtensionRuntimeFingerprint,
+        invocation: ExtensionUserInvocationKind,
+    ) -> Result<ExtensionActiveTabGrantWitness, ExtensionOperationAuthorityDenial> {
+        if runtime != &self.fingerprint {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        if self
+            .eligibility
+            .decide_api(invocation_api_permission(invocation))
+            != ExtensionApiGrantDecision::Granted
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        Ok(ExtensionActiveTabGrantWitness {
+            runtime: self.fingerprint.clone(),
+            invocation,
+        })
+    }
+
+    /// Mints one exact closed document-purpose capability.
+    ///
+    /// This proves only the purpose-specific API authority and exact runtime
+    /// snapshot. No URL is accepted here. The engine must derive its current
+    /// committed URL and evaluate durable scope through the returned witness,
+    /// then join either that result or exact transient `activeTab` document
+    /// authority with native view identity.
+    pub fn mint_document_authority_witness(
+        &self,
+        runtime: &ExtensionRuntimeFingerprint,
+        purpose: ExtensionDocumentPurpose,
+    ) -> Result<ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial> {
+        if runtime != &self.fingerprint {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        if self
+            .eligibility
+            .decide_api(document_purpose_api_permission(purpose))
+            != ExtensionApiGrantDecision::Granted
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        Ok(ExtensionDocumentAuthorityWitness {
+            runtime: self.fingerprint.clone(),
+            purpose,
+            manifest: Arc::clone(&self.eligibility.manifest),
+            grants: Arc::clone(&self.eligibility.grants),
+        })
+    }
+
+    pub(super) const fn eligibility(&self) -> &ExtensionRuntimeEligibility {
+        &self.eligibility
+    }
+
+    pub(super) fn into_eligibility(self) -> ExtensionRuntimeEligibility {
+        self.eligibility
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeOperationAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeOperationAuthority")
+            .field("runtime", &"<redacted>")
+            .field("authority", &"<redacted>")
+            .finish()
     }
 }
 
@@ -642,13 +752,16 @@ mod tests {
         generation: ExtensionRuntimeGeneration,
         granted_api: &[&str],
         file_access: bool,
-    ) -> (ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint) {
+    ) -> (
+        ExtensionRuntimeOperationAuthority,
+        ExtensionRuntimeFingerprint,
+    ) {
         let cohort = cohort(profile, install_id, granted_api, file_access, false);
         let eligibility = cohort
             .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
             .unwrap();
         let runtime = eligibility.fingerprint(generation);
-        (eligibility, runtime)
+        (eligibility.into_operation_authority(generation), runtime)
     }
 
     #[test]
@@ -656,14 +769,14 @@ mod tests {
         let profile = ProfileId::from(17);
         let install_id = ExtensionInstallId::from(23);
         let generation = ExtensionRuntimeGeneration::new(29).unwrap();
-        let (eligibility, runtime) = eligible_runtime(
+        let (authority, runtime) = eligible_runtime(
             profile,
             install_id,
             generation,
             &["activeTab", "scripting"],
             false,
         );
-        let witness = eligibility
+        let witness = authority
             .mint_active_tab_grant_witness(&runtime, ExtensionUserInvocationKind::ToolbarAction)
             .unwrap();
 
@@ -675,7 +788,13 @@ mod tests {
         );
         assert!(witness.matches(&runtime, ExtensionUserInvocationKind::ToolbarAction));
 
-        let wrong_generation = eligibility.fingerprint(generation.next().unwrap());
+        let (_, wrong_generation) = eligible_runtime(
+            profile,
+            install_id,
+            generation.next().unwrap(),
+            &["activeTab", "scripting"],
+            false,
+        );
         assert!(!witness.matches(
             &wrong_generation,
             ExtensionUserInvocationKind::ToolbarAction
@@ -689,7 +808,7 @@ mod tests {
             false,
         );
         assert!(matches!(
-            eligibility.mint_active_tab_grant_witness(
+            authority.mint_active_tab_grant_witness(
                 &wrong_profile,
                 ExtensionUserInvocationKind::ToolbarAction,
             ),
@@ -704,7 +823,7 @@ mod tests {
             false,
         );
         assert!(matches!(
-            eligibility.mint_active_tab_grant_witness(
+            authority.mint_active_tab_grant_witness(
                 &wrong_install,
                 ExtensionUserInvocationKind::ToolbarAction,
             ),
@@ -714,12 +833,37 @@ mod tests {
         let (_, wrong_grants) =
             eligible_runtime(profile, install_id, generation, &["activeTab"], false);
         assert!(matches!(
-            eligibility.mint_active_tab_grant_witness(
+            authority.mint_active_tab_grant_witness(
                 &wrong_grants,
                 ExtensionUserInvocationKind::ToolbarAction,
             ),
             Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
         ));
+    }
+
+    #[test]
+    fn operation_authority_is_send_bounded_and_exactly_generation_bound() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<ExtensionRuntimeOperationAuthority>();
+        let (authority, runtime) = eligible_runtime(
+            ProfileId::from(27),
+            ExtensionInstallId::from(28),
+            ExtensionRuntimeGeneration::new(30).unwrap(),
+            &["activeTab", "scripting"],
+            false,
+        );
+
+        assert_eq!(authority.fingerprint(), &runtime);
+        assert_eq!(
+            authority.fingerprint().instance().generation(),
+            ExtensionRuntimeGeneration::new(30).unwrap()
+        );
+        assert!(authority.retained_bytes() >= size_of::<ExtensionRuntimeOperationAuthority>());
+        assert_eq!(
+            format!("{authority:?}"),
+            "ExtensionRuntimeOperationAuthority { runtime: \"<redacted>\", authority: \"<redacted>\" }"
+        );
     }
 
     #[test]
@@ -756,17 +900,17 @@ mod tests {
         let profile = ProfileId::from(43);
         let install_id = ExtensionInstallId::from(47);
         let generation = ExtensionRuntimeGeneration::new(53).unwrap();
-        let (eligibility, runtime) = eligible_runtime(
+        let (authority, runtime) = eligible_runtime(
             profile,
             install_id,
             generation,
             &["activeTab", "scripting"],
             false,
         );
-        let witness = eligibility
+        let witness = authority
             .mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::ExecuteScript)
             .unwrap();
-        drop(eligibility);
+        drop(authority);
 
         assert_eq!(witness.runtime(), &runtime);
         assert_eq!(witness.runtime_instance(), runtime.instance());
@@ -786,14 +930,14 @@ mod tests {
             ExtensionUrlScopeDecision::OutOfScope(ExtensionGrantDenial::FileAccessNotGranted)
         );
 
-        let (eligibility, runtime) = eligible_runtime(
+        let (authority, runtime) = eligible_runtime(
             profile,
             install_id,
             generation.next().unwrap(),
             &["activeTab", "scripting"],
             true,
         );
-        let file_witness = eligibility
+        let file_witness = authority
             .mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::ExecuteScript)
             .unwrap();
         assert_eq!(
@@ -809,23 +953,29 @@ mod tests {
         let profile = ProfileId::from(59);
         let install_id = ExtensionInstallId::from(61);
         let generation = ExtensionRuntimeGeneration::new(67).unwrap();
-        let (eligibility, runtime) = eligible_runtime(
+        let (authority, runtime) = eligible_runtime(
             profile,
             install_id,
             generation,
             &["activeTab", "scripting"],
             false,
         );
-        let witness = eligibility
+        let witness = authority
             .mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::InsertCss)
             .unwrap();
-        let wrong_generation = eligibility.fingerprint(generation.next().unwrap());
+        let (_, wrong_generation) = eligible_runtime(
+            profile,
+            install_id,
+            generation.next().unwrap(),
+            &["activeTab", "scripting"],
+            false,
+        );
         assert!(!witness.matches(&wrong_generation, ExtensionDocumentPurpose::InsertCss));
 
         let (_, wrong_grants) =
             eligible_runtime(profile, install_id, generation, &["scripting"], false);
         assert!(matches!(
-            eligibility.mint_document_authority_witness(
+            authority.mint_document_authority_witness(
                 &wrong_grants,
                 ExtensionDocumentPurpose::InsertCss,
             ),
@@ -846,17 +996,17 @@ mod tests {
 
     #[test]
     fn capability_debug_output_redacts_runtime_and_grant_identity() {
-        let (eligibility, runtime) = eligible_runtime(
+        let (authority, runtime) = eligible_runtime(
             ProfileId::from(79),
             ExtensionInstallId::from(83),
             ExtensionRuntimeGeneration::new(89).unwrap(),
             &["activeTab", "scripting"],
             false,
         );
-        let active_tab = eligibility
+        let active_tab = authority
             .mint_active_tab_grant_witness(&runtime, ExtensionUserInvocationKind::ToolbarAction)
             .unwrap();
-        let document = eligibility
+        let document = authority
             .mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::RemoveCss)
             .unwrap();
 
