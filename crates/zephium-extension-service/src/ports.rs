@@ -1,7 +1,13 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use zephium_core::ports::extensions::{
+    ExtensionServiceLifecycle,
+    ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
+};
 
 use crate::{
-    ExtensionServiceShutdownEvidence, ExtensionServiceStatusSnapshot, ExtensionServiceStatusWait,
+    ExtensionServiceOwner, ExtensionServiceShutdownEvidence, ExtensionServiceStatusSnapshot,
+    ExtensionServiceStatusWait,
 };
 
 /// Read-only observation port for the serialized extension service.
@@ -38,4 +44,50 @@ pub enum ExtensionServiceShutdownOutcome {
     /// The deadline elapsed before termination and resource release were
     /// proven; the worker was detached and this is not cleanup evidence.
     DeadlineExceeded,
+}
+
+impl ExtensionServiceLifecycle for ExtensionServiceOwner {
+    fn shutdown_until(self: Box<Self>, deadline: Instant) -> CoreExtensionServiceShutdownOutcome {
+        project_lifecycle_shutdown_outcome(ExtensionServiceOwner::shutdown_until(*self, deadline))
+    }
+}
+
+fn project_lifecycle_shutdown_outcome(
+    outcome: ExtensionServiceShutdownOutcome,
+) -> CoreExtensionServiceShutdownOutcome {
+    match outcome {
+        ExtensionServiceShutdownOutcome::Complete(_) => CoreExtensionServiceShutdownOutcome::Clean,
+        ExtensionServiceShutdownOutcome::WorkerPanicked
+        | ExtensionServiceShutdownOutcome::EvidenceMissing
+        | ExtensionServiceShutdownOutcome::DeadlineExceeded => {
+            CoreExtensionServiceShutdownOutcome::Unclean
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExtensionServiceWorkerIdentity;
+
+    #[test]
+    fn only_evidenced_completion_projects_to_clean() {
+        for outcome in [
+            ExtensionServiceShutdownOutcome::WorkerPanicked,
+            ExtensionServiceShutdownOutcome::EvidenceMissing,
+            ExtensionServiceShutdownOutcome::DeadlineExceeded,
+        ] {
+            assert_eq!(
+                project_lifecycle_shutdown_outcome(outcome),
+                CoreExtensionServiceShutdownOutcome::Unclean
+            );
+        }
+
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        let evidence = ExtensionServiceShutdownEvidence::new(worker, 0, 0);
+        assert_eq!(
+            project_lifecycle_shutdown_outcome(ExtensionServiceShutdownOutcome::Complete(evidence)),
+            CoreExtensionServiceShutdownOutcome::Clean
+        );
+    }
 }

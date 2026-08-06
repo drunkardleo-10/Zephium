@@ -1012,6 +1012,10 @@ fn retain_fail_stopped_native_obligation(_state: &mut WorkerState) -> ! {
 mod tests {
     use super::*;
     use crate::mailbox::EXTENSION_SERVICE_NORMAL_CAPACITY;
+    use zephium_core::ports::extensions::{
+        ExtensionServiceLifecycle,
+        ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
+    };
     use zephium_extension_runtime_api::{
         ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
         ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
@@ -1093,6 +1097,17 @@ mod tests {
             outcome,
             ExtensionServiceShutdownOutcome::Complete(_)
         ));
+    }
+
+    #[test]
+    fn lifecycle_port_is_object_safe_and_projects_clean_shutdown() {
+        let owner = ExtensionServiceOwner::spawn_empty_for_test().unwrap();
+        let lifecycle: Box<dyn ExtensionServiceLifecycle> = Box::new(owner);
+
+        assert_eq!(
+            lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            CoreExtensionServiceShutdownOutcome::Clean
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
