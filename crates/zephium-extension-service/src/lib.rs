@@ -4,7 +4,9 @@
 //! but cannot be shared by reference. Cloneable handles expose observation
 //! only; they cannot tear down or replace the worker. Normal actor work has a
 //! fixed 1,024-entry FIFO, and shutdown owns a separate final slot so overload
-//! cannot make the worker unjoinable.
+//! cannot make the worker unjoinable. Profile retirement owns one additional
+//! FIFO barrier slot, allowing its monotonic ingress fence to be admitted even
+//! when ordinary work is saturated.
 //!
 //! The typed startup surface transfers a validated private-repository location,
 //! the Store's unique native-ownership capability, and the engine's unique
@@ -12,7 +14,8 @@
 //! worker settles interrupted package builds, reconciles possible native
 //! owners one exact lineage at a time, retires owners that still exist, and
 //! releases package pins only after durable native absence. No extension
-//! operation authority is exposed by this crate yet.
+//! operation authority is exposed by this crate yet. Profile-retirement
+//! results are ordinary non-authorizing control-flow settlements.
 //!
 //! The owner cannot be shared across threads:
 //!
@@ -42,6 +45,7 @@ mod journal_store;
 mod mailbox;
 mod native_recovery;
 mod ports;
+mod profile_retirement;
 mod repository;
 mod startup;
 mod status;
@@ -56,6 +60,10 @@ pub use evidence::{
 };
 pub use mailbox::{EXTENSION_SERVICE_MAILBOX_CAPACITY, EXTENSION_SERVICE_NORMAL_CAPACITY};
 pub use ports::{ExtensionServiceShutdownOutcome, ExtensionServiceStatusPort};
+pub use profile_retirement::{
+    ExtensionServiceProfileRetirementFailureReason, ExtensionServiceProfileRetirementOutcome,
+    ExtensionServiceProfileRetirementUnavailableReason,
+};
 pub use startup::{
     ExtensionRepositoryRoot, ExtensionRepositoryRootError, ExtensionServiceLaunchInput,
     ExtensionServiceStartupFailure, ExtensionServiceStartupFailureReason,

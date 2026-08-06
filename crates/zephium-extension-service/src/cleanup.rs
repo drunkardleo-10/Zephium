@@ -8,6 +8,7 @@ use zephium_core::extensions::{
     ExtensionNativeOwnershipPhase, ExtensionPackagePinReleaseBinding,
     MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
 };
+use zephium_core::ids::ProfileId;
 use zephium_extension_repository::{
     BundledPackageBuildSettlementError, BundledPackageLeaseReleaseError,
     BundledPackageLeaseReleaseOutcome, ExtensionRepositoryError,
@@ -37,6 +38,40 @@ pub(crate) trait CancellationCheck {
 pub(crate) enum CleanupProgress {
     LoadingOwnershipJournal,
     ReconcilingCleanup,
+}
+
+/// Exact ownership-journal subset one cleanup attempt may mutate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CleanupScope {
+    All,
+    Profile(ProfileId),
+}
+
+/// Immutable boundaries for one cleanup attempt.
+pub(crate) struct CleanupAttempt<'attempt, C: CancellationCheck> {
+    scope: CleanupScope,
+    cancellation: &'attempt C,
+    deadline: Instant,
+}
+
+impl<'attempt, C: CancellationCheck> CleanupAttempt<'attempt, C> {
+    pub(crate) fn new(scope: CleanupScope, cancellation: &'attempt C, deadline: Instant) -> Self {
+        Self {
+            scope,
+            cancellation,
+            deadline,
+        }
+    }
+}
+
+impl CleanupScope {
+    fn includes_profile(self, profile: ProfileId) -> bool {
+        matches!(self, Self::All) || matches!(self, Self::Profile(expected) if expected == profile)
+    }
+
+    fn includes_entry(self, entry: &ExtensionNativeOwnershipEntry) -> bool {
+        self.includes_profile(entry.key().profile())
+    }
 }
 
 pub(crate) trait CleanupRepositoryBackend {
@@ -128,10 +163,14 @@ pub(crate) fn reconcile_startup(
     projection: &mut JournalProjection,
     repository: &mut impl CleanupRepositoryBackend,
     mut native_recovery: Option<&mut NativeRecoveryState>,
-    cancellation: &impl CancellationCheck,
-    deadline: Instant,
+    attempt: CleanupAttempt<'_, impl CancellationCheck>,
     mut publish_progress: impl FnMut(CleanupProgress),
 ) -> CleanupStartupOutcome {
+    let CleanupAttempt {
+        scope,
+        cancellation,
+        deadline,
+    } = attempt;
     if let Some(outcome) = frontier_refusal(cancellation, deadline) {
         return outcome;
     }
@@ -168,10 +207,16 @@ pub(crate) fn reconcile_startup(
             publish_progress(CleanupProgress::ReconcilingCleanup);
             continue;
         };
-        if native_recovery
-            .as_ref()
-            .is_some_and(|recovery| recovery.has_frontier())
-        {
+        let native_frontier_profile = match native_recovery.as_ref() {
+            Some(recovery) => match recovery.frontier_profile() {
+                Ok(profile) => profile,
+                Err(reason) => {
+                    return CleanupStartupOutcome::Failed(map_native_failure(reason));
+                }
+            },
+            None => None,
+        };
+        if native_frontier_profile.is_some_and(|profile| scope.includes_profile(profile)) {
             let Some(native_recovery) = native_recovery.as_deref_mut() else {
                 return CleanupStartupOutcome::Failed(CleanupFailure::NativeHostInvariant);
             };
@@ -187,7 +232,7 @@ pub(crate) fn reconcile_startup(
                     continue;
                 }
                 NativeRecoveryStep::Unsupported => {
-                    return cleanup_required_from_projection(projection);
+                    return cleanup_required_from_projection(projection, scope);
                 }
                 NativeRecoveryStep::Unavailable(reason) => {
                     return CleanupStartupOutcome::Unavailable(map_native_unavailable(reason));
@@ -201,20 +246,28 @@ pub(crate) fn reconcile_startup(
         let definite_absence = journal
             .entries()
             .iter()
-            .find(|entry| native_absence_is_definite(entry))
+            .find(|entry| scope.includes_entry(entry) && native_absence_is_definite(entry))
             .cloned();
         let Some(entry) = definite_absence else {
             let Some(entry) = journal
                 .entries()
                 .iter()
-                .find(|entry| native_owner_is_possible(entry))
+                .find(|entry| scope.includes_entry(entry) && native_owner_is_possible(entry))
                 .cloned()
             else {
-                return cleanup_required_from_projection(projection);
+                return cleanup_required_from_projection(projection, scope);
             };
             let Some(native_recovery) = native_recovery.as_deref_mut() else {
-                return cleanup_required_from_projection(projection);
+                return cleanup_required_from_projection(projection, scope);
             };
+            if native_recovery.has_frontier() {
+                // A scoped attempt must never advance or replace another
+                // profile's exact native frontier. Its single recovery slot is
+                // retryably unavailable until that unrelated owner settles.
+                return CleanupStartupOutcome::Unavailable(
+                    CleanupUnavailable::NativeRuntimeCapacity,
+                );
+            }
             match native_recovery.begin(entry) {
                 NativeRecoveryStep::Progress => {
                     repository_reopens = 0;
@@ -227,7 +280,7 @@ pub(crate) fn reconcile_startup(
                     continue;
                 }
                 NativeRecoveryStep::Unsupported => {
-                    return cleanup_required_from_projection(projection);
+                    return cleanup_required_from_projection(projection, scope);
                 }
                 NativeRecoveryStep::Unavailable(reason) => {
                     return CleanupStartupOutcome::Unavailable(map_native_unavailable(reason));
@@ -304,11 +357,18 @@ fn native_owner_is_possible(entry: &ExtensionNativeOwnershipEntry) -> bool {
     )
 }
 
-fn cleanup_required_from_projection(projection: &JournalProjection) -> CleanupStartupOutcome {
+fn cleanup_required_from_projection(
+    projection: &JournalProjection,
+    scope: CleanupScope,
+) -> CleanupStartupOutcome {
     let Some(journal) = projection.known() else {
         return CleanupStartupOutcome::Failed(CleanupFailure::StoreJournalInvalid);
     };
-    let possible_owner_count = journal.entries().len();
+    let possible_owner_count = journal
+        .entries()
+        .iter()
+        .filter(|entry| scope.includes_entry(entry))
+        .count();
     if possible_owner_count == 0 {
         return CleanupStartupOutcome::Ready {
             journal_revision: journal.revision(),
@@ -907,11 +967,11 @@ mod tests {
         }
     }
 
-    fn preparation(install: u128) -> ExtensionNativeOwnershipPreparation {
+    fn preparation_for(profile: ProfileId, install: u128) -> ExtensionNativeOwnershipPreparation {
         let byte = u8::try_from(install).unwrap();
         ExtensionNativeOwnershipPreparation::new(
             ExtensionNativeOwnershipKey::new(
-                ProfileId::from(1),
+                profile,
                 ExtensionInstallId::from(install),
                 ExtensionGrantBrowsingContext::Regular,
             ),
@@ -933,18 +993,30 @@ mod tests {
         )
     }
 
-    fn begin(
+    fn preparation(install: u128) -> ExtensionNativeOwnershipPreparation {
+        preparation_for(ProfileId::from(1), install)
+    }
+
+    fn begin_for(
         journal: ExtensionNativeOwnershipJournal,
+        profile: ProfileId,
         install: u128,
     ) -> ExtensionNativeOwnershipJournal {
         let expected = journal.revision();
         journal
             .apply(
                 expected,
-                ExtensionNativeOwnershipJournalMutation::begin(preparation(install)),
+                ExtensionNativeOwnershipJournalMutation::begin(preparation_for(profile, install)),
             )
             .unwrap()
             .into_journal()
+    }
+
+    fn begin(
+        journal: ExtensionNativeOwnershipJournal,
+        install: u128,
+    ) -> ExtensionNativeOwnershipJournal {
+        begin_for(journal, ProfileId::from(1), install)
     }
 
     fn transition(
@@ -1036,8 +1108,7 @@ mod tests {
             &mut projection,
             repository,
             None,
-            cancellation,
-            deadline,
+            CleanupAttempt::new(CleanupScope::All, cancellation, deadline),
             publish_progress,
         )
     }
@@ -1200,6 +1271,66 @@ mod tests {
         assert_eq!(
             repository.releases()[0].native_incarnation,
             definite_operation
+        );
+    }
+
+    #[test]
+    fn profile_scope_drains_only_target_rows_and_preserves_unrelated_rows_exactly() {
+        let target = ProfileId::from(1);
+        let unrelated = ProfileId::from(2);
+        let journal = begin_for(ExtensionNativeOwnershipJournal::empty(), target, 1);
+        let journal = begin_for(journal, unrelated, 2);
+        let target_entry = journal
+            .get(preparation_for(target, 1).key())
+            .unwrap()
+            .clone();
+        let unrelated_entry = journal
+            .get(preparation_for(unrelated, 2).key())
+            .unwrap()
+            .clone();
+        let backend = FakeJournalBackend::new(journal);
+        let mut repository = FakeRepository::new();
+        let mut projection = JournalProjection::unknown();
+
+        let outcome = reconcile_startup(
+            &backend,
+            &mut projection,
+            &mut repository,
+            None,
+            CleanupAttempt::new(
+                CleanupScope::Profile(target),
+                &ScriptedCancellation::never(),
+                Instant::now() + TEST_DEADLINE,
+            ),
+            |_| {},
+        );
+
+        let durable = backend.durable();
+        assert_eq!(
+            outcome,
+            CleanupStartupOutcome::Ready {
+                journal_revision: durable.revision(),
+            }
+        );
+        assert!(durable.get(target_entry.key()).is_none());
+        assert_eq!(durable.get(unrelated_entry.key()), Some(&unrelated_entry));
+        assert_eq!(repository.releases().len(), 1);
+        assert_eq!(
+            repository.releases()[0].install_id,
+            ExtensionInstallId::from(1)
+        );
+        assert_eq!(
+            backend.mutation_traces(),
+            vec![
+                MutationTrace::Transition {
+                    operation: target_entry.operation().get(),
+                    intent: ExtensionNativeOwnershipIntent::Release,
+                    phase: ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+                },
+                MutationTrace::Clear {
+                    operation: target_entry.operation().get(),
+                },
+            ]
         );
     }
 

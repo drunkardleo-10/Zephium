@@ -7,8 +7,10 @@ use zephium_core::extensions::{
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournalMutation,
     ExtensionNativeOwnershipPhase, ExtensionRuntimeBackendTarget,
 };
+use zephium_core::ids::ProfileId;
 use zephium_extension_runtime_api::{
     ExtensionRuntimeFailure, ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
+    ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostProfileAbsenceEvidence,
     ExtensionRuntimeHostRecoveryBinding, ExtensionRuntimeOwnershipEvidence,
     ExtensionRuntimeRecoveryOwner, ExtensionRuntimeRecoveryRequest,
     ExtensionRuntimeRecoveryRetirementSettlement, ExtensionRuntimeRecoverySettlement,
@@ -90,6 +92,7 @@ struct NativeRecoveryFrontier {
 pub(crate) struct NativeRecoveryState {
     factory: ExtensionRuntimeHostFactory,
     frontier: Option<NativeRecoveryFrontier>,
+    native_call_panic_fence: bool,
 }
 
 impl NativeRecoveryState {
@@ -97,6 +100,7 @@ impl NativeRecoveryState {
         Self {
             factory,
             frontier: None,
+            native_call_panic_fence: false,
         }
     }
 
@@ -104,17 +108,64 @@ impl NativeRecoveryState {
         self.frontier.is_some()
     }
 
+    /// Returns the exact profile owned by the current cleanup frontier.
+    ///
+    /// Pending durable transitions must preserve the complete ownership key;
+    /// disagreement is a host/service invariant failure rather than a profile
+    /// that scoped retirement may guess around.
+    pub(crate) fn frontier_profile(&self) -> Result<Option<ProfileId>, NativeRecoveryFailure> {
+        let Some(frontier) = self.frontier.as_ref() else {
+            return Ok(None);
+        };
+        let key = frontier.durable.entry.key();
+        if frontier
+            .durable
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.before.key() != key || pending.after.key() != key)
+        {
+            return Err(NativeRecoveryFailure::HostInvariant);
+        }
+        Ok(Some(key.profile()))
+    }
+
+    /// Joins the engine's complete profile registry fence with this worker's
+    /// exact local recovery frontier.
+    pub(crate) fn profile_absence_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> Result<
+        ExtensionRuntimeHostProfileAbsenceEvidence<'_>,
+        ExtensionRuntimeHostProfileAbsenceDisposition,
+    > {
+        match self.frontier_profile() {
+            Err(_) => {
+                return Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed);
+            }
+            Ok(Some(frontier_profile)) if frontier_profile == profile => {
+                return Err(ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain);
+            }
+            Ok(Some(_) | None) => {}
+        }
+        self.native_call_panic_fence = true;
+        let outcome = self.factory.profile_absence_until(profile, deadline);
+        self.native_call_panic_fence = false;
+        outcome
+    }
+
     /// Whether dropping this state would abandon an attached engine registry
     /// obligation. A merely bound, never-invoked request remains provisional
     /// and its passive destructor may return that local reservation.
     pub(crate) fn has_attached_obligation(&self) -> bool {
-        self.frontier.as_ref().is_some_and(|frontier| {
-            matches!(
-                frontier.control,
-                NativeRecoveryControl::Request { attached: true, .. }
-                    | NativeRecoveryControl::Owner(_)
-            )
-        })
+        self.native_call_panic_fence
+            || self.frontier.as_ref().is_some_and(|frontier| {
+                matches!(
+                    frontier.control,
+                    NativeRecoveryControl::Request { attached: true, .. }
+                        | NativeRecoveryControl::Owner(_)
+                )
+            })
     }
 
     pub(crate) fn begin(&mut self, entry: ExtensionNativeOwnershipEntry) -> NativeRecoveryStep {
@@ -127,7 +178,10 @@ impl NativeRecoveryState {
                 return NativeRecoveryStep::Failed(NativeRecoveryFailure::InvalidBinding);
             }
         };
-        match self.factory.bind_recovery(binding) {
+        self.native_call_panic_fence = true;
+        let binding = self.factory.bind_recovery(binding);
+        self.native_call_panic_fence = false;
+        match binding {
             Ok(request) => {
                 self.frontier = Some(NativeRecoveryFrontier {
                     durable: DurableRecoveryLineage::new(entry),
@@ -223,7 +277,9 @@ impl NativeRecoveryState {
             return (Some(request_frontier(durable, request, attached)), step);
         }
 
+        self.native_call_panic_fence = true;
         let settlement = request.reconcile_until(deadline);
+        self.native_call_panic_fence = false;
         let (frontier, provisional_step) = match settlement {
             ExtensionRuntimeRecoverySettlement::Owned(owner) => (
                 NativeRecoveryFrontier {
@@ -314,7 +370,9 @@ impl NativeRecoveryState {
             return (Some(owner_frontier(durable, owner)), step);
         }
 
+        self.native_call_panic_fence = true;
         let settlement = owner.into_retirement_request().settle_until(deadline);
+        self.native_call_panic_fence = false;
         let (frontier, provisional_step) = match settlement {
             ExtensionRuntimeRecoveryRetirementSettlement::Absent => (
                 NativeRecoveryFrontier {
@@ -710,6 +768,7 @@ const fn step_is_progress(step: &NativeRecoveryStep) -> bool {
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::panic::{self, AssertUnwindSafe};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -916,8 +975,10 @@ mod tests {
     struct HostScript {
         bind_error: Option<ExtensionRuntimeHostBindError>,
         bind_calls: usize,
+        profile_absence_calls: usize,
         reconcile_calls: usize,
         retire_calls: usize,
+        profile_absence: VecDeque<Result<(), ExtensionRuntimeHostProfileAbsenceDisposition>>,
         reconcile_deadlines: Vec<Instant>,
         retire_deadlines: Vec<Instant>,
         reconcile: VecDeque<ExtensionRuntimeOwnershipDisposition>,
@@ -929,8 +990,10 @@ mod tests {
             Self {
                 bind_error: None,
                 bind_calls: 0,
+                profile_absence_calls: 0,
                 reconcile_calls: 0,
                 retire_calls: 0,
+                profile_absence: VecDeque::new(),
                 reconcile_deadlines: Vec::new(),
                 retire_deadlines: Vec::new(),
                 reconcile: VecDeque::new(),
@@ -965,6 +1028,18 @@ mod tests {
             Ok(Box::new(ScriptedOwnershipPort {
                 script: Arc::clone(&self.script),
             }))
+        }
+
+        fn profile_absence_until(
+            &mut self,
+            _profile: ProfileId,
+            _deadline: Instant,
+        ) -> Result<(), ExtensionRuntimeHostProfileAbsenceDisposition> {
+            let mut script = self.script.lock().unwrap();
+            script.profile_absence_calls += 1;
+            script.profile_absence.pop_front().unwrap_or(Err(
+                ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable,
+            ))
         }
     }
 
@@ -1108,10 +1183,141 @@ mod tests {
             projection,
             repository,
             Some(native),
-            cancellation,
-            deadline,
+            crate::cleanup::CleanupAttempt::new(
+                crate::cleanup::CleanupScope::All,
+                cancellation,
+                deadline,
+            ),
             |_| {},
         )
+    }
+
+    #[test]
+    fn profile_absence_wrapper_exposes_exact_frontier_and_never_skips_it() {
+        let script = Arc::new(Mutex::new(HostScript::new()));
+        let mut native = NativeRecoveryState::new(factory(&script));
+        let journal = possible_owner(ExtensionRuntimeBackendTarget::MacosNative);
+        let entry = journal.entries()[0].clone();
+        let profile = entry.key().profile();
+
+        assert!(matches!(native.begin(entry), NativeRecoveryStep::Progress));
+        assert_eq!(native.frontier_profile(), Ok(Some(profile)));
+        assert!(matches!(
+            native.profile_absence_until(profile, Instant::now() + TEST_DEADLINE),
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain)
+        ));
+        assert_eq!(script.lock().unwrap().profile_absence_calls, 0);
+    }
+
+    #[test]
+    fn profile_absence_wrapper_fails_closed_on_inconsistent_pending_frontier_key() {
+        let script = Arc::new(Mutex::new(HostScript::new()));
+        let mut native = NativeRecoveryState::new(factory(&script));
+        let journal = two_possible_owners(ExtensionRuntimeBackendTarget::MacosNative);
+        let before = journal.entries()[0].clone();
+        let after = journal.entries()[1].clone();
+        let profile = before.key().profile();
+
+        assert!(matches!(
+            native.begin(before.clone()),
+            NativeRecoveryStep::Progress
+        ));
+        native
+            .frontier
+            .as_mut()
+            .expect("begin installs the exact frontier")
+            .durable
+            .pending = Some(PendingTransition {
+            mutation: ExtensionNativeOwnershipJournalMutation::clear(before.cas()),
+            before,
+            after,
+        });
+
+        assert_eq!(
+            native.frontier_profile(),
+            Err(NativeRecoveryFailure::HostInvariant)
+        );
+        assert!(matches!(
+            native.profile_absence_until(profile, Instant::now() + TEST_DEADLINE),
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed)
+        ));
+        assert_eq!(script.lock().unwrap().profile_absence_calls, 0);
+    }
+
+    #[test]
+    fn profile_absence_wrapper_returns_factory_bound_evidence_without_a_frontier() {
+        let profile = ProfileId::from(8);
+        let script = Arc::new(Mutex::new(HostScript::new()));
+        script.lock().unwrap().profile_absence.push_back(Ok(()));
+        let mut native = NativeRecoveryState::new(factory(&script));
+
+        let evidence = native
+            .profile_absence_until(profile, Instant::now() + TEST_DEADLINE)
+            .expect("empty local frontier and trusted host absence must mint evidence");
+        assert!(evidence.is_for_profile(profile));
+        assert_ne!(evidence.fence_generation(), 0);
+        drop(evidence);
+        assert_eq!(script.lock().unwrap().profile_absence_calls, 1);
+    }
+
+    #[test]
+    fn panicking_native_call_leaves_a_sticky_fail_stop_obligation() {
+        let script = Arc::new(Mutex::new(HostScript::new()));
+        let journal = possible_owner(ExtensionRuntimeBackendTarget::LinuxCompatibility);
+        let entry = journal.entries()[0].clone();
+        let backend = FakeJournalBackend::new(journal);
+        let mut projection = JournalProjection::unknown();
+        let mut native = NativeRecoveryState::new(factory(&script));
+        assert!(matches!(native.begin(entry), NativeRecoveryStep::Progress));
+
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let _ = native.advance(
+                &backend,
+                &mut projection,
+                &NeverCancelled,
+                Instant::now() + TEST_DEADLINE,
+            );
+        }));
+
+        assert!(result.is_err());
+        assert!(native.has_attached_obligation());
+    }
+
+    #[test]
+    fn scoped_cleanup_never_advances_an_unrelated_native_frontier() {
+        let script = Arc::new(Mutex::new(HostScript::new()));
+        let journal = possible_owner(ExtensionRuntimeBackendTarget::MacosNative);
+        let entry = journal.entries()[0].clone();
+        let backend = FakeJournalBackend::new(journal.clone());
+        let mut projection = JournalProjection::unknown();
+        let mut repository = FakeRepository::new();
+        let mut native = NativeRecoveryState::new(factory(&script));
+        assert!(matches!(native.begin(entry), NativeRecoveryStep::Progress));
+
+        let outcome = reconcile_startup(
+            &backend,
+            &mut projection,
+            &mut repository,
+            Some(&mut native),
+            crate::cleanup::CleanupAttempt::new(
+                crate::cleanup::CleanupScope::Profile(ProfileId::from(2)),
+                &NeverCancelled,
+                Instant::now() + TEST_DEADLINE,
+            ),
+            |_| {},
+        );
+
+        assert_eq!(
+            outcome,
+            CleanupStartupOutcome::Ready {
+                journal_revision: journal.revision(),
+            }
+        );
+        assert!(native.has_frontier());
+        assert_eq!(backend.durable(), journal);
+        let script = script.lock().unwrap();
+        assert_eq!(script.reconcile_calls, 0);
+        assert_eq!(script.retire_calls, 0);
     }
 
     fn native_owner_id() -> ExtensionRuntimeNativeOwnerId {

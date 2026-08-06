@@ -9,17 +9,26 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use zephium_core::ids::ProfileId;
+
 use crate::cleanup::{
-    reconcile_startup, CancellationCheck, CleanupFailure, CleanupProgress, CleanupStartupOutcome,
-    CleanupUnavailable,
+    reconcile_startup, CancellationCheck, CleanupAttempt, CleanupFailure, CleanupProgress,
+    CleanupScope, CleanupStartupOutcome, CleanupUnavailable,
 };
 use crate::evidence::ExtensionServiceShutdownEvidence;
 use crate::journal_store::JournalProjection;
 #[cfg(test)]
 use crate::mailbox::NormalAdmission;
-use crate::mailbox::{Delivery, Mailbox, ShutdownAdmission};
+use crate::mailbox::{BarrierAdmission, Delivery, Mailbox, ShutdownAdmission};
 use crate::native_recovery::NativeRecoveryState;
 use crate::ports::{ExtensionServiceShutdownOutcome, ExtensionServiceStatusPort};
+#[cfg(test)]
+use crate::profile_retirement::ProfileRetirementBegin;
+use crate::profile_retirement::{
+    retire_profile_until as run_profile_retirement, ExtensionServiceProfileRetirementFailureReason,
+    ExtensionServiceProfileRetirementOutcome, ExtensionServiceProfileRetirementUnavailableReason,
+    ProfileRetirementRegistry, ProfileRetirementResources,
+};
 use crate::repository::ServiceRepository;
 use crate::startup::{
     CurrentStartupObservation, ExtensionServiceLaunchInput, ExtensionServiceStartupFailure,
@@ -57,6 +66,11 @@ enum WorkerCommand {
     RetryStartup {
         attempt: StartupAttempt,
         deadline: Instant,
+    },
+    RetireProfile {
+        profile: ProfileId,
+        deadline: Instant,
+        settlement: mpsc::SyncSender<ExtensionServiceProfileRetirementOutcome>,
     },
     #[cfg(test)]
     Drive,
@@ -346,8 +360,8 @@ impl ExtensionServiceOwner {
                     drop(worker_mailbox);
                     let evidence = ExtensionServiceShutdownEvidence::new(
                         worker,
-                        summary.accepted_normal,
-                        summary.completed_normal,
+                        summary.accepted_commands,
+                        summary.completed_commands,
                     );
                     let _ = completion_tx.try_send(evidence);
                 }
@@ -413,6 +427,46 @@ impl ExtensionServiceOwner {
         ExtensionServiceHandle {
             worker: self.worker,
             status: Arc::clone(&self.status),
+        }
+    }
+
+    /// Permanently fences one profile in this worker and tries to prove that
+    /// all extension-owned state for it has been retired by `deadline`.
+    ///
+    /// The reserved command is admitted even when the supplied deadline has
+    /// already elapsed. This preserves FIFO ordering: once accepted, the
+    /// worker installs its monotonic profile fence before inspecting time,
+    /// durable state, or the native registry. The returned value is a direct
+    /// control-flow settlement, not a transferable capability; no deletion
+    /// API may accept or trust a constructed copy of it.
+    #[must_use = "profile retirement settlement must be checked"]
+    pub fn retire_profile_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> ExtensionServiceProfileRetirementOutcome {
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::RetireProfile {
+            profile,
+            deadline,
+            settlement,
+        };
+        match self.mailbox.try_push_barrier(command) {
+            BarrierAdmission::Accepted => receive_profile_retirement_until(&observation, deadline),
+            BarrierAdmission::Occupied(_) => ExtensionServiceProfileRetirementOutcome::Unavailable(
+                ExtensionServiceProfileRetirementUnavailableReason::WorkerBusy,
+            ),
+            BarrierAdmission::Sealed(_) | BarrierAdmission::Closed(_) => {
+                ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                    ExtensionServiceProfileRetirementFailureReason::WorkerUnavailable,
+                )
+            }
+            BarrierAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                    ExtensionServiceProfileRetirementFailureReason::WorkerUnavailable,
+                )
+            }
         }
     }
 
@@ -698,6 +752,40 @@ fn receive_completion_until(
     completion.recv_timeout(remaining).ok()
 }
 
+fn receive_profile_retirement_until(
+    settlement: &Receiver<ExtensionServiceProfileRetirementOutcome>,
+    deadline: Instant,
+) -> ExtensionServiceProfileRetirementOutcome {
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        return match settlement.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => {
+                ExtensionServiceProfileRetirementOutcome::Unavailable(
+                    ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached,
+                )
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                    ExtensionServiceProfileRetirementFailureReason::WorkerUnavailable,
+                )
+            }
+        };
+    };
+    match settlement.recv_timeout(remaining) {
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            ExtensionServiceProfileRetirementOutcome::Unavailable(
+                ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached,
+            )
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                ExtensionServiceProfileRetirementFailureReason::WorkerUnavailable,
+            )
+        }
+    }
+}
+
 fn wait_for_thread_finish(thread: &JoinHandle<()>, deadline: Instant) -> bool {
     loop {
         if thread.is_finished() {
@@ -711,9 +799,10 @@ fn wait_for_thread_finish(thread: &JoinHandle<()>, deadline: Instant) -> bool {
 }
 
 struct WorkerState {
-    completed_normal: u64,
+    completed_commands: u64,
     startup: Option<WorkerStartupState>,
     initial_startup: Option<(Instant, StartupAttempt)>,
+    retirements: ProfileRetirementRegistry,
     #[cfg(test)]
     retained_probe: Option<TestDropProbe>,
 }
@@ -725,9 +814,10 @@ impl WorkerState {
             None => (None, None),
         };
         Self {
-            completed_normal: 0,
+            completed_commands: 0,
             startup,
             initial_startup,
+            retirements: ProfileRetirementRegistry::new(),
             #[cfg(test)]
             retained_probe: None,
         }
@@ -770,20 +860,37 @@ impl WorkerState {
         startup_outcome: &SharedStartupOutcome,
         cancellation: &WorkerCancellation,
     ) -> bool {
-        let Some(startup) = self.startup.as_mut() else {
-            return false;
-        };
         if !startup_outcome.is_active(attempt) {
             return false;
         }
+        // Retry startup is global recovery ingress. Once any profile has been
+        // fenced, allowing it to run could advance that profile outside the
+        // retirement protocol. Refuse without touching Store, repository, or
+        // the native host. Initial startup necessarily precedes all commands.
+        if self.retirements.has_any_fence() {
+            return publish_startup_settlement(
+                status,
+                startup_outcome,
+                attempt,
+                ExtensionServiceStartupOutcome::Unavailable(
+                    ExtensionServiceStartupUnavailable::new(
+                        worker,
+                        ExtensionServiceStartupUnavailableReason::ReconciliationPending,
+                    ),
+                ),
+                || {},
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            return false;
+        };
         status.publish_startup(ExtensionServicePhase::OpeningRepository);
         let outcome = reconcile_startup(
             &startup.store,
             &mut startup.projection,
             &mut startup.repository,
             Some(&mut startup.native_recovery),
-            cancellation,
-            deadline,
+            CleanupAttempt::new(CleanupScope::All, cancellation, deadline),
             |progress| match progress {
                 CleanupProgress::LoadingOwnershipJournal => {
                     status.publish_startup(ExtensionServicePhase::LoadingOwnershipJournal);
@@ -818,6 +925,30 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::RetireProfile {
+                profile,
+                deadline,
+                settlement,
+            } => {
+                let resources = self.startup.as_mut().map(|startup| {
+                    ProfileRetirementResources::new(
+                        &startup.store,
+                        &mut startup.projection,
+                        &mut startup.repository,
+                        &mut startup.native_recovery,
+                    )
+                });
+                let outcome = run_profile_retirement(
+                    resources,
+                    &mut self.retirements,
+                    profile,
+                    deadline,
+                    cancellation,
+                );
+                // The caller's observation deadline is independent of worker
+                // completion. A dropped receiver never rolls back the fence.
+                let _ = settlement.try_send(outcome);
+            }
             #[cfg(test)]
             WorkerCommand::Drive => {}
             #[cfg(test)]
@@ -833,8 +964,8 @@ impl WorkerState {
                 let _ = release.recv();
             }
         }
-        self.completed_normal = self
-            .completed_normal
+        self.completed_commands = self
+            .completed_commands
             .checked_add(1)
             .expect("mailbox admission proves the completion counter bound");
         true
@@ -859,8 +990,7 @@ impl WorkerState {
             &mut startup.projection,
             &mut startup.repository,
             Some(&mut startup.native_recovery),
-            &cancellation,
-            deadline,
+            CleanupAttempt::new(CleanupScope::All, &cancellation, deadline),
             |_| {},
         );
         !startup.native_recovery.has_attached_obligation()
@@ -1026,8 +1156,8 @@ const fn public_failure_reason(reason: CleanupFailure) -> ExtensionServiceStartu
 }
 
 struct WorkerShutdownSummary {
-    accepted_normal: u64,
-    completed_normal: u64,
+    accepted_commands: u64,
+    completed_commands: u64,
 }
 
 fn run_worker(
@@ -1045,8 +1175,8 @@ fn run_worker(
                     return None;
                 }
             }
-            Delivery::Shutdown { accepted_normal } => {
-                if !cancellation.is_requested() || state.completed_normal != accepted_normal {
+            Delivery::Shutdown { accepted_commands } => {
+                if !cancellation.is_requested() || state.completed_commands != accepted_commands {
                     return None;
                 }
                 let deadline = cancellation.shutdown_deadline()?;
@@ -1055,8 +1185,8 @@ fn run_worker(
                     retain_fail_stopped_native_obligation(state);
                 }
                 return Some(WorkerShutdownSummary {
-                    accepted_normal,
-                    completed_normal: state.completed_normal,
+                    accepted_commands,
+                    completed_commands: state.completed_commands,
                 });
             }
             Delivery::Closed => return None,
@@ -1076,8 +1206,10 @@ fn retain_fail_stopped_native_obligation(_state: &mut WorkerState) -> ! {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
-    use crate::mailbox::EXTENSION_SERVICE_NORMAL_CAPACITY;
+    use crate::mailbox::{EXTENSION_SERVICE_MAILBOX_CAPACITY, EXTENSION_SERVICE_NORMAL_CAPACITY};
     use zephium_core::ports::extensions::{
         ExtensionServiceLifecycle,
         ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
@@ -1086,7 +1218,7 @@ mod tests {
         ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
         ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
         ExtensionRuntimeHostFactoryPort, ExtensionRuntimeHostOwnershipPort,
-        ExtensionRuntimeHostRecoveryContext,
+        ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostRecoveryContext,
     };
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1145,6 +1277,47 @@ mod tests {
         ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactoryPort))
     }
 
+    struct ProfileAbsenceHostFactoryPort {
+        calls: Arc<AtomicUsize>,
+        disposition: Option<ExtensionRuntimeHostProfileAbsenceDisposition>,
+    }
+
+    impl ExtensionRuntimeHostFactoryPort for ProfileAbsenceHostFactoryPort {
+        fn bind_activation(
+            &mut self,
+            _context: &ExtensionRuntimeHostActivationContext<'_>,
+        ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+            Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+        }
+
+        fn bind_recovery(
+            &mut self,
+            _context: ExtensionRuntimeHostRecoveryContext,
+        ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError>
+        {
+            Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+        }
+
+        fn profile_absence_until(
+            &mut self,
+            _profile: ProfileId,
+            _deadline: Instant,
+        ) -> Result<(), ExtensionRuntimeHostProfileAbsenceDisposition> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.disposition.map_or(Ok(()), Err)
+        }
+    }
+
+    fn profile_absence_host_factory(
+        calls: Arc<AtomicUsize>,
+        disposition: Option<ExtensionRuntimeHostProfileAbsenceDisposition>,
+    ) -> ExtensionRuntimeHostFactory {
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(ProfileAbsenceHostFactoryPort {
+            calls,
+            disposition,
+        }))
+    }
+
     fn settled_unavailable_owner_for_admission_test() -> ExtensionServiceOwner {
         let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
         let status = Arc::new(SharedStatus::new(worker));
@@ -1167,6 +1340,27 @@ mod tests {
             thread: None,
             _not_sync: PhantomData,
         }
+    }
+
+    #[test]
+    fn expired_retirement_observation_distinguishes_pending_from_dead_worker() {
+        let (pending_sender, pending) = mpsc::sync_channel(1);
+        assert_eq!(
+            receive_profile_retirement_until(&pending, Instant::now()),
+            ExtensionServiceProfileRetirementOutcome::Unavailable(
+                ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached,
+            )
+        );
+        drop(pending_sender);
+
+        let (dead_sender, dead) = mpsc::sync_channel(1);
+        drop(dead_sender);
+        assert_eq!(
+            receive_profile_retirement_until(&dead, Instant::now()),
+            ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                ExtensionServiceProfileRetirementFailureReason::WorkerUnavailable,
+            )
+        );
     }
 
     #[test]
@@ -1295,6 +1489,63 @@ mod tests {
     }
 
     #[test]
+    fn expired_retirement_installs_fencing_before_inspecting_deadline_or_startup() {
+        let profile = ProfileId::from(3);
+        let mut retirements = ProfileRetirementRegistry::new();
+        let cancellation = WorkerCancellation::new();
+
+        assert_eq!(
+            run_profile_retirement(
+                None,
+                &mut retirements,
+                profile,
+                Instant::now(),
+                &cancellation,
+            ),
+            ExtensionServiceProfileRetirementOutcome::Unavailable(
+                ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached,
+            )
+        );
+        assert_eq!(
+            retirements.state(profile),
+            Some(crate::profile_retirement::ProfileRetirementState::Fencing)
+        );
+    }
+
+    #[test]
+    fn retained_profile_fence_refuses_later_global_recovery_ingress() {
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        let status = SharedStatus::new(worker);
+        let startup_outcome = SharedStartupOutcome::new(Some(StartupAttempt::INITIAL));
+        let cancellation = WorkerCancellation::new();
+        let mut state = WorkerState::new(None);
+        assert_eq!(
+            state.retirements.begin(ProfileId::from(4)),
+            ProfileRetirementBegin::Proceed
+        );
+
+        assert!(state.attempt_startup(
+            worker,
+            StartupAttempt::INITIAL,
+            Instant::now() + Duration::from_secs(1),
+            &status,
+            &startup_outcome,
+            &cancellation,
+        ));
+        assert!(matches!(
+            startup_outcome.current(),
+            CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::Unavailable(
+                unavailable
+            )) if unavailable.reason()
+                == ExtensionServiceStartupUnavailableReason::ReconciliationPending
+        ));
+        assert_eq!(
+            status.snapshot().phase(),
+            ExtensionServicePhase::StartupUnavailable
+        );
+    }
+
+    #[test]
     fn owner_is_send_and_handle_is_send_sync() {
         assert_send::<ExtensionServiceOwner>();
         assert_send_sync::<ExtensionServiceHandle>();
@@ -1331,6 +1582,17 @@ mod tests {
         Arc<SqliteStore>,
         ExtensionServiceLaunchInput,
     ) {
+        production_input_fixture_with_factory(unsupported_host_factory())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn production_input_fixture_with_factory(
+        host_factory: ExtensionRuntimeHostFactory,
+    ) -> (
+        tempfile::TempDir,
+        Arc<SqliteStore>,
+        ExtensionServiceLaunchInput,
+    ) {
         // macOS exposes `/var` through a filesystem alias. The private
         // namespace correctly rejects that path identity, so place the live
         // fixture below the already admitted checkout rather than weakening
@@ -1340,11 +1602,8 @@ mod tests {
         let authority = store.claim_extension_native_ownership_authority().unwrap();
         let repository_root =
             crate::ExtensionRepositoryRoot::from_app_data_directory(app_data.path()).unwrap();
-        let input = crate::ExtensionServiceLaunchInput::new(
-            authority,
-            repository_root,
-            unsupported_host_factory(),
-        );
+        let input =
+            crate::ExtensionServiceLaunchInput::new(authority, repository_root, host_factory);
         (app_data, store, input)
     }
 
@@ -1478,6 +1737,129 @@ mod tests {
             owner.handle().status().phase(),
             ExtensionServicePhase::Ready
         );
+
+        assert!(matches!(
+            owner.shutdown(),
+            ExtensionServiceShutdownOutcome::Complete(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn profile_retirement_joins_fresh_repository_and_native_absence_then_stays_sticky() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_app_data, store, input) = production_input_fixture_with_factory(
+            profile_absence_host_factory(Arc::clone(&calls), None),
+        );
+        let mut owner =
+            ExtensionServiceOwner::launch(input, Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            owner.wait_for_startup_until(Instant::now() + Duration::from_secs(5)),
+            ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(_))
+        ));
+        let profile = ProfileId::from(7);
+
+        assert_eq!(
+            owner.retire_profile_until(profile, Instant::now() + Duration::from_secs(5)),
+            ExtensionServiceProfileRetirementOutcome::Retired
+        );
+        assert_eq!(
+            owner.retire_profile_until(profile, Instant::now() + Duration::from_secs(5)),
+            ExtensionServiceProfileRetirementOutcome::Retired
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown() else {
+            panic!("retirement commands must drain before shutdown evidence is minted")
+        };
+        assert_eq!(evidence.accepted_commands(), 2);
+        assert_eq!(evidence.completed_commands(), 2);
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn expired_retirement_is_still_fifo_fenced_and_can_retry_in_place() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_app_data, store, input) = production_input_fixture_with_factory(
+            profile_absence_host_factory(Arc::clone(&calls), None),
+        );
+        let mut owner =
+            ExtensionServiceOwner::launch(input, Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            owner.wait_for_startup_until(Instant::now() + Duration::from_secs(5)),
+            ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(_))
+        ));
+        let profile = ProfileId::from(9);
+
+        assert_eq!(
+            owner.retire_profile_until(profile, Instant::now()),
+            ExtensionServiceProfileRetirementOutcome::Unavailable(
+                ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached,
+            )
+        );
+        let retry_deadline = Instant::now() + Duration::from_secs(5);
+        let outcome = loop {
+            let outcome = owner.retire_profile_until(profile, retry_deadline);
+            if outcome
+                != ExtensionServiceProfileRetirementOutcome::Unavailable(
+                    ExtensionServiceProfileRetirementUnavailableReason::WorkerBusy,
+                )
+            {
+                break outcome;
+            }
+            assert!(Instant::now() < retry_deadline);
+            thread::yield_now();
+        };
+        assert_eq!(outcome, ExtensionServiceProfileRetirementOutcome::Retired);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        assert!(matches!(
+            owner.shutdown(),
+            ExtensionServiceShutdownOutcome::Complete(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn native_invariant_failure_is_sticky_and_never_replays_the_host_fence() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_app_data, store, input) =
+            production_input_fixture_with_factory(profile_absence_host_factory(
+                Arc::clone(&calls),
+                Some(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed),
+            ));
+        let mut owner =
+            ExtensionServiceOwner::launch(input, Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            owner.wait_for_startup_until(Instant::now() + Duration::from_secs(5)),
+            ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(_))
+        ));
+        let profile = ProfileId::from(10);
+        let expected = ExtensionServiceProfileRetirementOutcome::FailedClosed(
+            ExtensionServiceProfileRetirementFailureReason::NativeRuntimeInvariant,
+        );
+
+        assert_eq!(
+            owner.retire_profile_until(profile, Instant::now() + Duration::from_secs(5)),
+            expected
+        );
+        assert_eq!(
+            owner.retire_profile_until(profile, Instant::now() + Duration::from_secs(5)),
+            expected
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
 
         assert!(matches!(
             owner.shutdown(),
@@ -1720,8 +2102,8 @@ mod tests {
         // One Block plus the expired and successful retries. The two
         // observations while the expired retry was in flight admitted no
         // duplicate commands.
-        assert_eq!(evidence.accepted_normal_commands(), 3);
-        assert_eq!(evidence.completed_normal_commands(), 3);
+        assert_eq!(evidence.accepted_commands(), 3);
+        assert_eq!(evidence.completed_commands(), 3);
         assert_eq!(
             store.shutdown_until(Instant::now() + Duration::from_secs(5)),
             StoreShutdownOutcome::Clean
@@ -1783,12 +2165,89 @@ mod tests {
         };
         assert_eq!(evidence.worker(), worker);
         assert_eq!(
-            evidence.accepted_normal_commands(),
+            evidence.accepted_commands(),
             EXTENSION_SERVICE_NORMAL_CAPACITY as u64
         );
         assert_eq!(
-            evidence.completed_normal_commands(),
+            evidence.completed_commands(),
             EXTENSION_SERVICE_NORMAL_CAPACITY as u64
+        );
+    }
+
+    #[test]
+    fn shutdown_evidence_counts_retirement_barriers_as_commands() {
+        let mut owner = ExtensionServiceOwner::spawn_empty_for_test().unwrap();
+        assert_eq!(
+            owner
+                .retire_profile_until(ProfileId::from(1), Instant::now() + Duration::from_secs(1),),
+            ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                ExtensionServiceProfileRetirementFailureReason::InternalProtocolViolation,
+            )
+        );
+        let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown() else {
+            panic!("retirement barrier must drain before shutdown evidence is minted")
+        };
+        assert_eq!(evidence.accepted_commands(), 1);
+        assert_eq!(evidence.completed_commands(), 1);
+    }
+
+    #[test]
+    fn physically_full_actor_mailbox_preserves_retirement_and_shutdown_slots() {
+        let mut owner = ExtensionServiceOwner::spawn_empty_for_test().unwrap();
+        let mailbox = Arc::clone(&owner.mailbox);
+        let (release_tx, release) = mpsc::sync_channel(0);
+        assert!(matches!(
+            owner.try_block_for_test(release),
+            NormalAdmission::Accepted
+        ));
+        let receive_deadline = Instant::now() + Duration::from_secs(1);
+        while mailbox.len() != 0 {
+            assert!(
+                Instant::now() < receive_deadline,
+                "worker did not receive blocker"
+            );
+            thread::yield_now();
+        }
+
+        for _ in 0..EXTENSION_SERVICE_NORMAL_CAPACITY {
+            assert!(matches!(
+                owner.try_drive_for_test(),
+                NormalAdmission::Accepted
+            ));
+        }
+        assert_eq!(
+            owner.retire_profile_until(ProfileId::from(1), Instant::now()),
+            ExtensionServiceProfileRetirementOutcome::Unavailable(
+                ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached,
+            )
+        );
+        assert_eq!(mailbox.len(), EXTENSION_SERVICE_MAILBOX_CAPACITY - 1);
+        assert!(matches!(
+            owner.try_drive_for_test(),
+            NormalAdmission::Full(WorkerCommand::Drive)
+        ));
+
+        let shutdown = thread::spawn(move || owner.shutdown());
+        let shutdown_admission_deadline = Instant::now() + Duration::from_secs(1);
+        while mailbox.len() != EXTENSION_SERVICE_MAILBOX_CAPACITY {
+            assert!(
+                Instant::now() < shutdown_admission_deadline,
+                "shutdown did not consume its reserved mailbox slot"
+            );
+            thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        let ExtensionServiceShutdownOutcome::Complete(evidence) = shutdown.join().unwrap() else {
+            panic!("full mailbox must drain both reserved command classes")
+        };
+        assert_eq!(
+            evidence.accepted_commands(),
+            EXTENSION_SERVICE_MAILBOX_CAPACITY as u64
+        );
+        assert_eq!(
+            evidence.completed_commands(),
+            EXTENSION_SERVICE_MAILBOX_CAPACITY as u64
         );
     }
 

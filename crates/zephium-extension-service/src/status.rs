@@ -117,6 +117,12 @@ impl SharedStatus {
 
     pub(crate) fn publish(&self, phase: ExtensionServicePhase) {
         let mut snapshot = self.lock();
+        if matches!(
+            snapshot.phase,
+            ExtensionServicePhase::Stopped | ExtensionServicePhase::Failed
+        ) {
+            return;
+        }
         Self::publish_locked(&mut snapshot, phase, &self.changed);
     }
 
@@ -195,6 +201,23 @@ mod tests {
         status.publish_ready();
 
         assert_eq!(status.snapshot(), queued);
+    }
+
+    #[test]
+    fn terminal_status_cannot_regress_to_a_late_shutdown_publication() {
+        for terminal in [
+            ExtensionServicePhase::Stopped,
+            ExtensionServicePhase::Failed,
+        ] {
+            let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+            let status = SharedStatus::new(worker);
+            status.publish(terminal);
+            let settled = status.snapshot();
+
+            status.publish(ExtensionServicePhase::ShutdownQueued);
+
+            assert_eq!(status.snapshot(), settled);
+        }
     }
 
     #[test]

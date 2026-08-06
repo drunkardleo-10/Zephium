@@ -1,10 +1,12 @@
 //! Worker-private ownership of the authenticated extension repository.
 
 use zephium_core::extensions::ExtensionPackagePinReleaseBinding;
+use zephium_core::ids::ProfileId;
 use zephium_extension_repository::{
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome,
     BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome, ExtensionRepository,
-    ExtensionRepositoryError,
+    ExtensionRepositoryError, ProfilePackageAbsenceEvidence,
+    ProfilePackageAbsenceRevalidationError, ProfilePackageObligation,
 };
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
@@ -79,5 +81,28 @@ impl ServiceRepository {
             ));
         };
         repository.reconcile_bundled_package_pin_release(binding)
+    }
+
+    pub(crate) fn audit_profile_package_obligations(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<ProfilePackageObligation, ExtensionRepositoryError> {
+        let Some(repository) = self.repository.as_mut() else {
+            return Err(ExtensionRepositoryError::Sealed);
+        };
+        repository.audit_profile_package_obligations(profile)
+    }
+
+    pub(crate) fn revalidate_profile_package_absence(
+        &mut self,
+        profile: ProfileId,
+        evidence: ProfilePackageAbsenceEvidence,
+    ) -> Result<(), ProfilePackageAbsenceRevalidationError> {
+        let Some(repository) = self.repository.as_mut() else {
+            return Err(ProfilePackageAbsenceRevalidationError::Repository(
+                ExtensionRepositoryError::Sealed,
+            ));
+        };
+        repository.revalidate_profile_package_absence(profile, evidence)
     }
 }

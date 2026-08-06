@@ -43,20 +43,20 @@ impl ExtensionServiceWorkerIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensionServiceShutdownEvidence {
     worker: ExtensionServiceWorkerIdentity,
-    accepted_normal_commands: u64,
-    completed_normal_commands: u64,
+    accepted_commands: u64,
+    completed_commands: u64,
 }
 
 impl ExtensionServiceShutdownEvidence {
     pub(crate) const fn new(
         worker: ExtensionServiceWorkerIdentity,
-        accepted_normal_commands: u64,
-        completed_normal_commands: u64,
+        accepted_commands: u64,
+        completed_commands: u64,
     ) -> Self {
         Self {
             worker,
-            accepted_normal_commands,
-            completed_normal_commands,
+            accepted_commands,
+            completed_commands,
         }
     }
 
@@ -65,14 +65,14 @@ impl ExtensionServiceShutdownEvidence {
         self.worker
     }
 
-    /// Returns the number of normal commands admitted before shutdown.
-    pub const fn accepted_normal_commands(self) -> u64 {
-        self.accepted_normal_commands
+    /// Returns the number of ordinary and retirement commands admitted before shutdown.
+    pub const fn accepted_commands(self) -> u64 {
+        self.accepted_commands
     }
 
-    /// Returns the number of normal commands completed before shutdown.
-    pub const fn completed_normal_commands(self) -> u64 {
-        self.completed_normal_commands
+    /// Returns the number of ordinary and retirement commands completed before shutdown.
+    pub const fn completed_commands(self) -> u64 {
+        self.completed_commands
     }
 }
 
