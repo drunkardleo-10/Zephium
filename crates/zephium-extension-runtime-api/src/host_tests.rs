@@ -1,0 +1,1689 @@
+use std::io::Cursor;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use zephium_core::extensions::{
+    ApiPermissionName, ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
+    ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
+    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
+    ExtensionGrantDigest, ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
+    ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
+    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
+    ExtensionManifestResourceDigest, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePayloadIdentity, ExtensionPackagePinAcquisitionBinding,
+    ExtensionPackagePinHeldBinding, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
+    ExtensionTreeDigest,
+};
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
+use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
+
+use super::*;
+use crate::{
+    ExtensionPackageAccessError, ExtensionPackageAccessPort, ExtensionPackageAccessView,
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeFailure,
+    ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeOwnershipDisposition,
+    ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan,
+    ExtensionRuntimeResourceVisitor, ExtensionRuntimeRetirementDisposition,
+};
+
+const ALL_URLS: &str = "<all_urls>";
+const EXPECTED_NATIVE_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+const OTHER_NATIVE_ID: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
+
+fn api(names: &[&str]) -> ExtensionApiPermissionSet {
+    ExtensionApiPermissionSet::new(
+        names
+            .iter()
+            .map(|name| ApiPermissionName::parse_exact(name).expect("valid API permission"))
+            .collect(),
+    )
+    .expect("canonical API set")
+}
+
+fn package(seed: u8) -> ExtensionPackageIdentity {
+    ExtensionPackageIdentity::new(
+        ExtensionAuthorityId::from_bytes([seed; 32]),
+        ExtensionPackageKey::from_bytes([seed.wrapping_add(1); 32]),
+        ExtensionPackageRevision::INITIAL,
+        ExtensionPackagePayloadIdentity::acquired_zip(
+            2,
+            ExtensionArchiveDigest::from_bytes([seed.wrapping_add(2); 32]),
+        )
+        .expect("bounded archive"),
+        ExtensionManifestDigest::from_bytes([seed.wrapping_add(3); 32]),
+        ExtensionTreeDigest::from_bytes([seed.wrapping_add(4); 32]),
+    )
+}
+
+fn manifest(seed: u8) -> Arc<ExtensionManifestDescriptor> {
+    let declarations = ExtensionManifestDeclarations::new(
+        api(&[]),
+        api(&["activeTab", "scripting"]),
+        None,
+        Some(
+            ExtensionHostPermissionSet::new(
+                MatchSet::parse(
+                    [ALL_URLS],
+                    std::iter::empty::<&str>(),
+                    MatchOptions::default(),
+                )
+                .expect("all URLs match set"),
+            )
+            .expect("bounded host permissions"),
+        ),
+        None,
+        None,
+        Vec::new(),
+        ExtensionManifestExecutionSurfaces::new(
+            Vec::new(),
+            ExtensionContentSecurityPolicyDeclaration::new(
+                ExtensionManifestResourceDigest::from_bytes([seed.wrapping_add(5); 32]),
+            ),
+            None,
+            Vec::new(),
+        )
+        .expect("bounded execution surfaces"),
+        Vec::new(),
+    )
+    .expect("valid manifest declarations");
+    let compatibility = declarations
+        .declaration_keys()
+        .into_iter()
+        .map(|declaration| {
+            ExtensionCompatibilityClassification::new(
+                declaration,
+                ExtensionCompatibilityLevel::Compatible,
+            )
+        })
+        .collect();
+    Arc::new(
+        ExtensionManifestDescriptor::new(
+            package(seed),
+            3,
+            declarations,
+            ExtensionCompatibilityTargetId::parse_exact("test.runtime.host.v1")
+                .expect("compatibility target"),
+            compatibility,
+        )
+        .expect("valid manifest"),
+    )
+}
+
+fn eligibility(
+    seed: u8,
+    profile: ProfileId,
+    install_id: ExtensionInstallId,
+) -> zephium_core::extensions::ExtensionRuntimeEligibility {
+    let manifest = manifest(seed);
+    let install = ExtensionInstall::from_persisted(
+        install_id,
+        ExtensionInstallRevision::new(u64::from(seed) + 10).expect("nonzero revision"),
+        manifest.package().clone(),
+        true,
+    );
+    let catalog = ExtensionInstallCatalog::from_persisted(
+        ExtensionInstallCatalogRevision::new(u64::from(seed) + 20).expect("nonzero revision"),
+        Some(install_id),
+        vec![install.clone()],
+    )
+    .expect("valid install catalog");
+    let bindings = ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+        install_id,
+        Arc::clone(&manifest),
+    )])
+    .expect("valid manifest bindings");
+    let authority = ExtensionGrantAuthority::initialize(
+        &install,
+        ["activeTab", "scripting"]
+            .into_iter()
+            .map(|name| ApiPermissionName::parse_exact(name).expect("valid API permission"))
+            .collect(),
+        vec![MatchPattern::parse(ALL_URLS).expect("all URLs pattern")],
+        false,
+        false,
+        &manifest,
+    )
+    .expect("valid grant authority");
+    ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority])
+        .expect("valid grant cohort")
+        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+        .expect("eligible runtime")
+}
+
+#[derive(Clone)]
+struct EntryTemplate {
+    key: ExtensionNativeOwnershipKey,
+    package: ExtensionPackageIdentity,
+    catalog_set_digest: ExtensionCatalogSetDigest,
+    catalog_role: ExtensionCatalogGenerationRole,
+    catalog_revision: ExtensionInstallCatalogRevision,
+    install_revision: ExtensionInstallRevision,
+    grant_revision: ExtensionGrantRevision,
+    grant_digest: ExtensionGrantDigest,
+    backend: ExtensionRuntimeBackendTarget,
+}
+
+impl EntryTemplate {
+    fn from_eligibility(
+        eligibility: &zephium_core::extensions::ExtensionRuntimeEligibility,
+        seed: u8,
+        backend: ExtensionRuntimeBackendTarget,
+    ) -> Self {
+        Self {
+            key: ExtensionNativeOwnershipKey::new(
+                eligibility.profile(),
+                eligibility.install_id(),
+                eligibility.browsing_context(),
+            ),
+            package: eligibility.package().clone(),
+            catalog_set_digest: ExtensionCatalogSetDigest::from_bytes([seed.wrapping_add(6); 32]),
+            catalog_role: ExtensionCatalogGenerationRole::Active,
+            catalog_revision: eligibility.catalog_revision(),
+            install_revision: eligibility.install_revision(),
+            grant_revision: eligibility.grant_revision(),
+            grant_digest: eligibility.grant_digest(),
+            backend,
+        }
+    }
+
+    fn entry(
+        &self,
+        revision: u64,
+        intent: ExtensionNativeOwnershipIntent,
+        phase: ExtensionNativeOwnershipPhase,
+        native_identity: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> ExtensionNativeOwnershipEntry {
+        ExtensionNativeOwnershipEntry::from_persisted_with_native_identity(
+            self.key,
+            ExtensionNativeOwnershipOperation::INITIAL,
+            ExtensionNativeOwnershipEntryRevision::new(revision).expect("nonzero entry revision"),
+            self.package.clone(),
+            self.catalog_set_digest,
+            self.catalog_role,
+            self.catalog_revision,
+            self.install_revision,
+            self.grant_revision,
+            self.grant_digest,
+            self.backend,
+            native_identity,
+            ExtensionNativeIncarnation::INITIAL,
+            intent,
+            phase,
+        )
+        .expect("valid ownership row")
+    }
+
+    fn preparing(&self) -> ExtensionNativeOwnershipEntry {
+        self.entry(
+            1,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+            None,
+        )
+    }
+
+    fn may_own(&self) -> ExtensionNativeOwnershipEntry {
+        self.entry(
+            2,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+            None,
+        )
+    }
+
+    fn owned(
+        &self,
+        identity: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> ExtensionNativeOwnershipEntry {
+        self.entry(
+            3,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeOwned,
+            identity,
+        )
+    }
+
+    fn release_absent(
+        &self,
+        revision: u64,
+        identity: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> ExtensionNativeOwnershipEntry {
+        self.entry(
+            revision,
+            ExtensionNativeOwnershipIntent::Release,
+            ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+            identity,
+        )
+    }
+}
+
+struct PinnedProvider {
+    _held: ExtensionPackagePinHeldBinding,
+    identity: Arc<()>,
+    dropped: Arc<AtomicUsize>,
+    retained_bytes: usize,
+}
+
+impl Drop for PinnedProvider {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl ExtensionPackageAccessPort for PinnedProvider {
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn visit_resource(
+        &mut self,
+        resource: ExtensionRuntimeResource,
+        visitor: &mut dyn ExtensionRuntimeResourceVisitor,
+    ) -> Result<(), ExtensionPackageAccessError> {
+        let bytes = vec![0_u8; resource.declared_bytes() as usize];
+        let _ = visitor.visit(&mut Cursor::new(bytes));
+        Ok(())
+    }
+
+    fn visit_native_root(
+        &mut self,
+        _target: ExtensionRuntimeTarget,
+        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+    ) -> Result<(), ExtensionPackageAccessError> {
+        #[cfg(unix)]
+        let root = Path::new("/private/var/zephium/extensions/runtime-host-test");
+        #[cfg(windows)]
+        let root = Path::new(r"C:\Zephium\extensions\runtime-host-test");
+        let _ = visitor.visit(root);
+        Ok(())
+    }
+}
+
+struct ActivationFixture {
+    template: EntryTemplate,
+    initial: ExtensionNativeOwnershipEntry,
+    access: ExtensionPackageAccess,
+    authority: ExtensionRuntimeOperationAuthority,
+    expectation: ExtensionRuntimeNativeIdentityExpectation,
+    native_identity: Option<ExtensionNativeOwnershipIdentity>,
+    evidence: ExtensionRuntimeOwnershipEvidence,
+    provider_identity: Arc<()>,
+    provider_dropped: Arc<AtomicUsize>,
+}
+
+impl ActivationFixture {
+    fn compatibility(seed: u8) -> Self {
+        Self::new(
+            seed,
+            ExtensionRuntimeBackendTarget::LinuxCompatibility,
+            ExtensionRuntimeTarget::Compatibility,
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+            None,
+            ExtensionRuntimeOwnershipEvidence::Compatibility,
+            0,
+        )
+    }
+
+    fn macos(seed: u8) -> Self {
+        let owner = ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+            .expect("canonical native owner ID");
+        let native_identity = ExtensionNativeOwnershipIdentity::parse(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            EXPECTED_NATIVE_ID,
+        )
+        .expect("canonical durable native ID");
+        Self::new(
+            seed,
+            ExtensionRuntimeBackendTarget::MacosNative,
+            ExtensionRuntimeTarget::NativeWebExtension,
+            ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(owner),
+            Some(native_identity),
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(owner),
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        seed: u8,
+        backend: ExtensionRuntimeBackendTarget,
+        target: ExtensionRuntimeTarget,
+        expectation: ExtensionRuntimeNativeIdentityExpectation,
+        native_identity: Option<ExtensionNativeOwnershipIdentity>,
+        evidence: ExtensionRuntimeOwnershipEvidence,
+        provider_retained_bytes: usize,
+    ) -> Self {
+        let profile = ProfileId::from(u128::from(seed) + 100);
+        let install_id = ExtensionInstallId::from(u128::from(seed) + 200);
+        let eligibility = eligibility(seed, profile, install_id);
+        let template = EntryTemplate::from_eligibility(&eligibility, seed, backend);
+        let acquisition =
+            ExtensionPackagePinAcquisitionBinding::mint(&template.preparing(), eligibility)
+                .expect("authentic package-pin acquisition");
+        let (held, authority) = acquisition
+            .into_runtime_parts(
+                ExtensionRuntimeGeneration::new(u64::from(seed) + 1)
+                    .expect("nonzero runtime generation"),
+            )
+            .into_held_binding_and_operation_authority();
+        let plan =
+            ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+                "manifest.json",
+                2,
+                [seed; 32],
+            )
+            .expect("manifest resource binding")])
+            .expect("runtime resource plan");
+        let provider_identity = Arc::new(());
+        let provider_dropped = Arc::new(AtomicUsize::new(0));
+        let access = ExtensionPackageAccess::from_delegated_provider(
+            target,
+            plan,
+            Box::new(PinnedProvider {
+                _held: held,
+                identity: Arc::clone(&provider_identity),
+                dropped: Arc::clone(&provider_dropped),
+                retained_bytes: provider_retained_bytes,
+            }),
+        )
+        .expect("bounded authenticated package access");
+        let initial = template.may_own();
+        Self {
+            template,
+            initial,
+            access,
+            authority,
+            expectation,
+            native_identity,
+            evidence,
+            provider_identity,
+            provider_dropped,
+        }
+    }
+
+    fn runtime(&self) -> ExtensionRuntimeFingerprint {
+        self.authority.fingerprint().clone()
+    }
+
+    fn owned(&self) -> ExtensionNativeOwnershipEntry {
+        self.template.owned(self.native_identity)
+    }
+
+    fn release(&self) -> ExtensionNativeOwnershipEntry {
+        self.template.release_absent(4, self.native_identity)
+    }
+
+    fn into_binding(self) -> ExtensionRuntimeHostActivationBinding {
+        ExtensionRuntimeHostActivationBinding::try_from_authenticated_repository(
+            self.initial,
+            self.access,
+            self.authority,
+            self.expectation,
+        )
+        .expect("valid authenticated host binding")
+    }
+}
+
+fn same_fingerprint_different_lineage_authority(
+    seed: u8,
+    backend: ExtensionRuntimeBackendTarget,
+) -> ExtensionRuntimeOperationAuthority {
+    let profile = ProfileId::from(u128::from(seed) + 100);
+    let install_id = ExtensionInstallId::from(u128::from(seed) + 200);
+    let eligibility = eligibility(seed, profile, install_id);
+    let mut template = EntryTemplate::from_eligibility(&eligibility, seed, backend);
+    template.catalog_set_digest =
+        ExtensionCatalogSetDigest::from_bytes([seed.wrapping_add(99); 32]);
+    let acquisition =
+        ExtensionPackagePinAcquisitionBinding::mint(&template.preparing(), eligibility)
+            .expect("authentic alternate-lineage package pin");
+    let (_held, authority) = acquisition
+        .into_runtime_parts(
+            ExtensionRuntimeGeneration::new(u64::from(seed) + 1)
+                .expect("nonzero runtime generation"),
+        )
+        .into_held_binding_and_operation_authority();
+    authority
+}
+
+#[derive(Default)]
+struct HostProbe {
+    activation_binds: AtomicUsize,
+    recovery_binds: AtomicUsize,
+    reservations: AtomicUsize,
+    preattachment_restores: AtomicUsize,
+    lifecycle_calls: AtomicUsize,
+    publication_calls: AtomicUsize,
+    reclaim_calls: AtomicUsize,
+    active_witness_calls: AtomicUsize,
+    document_witness_calls: AtomicUsize,
+    publication_drops: AtomicUsize,
+    last_publication: Mutex<Option<PublicationObservation>>,
+    last_witness: Mutex<Option<WitnessObservation>>,
+}
+
+#[derive(Clone)]
+struct PublicationObservation {
+    owner: ExtensionRuntimeOwnerAddress,
+    generation: ExtensionRuntimeHostRegistryGeneration,
+    owned_cas: zephium_core::extensions::ExtensionNativeOwnershipEntryCas,
+    evidence: ExtensionRuntimeOwnershipEvidence,
+}
+
+#[derive(Clone)]
+struct WitnessObservation {
+    owner: ExtensionRuntimeOwnerAddress,
+    generation: ExtensionRuntimeHostRegistryGeneration,
+    runtime: ExtensionRuntimeFingerprint,
+}
+
+struct Reservation {
+    probe: Arc<HostProbe>,
+    attached: AtomicBool,
+}
+
+impl Reservation {
+    fn new(probe: Arc<HostProbe>) -> Arc<Self> {
+        probe.reservations.fetch_add(1, Ordering::Relaxed);
+        Arc::new(Self {
+            probe,
+            attached: AtomicBool::new(false),
+        })
+    }
+
+    fn attach(&self) {
+        self.attached.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.attached.load(Ordering::Relaxed) {
+            self.probe
+                .preattachment_restores
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct FakeLifecycle {
+    probe: Arc<HostProbe>,
+    reservation: Arc<Reservation>,
+    retained_bytes: usize,
+}
+
+impl ExtensionRuntimeOwnershipPort for FakeLifecycle {
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
+        self.reservation.attach();
+        self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
+        ExtensionRuntimeRetirementDisposition::Retired
+    }
+
+    fn reconcile_ownership_until(
+        &mut self,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeOwnershipDisposition {
+        self.reservation.attach();
+        self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
+        ExtensionRuntimeOwnershipDisposition::Absent
+    }
+}
+
+impl ExtensionRuntimeLifecyclePort for FakeLifecycle {
+    fn activate_until(
+        &mut self,
+        access: &mut ExtensionPackageAccessView<'_>,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeActivationDisposition {
+        self.reservation.attach();
+        self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
+        match access.target() {
+            ExtensionRuntimeTarget::NativeWebExtension => {
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::Internal,
+                    evidence: None,
+                }
+            }
+            ExtensionRuntimeTarget::Compatibility => {
+                ExtensionRuntimeActivationDisposition::Activated(
+                    ExtensionRuntimeOwnershipEvidence::Compatibility,
+                )
+            }
+        }
+    }
+}
+
+impl ExtensionRuntimeHostLifecyclePort for FakeLifecycle {}
+
+struct FakeOwnership {
+    probe: Arc<HostProbe>,
+    reservation: Arc<Reservation>,
+    retained_bytes: usize,
+}
+
+impl ExtensionRuntimeOwnershipPort for FakeOwnership {
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
+        self.reservation.attach();
+        self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
+        ExtensionRuntimeRetirementDisposition::Retired
+    }
+
+    fn reconcile_ownership_until(
+        &mut self,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeOwnershipDisposition {
+        self.reservation.attach();
+        self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
+        ExtensionRuntimeOwnershipDisposition::Absent
+    }
+}
+
+impl ExtensionRuntimeHostOwnershipPort for FakeOwnership {}
+
+#[derive(Clone, Copy, Default)]
+enum PublicationBehavior {
+    #[default]
+    Normal,
+    RefuseExact,
+    RefuseSwapped,
+    SwapReclaim,
+    BadActiveWitness,
+    BadDocumentWitness,
+}
+
+struct FakePublication {
+    probe: Arc<HostProbe>,
+    reservation: Arc<Reservation>,
+    retained_bytes: usize,
+    behavior: PublicationBehavior,
+    authority: Option<ExtensionRuntimeOperationAuthority>,
+    substitute: Option<ExtensionRuntimeOperationAuthority>,
+    reclaim_failures: usize,
+}
+
+impl Drop for FakePublication {
+    fn drop(&mut self) {
+        self.probe.publication_drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl ExtensionRuntimeHostPublicationPort for FakePublication {
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn publish_operation_authority(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        owned_entry: &ExtensionNativeOwnershipEntry,
+        evidence: ExtensionRuntimeOwnershipEvidence,
+        authority: ExtensionRuntimeOperationAuthority,
+    ) -> Result<(), ExtensionRuntimeHostPublicationPortRefusal> {
+        self.probe.publication_calls.fetch_add(1, Ordering::Relaxed);
+        *self.probe.last_publication.lock().expect("probe lock") = Some(PublicationObservation {
+            owner,
+            generation,
+            owned_cas: owned_entry.cas(),
+            evidence,
+        });
+        match self.behavior {
+            PublicationBehavior::RefuseExact => {
+                Err(ExtensionRuntimeHostPublicationPortRefusal::new(
+                    ExtensionRuntimeHostBindError::Unavailable,
+                    authority,
+                ))
+            }
+            PublicationBehavior::RefuseSwapped => {
+                self.authority = Some(authority);
+                Err(ExtensionRuntimeHostPublicationPortRefusal::new(
+                    ExtensionRuntimeHostBindError::Unavailable,
+                    self.substitute.take().expect("substitute authority"),
+                ))
+            }
+            PublicationBehavior::Normal
+            | PublicationBehavior::SwapReclaim
+            | PublicationBehavior::BadActiveWitness
+            | PublicationBehavior::BadDocumentWitness => {
+                self.reservation.attach();
+                self.authority = Some(authority);
+                Ok(())
+            }
+        }
+    }
+
+    fn reclaim_operation_authority(
+        &mut self,
+        _owner: ExtensionRuntimeOwnerAddress,
+        _generation: ExtensionRuntimeHostRegistryGeneration,
+        _release_entry: &ExtensionNativeOwnershipEntry,
+    ) -> Result<ExtensionRuntimeOperationAuthority, ExtensionRuntimeHostBindError> {
+        self.probe.reclaim_calls.fetch_add(1, Ordering::Relaxed);
+        if self.reclaim_failures > 0 {
+            self.reclaim_failures -= 1;
+            return Err(ExtensionRuntimeHostBindError::Unavailable);
+        }
+        if matches!(self.behavior, PublicationBehavior::SwapReclaim) {
+            return Ok(self.substitute.take().expect("substitute authority"));
+        }
+        self.authority
+            .take()
+            .ok_or(ExtensionRuntimeHostBindError::InternalInvariant)
+    }
+
+    fn mint_active_tab_grant_witness(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        runtime: &ExtensionRuntimeFingerprint,
+        invocation: ExtensionUserInvocationKind,
+    ) -> Result<ExtensionActiveTabGrantWitness, ExtensionOperationAuthorityDenial> {
+        self.probe
+            .active_witness_calls
+            .fetch_add(1, Ordering::Relaxed);
+        *self.probe.last_witness.lock().expect("probe lock") = Some(WitnessObservation {
+            owner,
+            generation,
+            runtime: runtime.clone(),
+        });
+        if matches!(self.behavior, PublicationBehavior::BadActiveWitness) {
+            let substitute = self.substitute.as_ref().expect("substitute authority");
+            return substitute.mint_active_tab_grant_witness(substitute.fingerprint(), invocation);
+        }
+        self.authority
+            .as_ref()
+            .expect("published authority")
+            .mint_active_tab_grant_witness(runtime, invocation)
+    }
+
+    fn mint_document_authority_witness(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        runtime: &ExtensionRuntimeFingerprint,
+        purpose: ExtensionDocumentPurpose,
+    ) -> Result<ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial> {
+        self.probe
+            .document_witness_calls
+            .fetch_add(1, Ordering::Relaxed);
+        *self.probe.last_witness.lock().expect("probe lock") = Some(WitnessObservation {
+            owner,
+            generation,
+            runtime: runtime.clone(),
+        });
+        let returned_purpose = if matches!(self.behavior, PublicationBehavior::BadDocumentWitness) {
+            ExtensionDocumentPurpose::InsertCss
+        } else {
+            purpose
+        };
+        self.authority
+            .as_ref()
+            .expect("published authority")
+            .mint_document_authority_witness(runtime, returned_purpose)
+    }
+}
+
+struct FakeFactoryPort {
+    probe: Arc<HostProbe>,
+    activation_error: Option<ExtensionRuntimeHostBindError>,
+    recovery_error: Option<ExtensionRuntimeHostBindError>,
+    lifecycle_retained_bytes: usize,
+    publication_retained_bytes: usize,
+    recovery_retained_bytes: usize,
+    publication_behavior: PublicationBehavior,
+    substitute: Option<ExtensionRuntimeOperationAuthority>,
+    reclaim_failures: usize,
+}
+
+impl FakeFactoryPort {
+    fn normal(probe: Arc<HostProbe>) -> Self {
+        Self {
+            probe,
+            activation_error: None,
+            recovery_error: None,
+            lifecycle_retained_bytes: 0,
+            publication_retained_bytes: 0,
+            recovery_retained_bytes: 0,
+            publication_behavior: PublicationBehavior::Normal,
+            substitute: None,
+            reclaim_failures: 0,
+        }
+    }
+}
+
+impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
+    fn bind_activation(
+        &mut self,
+        _context: &ExtensionRuntimeHostActivationContext<'_>,
+    ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+        self.probe.activation_binds.fetch_add(1, Ordering::Relaxed);
+        if let Some(reason) = self.activation_error {
+            return Err(reason);
+        }
+        let reservation = Reservation::new(Arc::clone(&self.probe));
+        Ok(ExtensionRuntimeHostActivationPorts::new(
+            ExtensionRuntimeHostRegistryGeneration::new(17).expect("nonzero host generation"),
+            Box::new(FakeLifecycle {
+                probe: Arc::clone(&self.probe),
+                reservation: Arc::clone(&reservation),
+                retained_bytes: self.lifecycle_retained_bytes,
+            }),
+            Box::new(FakePublication {
+                probe: Arc::clone(&self.probe),
+                reservation,
+                retained_bytes: self.publication_retained_bytes,
+                behavior: self.publication_behavior,
+                authority: None,
+                substitute: self.substitute.take(),
+                reclaim_failures: self.reclaim_failures,
+            }),
+        ))
+    }
+
+    fn bind_recovery(
+        &mut self,
+        _context: ExtensionRuntimeHostRecoveryContext,
+    ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError> {
+        self.probe.recovery_binds.fetch_add(1, Ordering::Relaxed);
+        if let Some(reason) = self.recovery_error {
+            return Err(reason);
+        }
+        let reservation = Reservation::new(Arc::clone(&self.probe));
+        Ok(Box::new(FakeOwnership {
+            probe: Arc::clone(&self.probe),
+            reservation,
+            retained_bytes: self.recovery_retained_bytes,
+        }))
+    }
+}
+
+fn bind_activation_with(
+    fixture: ActivationFixture,
+    port: FakeFactoryPort,
+) -> (
+    ExtensionRuntimeHostActivation,
+    Arc<HostProbe>,
+    ExtensionRuntimeFingerprint,
+    ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipEntry,
+    ExtensionRuntimeOwnershipEvidence,
+) {
+    let probe = Arc::clone(&port.probe);
+    let runtime = fixture.runtime();
+    let owned = fixture.owned();
+    let release = fixture.release();
+    let evidence = fixture.evidence;
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let activation = factory
+        .bind_activation(fixture.into_binding())
+        .expect("host activation binding");
+    (activation, probe, runtime, owned, release, evidence)
+}
+
+fn published_receipt_with(
+    fixture: ActivationFixture,
+    port: FakeFactoryPort,
+) -> (
+    ExtensionRuntimePublicationReceipt,
+    Arc<HostProbe>,
+    ExtensionRuntimeFingerprint,
+    ExtensionNativeOwnershipEntry,
+) {
+    let (activation, probe, runtime, owned, release, evidence) =
+        bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let receipt = pending
+        .authorize(owned, evidence)
+        .expect("authorized publication")
+        .publish()
+        .expect("published authority");
+    (receipt, probe, runtime, release)
+}
+
+fn assert_refused_binding_parts(
+    provider_identity: Arc<()>,
+    entry: ExtensionNativeOwnershipEntry,
+    access: ExtensionPackageAccess,
+    authority: ExtensionRuntimeOperationAuthority,
+    expectation: ExtensionRuntimeNativeIdentityExpectation,
+    expected: ExtensionRuntimeHostActivationBindingError,
+) {
+    let runtime = authority.fingerprint().clone();
+    let refusal = ExtensionRuntimeHostActivationBinding::try_from_authenticated_repository(
+        entry.clone(),
+        access,
+        authority,
+        expectation,
+    )
+    .expect_err("binding must be refused");
+    assert_eq!(refusal.reason(), expected);
+    let (returned_entry, returned_access, returned_authority, returned_expectation) =
+        refusal.into_parts();
+    assert_eq!(returned_entry, entry);
+    assert_eq!(returned_authority.fingerprint(), &runtime);
+    assert_eq!(returned_expectation, expectation);
+    let returned_provider = returned_access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("exact provider type returned");
+    assert!(Arc::ptr_eq(&returned_provider.identity, &provider_identity));
+}
+
+#[test]
+fn activation_binding_refuses_reachable_frontier_and_join_mismatches_losslessly() {
+    let fixture = ActivationFixture::compatibility(1);
+    let mut wrong = fixture.template.clone();
+    wrong.package = package(77);
+    let wrong_entry = wrong.may_own();
+    let ActivationFixture {
+        access,
+        authority,
+        expectation,
+        provider_identity,
+        ..
+    } = fixture;
+    assert_refused_binding_parts(
+        provider_identity,
+        wrong_entry,
+        access,
+        authority,
+        expectation,
+        ExtensionRuntimeHostActivationBindingError::RuntimeFingerprintMismatch,
+    );
+
+    let fixture = ActivationFixture::compatibility(2);
+    let wrong_entry = fixture.template.entry(
+        3,
+        ExtensionNativeOwnershipIntent::Release,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+        None,
+    );
+    let provider_identity = Arc::clone(&fixture.provider_identity);
+    assert_refused_binding_parts(
+        provider_identity,
+        wrong_entry,
+        fixture.access,
+        fixture.authority,
+        fixture.expectation,
+        ExtensionRuntimeHostActivationBindingError::OwnershipIntentMismatch,
+    );
+
+    let fixture = ActivationFixture::compatibility(3);
+    let wrong_entry = fixture.template.owned(None);
+    assert_refused_binding_parts(
+        Arc::clone(&fixture.provider_identity),
+        wrong_entry,
+        fixture.access,
+        fixture.authority,
+        fixture.expectation,
+        ExtensionRuntimeHostActivationBindingError::OwnershipPhaseMismatch,
+    );
+
+    let fixture = ActivationFixture::macos(4);
+    let identity = fixture.native_identity.expect("native identity");
+    let wrong_entry = fixture.template.entry(
+        3,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+        Some(identity),
+    );
+    assert_refused_binding_parts(
+        Arc::clone(&fixture.provider_identity),
+        wrong_entry,
+        fixture.access,
+        fixture.authority,
+        fixture.expectation,
+        ExtensionRuntimeHostActivationBindingError::NativeIdentityAlreadyPresent,
+    );
+
+    let fixture = ActivationFixture::compatibility(5);
+    let wrong_access_fixture = ActivationFixture::new(
+        6,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+        None,
+        ExtensionRuntimeOwnershipEvidence::Compatibility,
+        0,
+    );
+    assert_refused_binding_parts(
+        Arc::clone(&wrong_access_fixture.provider_identity),
+        fixture.initial,
+        wrong_access_fixture.access,
+        fixture.authority,
+        fixture.expectation,
+        ExtensionRuntimeHostActivationBindingError::RuntimeTargetMismatch,
+    );
+
+    let fixture = ActivationFixture::compatibility(7);
+    let native_access_fixture = ActivationFixture::new(
+        8,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+        None,
+        ExtensionRuntimeOwnershipEvidence::Compatibility,
+        0,
+    );
+    let mac_id = ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID).expect("native ID");
+    assert_refused_binding_parts(
+        Arc::clone(&native_access_fixture.provider_identity),
+        fixture.initial,
+        native_access_fixture.access,
+        fixture.authority,
+        ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(mac_id),
+        ExtensionRuntimeHostActivationBindingError::NativeIdentityExpectationMismatch,
+    );
+}
+
+#[test]
+fn activation_binding_refuses_combined_memory_excess_and_returns_exact_provider() {
+    let seed = 9;
+    let plan =
+        ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+            "manifest.json",
+            2,
+            [seed; 32],
+        )
+        .expect("manifest binding")])
+        .expect("resource plan");
+    let access_inline = std::mem::size_of::<ExtensionPackageAccess>();
+    let plan_heap = plan
+        .retained_bytes()
+        .saturating_sub(std::mem::size_of::<ExtensionRuntimeResourcePlan>());
+    let retained = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .saturating_sub(access_inline)
+        .saturating_sub(plan_heap);
+    drop(plan);
+    let fixture = ActivationFixture::new(
+        seed,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        ExtensionRuntimeTarget::Compatibility,
+        ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+        None,
+        ExtensionRuntimeOwnershipEvidence::Compatibility,
+        retained,
+    );
+    let provider_identity = Arc::clone(&fixture.provider_identity);
+    let refusal = ExtensionRuntimeHostActivationBinding::try_from_authenticated_repository(
+        fixture.initial,
+        fixture.access,
+        fixture.authority,
+        fixture.expectation,
+    )
+    .expect_err("combined binding exceeds owner budget");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostActivationBindingError::RetainedBytesExceeded
+    );
+    let (_, access, _, _) = refusal.into_parts();
+    let provider = access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("same provider is returned");
+    assert!(Arc::ptr_eq(&provider.identity, &provider_identity));
+}
+
+#[test]
+fn every_ordinary_host_control_state_stays_inside_the_owner_memory_ceiling() {
+    let binding = ActivationFixture::compatibility(40).into_binding();
+    assert!(binding.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(binding);
+
+    let fixture = ActivationFixture::compatibility(41);
+    let probe = Arc::new(HostProbe::default());
+    let activation = bind_activation_with(fixture, FakeFactoryPort::normal(Arc::clone(&probe))).0;
+    assert!(activation.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    assert!(pending.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    let wrong_release = ActivationFixture::compatibility(42).release();
+    let refusal = pending
+        .recover_after_absence(&wrong_release)
+        .expect_err("another owner is not a release frontier");
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(refusal.into_pending());
+
+    let fixture = ActivationFixture::compatibility(43);
+    let probe = Arc::new(HostProbe::default());
+    let (activation, _, _, _, _, evidence) =
+        bind_activation_with(fixture, FakeFactoryPort::normal(Arc::clone(&probe)));
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let wrong_state = ActivationFixture::compatibility(43).initial;
+    let refusal = pending
+        .authorize(wrong_state, evidence)
+        .expect_err("possible owner cannot publish");
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(refusal.into_parts());
+
+    let fixture = ActivationFixture::compatibility(44);
+    let probe = Arc::new(HostProbe::default());
+    let (activation, _, _, owned, _, evidence) =
+        bind_activation_with(fixture, FakeFactoryPort::normal(Arc::clone(&probe)));
+    let (lifecycle, pending) = activation.into_parts();
+    drop(lifecycle.cancel());
+    let request = pending.authorize(owned, evidence).expect("authorization");
+    assert!(request.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    let wrong_release = ActivationFixture::compatibility(45).release();
+    let refusal = request
+        .recover_after_absence(&wrong_release)
+        .expect_err("another owner is not a release frontier");
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(refusal.into_request());
+
+    let fixture = ActivationFixture::compatibility(46);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::RefuseExact;
+    let (activation, _, _, owned, _, evidence) = bind_activation_with(fixture, port);
+    let (lifecycle, pending) = activation.into_parts();
+    drop(lifecycle.cancel());
+    let refusal = pending
+        .authorize(owned, evidence)
+        .expect("authorization")
+        .publish()
+        .expect_err("scripted ordinary refusal");
+    assert!(!refusal.requires_fail_stop());
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(refusal.try_into_request().expect("recoverable request"));
+
+    let fixture = ActivationFixture::compatibility(47);
+    let probe = Arc::new(HostProbe::default());
+    let (receipt, _, _, _) =
+        published_receipt_with(fixture, FakeFactoryPort::normal(Arc::clone(&probe)));
+    assert!(receipt.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    let wrong_release = ActivationFixture::compatibility(48).release();
+    let refusal = receipt
+        .reclaim_after_absence(&wrong_release)
+        .expect_err("another owner is not a release frontier");
+    assert!(!refusal.requires_fail_stop());
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(refusal.try_into_receipt().expect("recoverable receipt"));
+
+    let fixture = ActivationFixture::compatibility(49);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.reclaim_failures = 1;
+    let (receipt, _, _, release) = published_receipt_with(fixture, port);
+    let refusal = receipt
+        .reclaim_after_absence(&release)
+        .expect_err("scripted ordinary reclaim refusal");
+    assert!(!refusal.requires_fail_stop());
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    drop(refusal.try_into_receipt().expect("recoverable receipt"));
+}
+
+#[test]
+fn recovery_binding_accepts_only_possible_owner_states_and_preserves_refusals() {
+    let fixture = ActivationFixture::compatibility(10);
+    let acquire_may_own = fixture.template.may_own();
+    let acquire_owned = fixture.template.owned(None);
+    let release_may_own = fixture.template.entry(
+        3,
+        ExtensionNativeOwnershipIntent::Release,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+        None,
+    );
+    for entry in [acquire_may_own, acquire_owned, release_may_own] {
+        let binding = ExtensionRuntimeHostRecoveryBinding::try_new(entry.clone())
+            .expect("possible owner is recoverable");
+        assert_eq!(binding.context().owner().cas(), entry.cas());
+        assert_eq!(
+            binding.context().expectation(),
+            ExtensionRuntimeRecoveryExpectation::Compatibility
+        );
+    }
+
+    for entry in [
+        fixture.template.preparing(),
+        fixture.template.release_absent(3, None),
+    ] {
+        let refusal = ExtensionRuntimeHostRecoveryBinding::try_new(entry.clone())
+            .expect_err("definitely absent state cannot enter possible-owner recovery");
+        assert_eq!(
+            refusal.reason(),
+            ExtensionRuntimeHostRecoveryBindingError::OwnershipStateMismatch
+        );
+        assert_eq!(refusal.into_entry(), entry);
+    }
+
+    let native = ActivationFixture::macos(11);
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(native.initial.clone())
+        .expect("identityless native may-own recovery");
+    assert_eq!(
+        binding.context().expectation(),
+        ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None }
+    );
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(native.owned())
+        .expect("identified native owned recovery");
+    assert_eq!(
+        binding.context().expectation(),
+        ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+            expected: Some(
+                ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID).expect("native ID")
+            )
+        }
+    );
+}
+
+#[test]
+fn factory_refusals_are_lossless_and_do_not_reserve_or_call_native_code() {
+    let fixture = ActivationFixture::compatibility(12);
+    let runtime = fixture.runtime();
+    let entry = fixture.initial.clone();
+    let expectation = fixture.expectation;
+    let provider_identity = Arc::clone(&fixture.provider_identity);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.activation_error = Some(ExtensionRuntimeHostBindError::UnsupportedBackend);
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let refusal = factory
+        .bind_activation(fixture.into_binding())
+        .expect_err("unsupported engine refuses activation");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::UnsupportedBackend
+    );
+    let (returned_entry, returned_access, returned_authority, returned_expectation) =
+        refusal.cancel_into_parts();
+    assert_eq!(returned_entry, entry);
+    assert_eq!(returned_authority.fingerprint(), &runtime);
+    assert!(returned_authority.matches_native_ownership_lineage(&entry));
+    assert_eq!(returned_expectation, expectation);
+    let returned_provider = returned_access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("exact provider returned from bind cancellation");
+    assert!(Arc::ptr_eq(&returned_provider.identity, &provider_identity));
+    assert_eq!(probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.reservations.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+
+    let recovery_entry = ActivationFixture::compatibility(13).initial;
+    let recovery = ExtensionRuntimeHostRecoveryBinding::try_new(recovery_entry.clone())
+        .expect("recovery binding");
+    let recovery_owner = recovery.context().owner();
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.recovery_error = Some(ExtensionRuntimeHostBindError::CapacityExceeded);
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let refusal = factory
+        .bind_recovery(recovery)
+        .expect_err("capacity refuses recovery");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::CapacityExceeded
+    );
+    assert_eq!(refusal.into_binding().context().owner(), recovery_owner);
+    assert_eq!(probe.recovery_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.reservations.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn oversized_host_proxies_restore_provisional_slots_without_lifecycle_calls() {
+    let fixture = ActivationFixture::compatibility(14);
+    let runtime = fixture.runtime();
+    let entry = fixture.initial.clone();
+    let expectation = fixture.expectation;
+    let provider_identity = Arc::clone(&fixture.provider_identity);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.lifecycle_retained_bytes = usize::MAX;
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let refusal = factory
+        .bind_activation(fixture.into_binding())
+        .expect_err("unbounded activation proxy refused");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::RetainedBytesOverflow
+    );
+    let (returned_entry, returned_access, returned_authority, returned_expectation) =
+        refusal.cancel_into_parts();
+    assert_eq!(returned_entry, entry);
+    assert_eq!(returned_authority.fingerprint(), &runtime);
+    assert!(returned_authority.matches_native_ownership_lineage(&entry));
+    assert_eq!(returned_expectation, expectation);
+    let returned_provider = returned_access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("exact provider returned from budget refusal");
+    assert!(Arc::ptr_eq(&returned_provider.identity, &provider_identity));
+    assert_eq!(probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+
+    let recovery =
+        ExtensionRuntimeHostRecoveryBinding::try_new(ActivationFixture::compatibility(15).initial)
+            .expect("recovery binding");
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.recovery_retained_bytes = usize::MAX;
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let refusal = factory
+        .bind_recovery(recovery)
+        .expect_err("unbounded recovery proxy refused");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::RetainedBytesOverflow
+    );
+    assert_eq!(probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn dropping_unattached_host_values_is_passive_and_restores_only_local_admission() {
+    let fixture = ActivationFixture::compatibility(16);
+    let provider_dropped = Arc::clone(&fixture.provider_dropped);
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let activation = factory
+        .bind_activation(fixture.into_binding())
+        .expect("host activation");
+    drop(activation);
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.reclaim_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(provider_dropped.load(Ordering::Relaxed), 1);
+
+    let recovery =
+        ExtensionRuntimeHostRecoveryBinding::try_new(ActivationFixture::compatibility(17).initial)
+            .expect("recovery binding");
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let request = factory.bind_recovery(recovery).expect("recovery request");
+    drop(request);
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn publication_authorization_checks_state_lineage_and_native_identity_losslessly() {
+    let fixture = ActivationFixture::macos(18);
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (activation, _, _, owned, _, evidence) = bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let wrong_state = ActivationFixture::macos(18).initial;
+    let refusal = pending
+        .authorize(wrong_state.clone(), evidence)
+        .expect_err("may-own row cannot publish");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::OwnershipStateMismatch
+    );
+    let (pending, returned_entry, returned_evidence) = refusal.into_parts();
+    assert_eq!(returned_entry, wrong_state);
+    assert_eq!(returned_evidence, evidence);
+
+    let mut wrong_lineage_template = ActivationFixture::macos(18).template;
+    wrong_lineage_template.catalog_set_digest = ExtensionCatalogSetDigest::from_bytes([99; 32]);
+    let wrong_lineage = wrong_lineage_template.owned(Some(
+        ExtensionNativeOwnershipIdentity::parse(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            EXPECTED_NATIVE_ID,
+        )
+        .expect("native ID"),
+    ));
+    let refusal = pending
+        .authorize(wrong_lineage.clone(), evidence)
+        .expect_err("different lineage cannot publish");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::OwnershipLineageMismatch
+    );
+    let (pending, returned_entry, _) = refusal.into_parts();
+    assert_eq!(returned_entry, wrong_lineage);
+
+    let refusal = pending
+        .authorize(
+            owned.clone(),
+            ExtensionRuntimeOwnershipEvidence::Compatibility,
+        )
+        .expect_err("wrong evidence family cannot publish");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::NativeEvidenceMismatch
+    );
+    let (pending, returned_entry, returned_evidence) = refusal.into_parts();
+    assert_eq!(returned_entry, owned);
+    assert_eq!(
+        returned_evidence,
+        ExtensionRuntimeOwnershipEvidence::Compatibility
+    );
+
+    let other_id = ExtensionNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("other native identity");
+    let wrong_identity = ActivationFixture::macos(18).template.owned(Some(other_id));
+    let refusal = pending
+        .authorize(wrong_identity.clone(), evidence)
+        .expect_err("persisted identity must equal evidence");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::NativeIdentityMismatch
+    );
+    let (pending, returned_entry, _) = refusal.into_parts();
+    assert_eq!(returned_entry, wrong_identity);
+
+    let request = pending
+        .authorize(owned, evidence)
+        .expect("exact identity and lineage authorize publication");
+    drop(request);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn native_release_frontier_accepts_expected_optional_observation_and_rejects_substitution() {
+    for (seed, identity) in [(19, None), (20, Some(EXPECTED_NATIVE_ID))] {
+        let fixture = ActivationFixture::macos(seed);
+        let probe = Arc::new(HostProbe::default());
+        let port = FakeFactoryPort::normal(Arc::clone(&probe));
+        let (activation, _, runtime, _, _, _) = bind_activation_with(fixture, port);
+        let (request, pending) = activation.into_parts();
+        drop(request.cancel());
+        let template = ActivationFixture::macos(seed).template;
+        let durable_identity = identity.map(|value| {
+            ExtensionNativeOwnershipIdentity::parse(
+                ExtensionRuntimeBackendTarget::MacosNative,
+                value,
+            )
+            .expect("native identity")
+        });
+        let revision = if durable_identity.is_some() { 4 } else { 3 };
+        let release = template.release_absent(revision, durable_identity);
+        let authority = pending
+            .recover_after_absence(&release)
+            .expect("optional expected observation accepted");
+        assert_eq!(authority.fingerprint(), &runtime);
+    }
+
+    let fixture = ActivationFixture::macos(21);
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (activation, _, _, _, _, _) = bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let wrong_identity = ExtensionNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("wrong native identity");
+    let release = ActivationFixture::macos(21)
+        .template
+        .release_absent(4, Some(wrong_identity));
+    let refusal = pending
+        .recover_after_absence(&release)
+        .expect_err("substituted native identity rejected");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::ReleaseFrontierMismatch
+    );
+    assert_eq!(
+        refusal
+            .into_pending()
+            .owner_address()
+            .cas()
+            .revision()
+            .get(),
+        2
+    );
+}
+
+#[test]
+fn publication_refusal_returns_exact_authority_but_substitution_is_quarantined() {
+    let fixture = ActivationFixture::compatibility(22);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::RefuseExact;
+    let (activation, _, _, owned, _, evidence) = bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let request = pending.authorize(owned, evidence).expect("authorization");
+    let refusal = request.publish().expect_err("host refusal");
+    assert_eq!(refusal.reason(), ExtensionRuntimeHostBindError::Unavailable);
+    let request = refusal
+        .try_into_request()
+        .expect("ordinary refusal returns exact request");
+    drop(request);
+
+    let fixture = ActivationFixture::compatibility(24);
+    let expected_runtime = fixture.runtime();
+    let substitute = same_fingerprint_different_lineage_authority(
+        24,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+    );
+    assert_eq!(substitute.fingerprint(), &expected_runtime);
+    assert!(!substitute.matches_native_ownership_lineage(&fixture.initial));
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::RefuseSwapped;
+    port.substitute = Some(substitute);
+    let (activation, _, _, owned, _, evidence) = bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let refusal = pending
+        .authorize(owned, evidence)
+        .expect("authorization")
+        .publish()
+        .expect_err("swapped host refusal");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::InternalInvariant
+    );
+    assert!(refusal.requires_fail_stop());
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_HOST_QUARANTINE_RETAINED_BYTES);
+    assert!(refusal.try_into_request().is_err());
+}
+
+#[test]
+fn published_witness_ingress_prevalidates_runtime_and_validates_host_output() {
+    let fixture = ActivationFixture::compatibility(25);
+    let expected_owner = ExtensionRuntimeOwnerAddress::from_entry(&fixture.initial);
+    let expected_owned = fixture.owned();
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (mut receipt, _, runtime, _) = published_receipt_with(fixture, port);
+    let wrong_runtime = ActivationFixture::compatibility(26).runtime();
+    assert!(matches!(
+        receipt.mint_active_tab_grant_witness(
+            &wrong_runtime,
+            ExtensionUserInvocationKind::ToolbarAction,
+        ),
+        Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+    ));
+    assert_eq!(probe.active_witness_calls.load(Ordering::Relaxed), 0);
+
+    let witness = receipt
+        .mint_active_tab_grant_witness(&runtime, ExtensionUserInvocationKind::ToolbarAction)
+        .expect("exact active-tab witness");
+    assert!(witness.matches(&runtime, ExtensionUserInvocationKind::ToolbarAction));
+    let document = receipt
+        .mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::ExecuteScript)
+        .expect("exact document witness");
+    assert!(document.matches(&runtime, ExtensionDocumentPurpose::ExecuteScript));
+    let publication = probe
+        .last_publication
+        .lock()
+        .expect("probe lock")
+        .clone()
+        .expect("publication observation");
+    assert_eq!(publication.owner, expected_owner);
+    assert_eq!(publication.generation, receipt.registry_generation());
+    assert_eq!(publication.owned_cas, expected_owned.cas());
+    assert_eq!(
+        publication.evidence,
+        ExtensionRuntimeOwnershipEvidence::Compatibility
+    );
+    let call = probe
+        .last_witness
+        .lock()
+        .expect("probe lock")
+        .clone()
+        .expect("witness observation");
+    assert_eq!(call.owner, expected_owner);
+    assert_eq!(call.generation, receipt.registry_generation());
+    assert_eq!(call.runtime, runtime);
+
+    let substitute = ActivationFixture::compatibility(27).authority;
+    let fixture = ActivationFixture::compatibility(28);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::BadActiveWitness;
+    port.substitute = Some(substitute);
+    let (mut receipt, _, runtime, _) = published_receipt_with(fixture, port);
+    assert!(matches!(
+        receipt
+            .mint_active_tab_grant_witness(&runtime, ExtensionUserInvocationKind::ToolbarAction,),
+        Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+    ));
+
+    let fixture = ActivationFixture::compatibility(29);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::BadDocumentWitness;
+    let (mut receipt, _, runtime, _) = published_receipt_with(fixture, port);
+    assert!(matches!(
+        receipt.mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::ExecuteScript,),
+        Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+    ));
+}
+
+#[test]
+fn reclaim_is_frontier_bound_retryable_and_quarantines_substituted_authority() {
+    let fixture = ActivationFixture::compatibility(30);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.reclaim_failures = 1;
+    let (receipt, _, runtime, release) = published_receipt_with(fixture, port);
+    let wrong_release = ActivationFixture::compatibility(30).initial;
+    let refusal = receipt
+        .reclaim_after_absence(&wrong_release)
+        .expect_err("wrong frontier rejected before host");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationReclaimError::Authorization(
+            ExtensionRuntimePublicationAuthorizationError::ReleaseFrontierMismatch
+        )
+    );
+    assert_eq!(probe.reclaim_calls.load(Ordering::Relaxed), 0);
+    let receipt = refusal
+        .try_into_receipt()
+        .expect("authorization refusal retains receipt");
+    let refusal = receipt
+        .reclaim_after_absence(&release)
+        .expect_err("transient host reclaim refusal");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationReclaimError::Host(ExtensionRuntimeHostBindError::Unavailable)
+    );
+    let receipt = refusal
+        .try_into_receipt()
+        .expect("host refusal retains receipt for retry");
+    let authority = receipt
+        .reclaim_after_absence(&release)
+        .expect("retry returns exact authority");
+    assert_eq!(authority.fingerprint(), &runtime);
+    assert_eq!(probe.reclaim_calls.load(Ordering::Relaxed), 2);
+
+    let fixture = ActivationFixture::compatibility(32);
+    let expected_runtime = fixture.runtime();
+    let substitute = same_fingerprint_different_lineage_authority(
+        32,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+    );
+    assert_eq!(substitute.fingerprint(), &expected_runtime);
+    assert!(!substitute.matches_native_ownership_lineage(&fixture.initial));
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::SwapReclaim;
+    port.substitute = Some(substitute);
+    let (receipt, _, _, release) = published_receipt_with(fixture, port);
+    let refusal = receipt
+        .reclaim_after_absence(&release)
+        .expect_err("substituted reclaim authority quarantined");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationReclaimError::Host(
+            ExtensionRuntimeHostBindError::InternalInvariant
+        )
+    );
+    assert!(refusal.requires_fail_stop());
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_HOST_QUARANTINE_RETAINED_BYTES);
+    assert!(refusal.try_into_receipt().is_err());
+}
+
+#[test]
+fn unpublished_authority_recovery_requires_exact_release_lineage() {
+    let fixture = ActivationFixture::compatibility(33);
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (activation, _, runtime, owned, release, evidence) = bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let wrong_release = ActivationFixture::compatibility(34).release();
+    let refusal = pending
+        .recover_after_absence(&wrong_release)
+        .expect_err("pending recovery rejects another owner");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::ReleaseFrontierMismatch
+    );
+    let pending = refusal.into_pending();
+    let request = pending
+        .authorize(owned, evidence)
+        .expect("exact owned row authorizes");
+    let wrong_release = ActivationFixture::compatibility(35).release();
+    let refusal = request
+        .recover_after_absence(&wrong_release)
+        .expect_err("authorized request rejects another owner");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::ReleaseFrontierMismatch
+    );
+    let authority = refusal
+        .into_request()
+        .recover_after_absence(&release)
+        .expect("exact release returns unpublished authority");
+    assert_eq!(authority.fingerprint(), &runtime);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn dropping_published_receipt_never_reclaims_or_invokes_lifecycle() {
+    let fixture = ActivationFixture::compatibility(36);
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (receipt, _, _, _) = published_receipt_with(fixture, port);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 1);
+    drop(receipt);
+    assert_eq!(probe.publication_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.reclaim_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 0);
+}

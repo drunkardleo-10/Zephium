@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 sha2 = "=0.10.9"
+zephium-core.workspace = true
 
 [dev-dependencies]
 serde.workspace = true

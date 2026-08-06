@@ -38,6 +38,9 @@ fn main() {
             check_security_fork_locks()
         }
         Some("check-blocker-security-fork") => check_blocker_security_fork(),
+        Some("check-extension-runtime-host-assembler") => {
+            check_extension_runtime_host_assembler_call_sites()
+        }
         Some("check-blocker-seed") if arguments.len() == 1 => {
             let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
             if let Err(error) = blocker_seed::check(&repository) {
@@ -76,7 +79,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -530,6 +533,7 @@ fn check_release_engine_security() {
 fn ci() {
     reject_ambient_internal_repository_cfg();
     share_workspace_target_dir();
+    check_extension_runtime_host_assembler_call_sites();
     check_engine_floors();
     check_advisory_exceptions();
     check_blocker_security_fork();
@@ -581,6 +585,78 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+fn check_extension_runtime_host_assembler_call_sites() {
+    const NEEDLE: &str = "try_from_authenticated_repository(";
+    const REPOSITORY_BRIDGE: &str =
+        "crates/zephium-extension-repository/src/package_lease/runtime_access.rs";
+    const EXPECTED_REPOSITORY_CALLS: usize = 2;
+
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut sources = Vec::new();
+    collect_rust_sources(&repository.join("crates"), &mut sources);
+    sources.sort();
+
+    let mut repository_calls = 0;
+    let mut forbidden = Vec::new();
+    for path in sources {
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            eprintln!("cannot read {}: {error}", path.display());
+            exit(1);
+        });
+        let calls = source.matches(NEEDLE).count();
+        if calls == 0 {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(&repository)
+            .unwrap_or(&path)
+            .to_string_lossy();
+        if relative == REPOSITORY_BRIDGE {
+            repository_calls = calls;
+        } else if relative == "crates/zephium-extension-runtime-api/src/host.rs" && calls == 1 {
+            // The sole constructor definition. Calls remain repository-only.
+        } else if relative != "crates/zephium-extension-runtime-api/src/host_tests.rs" {
+            forbidden.push((relative.into_owned(), calls));
+        }
+    }
+
+    if repository_calls != EXPECTED_REPOSITORY_CALLS || !forbidden.is_empty() {
+        eprintln!(
+            "extension host activation assembly must remain behind the authenticated repository bridge"
+        );
+        eprintln!(
+            "{REPOSITORY_BRIDGE} contains {repository_calls} constructor calls, expected {EXPECTED_REPOSITORY_CALLS}"
+        );
+        for (path, calls) in forbidden {
+            eprintln!("forbidden host activation constructor use: {path} ({calls} calls)");
+        }
+        exit(1);
+    }
+}
+
+fn collect_rust_sources(directory: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
+    let entries = std::fs::read_dir(directory).unwrap_or_else(|error| {
+        eprintln!("cannot enumerate {}: {error}", directory.display());
+        exit(1);
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            eprintln!("cannot enumerate {}: {error}", directory.display());
+            exit(1);
+        });
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            eprintln!("cannot inspect {}: {error}", entry.path().display());
+            exit(1);
+        });
+        if file_type.is_dir() {
+            collect_rust_sources(&entry.path(), output);
+        } else if file_type.is_file() && entry.path().extension().is_some_and(|value| value == "rs")
+        {
+            output.push(entry.path());
+        }
+    }
 }
 
 fn run_internal_extension_repository_gates() {
