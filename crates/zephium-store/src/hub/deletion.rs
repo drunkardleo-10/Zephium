@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use zephium_core::ports::store::{PendingProfileDeletion, ProfileDeletionAuthorizeOutcome};
+use zephium_core::ports::store::{
+    ExtensionNativeOwnershipJournalLoadOutcome, PendingProfileDeletion,
+    ProfileDeletionAuthorizeOutcome,
+};
 
 use super::filesystem::profile_artifacts_absent;
 use super::*;
@@ -292,6 +295,30 @@ impl Hub {
         self.profiles
             .retain(|profile, _| self.registry.contains(profile));
         let journal = self.profile_deletion_journal_entries()?;
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(native_ownership) =
+            self.load_extension_native_ownership_journal()?
+        else {
+            return Err(invalid_data(
+                "native extension ownership is unavailable during profile deletion recovery",
+            ));
+        };
+        if journal.iter().any(|deletion| {
+            native_ownership
+                .entries()
+                .iter()
+                .any(|owner| owner.key().profile() == deletion.profile)
+        }) {
+            // A deletion authorization can predate the native-ownership
+            // interlock (or survive an outcome-unknown boundary). Never hand
+            // that stale capability to the application while cleanup still
+            // has a possible native owner for the same profile. Loading the
+            // complete bounded ownership cohort above also makes a malformed
+            // sibling fail the whole reconciliation instead of hiding it
+            // behind a targeted lookup.
+            return Err(invalid_data(
+                "profile deletion recovery is blocked by native extension ownership",
+            ));
+        }
         let pending = Self::pending_profile_deletion_entries(&journal);
         if !journal.is_empty() {
             let authoritative = self.meta.query_row(
@@ -848,6 +875,55 @@ mod tests {
     }
 
     #[test]
+    fn pending_deletion_recovery_refuses_a_profile_with_unresolved_native_ownership() {
+        let mut hub = Hub::in_memory().unwrap();
+        let (full, filtered) = deletion_sessions();
+        let profile = ProfileId::from(2);
+        hub.save(&full).unwrap();
+        assert_eq!(
+            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
+            ProfileDeletionAuthorizeOutcome::Authorized
+        );
+        let entry = native_entry(profile, ExtensionInstallId::from(83));
+        hub.inject_extension_native_ownership_entry_for_interlock_test(&entry)
+            .unwrap();
+
+        let error = hub
+            .reconcile_profile_deletion_journal()
+            .expect_err("possible native ownership must hide stale deletion authority");
+        assert!(
+            error.to_string().contains("native extension ownership"),
+            "{error}"
+        );
+        let journal = hub.profile_deletion_journal_entries().unwrap();
+        assert_eq!(journal.len(), 1);
+        assert!(!journal[0].native_erasure_verified);
+    }
+
+    #[test]
+    fn pending_deletion_recovery_allows_valid_ownership_for_another_profile() {
+        let mut hub = Hub::in_memory().unwrap();
+        let (full, filtered) = deletion_sessions();
+        let profile = ProfileId::from(2);
+        hub.save(&full).unwrap();
+        assert_eq!(
+            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
+            ProfileDeletionAuthorizeOutcome::Authorized
+        );
+        let unrelated = native_entry(ProfileId::from(99), ExtensionInstallId::from(84));
+        hub.inject_extension_native_ownership_entry_for_interlock_test(&unrelated)
+            .unwrap();
+
+        assert_eq!(
+            hub.reconcile_profile_deletion_journal().unwrap(),
+            vec![PendingProfileDeletion {
+                profile,
+                native_erasure_verified: false,
+            }]
+        );
+    }
+
+    #[test]
     fn malformed_native_ownership_sibling_blocks_authorization_and_final_purge() {
         let mut hub = Hub::in_memory().unwrap();
         let (full, filtered) = deletion_sessions();
@@ -888,6 +964,7 @@ mod tests {
                 [target.to_string()],
             )
             .unwrap();
+        assert!(hub.reconcile_profile_deletion_journal().is_err());
         assert!(hub.finalize_profile_deletion(target).is_err());
         let journal = hub.profile_deletion_journal_entries().unwrap();
         assert_eq!(journal.len(), 1);
