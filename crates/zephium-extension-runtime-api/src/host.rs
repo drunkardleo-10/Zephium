@@ -964,6 +964,26 @@ impl ExtensionRuntimeHostFactory {
         &mut self,
         binding: ExtensionRuntimeHostActivationBinding,
     ) -> Result<ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal> {
+        self.bind_activation_with_companion_retained_bytes(binding, 0)
+    }
+
+    /// Binds a fresh activation while charging caller-retained companion state.
+    ///
+    /// `companion_retained_bytes` is the stable exclusive charge for authority
+    /// that the caller must keep beside the host value throughout binding and
+    /// every later control state. The companion remains caller-owned and is
+    /// never inspected or retained by this factory. Both the transient
+    /// binding/proxy state and the largest reachable host-control state are
+    /// admitted against the same per-owner ceiling with this charge included.
+    ///
+    /// This method invokes no native lifecycle or publication operation. A
+    /// refusal returns the exact authenticated binding and passively releases
+    /// any provisional engine reservation.
+    pub fn bind_activation_with_companion_retained_bytes(
+        &mut self,
+        binding: ExtensionRuntimeHostActivationBinding,
+        companion_retained_bytes: usize,
+    ) -> Result<ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal> {
         let context = ExtensionRuntimeHostActivationContext {
             owner: ExtensionRuntimeOwnerAddress::from_entry(&binding.entry),
             fingerprint: binding.authority.fingerprint(),
@@ -987,7 +1007,8 @@ impl ExtensionRuntimeHostFactory {
             .retained_bytes()
             .checked_add(publication.retained_bytes())
             .and_then(|value| value.checked_add(binding.retained_bytes()))
-            .and_then(|value| value.checked_add(size_of::<ExtensionRuntimeHostActivation>()));
+            .and_then(|value| value.checked_add(size_of::<ExtensionRuntimeHostActivation>()))
+            .and_then(|value| value.checked_add(companion_retained_bytes));
         let reason = match host_retained {
             None => Some(ExtensionRuntimeHostBindError::RetainedBytesOverflow),
             Some(value) if value > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
@@ -1050,7 +1071,8 @@ impl ExtensionRuntimeHostFactory {
         };
         let future_retained = request
             .retained_bytes()
-            .checked_add(pending.max_future_control_retained_bytes());
+            .checked_add(pending.max_future_control_retained_bytes())
+            .and_then(|value| value.checked_add(companion_retained_bytes));
         let reason = match future_retained {
             None => Some(ExtensionRuntimeHostBindError::RetainedBytesOverflow),
             Some(value) if value > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {

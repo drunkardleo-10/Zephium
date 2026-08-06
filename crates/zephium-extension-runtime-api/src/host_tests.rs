@@ -1290,6 +1290,148 @@ fn oversized_host_proxies_restore_provisional_slots_without_lifecycle_calls() {
 }
 
 #[test]
+fn companion_state_is_charged_at_the_exact_factory_boundary_losslessly() {
+    let baseline = ActivationFixture::compatibility(50);
+    let baseline_binding = baseline.into_binding();
+    let transient_without_companion = baseline_binding
+        .retained_bytes()
+        .checked_add(std::mem::size_of::<ExtensionRuntimeHostActivation>())
+        .unwrap();
+    let baseline_probe = Arc::new(HostProbe::default());
+    let mut baseline_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&baseline_probe)),
+    ));
+    let baseline_activation = baseline_factory
+        .bind_activation_with_companion_retained_bytes(baseline_binding, 0)
+        .expect("zero-companion baseline");
+    let maximum_without_companion =
+        transient_without_companion.max(baseline_activation.maximum_future_retained_bytes());
+    let exact_companion = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .checked_sub(maximum_without_companion)
+        .expect("baseline fits below the owner ceiling");
+    assert_ne!(exact_companion, 0);
+    drop(baseline_activation.cancel_before_attempt());
+    assert_eq!(baseline_probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(baseline_probe.publication_calls.load(Ordering::Relaxed), 0);
+
+    let exact = ActivationFixture::compatibility(51);
+    let exact_binding = exact.into_binding();
+    assert_eq!(
+        exact_binding.retained_bytes(),
+        transient_without_companion
+            .checked_sub(std::mem::size_of::<ExtensionRuntimeHostActivation>())
+            .unwrap()
+    );
+    let exact_probe = Arc::new(HostProbe::default());
+    let mut exact_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&exact_probe)),
+    ));
+    let exact_activation = exact_factory
+        .bind_activation_with_companion_retained_bytes(exact_binding, exact_companion)
+        .expect("the exact complete owner ceiling must be accepted");
+    assert_eq!(
+        transient_without_companion
+            .checked_add(exact_companion)
+            .unwrap()
+            .max(
+                exact_activation
+                    .maximum_future_retained_bytes()
+                    .checked_add(exact_companion)
+                    .unwrap()
+            ),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    drop(exact_activation.cancel_before_attempt());
+    assert_eq!(exact_probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(exact_probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        exact_probe.preattachment_restores.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(exact_probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(exact_probe.publication_calls.load(Ordering::Relaxed), 0);
+
+    let exceeded = ActivationFixture::compatibility(52);
+    let exceeded_entry = exceeded.initial.clone();
+    let exceeded_runtime = exceeded.runtime();
+    let exceeded_expectation = exceeded.expectation;
+    let exceeded_provider_identity = Arc::clone(&exceeded.provider_identity);
+    let exceeded_probe = Arc::new(HostProbe::default());
+    let mut exceeded_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&exceeded_probe)),
+    ));
+    let refusal = exceeded_factory
+        .bind_activation_with_companion_retained_bytes(
+            exceeded.into_binding(),
+            exact_companion.checked_add(1).unwrap(),
+        )
+        .expect_err("one byte above the complete owner ceiling must be refused");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::RetainedBytesExceeded
+    );
+    let (entry, access, authority, expectation) = refusal.cancel_into_parts();
+    assert_eq!(entry, exceeded_entry);
+    assert_eq!(authority.fingerprint(), &exceeded_runtime);
+    assert!(authority.matches_native_ownership_lineage(&entry));
+    assert_eq!(expectation, exceeded_expectation);
+    let provider = access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("the exact provider returns after a companion excess");
+    assert!(Arc::ptr_eq(&provider.identity, &exceeded_provider_identity));
+    drop(provider);
+    assert_eq!(exceeded_probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(exceeded_probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        exceeded_probe
+            .preattachment_restores
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(exceeded_probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(exceeded_probe.publication_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(exceeded_probe.reclaim_calls.load(Ordering::Relaxed), 0);
+
+    let overflow = ActivationFixture::compatibility(53);
+    let overflow_entry = overflow.initial.clone();
+    let overflow_runtime = overflow.runtime();
+    let overflow_expectation = overflow.expectation;
+    let overflow_provider_identity = Arc::clone(&overflow.provider_identity);
+    let overflow_probe = Arc::new(HostProbe::default());
+    let mut overflow_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&overflow_probe)),
+    ));
+    let refusal = overflow_factory
+        .bind_activation_with_companion_retained_bytes(overflow.into_binding(), usize::MAX)
+        .expect_err("overflowing companion accounting must be refused");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::RetainedBytesOverflow
+    );
+    let (entry, access, authority, expectation) = refusal.cancel_into_parts();
+    assert_eq!(entry, overflow_entry);
+    assert_eq!(authority.fingerprint(), &overflow_runtime);
+    assert!(authority.matches_native_ownership_lineage(&entry));
+    assert_eq!(expectation, overflow_expectation);
+    let provider = access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("the exact provider returns after companion overflow");
+    assert!(Arc::ptr_eq(&provider.identity, &overflow_provider_identity));
+    drop(provider);
+    assert_eq!(overflow_probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(overflow_probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        overflow_probe
+            .preattachment_restores
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(overflow_probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(overflow_probe.publication_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(overflow_probe.reclaim_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn dropping_unattached_host_values_is_passive_and_restores_only_local_admission() {
     let fixture = ActivationFixture::compatibility(16);
     let provider_dropped = Arc::clone(&fixture.provider_dropped);
