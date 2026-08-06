@@ -469,7 +469,7 @@ impl Shell {
         {
             return;
         }
-        eprintln!("engine: {reason}; retiring exact hidden view");
+        crate::diagnostic!("engine: {reason}; retiring exact hidden view");
         // `close` revokes the engine's item token synchronously before its
         // native cleanup is dispatched. If that dispatch is itself rejected,
         // the production engine seals native authority and invokes its fatal
@@ -532,7 +532,7 @@ impl Shell {
         url: String,
     ) {
         let Ok(url) = url::Url::parse(&url) else {
-            eprintln!("engine: rejected malformed native presentation URL");
+            crate::diagnostic!("engine: rejected malformed native presentation URL");
             return;
         };
         if !navigation::is_allowed(&url)

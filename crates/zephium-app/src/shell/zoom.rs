@@ -58,13 +58,13 @@ impl Shell {
         // based on a value that will never settle.
         self.zoom.pending.remove(&id);
         if !applied_scale.is_finite() || !(0.3..=3.0).contains(&applied_scale) {
-            eprintln!("engine: rejected malformed native zoom settlement");
+            crate::diagnostic!("engine: rejected malformed native zoom settlement");
             return;
         }
         if !succeeded {
-            eprintln!("engine: native zoom request was not applied");
+            crate::diagnostic!("engine: native zoom request was not applied");
         } else if (applied_scale - pending.desired_scale).abs() > f64::EPSILON {
-            eprintln!("engine: native zoom settled at an unexpected scale");
+            crate::diagnostic!("engine: native zoom settled at an unexpected scale");
         }
         let Some(previous) = self.items.tab(id).map(|tab| tab.zoom) else {
             return;

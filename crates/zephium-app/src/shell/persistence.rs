@@ -75,7 +75,7 @@ impl Shell {
                 // the actor can receive a URL. If that invariant changes,
                 // defer to the exact shutdown snapshot instead of restoring
                 // hostile per-URL full rewrites.
-                eprintln!("persistence: URL checkpoint timer is unavailable");
+                crate::diagnostic!("persistence: URL checkpoint timer is unavailable");
             }
         }
     }

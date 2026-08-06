@@ -57,10 +57,10 @@ pub fn cleanup_current_after_proven_exit() -> bool {
     match cleanup.cleanup_after_proven_exit() {
         Ok(()) => true,
         Err(error) => {
-            eprintln!(
+            crate::write_diagnostic(format_args!(
                 "privacy: could not remove proven-exited privileged WebView2 runtime data at {}: {error}",
                 cleanup.root().display()
-            );
+            ));
             false
         }
     }

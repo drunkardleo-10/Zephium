@@ -7,25 +7,169 @@ mod tests;
 use mailbox::CommandQueueInner;
 pub(super) use mailbox::{CommandQueue, TimerWake, TryPushError};
 
-use std::sync::mpsc::{sync_channel, Receiver};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::thread::JoinHandle;
 
 use crate::shell::{
-    Shell, END_TO_END_SHUTDOWN_TIMEOUT, MAINTENANCE_INTERVAL, MAX_OPERATION_ID_BYTES,
+    Shell, ShellPorts, END_TO_END_SHUTDOWN_TIMEOUT, MAINTENANCE_INTERVAL, MAX_OPERATION_ID_BYTES,
 };
 use crate::store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderStopGuard};
 use crate::{
-    Command, ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
-    SharedStore, ShutdownOutcome,
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, SharedBlocker,
+    SharedChrome, SharedEngine, SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 use zephium_core::ids::ProfileId;
 use zephium_ipc::BlockerStatusView;
 
+const FAILED_SPAWN_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+type WorkerTask = Box<dyn FnOnce() + Send + 'static>;
+
+struct ShellHandoff {
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    extension_service: ExtensionLifecycle,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActorStartupState {
+    Pending,
+    Waiting,
+    Admitted,
+    Started,
+    Cancelled,
+}
+
+/// Exact composition-root admission between guarded Shell construction and the
+/// first external port call. Cancellation may overtake admission until the
+/// actor consumes it, closing the concurrent terminal-start window.
+struct ActorStartupGate {
+    state: Mutex<ActorStartupState>,
+    changed: Condvar,
+}
+
+impl ActorStartupGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ActorStartupState::Pending),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn admit(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(
+            *state,
+            ActorStartupState::Pending | ActorStartupState::Waiting
+        ) {
+            return false;
+        }
+        *state = ActorStartupState::Admitted;
+        self.changed.notify_one();
+        true
+    }
+
+    fn cancel(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(
+            *state,
+            ActorStartupState::Pending | ActorStartupState::Waiting | ActorStartupState::Admitted
+        ) {
+            return false;
+        }
+        *state = ActorStartupState::Cancelled;
+        self.changed.notify_one();
+        true
+    }
+
+    /// Makes an already-admitted transition irrevocable for the compatibility
+    /// `spawn` API. The suspended composition path deliberately does not call
+    /// this: its terminal coordinator may still overtake admission until the
+    /// actor consumes the gate.
+    fn commit_admission(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *state {
+            ActorStartupState::Admitted => {
+                *state = ActorStartupState::Started;
+                self.changed.notify_one();
+                true
+            }
+            ActorStartupState::Started => true,
+            ActorStartupState::Pending
+            | ActorStartupState::Waiting
+            | ActorStartupState::Cancelled => false,
+        }
+    }
+
+    fn wait_for_admission(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            match *state {
+                ActorStartupState::Pending => {
+                    *state = ActorStartupState::Waiting;
+                    self.changed.notify_all();
+                }
+                ActorStartupState::Waiting => {
+                    state = self
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                ActorStartupState::Admitted => {
+                    *state = ActorStartupState::Started;
+                    return true;
+                }
+                ActorStartupState::Started => return true,
+                ActorStartupState::Cancelled => return false,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn wait_until_waiting(&self, deadline: std::time::Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *state == ActorStartupState::Pending {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            if timeout.timed_out() && *state == ActorStartupState::Pending {
+                return false;
+            }
+        }
+        *state == ActorStartupState::Waiting
+    }
+}
+
 pub struct Handle {
     pub(super) queue: CommandQueue,
     pub(super) workers: Arc<WorkerThreads>,
+    startup: Arc<ActorStartupGate>,
     pub(super) counted: bool,
 }
 
@@ -65,14 +209,85 @@ struct WorkerThread {
 #[derive(Debug)]
 pub enum SpawnError {
     Actor(std::io::Error),
+    ActorHandoff(std::io::Error),
     Timer(std::io::Error),
     StoreReader(std::io::Error),
+}
+
+/// Lossless application-composition failure.
+///
+/// Worker construction can fail on a native setup thread, where waiting on
+/// extension recovery or teardown would deadlock platforms that must service
+/// that work from the same event loop. The move-only lifecycle owner is
+/// therefore returned untouched to the composition root, together with proof
+/// of whether the helper workers that were admitted before the failure were
+/// reaped inside the bounded cleanup budget.
+#[must_use = "recover and explicitly dispose the returned extension lifecycle owner"]
+pub struct SpawnFailure {
+    error: SpawnError,
+    extension_lifecycle: ExtensionLifecycle,
+    worker_cleanup_proven: bool,
+}
+
+impl SpawnFailure {
+    fn new(
+        error: SpawnError,
+        extension_lifecycle: ExtensionLifecycle,
+        worker_cleanup_proven: bool,
+    ) -> Self {
+        Self {
+            error,
+            extension_lifecycle,
+            worker_cleanup_proven,
+        }
+    }
+
+    pub fn error(&self) -> &SpawnError {
+        &self.error
+    }
+
+    /// Whether every app-owned helper worker admitted before the failure was
+    /// observed exited and joined before the rollback deadline.
+    pub fn worker_cleanup_proven(&self) -> bool {
+        self.worker_cleanup_proven
+    }
+
+    /// Recovers the concrete failure and the unique, never-settled lifecycle
+    /// owner. Callers decide how to dispose it away from any native UI thread.
+    pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle) {
+        (self.error, self.extension_lifecycle)
+    }
+}
+
+impl std::fmt::Debug for SpawnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpawnFailure")
+            .field("error", &self.error)
+            .field("worker_cleanup_proven", &self.worker_cleanup_proven)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for SpawnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for SpawnFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 impl std::fmt::Display for SpawnError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Actor(error) => write!(formatter, "could not start shell actor: {error}"),
+            Self::ActorHandoff(error) => {
+                write!(formatter, "could not hand the shell to its actor: {error}")
+            }
             Self::Timer(error) => write!(formatter, "could not start shell timer: {error}"),
             Self::StoreReader(error) => {
                 write!(formatter, "could not start shell storage reader: {error}")
@@ -84,15 +299,15 @@ impl std::fmt::Display for SpawnError {
 impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Actor(error) | Self::Timer(error) | Self::StoreReader(error) => Some(error),
+            Self::Actor(error)
+            | Self::ActorHandoff(error)
+            | Self::Timer(error)
+            | Self::StoreReader(error) => Some(error),
         }
     }
 }
 
-fn spawn_worker(
-    name: &'static str,
-    task: impl FnOnce() + Send + 'static,
-) -> std::io::Result<WorkerThread> {
+fn spawn_worker(name: &'static str, task: WorkerTask) -> std::io::Result<WorkerThread> {
     let (exited, exit_proof) = sync_channel(1);
     let join = thread::Builder::new().name(name.into()).spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
@@ -167,6 +382,33 @@ impl WorkerThreads {
         let store_reader_clean = join_worker_until(&mut state.store_reader, deadline);
         actor_clean && timer_clean && store_reader_clean
     }
+}
+
+fn cleanup_failed_workers(
+    queue: &CommandQueue,
+    store_reads: &StoreReadQueue,
+    workers: &WorkerThreads,
+) -> bool {
+    let deadline = std::time::Instant::now() + FAILED_SPAWN_CLEANUP_TIMEOUT;
+    let queue_clean = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for pending in queue.close_and_drain() {
+            finish_unprocessed_command(pending, ShutdownOutcome::Unclean);
+        }
+    }))
+    .is_ok();
+    let reads_clean =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store_reads.stop())).is_ok();
+    let workers_clean = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        workers.join_until(deadline)
+    }))
+    .unwrap_or(false);
+    let clean = queue_clean && reads_clean && workers_clean;
+    if !clean {
+        crate::diagnostic!(
+            "startup: app helper-worker cleanup was not proven after construction failed"
+        );
+    }
+    clean
 }
 
 impl ShutdownRequest {
@@ -266,6 +508,7 @@ impl Clone for Handle {
         Self {
             queue: self.queue.clone(),
             workers: self.workers.clone(),
+            startup: self.startup.clone(),
             counted,
         }
     }
@@ -276,8 +519,8 @@ impl Drop for Handle {
         // The actor owns an internal queue reference so native callbacks can
         // re-enter it, but that reference must not keep the actor and ticker
         // alive after every public owner has gone away.
-        if self.counted {
-            self.queue.release_handle();
+        if self.counted && self.queue.release_handle() {
+            self.startup.cancel();
         }
     }
 }
@@ -285,16 +528,42 @@ impl Drop for Handle {
 impl Handle {
     #[cfg(test)]
     pub(super) fn new(queue: CommandQueue) -> Self {
-        Self::with_workers(queue, Arc::new(WorkerThreads::default()))
+        Self::with_workers(
+            queue,
+            Arc::new(WorkerThreads::default()),
+            Arc::new(ActorStartupGate::new()),
+        )
     }
 
-    fn with_workers(queue: CommandQueue, workers: Arc<WorkerThreads>) -> Self {
+    fn with_workers(
+        queue: CommandQueue,
+        workers: Arc<WorkerThreads>,
+        startup: Arc<ActorStartupGate>,
+    ) -> Self {
         let counted = queue.retain_handle();
         Self {
             queue,
             workers,
+            startup,
             counted,
         }
+    }
+
+    /// Authorizes the guarded actor to enter its first external composition
+    /// port. Desktop calls this only after publishing this Handle and clearing
+    /// every temporary rollback owner. The transition is exactly once.
+    #[must_use = "startup admission must be observed because cancellation is terminal"]
+    pub fn admit_startup(&self) -> bool {
+        self.startup.admit()
+    }
+
+    fn commit_startup_admission(&self) -> bool {
+        self.startup.commit_admission()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wait_until_startup_suspended(&self, deadline: std::time::Instant) -> bool {
+        self.startup.wait_until_waiting(deadline)
     }
 
     /// Returns a non-owning callback ingress. Long-lived dependencies owned
@@ -377,6 +646,10 @@ impl Handle {
         // spent behind already-accepted FIFO work is real shutdown latency
         // and must not be hidden by restarting the clock in the actor.
         let deadline = std::time::Instant::now() + END_TO_END_SHUTDOWN_TIMEOUT;
+        // A terminal request may overtake desktop admission. Wake the actor in
+        // cancelled mode before publishing the barrier so it can drain that
+        // exact request without entering an external startup port.
+        self.startup.cancel();
         let command = Command::Shutdown { deadline, ack };
         match self.queue.try_push(command) {
             Ok(()) => {}
@@ -453,62 +726,240 @@ impl Drop for ActorExitGuard {
     }
 }
 
+struct ShellExitGuard(Shell);
+
+impl std::ops::Deref for ShellExitGuard {
+    type Target = Shell;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ShellExitGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ShellExitGuard {
+    fn drop(&mut self) {
+        if self.0.is_shutdown() {
+            return;
+        }
+        // A panic or last-handle queue close can bypass Command::Shutdown.
+        // Signal the composition root first so its independent hard deadline
+        // is armed even if a damaged cleanup port never returns. The correlated
+        // shutdown request remains queued until ActorExitGuard terminalizes it.
+        self.0
+            .report_terminal_failure(crate::ShellTerminalFailure::ActorExitedUnexpectedly);
+        // Run every independent terminal barrier before ActorExitGuard drains
+        // waiters, under one absolute deadline and without retrying a process
+        // whose authoritative actor state has already been lost.
+        let deadline = std::time::Instant::now() + END_TO_END_SHUTDOWN_TIMEOUT;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0.cleanup_after_unexpected_exit_until(deadline)
+        })) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                crate::diagnostic!(
+                    "shutdown: complete cleanup was not proven during unexpected shell exit"
+                )
+            }
+        }
+    }
+}
+
 pub fn spawn(
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
+    extension_service: ExtensionLifecycle,
+    terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
-) -> Result<Handle, SpawnError> {
+) -> Result<Handle, SpawnFailure> {
+    let handle = spawn_suspended(
+        engine,
+        store,
+        blocker,
+        extension_service,
+        terminal_failure,
+        chrome,
+        emit,
+    )?;
+    let admitted = handle.admit_startup();
+    debug_assert!(admitted, "new Shell startup gate must be pending");
+    let committed = handle.commit_startup_admission();
+    debug_assert!(committed, "compatibility startup admission must commit");
+    Ok(handle)
+}
+
+/// Starts helper workers and transfers the move-only lifecycle into a guarded
+/// Shell while keeping every external actor port suspended.
+///
+/// The composition root must publish the returned Handle, clear every
+/// temporary rollback owner, and then call [`Handle::admit_startup`]. Calling
+/// [`Handle::shutdown`] first cancels admission and still drives the ordered
+/// terminal barrier without entering startup ports.
+pub fn spawn_suspended(
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    extension_service: ExtensionLifecycle,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+) -> Result<Handle, SpawnFailure> {
+    spawn_suspended_with_worker_spawner(
+        ShellHandoff {
+            engine,
+            store,
+            blocker,
+            extension_service,
+            terminal_failure,
+            chrome,
+            emit,
+        },
+        spawn_worker,
+    )
+}
+
+#[cfg(test)]
+fn spawn_with_worker_spawner(
+    ports: ShellHandoff,
+    worker_spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
+) -> Result<Handle, SpawnFailure> {
+    let handle = spawn_suspended_with_worker_spawner(ports, worker_spawner)?;
+    let admitted = handle.admit_startup();
+    debug_assert!(admitted, "new Shell startup gate must be pending");
+    let committed = handle.commit_startup_admission();
+    debug_assert!(committed, "compatibility startup admission must commit");
+    Ok(handle)
+}
+
+fn spawn_suspended_with_worker_spawner(
+    ports: ShellHandoff,
+    mut worker_spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
+) -> Result<Handle, SpawnFailure> {
+    let ShellHandoff {
+        engine,
+        store,
+        blocker,
+        extension_service,
+        terminal_failure,
+        chrome,
+        emit,
+    } = ports;
     // A hostile page can generate title/load/navigation events much faster
     // than projections can be persisted. Backpressure bounds memory instead
     // of letting the actor queue grow without limit.
     let queue = CommandQueue::new();
     let workers = Arc::new(WorkerThreads::default());
-    let handle = Handle::with_workers(queue.clone(), workers.clone());
+    let startup = Arc::new(ActorStartupGate::new());
+    let handle = Handle::with_workers(queue.clone(), workers.clone(), startup.clone());
     let store_reads = StoreReadQueue::new();
-    let store_reader = spawn_worker("zephium-store-reader", {
+    let mut extension_service = Some(extension_service);
+    let store_reader_task: WorkerTask = Box::new({
         let reader_store = store.clone();
         let reader_queue = store_reads.clone();
         let callback = handle.callback_handle();
         move || run_store_reader(reader_store, reader_queue, callback)
-    })
-    .map_err(SpawnError::StoreReader)?;
+    });
+    let store_reader = match worker_spawner("zephium-store-reader", store_reader_task) {
+        Ok(worker) => worker,
+        Err(error) => {
+            let extension_service = extension_service
+                .take()
+                .expect("pending extension-service owner is unique");
+            let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
+            return Err(SpawnFailure::new(
+                SpawnError::StoreReader(error),
+                extension_service,
+                cleanup_proven,
+            ));
+        }
+    };
     workers.install_store_reader(store_reader);
+    let (shell_handoff, shell_receiver) = sync_channel::<ShellHandoff>(1);
     let actor_queue = queue.clone();
     let actor_store_reads = store_reads.clone();
-    let mut shell = Shell::with_store_reads(
-        engine,
-        store,
-        blocker,
-        chrome,
-        emit,
-        store_reads.clone(),
-        #[cfg(test)]
-        false,
-    );
-    shell.attach_queue(queue.clone());
-    let actor = match spawn_worker("zephium-shell", move || {
+    let actor_startup = startup;
+    let actor_task: WorkerTask = Box::new(move || {
         let _exit_guard = ActorExitGuard(actor_queue.clone());
+        let shell_store_reads = actor_store_reads.clone();
         let _store_reader_guard = StoreReaderStopGuard::new(actor_store_reads);
+        let Ok(handoff) = shell_receiver.recv() else {
+            return;
+        };
+        let ShellHandoff {
+            engine,
+            store,
+            blocker,
+            extension_service,
+            terminal_failure,
+            chrome,
+            emit,
+        } = handoff;
+        let shell = Shell::with_store_reads_deferred_blocker_catalog(
+            ShellPorts::new(
+                engine,
+                store,
+                blocker,
+                extension_service,
+                terminal_failure,
+                chrome,
+                emit,
+            ),
+            shell_store_reads,
+            #[cfg(test)]
+            false,
+        );
+        let mut shell = ShellExitGuard(shell);
+        // No external composition port is entered until the complete Shell is
+        // guarded and desktop has published its authoritative Handle and
+        // cleared every temporary rollback owner.
+        if !actor_startup.wait_for_admission() {
+            shell.attach_queue_for_terminal_cleanup(actor_queue.clone());
+            while let Some(command) = actor_queue.recv() {
+                if matches!(command, Command::Shutdown { .. }) {
+                    shell.handle(command);
+                    break;
+                }
+                finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+            }
+            return;
+        }
+        // A panic in the initial blocker snapshot now runs only after the
+        // composition root can route the early terminal signal to this exact
+        // managed Shell.
+        shell.initialize_blocker_catalog();
+        shell.attach_queue(actor_queue.clone());
         while let Some(command) = actor_queue.recv() {
             shell.handle(command);
-            if shell.is_shutdown() {
+            if shell.is_shutdown() || shell.terminal_failure_handoff_panicked() {
                 break;
             }
         }
-    }) {
+    });
+    let actor = match worker_spawner("zephium-shell", actor_task) {
         Ok(actor) => actor,
         Err(error) => {
-            store_reads.stop();
-            let _ =
-                workers.join_until(std::time::Instant::now() + std::time::Duration::from_secs(1));
-            return Err(SpawnError::Actor(error));
+            drop(shell_handoff);
+            let extension_service = extension_service
+                .take()
+                .expect("pending extension-service owner is unique");
+            let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
+            return Err(SpawnFailure::new(
+                SpawnError::Actor(error),
+                extension_service,
+                cleanup_proven,
+            ));
         }
     };
     workers.install_actor(actor);
     let timer_queue = queue.clone();
-    let timer = match spawn_worker("zephium-timer", move || {
+    let timer_task: WorkerTask = Box::new(move || {
         let mut maintenance_deadline = std::time::Instant::now() + MAINTENANCE_INTERVAL;
         loop {
             match timer_queue.wait_for_timer(maintenance_deadline) {
@@ -519,6 +970,13 @@ pub fn spawn(
                         Err(TryPushError::Closed(_)) => break,
                     }
                 }
+                TimerWake::ExtensionStartup => match timer_queue.try_push(Command::Bootstrap) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_extension_startup(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    ),
+                    Err(TryPushError::Closed(_)) => break,
+                },
                 TimerWake::Persist => match timer_queue.try_push(Command::Persist) {
                     Ok(()) | Err(TryPushError::Sealed(_)) => {}
                     Err(TryPushError::Full(_)) => timer_queue.schedule_persist(
@@ -609,20 +1067,80 @@ pub fn spawn(
                 TimerWake::Stopped => break,
             }
         }
-    }) {
+    });
+    let timer = match worker_spawner("zephium-timer", timer_task) {
         Ok(timer) => timer,
         Err(error) => {
-            // No Handle escapes this failed construction. Seal the queue and
-            // make a bounded effort to reap the actor already started above.
-            for pending in queue.close_and_drain() {
-                finish_unprocessed_command(pending, ShutdownOutcome::Unclean);
-            }
-            store_reads.stop();
-            let _ =
-                workers.join_until(std::time::Instant::now() + std::time::Duration::from_secs(1));
-            return Err(SpawnError::Timer(error));
+            // Wake the actor waiter before joining it. The unique service
+            // owner is still local and has not crossed the handoff boundary.
+            drop(shell_handoff);
+            let extension_service = extension_service
+                .take()
+                .expect("pending extension-service owner is unique");
+            let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
+            return Err(SpawnFailure::new(
+                SpawnError::Timer(error),
+                extension_service,
+                cleanup_proven,
+            ));
         }
     };
     workers.install_timer(timer);
+
+    // Every fallible worker construction completed before the unique owner
+    // crosses into the actor. Shell itself is constructed only after receipt,
+    // so a disconnected handoff returns the owner as a first-class field
+    // without calling any lifecycle method on this setup thread.
+    let handoff = ShellHandoff {
+        engine,
+        store,
+        blocker,
+        extension_service: extension_service
+            .take()
+            .expect("pending extension-service owner is unique"),
+        terminal_failure,
+        chrome,
+        emit,
+    };
+    match shell_handoff.try_send(handoff) {
+        Ok(()) => {}
+        Err(TrySendError::Full(handoff) | TrySendError::Disconnected(handoff)) => {
+            let ShellHandoff {
+                engine,
+                store,
+                blocker,
+                extension_service,
+                terminal_failure,
+                chrome,
+                emit,
+            } = handoff;
+            let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
+            // These cloneable composition ports are not returned, but keep a
+            // faulty destructor from preventing recovery of the unique owner.
+            for clean in [
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(engine))).is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(store))).is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(blocker))).is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(terminal_failure)))
+                    .is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(chrome))).is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(emit))).is_ok(),
+            ] {
+                if !clean {
+                    crate::diagnostic!(
+                        "startup: a composition port panicked while its handoff was rolled back"
+                    );
+                }
+            }
+            return Err(SpawnFailure::new(
+                SpawnError::ActorHandoff(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "shell actor exited before accepting its unique owner",
+                )),
+                extension_service,
+                cleanup_proven,
+            ));
+        }
+    }
     Ok(handle)
 }

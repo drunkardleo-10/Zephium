@@ -6227,6 +6227,7 @@ dependencies = [
  "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
+ "zephium-extension-service",
  "zephium-ipc",
  "zephium-store",
 ]

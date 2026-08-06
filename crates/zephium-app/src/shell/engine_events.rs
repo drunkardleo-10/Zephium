@@ -26,6 +26,15 @@ fn valid_native_split_update(current: &Pane, candidate: &Pane) -> bool {
 
 impl Shell {
     pub(super) fn on_engine_event(&mut self, event: EngineEvent) {
+        // Except for the process-global runtime signal, every engine event is
+        // evidence about native state that bootstrap owns. Reject the whole
+        // cohort until bootstrap has completed: loading completion can warm a
+        // renderer, while crash/process-exit recovery can create replacement
+        // views. Neither is safe before extension startup has settled Ready.
+        if !self.bootstrapped && !matches!(&event, EngineEvent::RuntimeRestartRequired) {
+            crate::diagnostic!("engine: ignored native event before bootstrap");
+            return;
+        }
         match event {
             EngineEvent::RuntimeRestartRequired => {
                 if !self.runtime_restart_required {
@@ -48,7 +57,7 @@ impl Shell {
                     zephium_core::ports::engine::UserContentSettlement::Applied { generation }
                         if generation == requested
                 ) {
-                    eprintln!(
+                    crate::diagnostic!(
                         "engine: user-content generation {} for {scope:?} was not applied: {settlement:?}",
                         requested.get()
                     );
@@ -77,7 +86,7 @@ impl Shell {
                     self.schedule_persist();
                     let _ = self.relayout();
                 } else {
-                    eprintln!("engine: rejected invalid native split tree");
+                    crate::diagnostic!("engine: rejected invalid native split tree");
                     let _ = self.relayout();
                 }
             }
@@ -137,7 +146,7 @@ impl Shell {
                     // The engine separately re-observes authoritative
                     // source/history. Keep this diagnostic bounded and never
                     // include a page-derived URL or native error string.
-                    eprintln!("engine: native {action} action failed");
+                    crate::diagnostic!("engine: native {action} action failed");
                 }
             }
             EngineEvent::ViewCreationFailed { id } => {
@@ -156,6 +165,14 @@ impl Shell {
                 self.project_tab(id);
             }
             EngineEvent::LoadingChanged { id, loading } => {
+                // Loading callbacks belong to an exact live native view. A
+                // queued callback for a closed/discarded or unknown item must
+                // not mutate shell state, start favicon work, or warm a
+                // renderer using a fallback partition.
+                if !self.items.tab(id).is_some_and(TabState::has_view) {
+                    crate::diagnostic!("engine: ignored loading event for unknown native view");
+                    return;
+                }
                 if loading {
                     self.cancel_discard_probe(id);
                     self.crash.presentations.remove(&id);
@@ -173,11 +190,11 @@ impl Shell {
             EngineEvent::UrlChanged { id, url } => {
                 self.cancel_discard_probe(id);
                 let Ok(committed_url) = url::Url::parse(&url) else {
-                    eprintln!("engine: rejected invalid or unknown committed URL event");
+                    crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
                 if !navigation::is_allowed(&committed_url) {
-                    eprintln!("engine: rejected invalid or unknown committed URL event");
+                    crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
@@ -187,7 +204,7 @@ impl Shell {
                     .and_then(|tab| tab.url.as_ref())
                     .is_none_or(|previous| !same_browser_origin(previous, &committed_url));
                 if !self.items.set_committed_url(id, committed_url.clone()) {
-                    eprintln!("engine: rejected invalid or unknown committed URL event");
+                    crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
                 if replace_stale_title {

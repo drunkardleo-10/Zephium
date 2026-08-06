@@ -4,6 +4,13 @@ use super::*;
 
 impl Shell {
     pub(super) fn bootstrap(&mut self) {
+        // Native-owner recovery can dispatch onto the platform event loop, so
+        // this settlement runs on the shell actor rather than Tauri's setup
+        // callback. Nothing below may inspect recovered deletion authority or
+        // create a raw content view without explicit service readiness.
+        if !self.extension_service_ready_for_bootstrap() {
+            return;
+        }
         // Runtime update state is independent of session recovery and chrome
         // reloads. Querying the sticky engine state also repairs a callback
         // that arrived before the shell callback ingress was installed.
@@ -20,7 +27,7 @@ impl Shell {
         let pending_deletions = match self.store.pending_profile_deletions() {
             ProfileDeletionLoad::Loaded(pending) => pending,
             ProfileDeletionLoad::Failed => {
-                eprintln!(
+                crate::diagnostic!(
                     "bootstrap: profile deletion journal is unavailable; refusing initialization"
                 );
                 return;
@@ -32,7 +39,9 @@ impl Shell {
                 .iter()
                 .any(|deletion| !journal_profiles.insert(deletion.profile))
         {
-            eprintln!("bootstrap: profile deletion journal exceeds its unique bounded cohort");
+            crate::diagnostic!(
+                "bootstrap: profile deletion journal exceeds its unique bounded cohort"
+            );
             return;
         }
         let mut active_item = None;
@@ -68,14 +77,14 @@ impl Shell {
                         !session_profiles.contains(profile) || !degraded.insert(*profile)
                     })
                 {
-                    eprintln!(
+                    crate::diagnostic!(
                         "bootstrap: ancillary-profile degradation report is invalid; refusing initialization"
                     );
                     return;
                 }
                 let mut labels: Vec<_> = degraded.iter().map(ToString::to_string).collect();
                 labels.sort_unstable();
-                eprintln!(
+                crate::diagnostic!(
                     "bootstrap: ancillary history/favicon storage is disabled for profiles: {}",
                     labels.join(",")
                 );
@@ -95,14 +104,16 @@ impl Shell {
                 // The store has preserved the exact authoritative bytes and
                 // entered a sticky read-only mode. Do not construct first-run
                 // state or let a later shutdown overwrite recoverable data.
-                eprintln!("bootstrap: explicit session recovery required: {reason}");
+                crate::diagnostic!("bootstrap: explicit session recovery required: {reason}");
                 return;
             }
             SessionLoad::Failed => {
                 // Never convert corruption or I/O failure into first-run
                 // state. Since bootstrapped remains false, every persistence
                 // path also refuses to overwrite the recoverable snapshot.
-                eprintln!("bootstrap: session storage is unavailable; refusing initialization");
+                crate::diagnostic!(
+                    "bootstrap: session storage is unavailable; refusing initialization"
+                );
                 return;
             }
         }
@@ -114,14 +125,14 @@ impl Shell {
             // The store contract atomically removes every journaled profile
             // from a still-authoritative session. Any overlap/absence means
             // the two durable facts disagree; creating views would guess.
-            eprintln!(
+            crate::diagnostic!(
                 "bootstrap: profile deletion journal conflicts with the authoritative session"
             );
             return;
         }
         if let Some(configs) = blocker_configs {
             if !self.initialize_blocker_cohort(configs) {
-                eprintln!(
+                crate::diagnostic!(
                     "bootstrap: blocker configuration cohort is not exact; refusing initialization"
                 );
                 return;
@@ -162,7 +173,7 @@ impl Shell {
             .as_ref()
             .is_some_and(|tree| tree.tabs().len() > MAX_VISIBLE_PANES)
         {
-            eprintln!("session: discarded oversized split layout");
+            crate::diagnostic!("session: discarded oversized split layout");
             splits = None;
         }
 
@@ -174,15 +185,17 @@ impl Shell {
             })
             .or_else(|| self.create_default_space())
         else {
-            eprintln!("bootstrap: bounded profile/space aggregate cannot create first-run state");
+            crate::diagnostic!(
+                "bootstrap: bounded profile/space aggregate cannot create first-run state"
+            );
             return;
         };
         let Some(profile) = self.spaces.get(space).map(|space| space.profile) else {
-            eprintln!("bootstrap: selected space has no authoritative profile ownership");
+            crate::diagnostic!("bootstrap: selected space has no authoritative profile ownership");
             return;
         };
         if !self.start_blocker_profile(profile) {
-            eprintln!(
+            crate::diagnostic!(
                 "bootstrap: active profile policy compilation was not admitted; content views remain unavailable"
             );
         }

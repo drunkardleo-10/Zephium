@@ -9,6 +9,7 @@ use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
+use zephium_core::ports::extensions::ExtensionServiceLifecycle;
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
 use zephium_ipc::{BlockerStatusView, Projection, TabView};
@@ -19,6 +20,42 @@ pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
 pub type SharedBlocker = Arc<dyn ContentBlocker + Send + Sync>;
 pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
+/// Unique application-owned lifecycle authority for the extension service.
+///
+/// Unlike the cloneable observation handles exposed by the concrete service,
+/// this owner moves onto the shell actor and is consumed exactly once during
+/// ordered process shutdown.
+pub type ExtensionLifecycle = Box<dyn ExtensionServiceLifecycle>;
+/// Redacted terminal reason delivered to the desktop composition root when
+/// the shell can no longer continue safely in the current process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellTerminalFailure {
+    ExtensionStartupCleanupRequired,
+    ExtensionStartupFailedClosed,
+    ExtensionStartupLifecyclePanicked,
+    ExtensionStartupLifecycleMissing,
+    ActorExitedUnexpectedly,
+}
+
+impl std::fmt::Display for ShellTerminalFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ExtensionStartupCleanupRequired => "extension cleanup is still required",
+            Self::ExtensionStartupFailedClosed => "extension startup failed closed",
+            Self::ExtensionStartupLifecyclePanicked => "extension startup lifecycle panicked",
+            Self::ExtensionStartupLifecycleMissing => {
+                "extension startup lifecycle owner is missing"
+            }
+            Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
+        })
+    }
+}
+
+/// One-shot terminal shell handoff. Startup failures invoke it so the desktop
+/// can enqueue Shell-owned orderly shutdown; unexpected actor exit invokes it
+/// after bounded best-effort cleanup. Platform adapters must dispatch onto
+/// their native event loop rather than performing teardown inline.
+pub type ShellTerminalFailureCallback = Box<dyn FnOnce(ShellTerminalFailure) + Send>;
 pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
 
 /// Exact privileged-chrome work that must complete before one raw document
@@ -60,10 +97,11 @@ pub trait PresentationChrome: GeometryChrome {
 
 /// Terminal result of the ordered application shutdown protocol.
 ///
-/// A retryable failure happens before native teardown and leaves the actor
-/// live. `Unclean` is terminal: either the actor exited without completing the
-/// barrier or native teardown did not prove private engine data was removed,
-/// so the process must exit unsuccessfully.
+/// A retryable failure happens before the unique extension-service owner or
+/// native engine is torn down and leaves the actor live. `Unclean` is
+/// terminal: either the actor exited without completing the barrier or one of
+/// extension, Store, blocker, or native cleanup was not proven, so the process
+/// must exit unsuccessfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     RetryableFailure,

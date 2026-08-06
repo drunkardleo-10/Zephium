@@ -28,7 +28,7 @@ type HeldBlockerUpdate = (
 );
 type HeldBlockerLoad = (ProfileId, Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>);
 
-pub(super) struct ImmediateAllowAllCompiler;
+pub(crate) struct ImmediateAllowAllCompiler;
 
 pub(super) fn test_catalog_snapshot() -> BlockerCatalogSnapshot {
     BlockerCatalogSnapshot {
@@ -129,13 +129,134 @@ impl BlockerCatalog for ImmediateAllowAllCompiler {
 }
 
 #[derive(Default)]
-struct FakeEngine {
+pub(super) struct FakeExtensionLifecycleState {
+    pub(super) startup_calls: std::sync::atomic::AtomicUsize,
+    pub(super) panic_on_startup: std::sync::atomic::AtomicBool,
+    pub(super) wait_until_startup_deadline: std::sync::atomic::AtomicBool,
+    pub(super) startup_outcomes: Mutex<
+        std::collections::VecDeque<zephium_core::ports::extensions::ExtensionServiceStartupOutcome>,
+    >,
+    pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
+    pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
+    pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
+    pub(super) shutdown_outcome: Mutex<Option<ExtensionServiceShutdownOutcome>>,
+    pub(super) shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
+    pub(super) deadlines: Mutex<Vec<std::time::Instant>>,
+}
+
+struct FakeExtensionLifecycle {
+    state: Arc<FakeExtensionLifecycleState>,
+}
+
+impl Drop for FakeExtensionLifecycle {
+    fn drop(&mut self) {
+        if self
+            .state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            self.state
+                .dropped_without_shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensionLifecycle {
+    fn settle_startup_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> zephium_core::ports::extensions::ExtensionServiceStartupOutcome {
+        self.state
+            .startup_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if self
+            .state
+            .wait_until_startup_deadline
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            while std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        }
+        assert!(
+            !self
+                .state
+                .panic_on_startup
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected extension startup panic"
+        );
+        self.state
+            .startup_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready)
+    }
+
+    fn shutdown_until(
+        self: Box<Self>,
+        deadline: std::time::Instant,
+    ) -> ExtensionServiceShutdownOutcome {
+        self.state
+            .shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.state.deadlines.lock().unwrap().push(deadline);
+        if let Some(order) = self.state.shutdown_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("extensions");
+        }
+        assert!(
+            !self
+                .state
+                .panic_on_shutdown
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected extension shutdown panic"
+        );
+        self.state
+            .shutdown_outcome
+            .lock()
+            .unwrap()
+            .unwrap_or(ExtensionServiceShutdownOutcome::Clean)
+    }
+}
+
+pub(super) fn extension_lifecycle_with_outcome(
+    outcome: ExtensionServiceShutdownOutcome,
+) -> (ExtensionLifecycle, Arc<FakeExtensionLifecycleState>) {
+    let state = Arc::new(FakeExtensionLifecycleState::default());
+    *state.shutdown_outcome.lock().unwrap() = Some(outcome);
+    (
+        Box::new(FakeExtensionLifecycle {
+            state: Arc::clone(&state),
+        }),
+        state,
+    )
+}
+
+pub(super) fn clean_extension_lifecycle() -> ExtensionLifecycle {
+    extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean).0
+}
+
+pub(super) fn extension_lifecycle_with_startup_outcomes(
+    outcomes: impl IntoIterator<Item = zephium_core::ports::extensions::ExtensionServiceStartupOutcome>,
+) -> (ExtensionLifecycle, Arc<FakeExtensionLifecycleState>) {
+    let (lifecycle, state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    state.startup_outcomes.lock().unwrap().extend(outcomes);
+    (lifecycle, state)
+}
+
+#[derive(Default)]
+pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,
+    warm_spare_calls: std::sync::atomic::AtomicUsize,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
     shutdown_result: Mutex<Option<bool>>,
     shutdown_calls: std::sync::atomic::AtomicUsize,
     shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
+    panic_on_shutdown: std::sync::atomic::AtomicBool,
     skip_shutdown_callback: std::sync::atomic::AtomicBool,
     reject_create_dispatch: std::sync::atomic::AtomicBool,
     reject_navigation_dispatch: std::sync::atomic::AtomicBool,
@@ -154,6 +275,10 @@ impl FakeEngine {
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
+    }
+    fn warm_spare_calls(&self) -> usize {
+        self.warm_spare_calls
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn last_layout(&self) -> Vec<String> {
         self.calls
@@ -352,6 +477,10 @@ impl Engine for FakeEngine {
         self.native_admission()
     }
     fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
+    fn warm_spare(&self, _partition: Partition) {
+        self.warm_spare_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
     fn install_content_rules(
         &self,
         profile: ProfileId,
@@ -391,6 +520,12 @@ impl Engine for FakeEngine {
         if let Some(order) = self.shutdown_order.lock().unwrap().as_ref() {
             order.lock().unwrap().push("engine");
         }
+        assert!(
+            !self
+                .panic_on_shutdown
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected engine shutdown panic"
+        );
         if !self
             .skip_shutdown_callback
             .load(std::sync::atomic::Ordering::Acquire)
@@ -401,17 +536,27 @@ impl Engine for FakeEngine {
 }
 
 #[derive(Default)]
-struct FakeStore {
+pub(crate) struct FakeStore {
     saved: Mutex<Option<SessionState>>,
     events: Mutex<Vec<&'static str>>,
     flush_result: Mutex<Option<bool>>,
     shutdown_outcome: Mutex<Option<StoreShutdownOutcome>>,
+    shutdown_calls: std::sync::atomic::AtomicUsize,
+    shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
+    barrier_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
+    panic_on_save: std::sync::atomic::AtomicBool,
+    panic_on_flush: std::sync::atomic::AtomicBool,
+    panic_on_shutdown: std::sync::atomic::AtomicBool,
     load_failed: Mutex<bool>,
     recovery_reason: Mutex<Option<String>>,
     degraded_profiles: Mutex<Vec<ProfileId>>,
     blocker_configs: Mutex<Option<Vec<ProfileBlockerConfig>>>,
     blocker_update_outcomes: Mutex<VecDeque<BlockerConfigUpdateOutcome>>,
     blocker_load_outcomes: Mutex<VecDeque<BlockerConfigLoadOutcome>>,
+    blocker_update_on_shutdown: Mutex<Option<BlockerConfigUpdateOutcome>>,
+    blocker_load_calls: std::sync::atomic::AtomicUsize,
+    blocker_load_after_shutdown_calls: std::sync::atomic::AtomicUsize,
+    shutdown_entered: std::sync::atomic::AtomicBool,
     held_blocker_updates: Mutex<VecDeque<HeldBlockerUpdate>>,
     held_blocker_loads: Mutex<VecDeque<HeldBlockerLoad>>,
     hold_blocker_updates: std::sync::atomic::AtomicBool,
@@ -419,8 +564,11 @@ struct FakeStore {
     reject_blocker_updates: std::sync::atomic::AtomicBool,
     reject_blocker_loads: std::sync::atomic::AtomicBool,
     panic_on_load: std::sync::atomic::AtomicBool,
+    load_session_calls: std::sync::atomic::AtomicUsize,
+    pending_deletion_load_calls: std::sync::atomic::AtomicUsize,
     history: Vec<zephium_core::ports::store::HistoryHit>,
     history_delay_ms: std::sync::atomic::AtomicU64,
+    history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -458,14 +606,52 @@ impl FakeStore {
 
 impl Store for FakeStore {
     fn save_session(&self, session: SessionState) {
+        if let Some(order) = self.barrier_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("persist");
+        }
+        assert!(
+            !self
+                .panic_on_save
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected store save panic"
+        );
         *self.saved.lock().unwrap() = Some(session);
         self.events.lock().unwrap().push("save");
     }
     fn flush(&self) -> bool {
+        if let Some(order) = self.barrier_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("store-preflight");
+        }
+        assert!(
+            !self
+                .panic_on_flush
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected store flush panic"
+        );
         self.events.lock().unwrap().push("flush");
         self.flush_result.lock().unwrap().unwrap_or(true)
     }
     fn shutdown_until(&self, deadline: std::time::Instant) -> StoreShutdownOutcome {
+        self.shutdown_entered
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(order) = self.barrier_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("store-final");
+        }
+        if let Some(order) = self.shutdown_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("store");
+        }
+        assert!(
+            !self
+                .panic_on_shutdown
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected store shutdown panic"
+        );
+        let late_blocker_update = self.blocker_update_on_shutdown.lock().unwrap().take();
+        if let Some(outcome) = late_blocker_update {
+            self.complete_blocker_update(outcome);
+        }
         self.shutdown_outcome.lock().unwrap().unwrap_or_else(|| {
             if self.flush_until(deadline) {
                 StoreShutdownOutcome::Clean
@@ -475,6 +661,8 @@ impl Store for FakeStore {
         })
     }
     fn load_session(&self) -> SessionLoad {
+        self.load_session_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         assert!(
             !self
                 .panic_on_load
@@ -563,6 +751,15 @@ impl Store for FakeStore {
         profile: ProfileId,
         done: Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>,
     ) -> bool {
+        self.blocker_load_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if self
+            .shutdown_entered
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.blocker_load_after_shutdown_calls
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         if self
             .reject_blocker_loads
             .load(std::sync::atomic::Ordering::Acquire)
@@ -605,6 +802,8 @@ impl Store for FakeStore {
         _query: &str,
         _limit: u32,
     ) -> Vec<zephium_core::ports::store::HistoryHit> {
+        self.history_started
+            .store(true, std::sync::atomic::Ordering::Release);
         let delay = self
             .history_delay_ms
             .load(std::sync::atomic::Ordering::Acquire);
@@ -656,6 +855,8 @@ impl Store for FakeStore {
             .map(|(_, bytes)| bytes)
     }
     fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
+        self.pending_deletion_load_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if self
             .pending_load_failures
             .fetch_update(
@@ -743,7 +944,7 @@ impl Store for FakeStore {
     }
 }
 
-struct FakeChrome;
+pub(crate) struct FakeChrome;
 impl GeometryChrome for FakeChrome {
     fn position(&self, _frame: ChromeFrame) -> bool {
         true
@@ -832,6 +1033,13 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
 }
 
 fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
+    setup_with_extension_lifecycle(store, clean_extension_lifecycle())
+}
+
+fn setup_with_extension_lifecycle(
+    store: Arc<FakeStore>,
+    extension_service: ExtensionLifecycle,
+) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
@@ -844,9 +1052,11 @@ fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
         split_group: None,
     }));
     let sink = screen.clone();
-    let mut shell = Shell::new(
+    let mut shell = Shell::new_with_extension_lifecycle(
         engine.clone(),
         store,
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
         Arc::new(FakeChrome),
         Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
     );

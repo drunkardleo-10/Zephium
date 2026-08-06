@@ -213,7 +213,9 @@ pub fn harden_privileged(
             let mut in_private = windows::core::BOOL::default();
             profile.IsInPrivateModeEnabled(&mut in_private)?;
             if !in_private.as_bool() {
-                eprintln!("security: privileged WebView2 profile is not InPrivate");
+                crate::write_diagnostic(format_args!(
+                    "security: privileged WebView2 profile is not InPrivate"
+                ));
                 return Err(windows::core::Error::from_hresult(
                     windows::Win32::Foundation::E_FAIL,
                 ));
@@ -355,7 +357,9 @@ pub fn harden_privileged(
             Ok(())
         })();
         if let Err(error) = result {
-            eprintln!("security: privileged WebView2 hardening failed: {error}");
+            crate::write_diagnostic(format_args!(
+                "security: privileged WebView2 hardening failed: {error}"
+            ));
             return;
         }
         completed.store(true, Ordering::Release);
@@ -400,7 +404,7 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
         color: Some(tint),
     });
     if let Err(e) = &result {
-        eprintln!("material: window effects unavailable: {e}");
+        crate::write_diagnostic(format_args!("material: window effects unavailable: {e}"));
     }
     result.is_ok()
 }

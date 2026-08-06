@@ -20,6 +20,7 @@ zephium-core.workspace = true
 zephium-ipc.workspace = true
 zephium-app.workspace = true
 zephium-engine.workspace = true
+zephium-extension-service.workspace = true
 zephium-store.workspace = true
 zephium-blocker-service.workspace = true
 tauri-plugin-single-instance.workspace = true

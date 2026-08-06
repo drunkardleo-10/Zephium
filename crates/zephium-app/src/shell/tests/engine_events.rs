@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn engine_events_fold_into_projection() {
-    let (mut shell, _engine, screen) = setup();
+    let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
     shell.handle(Command::Navigate {
@@ -27,6 +27,28 @@ fn engine_events_fold_into_projection() {
         .unwrap();
     assert_eq!(tab.title, "Example");
     assert!(!tab.loading);
+    assert_eq!(engine.warm_spare_calls(), 1);
+}
+
+#[test]
+fn unknown_or_retired_loading_event_cannot_warm_a_renderer() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    let unknown = ItemId::from(81_001);
+
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id: unknown,
+        loading: false,
+    }));
+    assert_eq!(engine.warm_spare_calls(), 0);
+
+    shell.items.view_creation_failed(active);
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id: active,
+        loading: false,
+    }));
+    assert_eq!(engine.warm_spare_calls(), 0);
 }
 
 #[test]

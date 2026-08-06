@@ -32,7 +32,7 @@ use tauri_specta::{collect_commands, collect_events, Event};
 
 use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command, EmitFn,
-    Handle, SharedChrome, ShutdownOutcome,
+    ExtensionLifecycle, Handle, SharedChrome, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::geometry::Size;
@@ -43,11 +43,21 @@ use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome}
 use zephium_core::ports::engine::{
     Engine as _, ScriptOwner, UserContent, UserContentGeneration, UserStyle,
 };
+use zephium_core::ports::extensions::ExtensionServiceShutdownOutcome as ExtensionLifecycleShutdownOutcome;
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
 use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
+use zephium_extension_service::{
+    ExtensionRepositoryRoot, ExtensionServiceLaunchInput, ExtensionServiceOwner,
+};
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
+
+macro_rules! diagnostic {
+    ($($argument:tt)*) => {{
+        write_diagnostic(format_args!($($argument)*));
+    }};
+}
 
 // Only the thumb may paint. Every other part stays transparent so the page
 // background shows through the gutter; an unstyled scrollbar background is
@@ -87,6 +97,9 @@ const EVENT_OPERATION_PROCESSED: &str = "zephium:operation-processed";
 // rather than lose the public record of how accepted work was processed.
 const MAX_OPERATION_LEDGER_ENTRIES: usize = 1024;
 const BLOCKER_STATUS_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const EXTENSION_SERVICE_INITIAL_STARTUP_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(8);
+const PRE_SHELL_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 const PRIVILEGED_PERMISSIONS_POLICY: &str = "accelerometer=(), attribution-reporting=(), autoplay=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(), compute-pressure=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), join-ad-interest-group=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), private-state-token-issuance=(), private-state-token-redemption=(), publickey-credentials-get=(), run-ad-auction=(), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), sync-xhr=(), unload=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()";
 const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
@@ -96,17 +109,51 @@ const PRIVILEGED_WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msP
 #[derive(Clone)]
 struct ShutdownCoordinator {
     started: Arc<AtomicBool>,
+    terminal_started: Arc<AtomicBool>,
+    startup_admission: Arc<Mutex<()>>,
     terminal_failure: Arc<AtomicBool>,
     authorized_exit_code: Arc<AtomicI32>,
     watchdog: Arc<HardExitWatchdog>,
 }
 
-/// Retains the storage actor from the instant it is admitted. Before the
-/// shell exists, startup failure uses this handle to close SQLite under the
-/// same bounded process-exit policy; after shell admission, the shell owns the
-/// ordered store/native/blocker shutdown instead.
+/// Retains the move-only extension-service lifecycle authority between worker
+/// launch and exact Shell handoff. Unlike the engine and blocker startup
+/// owners, this state must not add an `Arc` around the authority: startup
+/// settlement mutates it and shutdown consumes it.
 #[derive(Clone)]
-struct StartupStore(Arc<SqliteStore>);
+struct StartupExtensionService {
+    inner: Arc<Mutex<Option<ExtensionLifecycle>>>,
+}
+
+impl Default for StartupExtensionService {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl StartupExtensionService {
+    /// Installs one exact owner, returning a refused owner unchanged.
+    fn install(&self, service: ExtensionLifecycle) -> Result<(), ExtensionLifecycle> {
+        let mut slot = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() {
+            return Err(service);
+        }
+        *slot = Some(service);
+        Ok(())
+    }
+
+    fn take(&self) -> Option<ExtensionLifecycle> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
 
 struct StartupOwner<T> {
     inner: Arc<Mutex<Option<Arc<T>>>>,
@@ -166,6 +213,75 @@ impl<T> StartupOwner<T> {
 
 type StartupEngine = StartupOwner<WebviewEngine>;
 type StartupBlocker = StartupOwner<ManagedBlocker>;
+/// Retains the storage actor from admission until the suspended Shell becomes
+/// the sole ordered-cleanup owner.
+type StartupStore = StartupOwner<SqliteStore>;
+
+/// Complete move/temporary-owner set for a terminal failure before Shell has
+/// become the sole lifecycle coordinator. Direct owners are retained when a
+/// one-shot startup slot refuses installation, so no native worker is shut
+/// down synchronously from Tauri's setup callback.
+#[derive(Default)]
+struct TerminalStartupResources {
+    shell: Option<Handle>,
+    direct_extension_service: Option<ExtensionLifecycle>,
+    extension_owner: Option<StartupExtensionService>,
+    engine_owner: Option<StartupEngine>,
+    direct_blocker: Option<Arc<ManagedBlocker>>,
+    blocker_owner: Option<StartupBlocker>,
+    direct_store: Option<Arc<SqliteStore>>,
+    store_owner: Option<StartupStore>,
+}
+
+#[derive(Default)]
+struct ClaimedTerminalStartupResources {
+    direct_extension_service: Option<ExtensionLifecycle>,
+    retained_extension_service: Option<ExtensionLifecycle>,
+    engine: Option<Arc<WebviewEngine>>,
+    direct_blocker: Option<Arc<ManagedBlocker>>,
+    retained_blocker: Option<Arc<ManagedBlocker>>,
+    direct_store: Option<Arc<SqliteStore>>,
+    retained_store: Option<Arc<SqliteStore>>,
+}
+
+impl TerminalStartupResources {
+    fn claim(self) -> (Option<Handle>, ClaimedTerminalStartupResources) {
+        let Self {
+            shell,
+            direct_extension_service,
+            extension_owner,
+            engine_owner,
+            direct_blocker,
+            blocker_owner,
+            direct_store,
+            store_owner,
+        } = self;
+        (
+            shell,
+            ClaimedTerminalStartupResources {
+                direct_extension_service,
+                retained_extension_service: extension_owner.and_then(|owner| owner.take()),
+                engine: engine_owner.and_then(|owner| owner.take()),
+                direct_blocker,
+                retained_blocker: blocker_owner.and_then(|owner| owner.take()),
+                direct_store,
+                retained_store: store_owner.and_then(|owner| owner.take()),
+            },
+        )
+    }
+}
+
+impl ClaimedTerminalStartupResources {
+    fn is_empty(&self) -> bool {
+        self.direct_extension_service.is_none()
+            && self.retained_extension_service.is_none()
+            && self.engine.is_none()
+            && self.direct_blocker.is_none()
+            && self.retained_blocker.is_none()
+            && self.direct_store.is_none()
+            && self.retained_store.is_none()
+    }
+}
 
 #[derive(Default)]
 struct HardExitWatchdog {
@@ -278,6 +394,126 @@ fn write_diagnostic_to(writer: &mut dyn std::io::Write, arguments: std::fmt::Arg
     let _ = writer.write_all(b"\n");
 }
 
+fn shutdown_startup_extension_service_until(
+    service: ExtensionLifecycle,
+    deadline: std::time::Instant,
+) -> bool {
+    matches!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.shutdown_until(deadline)
+        })),
+        Ok(ExtensionLifecycleShutdownOutcome::Clean)
+    )
+}
+
+fn cleanup_pre_shell_resources_until(
+    resources: ClaimedTerminalStartupResources,
+    deadline: std::time::Instant,
+) {
+    let ClaimedTerminalStartupResources {
+        direct_extension_service,
+        retained_extension_service,
+        engine,
+        direct_blocker,
+        retained_blocker,
+        direct_store,
+        retained_store,
+    } = resources;
+
+    // The service owns both Store and native-host capabilities. Consume every
+    // retained service before closing either dependency. Two owners can occur
+    // only after a refused temporary-state install, but both remain lossless.
+    for service in [direct_extension_service, retained_extension_service]
+        .into_iter()
+        .flatten()
+    {
+        if !shutdown_startup_extension_service_until(service, deadline) {
+            write_diagnostic(format_args!(
+                "startup: extension-service cleanup was not proven before the deadline"
+            ));
+        }
+    }
+    for store in [direct_store, retained_store].into_iter().flatten() {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.shutdown_until(deadline)
+        })) {
+            Ok(StoreShutdownOutcome::Clean) => {}
+            Ok(StoreShutdownOutcome::RetryableFailure) => {
+                write_diagnostic(format_args!(
+                    "startup: storage rejected terminal cleanup before the deadline"
+                ));
+            }
+            Ok(StoreShutdownOutcome::Unclean) => write_diagnostic(format_args!(
+                "startup: storage termination could not be proven before process exit"
+            )),
+            Err(_) => write_diagnostic(format_args!("startup: storage terminal cleanup panicked")),
+        }
+    }
+
+    // Native teardown is admitted before blocker joins. Both then consume the
+    // same caller-owned deadline, and the engine Arc remains alive until its
+    // exact completion callback has been observed.
+    let native_cleanup = engine.map(|engine| {
+        let (native_done, native_wait) = std::sync::mpsc::sync_channel(1);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.shutdown(Box::new(move |clean| {
+                let _ = native_done.send(clean);
+            }));
+        }))
+        .is_err()
+        {
+            write_diagnostic(format_args!(
+                "startup: pre-shell native engine cleanup admission panicked"
+            ));
+        }
+        (engine, native_wait)
+    });
+    for blocker in [direct_blocker, retained_blocker].into_iter().flatten() {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            blocker.shutdown_until(deadline)
+        })) {
+            Ok(BlockerShutdownOutcome::Clean) => {}
+            Ok(BlockerShutdownOutcome::Unclean) => write_diagnostic(format_args!(
+                "startup: pre-shell blocker updater/compiler cleanup was not proven before the deadline"
+            )),
+            Err(_) => write_diagnostic(format_args!(
+                "startup: pre-shell blocker updater/compiler cleanup panicked"
+            )),
+        }
+    }
+    if let Some((_engine, native_wait)) = native_cleanup {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if native_wait.recv_timeout(remaining) != Ok(true) {
+            write_diagnostic(format_args!(
+                "startup: pre-shell native engine cleanup was not proven before the deadline"
+            ));
+        }
+    }
+}
+
+fn cleanup_supplemental_startup_resources(
+    direct_extension_service: Option<ExtensionLifecycle>,
+    direct_blocker: Option<Arc<ManagedBlocker>>,
+    direct_store: Option<Arc<SqliteStore>>,
+) {
+    if direct_extension_service.is_none() && direct_blocker.is_none() && direct_store.is_none() {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::Instant::now();
+        let deadline = now.checked_add(PRE_SHELL_CLEANUP_TIMEOUT).unwrap_or(now);
+        cleanup_pre_shell_resources_until(
+            ClaimedTerminalStartupResources {
+                direct_extension_service,
+                direct_blocker,
+                direct_store,
+                ..ClaimedTerminalStartupResources::default()
+            },
+            deadline,
+        );
+    });
+}
+
 impl HardExitWatchdog {
     fn prepare(self: &Arc<Self>) -> std::io::Result<()> {
         if self
@@ -342,6 +578,8 @@ impl Default for ShutdownCoordinator {
     fn default() -> Self {
         Self {
             started: Arc::new(AtomicBool::new(false)),
+            terminal_started: Arc::new(AtomicBool::new(false)),
+            startup_admission: Arc::new(Mutex::new(())),
             terminal_failure: Arc::new(AtomicBool::new(false)),
             authorized_exit_code: Arc::new(AtomicI32::new(NO_AUTHORIZED_EXIT_CODE)),
             watchdog: Arc::new(HardExitWatchdog::default()),
@@ -350,11 +588,56 @@ impl Default for ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
+    /// Linearizes every terminal-start publication against the Shell's sole
+    /// startup-admission transition. The atomic mirror keeps later setup
+    /// gates read-only and lock-free.
+    fn mark_terminal_start(&self) {
+        let admission = self
+            .startup_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.terminal_started.store(true, Ordering::Release);
+        drop(admission);
+    }
+
+    fn try_startup_admission(&self, admit: impl FnOnce() -> bool) -> bool {
+        let admission = self
+            .startup_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let admitted = !self.terminal_started.load(Ordering::Acquire) && admit();
+        drop(admission);
+        admitted
+    }
+
+    fn try_admit_shell(&self, shell: &Handle) -> bool {
+        self.try_startup_admission(|| shell.admit_startup())
+    }
+
     fn prepare_hard_exit_watchdog(&self) -> std::io::Result<()> {
         self.watchdog.prepare()
     }
 
+    /// Publishes terminal intent and arms the independent process deadline
+    /// before actor-owned cleanup begins. This does not claim the teardown
+    /// single-flight gate, so the correlated Shell request remains authoritative.
+    fn signal_terminal_start(&self, app: &tauri::AppHandle) {
+        self.mark_terminal_start();
+        self.terminal_failure.store(true, Ordering::Release);
+        if !self.arm_hard_exit_watchdog() {
+            write_diagnostic(format_args!(
+                "shutdown: terminal signal could not arm the prepared hard-exit watchdog"
+            ));
+            self.schedule_authorized_exit(app.clone(), 1);
+        }
+    }
+
+    fn terminal_started(&self) -> bool {
+        self.terminal_started.load(Ordering::Acquire)
+    }
+
     fn request(&self, app: tauri::AppHandle, shell: Handle) {
+        self.mark_terminal_start();
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -381,7 +664,7 @@ impl ShutdownCoordinator {
                     // storage admission. Exit non-zero instead of leaving a
                     // permanently unclosable window when the actor or
                     // filesystem is stuck.
-                    eprintln!(
+                    diagnostic!(
                         "shutdown: final session durability was not proven before the deadline; exiting unsuccessfully"
                     );
                 }
@@ -391,7 +674,9 @@ impl ShutdownCoordinator {
                     // partial, so resuming is unsafe. A non-zero terminal
                     // status prevents supervisors and tests from recording
                     // private-data cleanup as clean.
-                    eprintln!("shutdown: clean completion was not proven; exiting unsuccessfully");
+                    diagnostic!(
+                        "shutdown: clean completion was not proven; exiting unsuccessfully"
+                    );
                 }
             }
             // Startup admission failure is sticky. Even a subsequently clean
@@ -408,79 +693,69 @@ impl ShutdownCoordinator {
     fn request_terminal_startup_failure(
         &self,
         app: tauri::AppHandle,
-        shell: Option<Handle>,
-        engine_owner: Option<StartupEngine>,
-        blocker_owner: Option<StartupBlocker>,
-        store: Option<Arc<SqliteStore>>,
+        resources: TerminalStartupResources,
     ) {
+        let TerminalStartupResources {
+            shell,
+            mut direct_extension_service,
+            extension_owner,
+            engine_owner,
+            mut direct_blocker,
+            blocker_owner,
+            mut direct_store,
+            store_owner,
+        } = resources;
+        self.mark_terminal_start();
         self.terminal_failure.store(true, Ordering::Release);
         if let Some(shell) = shell {
+            cleanup_supplemental_startup_resources(
+                direct_extension_service.take(),
+                direct_blocker.take(),
+                direct_store.take(),
+            );
             // Once the shell exists it is the sole authority for the ordered
-            // store -> native teardown protocol. `request` observes the
-            // sticky failure bit and exits non-zero even when cleanup is
-            // otherwise clean.
+            // extension-service -> Store -> native teardown protocol.
+            // `request` observes the sticky failure bit and exits non-zero
+            // even when cleanup is otherwise clean.
             self.request(app, shell);
             return;
         }
         if self.started.swap(true, Ordering::AcqRel) {
+            // The winning callback owns every managed temporary slot. A
+            // losing callback can still carry an uninstalled direct owner;
+            // reap only that supplemental owner instead of dropping it or
+            // racing the winner for shared slots.
+            cleanup_supplemental_startup_resources(
+                direct_extension_service.take(),
+                direct_blocker.take(),
+                direct_store.take(),
+            );
             return;
         }
+        // Claim the single-flight gate before taking any temporary owner.
+        // Otherwise concurrent failure callbacks could each remove one
+        // resource while only one callback remains authorized to reap it.
+        let (_, resources) = TerminalStartupResources {
+            shell: None,
+            direct_extension_service,
+            extension_owner,
+            engine_owner,
+            direct_blocker,
+            blocker_owner,
+            direct_store,
+            store_owner,
+        }
+        .claim();
         if !self.arm_hard_exit_watchdog() {
             write_diagnostic(format_args!(
-                "startup: hard-exit watchdog was not prepared; requesting immediate unsuccessful event-loop exit"
+                "startup: hard-exit watchdog was not prepared; continuing bounded cleanup before unsuccessful exit"
             ));
-            self.schedule_authorized_exit(app, 1);
-            return;
         }
-
-        // Claim the single-flight gate before taking either temporary owner.
-        // Otherwise two concurrent failure callbacks could each remove one
-        // resource while only one callback remains authorized to reap it.
-        let engine = engine_owner.and_then(|owner| owner.take());
-        let blocker = blocker_owner.and_then(|owner| owner.take());
-        if store.is_some() || engine.is_some() || blocker.is_some() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        if !resources.is_empty() {
+            let deadline = std::time::Instant::now() + PRE_SHELL_CLEANUP_TIMEOUT;
             let coordinator = self.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                if let Some(store) = store {
-                    match store.shutdown_until(deadline) {
-                        StoreShutdownOutcome::Clean => {}
-                        StoreShutdownOutcome::RetryableFailure => write_diagnostic(format_args!(
-                            "startup: storage rejected terminal cleanup before the deadline"
-                        )),
-                        StoreShutdownOutcome::Unclean => write_diagnostic(format_args!(
-                            "startup: storage termination could not be proven before process exit"
-                        )),
-                    }
-                }
-
-                // Native teardown must be admitted first. The blocker may
-                // then drain its updater/compiler workers while the native
-                // callback is outstanding; both consume the same absolute
-                // deadline. Retain the engine until its exact completion is
-                // observed so an Arc drop cannot race the callback.
-                let native_cleanup = engine.map(|engine| {
-                    let (native_done, native_wait) = std::sync::mpsc::sync_channel(1);
-                    engine.shutdown(Box::new(move |clean| {
-                        let _ = native_done.send(clean);
-                    }));
-                    (engine, native_wait)
-                });
-                if let Some(blocker) = blocker {
-                    if blocker.shutdown_until(deadline) != BlockerShutdownOutcome::Clean {
-                        write_diagnostic(format_args!(
-                            "startup: pre-shell blocker updater/compiler cleanup was not proven before the deadline"
-                        ));
-                    }
-                }
-                if let Some((_engine, native_wait)) = native_cleanup {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if native_wait.recv_timeout(remaining) != Ok(true) {
-                        write_diagnostic(format_args!(
-                            "startup: pre-shell native engine cleanup was not proven before the deadline"
-                        ));
-                    }
-                }
+                cleanup_pre_shell_resources_until(resources, deadline);
                 coordinator.schedule_authorized_exit(app, 1);
             });
         } else {
@@ -510,6 +785,7 @@ impl ShutdownCoordinator {
     }
 
     fn begin_unrecoverable_native_failure(&self) -> bool {
+        self.mark_terminal_start();
         self.terminal_failure.store(true, Ordering::Release);
         // Share the exact single-flight gate with ordinary shutdown. If a
         // durability barrier already owns teardown, make its result nonzero
@@ -584,7 +860,7 @@ fn shutdown_receive_outcome(
             // Timeout and disconnect are both terminal here. The actor either
             // exceeded the same end-to-end deadline it received at admission
             // or exited without proving native/private-data cleanup.
-            eprintln!("shutdown: shell actor did not acknowledge the barrier: {error}");
+            diagnostic!("shutdown: shell actor did not acknowledge the barrier: {error}");
             ShutdownOutcome::Unclean
         }
     }
@@ -611,15 +887,31 @@ fn request_startup_failure(app: &tauri::AppHandle, error: impl std::fmt::Display
     write_diagnostic(format_args!(
         "startup: failed to initialize Zephium: {error}"
     ));
-    let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
-        // Builder installs this state before the event loop begins. Retain a
-        // non-panicking fallback for defense in depth if that invariant is
-        // ever broken by composition-root refactoring.
-        write_diagnostic(format_args!("startup: shutdown coordinator is unavailable"));
-        app.exit(1);
-        return;
-    };
+    request_orderly_terminal_failure(app);
+}
+
+fn request_shell_terminal_failure(
+    app: &tauri::AppHandle,
+    coordinator: &ShutdownCoordinator,
+    error: impl std::fmt::Display,
+) {
+    // This is deliberately first: even diagnostics, Tauri state lookup, or
+    // async-runtime admission may fail after the actor has begun unwinding.
+    coordinator.signal_terminal_start(app);
+    write_diagnostic(format_args!(
+        "runtime: terminal application shell failure: {error}"
+    ));
+    request_orderly_terminal_failure(app);
+}
+
+fn request_orderly_terminal_failure(app: &tauri::AppHandle) {
     let shell = app.try_state::<Handle>().map(|shell| shell.inner().clone());
+    let extension_owner = if shell.is_none() {
+        app.try_state::<StartupExtensionService>()
+            .map(|owner| owner.inner().clone())
+    } else {
+        None
+    };
     let engine_owner = if shell.is_none() {
         app.try_state::<StartupEngine>()
             .map(|engine| engine.inner().clone())
@@ -632,14 +924,184 @@ fn request_startup_failure(app: &tauri::AppHandle, error: impl std::fmt::Display
     } else {
         None
     };
-    let store = app.try_state::<StartupStore>().map(|store| store.0.clone());
+    let store_owner = if shell.is_none() {
+        app.try_state::<StartupStore>()
+            .map(|store| store.inner().clone())
+    } else {
+        None
+    };
+    let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
+        // Builder installs this state before the event loop begins. Even if
+        // that invariant is broken, retain the dependency-complete cleanup
+        // path instead of abandoning managed workers on the event loop.
+        write_diagnostic(format_args!("startup: shutdown coordinator is unavailable"));
+        if let Some(shell) = shell {
+            let completion = shell.shutdown();
+            let exit_app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _ = completion.recv_until_deadline();
+                exit_app.exit(1);
+            });
+        } else {
+            request_pre_shell_cleanup_without_coordinator(
+                app,
+                TerminalStartupResources {
+                    extension_owner,
+                    engine_owner,
+                    blocker_owner,
+                    store_owner,
+                    ..TerminalStartupResources::default()
+                },
+            );
+        }
+        return;
+    };
     coordinator.request_terminal_startup_failure(
         app.clone(),
-        shell,
-        engine_owner,
-        blocker_owner,
-        store,
+        TerminalStartupResources {
+            shell,
+            extension_owner,
+            engine_owner,
+            blocker_owner,
+            store_owner,
+            ..TerminalStartupResources::default()
+        },
     );
+}
+
+/// Routes an extension owner that could not be restored to its temporary
+/// startup slot into the same asynchronous, dependency-ordered cleanup. This
+/// helper is valid only before Shell construction; callers retain the normal
+/// setup error so the outer containment callback can observe the already-owned
+/// single-flight failure without starting a second teardown.
+fn request_pre_shell_cleanup_without_coordinator(
+    app: &tauri::AppHandle,
+    resources: TerminalStartupResources,
+) {
+    let (shell, resources) = resources.claim();
+    debug_assert!(shell.is_none());
+    let exit_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::Instant::now();
+        let deadline = now.checked_add(PRE_SHELL_CLEANUP_TIMEOUT).unwrap_or(now);
+        cleanup_pre_shell_resources_until(resources, deadline);
+        exit_app.exit(1);
+    });
+}
+
+/// Losslessly routes a Store actor refused by the one-shot temporary owner
+/// into the same asynchronous dependency cleanup. No Store join may run on
+/// Tauri's native setup callback.
+fn request_pre_shell_startup_failure_with_store(
+    app: &tauri::AppHandle,
+    error: impl std::fmt::Display,
+    store: Arc<SqliteStore>,
+) {
+    write_diagnostic(format_args!(
+        "startup: failed to initialize Zephium: {error}"
+    ));
+    let store_owner = app
+        .try_state::<StartupStore>()
+        .map(|owner| owner.inner().clone());
+    let resources = TerminalStartupResources {
+        direct_store: Some(store),
+        store_owner,
+        ..TerminalStartupResources::default()
+    };
+    let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
+        write_diagnostic(format_args!("startup: shutdown coordinator is unavailable"));
+        request_pre_shell_cleanup_without_coordinator(app, resources);
+        return;
+    };
+    coordinator.request_terminal_startup_failure(app.clone(), resources);
+}
+
+fn request_pre_shell_startup_failure_with_extension(
+    app: &tauri::AppHandle,
+    error: impl std::fmt::Display,
+    extension_service: ExtensionLifecycle,
+) {
+    write_diagnostic(format_args!(
+        "startup: failed to initialize Zephium: {error}"
+    ));
+    let extension_owner = app
+        .try_state::<StartupExtensionService>()
+        .map(|owner| owner.inner().clone());
+    let engine_owner = app
+        .try_state::<StartupEngine>()
+        .map(|engine| engine.inner().clone());
+    let blocker_owner = app
+        .try_state::<StartupBlocker>()
+        .map(|blocker| blocker.inner().clone());
+    let store_owner = app
+        .try_state::<StartupStore>()
+        .map(|store| store.inner().clone());
+    let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
+        write_diagnostic(format_args!("startup: shutdown coordinator is unavailable"));
+        request_pre_shell_cleanup_without_coordinator(
+            app,
+            TerminalStartupResources {
+                direct_extension_service: Some(extension_service),
+                extension_owner,
+                engine_owner,
+                blocker_owner,
+                store_owner,
+                ..TerminalStartupResources::default()
+            },
+        );
+        return;
+    };
+    coordinator.request_terminal_startup_failure(
+        app.clone(),
+        TerminalStartupResources {
+            direct_extension_service: Some(extension_service),
+            extension_owner,
+            engine_owner,
+            blocker_owner,
+            store_owner,
+            ..TerminalStartupResources::default()
+        },
+    );
+}
+
+/// Losslessly routes a blocker refused by the one-shot temporary owner into
+/// the same asynchronous dependency cleanup. In particular, this helper must
+/// be used from Tauri setup instead of waiting on blocker workers on the
+/// native event-loop thread.
+fn request_pre_shell_startup_failure_with_blocker(
+    app: &tauri::AppHandle,
+    error: impl std::fmt::Display,
+    blocker: Arc<ManagedBlocker>,
+) {
+    write_diagnostic(format_args!(
+        "startup: failed to initialize Zephium: {error}"
+    ));
+    let extension_owner = app
+        .try_state::<StartupExtensionService>()
+        .map(|owner| owner.inner().clone());
+    let engine_owner = app
+        .try_state::<StartupEngine>()
+        .map(|engine| engine.inner().clone());
+    let blocker_owner = app
+        .try_state::<StartupBlocker>()
+        .map(|owner| owner.inner().clone());
+    let store_owner = app
+        .try_state::<StartupStore>()
+        .map(|store| store.inner().clone());
+    let resources = TerminalStartupResources {
+        extension_owner,
+        engine_owner,
+        direct_blocker: Some(blocker),
+        blocker_owner,
+        store_owner,
+        ..TerminalStartupResources::default()
+    };
+    let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
+        write_diagnostic(format_args!("startup: shutdown coordinator is unavailable"));
+        request_pre_shell_cleanup_without_coordinator(app, resources);
+        return;
+    };
+    coordinator.request_terminal_startup_failure(app.clone(), resources);
 }
 
 fn request_unrecoverable_native_failure(app: &tauri::AppHandle, reason: &str) {
@@ -974,7 +1436,7 @@ fn navigation_lock() -> tauri::plugin::TauriPlugin<tauri::Wry> {
                     })
                     .is_ok()
             {
-                eprintln!(
+                diagnostic!(
                     "security: blocked privileged webview {} navigation to scheme={} host={}",
                     webview.label(),
                     url.scheme(),
@@ -1014,7 +1476,7 @@ fn try_emit_to_privileged<T: Serialize>(
 ) -> bool {
     let (Ok(event), Ok(payload)) = (serde_json::to_string(event), serde_json::to_string(payload))
     else {
-        eprintln!("projection: failed to serialize privileged event");
+        diagnostic!("projection: failed to serialize privileged event");
         return false;
     };
     let Some(window) = app.get_webview_window(label) else {
@@ -1022,7 +1484,7 @@ fn try_emit_to_privileged<T: Serialize>(
     };
     let script = format!("window.dispatchEvent(new CustomEvent({event},{{detail:{payload}}}));");
     if let Err(error) = window.eval(&script) {
-        eprintln!("projection: delivery to {label} failed: {error}");
+        diagnostic!("projection: delivery to {label} failed: {error}");
         return false;
     }
     true
@@ -1117,7 +1579,7 @@ pub(crate) fn apply_chrome_presentation(
     }) {
         Ok(()) => ChromePresentationDispatch::Scheduled,
         Err(_) => {
-            eprintln!("projection: privileged presentation evaluation was not admitted");
+            diagnostic!("projection: privileged presentation evaluation was not admitted");
             ChromePresentationDispatch::Rejected
         }
     }
@@ -1131,7 +1593,7 @@ fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
 
 fn shutdown_started(app: &tauri::AppHandle) -> bool {
     app.try_state::<ShutdownCoordinator>()
-        .is_some_and(|state| state.started.load(Ordering::Acquire))
+        .is_some_and(|state| state.terminal_started())
 }
 
 const MAIN_LABEL: &str = "main";
@@ -1210,7 +1672,7 @@ fn authorize(caller: &WebviewWindow, policy: CallerPolicy, command: &str) -> boo
             })
             .is_ok();
     if report {
-        eprintln!(
+        diagnostic!(
             "security: blocked {command} from privileged webview {}",
             caller.label()
         );
@@ -2546,19 +3008,27 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         coordinator.request(app.clone(), shell.inner().clone());
     } else {
         write_diagnostic(format_args!("shutdown: exit requested before shell setup"));
+        let extension_owner = app
+            .try_state::<StartupExtensionService>()
+            .map(|owner| owner.inner().clone());
         let engine_owner = app
             .try_state::<StartupEngine>()
             .map(|engine| engine.inner().clone());
         let blocker_owner = app
             .try_state::<StartupBlocker>()
             .map(|blocker| blocker.inner().clone());
-        let store = app.try_state::<StartupStore>().map(|store| store.0.clone());
+        let store_owner = app
+            .try_state::<StartupStore>()
+            .map(|store| store.inner().clone());
         coordinator.request_terminal_startup_failure(
             app.clone(),
-            None,
-            engine_owner,
-            blocker_owner,
-            store,
+            TerminalStartupResources {
+                extension_owner,
+                engine_owner,
+                blocker_owner,
+                store_owner,
+                ..TerminalStartupResources::default()
+            },
         );
     }
 }
@@ -2574,7 +3044,7 @@ pub fn run() {
             // before Builder creates even the privileged blank bootstrap
             // WKWebView. Review age and newer stable releases are
             // projected as non-blocking advisories instead.
-            eprintln!("security: {error}");
+            diagnostic!("security: {error}");
             std::process::exit(78);
         }
     };
@@ -2586,7 +3056,7 @@ pub fn run() {
             // WebKitGTK is dynamically supplied by the OS. Reject known
             // obsolete/development runtimes and security overrides before
             // Builder constructs even the privileged blank bootstrap WebView.
-            eprintln!("security: {error}");
+            diagnostic!("security: {error}");
             std::process::exit(78);
         }
     };
@@ -2598,7 +3068,7 @@ pub fn run() {
             // This runs before Builder creates either privileged chrome
             // or raw content. Obsolete, preview, overridden, or
             // unparseable runtimes remain hard failures.
-            eprintln!("security: {error}");
+            diagnostic!("security: {error}");
             std::process::exit(78);
         }
     };
@@ -2633,6 +3103,15 @@ pub fn run() {
         // is contained inside that native Ready callback and converted into a
         // correlated event-loop exit instead of escaping as Tauri's panic.
         .manage(ShutdownCoordinator::default())
+        // Extension startup begins only after Store, engine, and blocker
+        // admission, but before the Shell exists. Retain its move-only owner
+        // across that narrow transaction so every failure and pre-Shell exit
+        // can clean it before either dependency is closed.
+        .manage(StartupExtensionService::default())
+        // Storage is admitted first inside setup, but its temporary cleanup
+        // owner must already exist so installation and later Shell transfer are
+        // one exact, failure-observable transaction.
+        .manage(StartupStore::default())
         // Own a successfully installed native host until shell ownership is
         // published. Setup failures in that narrow interval can therefore
         // execute the same explicit bounded engine teardown.
@@ -2660,6 +3139,11 @@ pub fn run() {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
                 }
+                // Validate the fixed repository namespace before consuming
+                // either one-shot extension authority. Live filesystem
+                // admission remains private to the extension worker.
+                let extension_repository_root =
+                    ExtensionRepositoryRoot::from_app_data_directory(&data_dir)?;
                 #[cfg(target_os = "windows")]
                 {
                     // Release builds have no console. Establish the bounded,
@@ -2667,7 +3151,7 @@ pub fn run() {
                     // schema/corruption failure is still actionable without
                     // constructing WebView2 state merely to initialize logs.
                     platform::imp::redirect_stderr(&data_dir);
-                    eprintln!("zephium {} starting", env!("CARGO_PKG_VERSION"));
+                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
                 }
 
                 // Storage is the first fallible subsystem admitted after the
@@ -2675,11 +3159,18 @@ pub fn run() {
                 // fail before either privileged chrome or raw content creates
                 // native renderer state.
                 let store = Arc::new(SqliteStore::open(&data_dir)?);
-                if !app.manage(StartupStore(store.clone())) {
-                    return Err(std::io::Error::other(
-                        "startup storage cleanup state is already installed",
-                    )
-                    .into());
+                let startup_store = app.try_state::<StartupStore>().ok_or_else(|| {
+                    std::io::Error::other("startup storage cleanup owner is unavailable")
+                })?;
+                if !startup_store.install(store.clone()) {
+                    let error =
+                        std::io::Error::other("startup storage cleanup owner is already armed");
+                    request_pre_shell_startup_failure_with_store(
+                        app.handle(),
+                        &error,
+                        store.clone(),
+                    );
+                    return Err(error.into());
                 }
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
@@ -2987,7 +3478,7 @@ pub fn run() {
                             )
                         },
                     ) {
-                        eprintln!("operation: rejected duplicate or unreserved actor disposition");
+                        diagnostic!("operation: rejected duplicate or unreserved actor disposition");
                     }
                 }
             });
@@ -3009,21 +3500,119 @@ pub fn run() {
                 // A second setup transaction is an invariant violation, but
                 // the newly-created workers are still ours to reap because
                 // they were never published into the temporary owner.
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs(8);
-                let _ = blocker.shutdown_until(deadline);
-                return Err(
-                    std::io::Error::other("startup blocker cleanup owner is already armed").into(),
+                let error = std::io::Error::other(
+                    "startup blocker cleanup owner is already armed",
                 );
+                request_pre_shell_startup_failure_with_blocker(
+                    app.handle(),
+                    &error,
+                    blocker,
+                );
+                return Err(error.into());
             }
 
-            let shell =
-                zephium_app::spawn(engine.clone(), store, blocker.clone(), chrome, emit)?;
-            if !app.manage(shell.clone()) {
-                return Err(std::io::Error::other(
-                    "shell cleanup state is already installed",
+            // Consume the two process-unique extension authorities only after
+            // every unrelated fallible subsystem has been admitted. From this
+            // point through Shell publication the managed temporary state is
+            // the sole rollback owner.
+            let startup_extension_service = app
+                .try_state::<StartupExtensionService>()
+                .map(|owner| owner.inner().clone())
+                .ok_or_else(|| {
+                    std::io::Error::other(
+                        "startup extension-service cleanup owner is unavailable",
+                    )
+                })?;
+            let store_authority = store.claim_extension_native_ownership_authority()?;
+            let host_factory = engine
+                .take_extension_runtime_host_factory()
+                .ok_or_else(|| {
+                    std::io::Error::other(
+                        "extension-runtime host factory was already transferred",
+                    )
+                })?;
+            let launch_input = ExtensionServiceLaunchInput::new(
+                store_authority,
+                extension_repository_root,
+                host_factory,
+            );
+            let now = std::time::Instant::now();
+            let startup_deadline = now
+                .checked_add(EXTENSION_SERVICE_INITIAL_STARTUP_TIMEOUT)
+                .unwrap_or(now);
+            let extension_service: ExtensionLifecycle =
+                Box::new(ExtensionServiceOwner::launch(launch_input, startup_deadline)?);
+            if let Err(extension_service) =
+                startup_extension_service.install(extension_service)
+            {
+                let error = std::io::Error::other(
+                    "startup extension-service cleanup owner is already armed",
+                );
+                request_pre_shell_startup_failure_with_extension(
+                    app.handle(),
+                    &error,
+                    extension_service,
+                );
+                return Err(error.into());
+            }
+
+            let extension_service = startup_extension_service.take().ok_or_else(|| {
+                std::io::Error::other(
+                    "startup extension-service owner disappeared before Shell handoff",
                 )
-                .into());
+            })?;
+            let extension_failure_app = app.handle().clone();
+            let extension_failure_shutdown = shutdown.inner().clone();
+            let shell_terminal_failure: ShellTerminalFailureCallback = Box::new(move |failure| {
+                request_shell_terminal_failure(
+                    &extension_failure_app,
+                    &extension_failure_shutdown,
+                    failure,
+                )
+            });
+            let shell = match zephium_app::spawn_suspended(
+                engine.clone(),
+                store.clone(),
+                blocker.clone(),
+                extension_service,
+                shell_terminal_failure,
+                chrome,
+                emit,
+            ) {
+                Ok(shell) => shell,
+                Err(failure) => {
+                    if !failure.worker_cleanup_proven() {
+                        write_diagnostic(format_args!(
+                            "startup: application helper-worker cleanup was not proven after Shell construction failed"
+                        ));
+                    }
+                    let (error, extension_service) = failure.into_parts();
+                    if let Err(extension_service) =
+                        startup_extension_service.install(extension_service)
+                    {
+                        request_pre_shell_startup_failure_with_extension(
+                            app.handle(),
+                            &error,
+                            extension_service,
+                        );
+                    }
+                    return Err(error.into());
+                }
+            };
+            if !app.manage(shell.clone()) {
+                let error = std::io::Error::other("shell cleanup state is already installed");
+                // The local actor owns the service, Store, engine, and blocker
+                // even though Tauri refused to publish its Handle. Route that
+                // exact owner through the coordinator before the outer setup
+                // error callback can observe unrelated managed state.
+                shutdown.request_terminal_startup_failure(
+                    app.handle().clone(),
+                    TerminalStartupResources {
+                        shell: Some(shell),
+                        ..TerminalStartupResources::default()
+                    },
+                );
+                return Err(error.into());
             }
             if !startup_engine.transfer_to(&engine) {
                 return Err(std::io::Error::other(
@@ -3037,7 +3626,31 @@ pub fn run() {
                 )
                 .into());
             }
-            let _ = slot.set(shell.callback_handle());
+            if !startup_store.transfer_to(&store) {
+                return Err(std::io::Error::other(
+                    "startup storage ownership did not transfer to the shell",
+                )
+                .into());
+            }
+            // Publish the weak callback ingress before actor admission, then
+            // make the single exact transition only after every temporary
+            // cleanup owner has been cleared. A concurrent terminal request may
+            // cancel admission and is never allowed to be overtaken here.
+            slot.set(shell.callback_handle()).map_err(|_| {
+                std::io::Error::other("native engine callback ingress is already published")
+            })?;
+            if !shutdown.try_admit_shell(&shell) {
+                return Err(std::io::Error::other(
+                    "terminal shutdown started before Shell actor admission, or admission was already consumed",
+                )
+                .into());
+            }
+            if shutdown.terminal_started() {
+                return Err(std::io::Error::other(
+                    "terminal shutdown overtook Shell actor admission",
+                )
+                .into());
+            }
             #[cfg(target_os = "windows")]
             if pending_runtime_update.swap(false, Ordering::AcqRel) {
                 engine.notify_runtime_restart_required();
@@ -3050,16 +3663,11 @@ pub fn run() {
             let resize_shell = shell.clone();
             let resize_window = window.clone();
             let exit_handle = handle.clone();
-            let shutdown = app
-                .try_state::<ShutdownCoordinator>()
-                .map(|shutdown| shutdown.inner().clone())
-                .ok_or_else(|| {
-                    std::io::Error::other("shutdown coordinator state is unavailable")
-                })?;
+            let window_shutdown = shutdown.inner().clone();
             window.on_window_event(move |event| {
                 match event {
                     tauri::WindowEvent::Resized(size)
-                        if !shutdown.started.load(Ordering::Acquire) =>
+                        if !window_shutdown.terminal_started() =>
                     {
                         let minimized = resize_window
                             .is_minimized()
@@ -3074,7 +3682,7 @@ pub fn run() {
                     }
                     #[cfg(target_os = "windows")]
                     tauri::WindowEvent::Moved(_)
-                        if !shutdown.started.load(Ordering::Acquire)
+                        if !window_shutdown.terminal_started()
                             && !resize_window.is_minimized().unwrap_or(false) =>
                     {
                         // WebView2 requires an explicit parent-position
@@ -3087,7 +3695,7 @@ pub fn run() {
                         resize_shell.dispatch(Command::SetWindowSize(size));
                     }
                     tauri::WindowEvent::ScaleFactorChanged { .. }
-                        if !shutdown.started.load(Ordering::Acquire) =>
+                        if !window_shutdown.terminal_started() =>
                     {
                         let minimized = resize_window.is_minimized().unwrap_or(false);
                         resize_shell.dispatch(Command::SetWindowVisible(!minimized));
@@ -3111,18 +3719,18 @@ pub fn run() {
                     // shell command queued before close has been snapshotted.
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        shutdown.request(exit_handle.clone(), resize_shell.clone());
+                        window_shutdown.request(exit_handle.clone(), resize_shell.clone());
                     }
                     // Fallback for platform/programmatic destruction paths
                     // that do not emit a preventable close request first.
                     tauri::WindowEvent::Destroyed => {
                         #[cfg(target_os = "windows")]
                         if !platform::imp::remove_privileged_version_observer(MAIN_LABEL) {
-                            eprintln!(
+                            diagnostic!(
                                 "runtime: main WebView2 update observer removal was reentrant"
                             );
                         }
-                        shutdown.request(exit_handle.clone(), resize_shell.clone())
+                        window_shutdown.request(exit_handle.clone(), resize_shell.clone())
                     }
                     tauri::WindowEvent::Focused(true) => {
                         // Some window managers restore without a distinct
@@ -3152,6 +3760,12 @@ pub fn run() {
                 }
             });
 
+            if shutdown.terminal_started() {
+                return Err(std::io::Error::other(
+                    "terminal shutdown started before privileged panel construction",
+                )
+                .into());
+            }
             let panel_builder = tauri::WebviewWindowBuilder::new(
                 app,
                 overlay::PANEL_LABEL,
@@ -3255,7 +3869,7 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 tauri::WindowEvent::Destroyed => {
                     if !platform::imp::remove_privileged_version_observer(overlay::PANEL_LABEL) {
-                        eprintln!("runtime: panel WebView2 update observer removal was reentrant");
+                        diagnostic!("runtime: panel WebView2 update observer removal was reentrant");
                     }
                 }
                 _ => {}
@@ -3280,7 +3894,7 @@ pub fn run() {
                         },
                     );
                     if let Err(e) = registered {
-                        eprintln!("global shortcut {accel} unavailable: {e}");
+                        diagnostic!("global shortcut {accel} unavailable: {e}");
                     }
                 }
             }
@@ -3322,14 +3936,26 @@ pub fn run() {
             // IPC/document-start plumbing and app protocols were registered
             // when the blank WebViews were built, so this navigation activates
             // the normal application without rebuilding the native views.
+            if shutdown.terminal_started() {
+                return Err(std::io::Error::other(
+                    "terminal shutdown started before trusted application navigation",
+                )
+                .into());
+            }
             panel_window.navigate(app_url.clone())?;
+            if shutdown.terminal_started() {
+                return Err(std::io::Error::other(
+                    "terminal shutdown overtook privileged panel navigation",
+                )
+                .into());
+            }
             window.navigate(app_url)?;
             #[cfg(all(unix, not(target_os = "macos")))]
             if std::env::var("ZEPHIUM_NATIVE_STARTUP_PROBE").as_deref() == Ok("1") {
                 // CI accepts this marker only after both privileged WebViews
                 // exist, their deny-by-default GTK policy/composition has
                 // completed, and both trusted navigations were admitted.
-                eprintln!("startup-probe: Linux privileged WebViews are hardened and composed");
+                diagnostic!("startup-probe: Linux privileged WebViews are hardened and composed");
             }
             Ok(())
             })();
@@ -3340,7 +3966,7 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
-            eprintln!("startup: failed to build Zephium: {error}");
+            diagnostic!("startup: failed to build Zephium: {error}");
             std::process::exit(1);
         });
 
@@ -3365,7 +3991,7 @@ pub fn run() {
             platform::imp::finalize_privileged_environment_observers(&expected_environments);
         let cleanup_succeeded = process_exit_proven && cleanup_privileged_runtime_after_exit();
         if !process_exit_proven {
-            eprintln!(
+            diagnostic!(
                 "privacy: privileged WebView2 Environment5/PID/HANDLE exit was not proven; leaving this run's UDF generation quarantined"
             );
         }
@@ -3382,10 +4008,39 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use tauri::Url;
+    use zephium_core::ports::extensions::{
+        ExtensionServiceLifecycle, ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
+    };
     use zephium_ipc::{
         OperationDisposition, OperationOutcome, OperationReason, OperationStatus, SearchAction,
     };
+
+    struct TestExtensionLifecycle {
+        shutdown_calls: Arc<AtomicUsize>,
+        panic_on_shutdown: bool,
+    }
+
+    impl ExtensionServiceLifecycle for TestExtensionLifecycle {
+        fn settle_startup_until(
+            &mut self,
+            _deadline: std::time::Instant,
+        ) -> ExtensionServiceStartupOutcome {
+            ExtensionServiceStartupOutcome::Ready
+        }
+
+        fn shutdown_until(
+            self: Box<Self>,
+            _deadline: std::time::Instant,
+        ) -> ExtensionServiceShutdownOutcome {
+            self.shutdown_calls.fetch_add(1, Ordering::AcqRel);
+            assert!(!self.panic_on_shutdown, "injected lifecycle panic");
+            ExtensionServiceShutdownOutcome::Clean
+        }
+    }
 
     fn completion(operation_id: &str) -> OperationDisposition {
         OperationDisposition {
@@ -3393,6 +4048,58 @@ mod tests {
             outcome: OperationOutcome::Applied,
             reason: OperationReason::ProfileDeletionCompleted,
         }
+    }
+
+    fn test_extension_lifecycle(
+        shutdown_calls: Arc<AtomicUsize>,
+        panic_on_shutdown: bool,
+    ) -> zephium_app::ExtensionLifecycle {
+        Box::new(TestExtensionLifecycle {
+            shutdown_calls,
+            panic_on_shutdown,
+        })
+    }
+
+    #[test]
+    fn startup_extension_service_install_is_lossless_and_take_is_exactly_once() {
+        let owner = super::StartupExtensionService::default();
+        let retained_calls = Arc::new(AtomicUsize::new(0));
+        let refused_calls = Arc::new(AtomicUsize::new(0));
+
+        assert!(
+            owner
+                .install(test_extension_lifecycle(retained_calls.clone(), false))
+                .is_ok(),
+            "empty startup owner accepts its first lifecycle"
+        );
+        let refused = owner
+            .install(test_extension_lifecycle(refused_calls.clone(), false))
+            .expect_err("occupied startup owner returns the exact refused lifecycle");
+        assert_eq!(retained_calls.load(Ordering::Acquire), 0);
+        assert_eq!(refused_calls.load(Ordering::Acquire), 0);
+
+        let retained = owner.take().expect("installed lifecycle remains available");
+        assert!(owner.take().is_none(), "lifecycle can be taken only once");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(super::shutdown_startup_extension_service_until(
+            retained, deadline
+        ));
+        assert!(super::shutdown_startup_extension_service_until(
+            refused, deadline
+        ));
+        assert_eq!(retained_calls.load(Ordering::Acquire), 1);
+        assert_eq!(refused_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn startup_extension_service_shutdown_contains_lifecycle_panics() {
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(!super::shutdown_startup_extension_service_until(
+            test_extension_lifecycle(shutdown_calls.clone(), true),
+            deadline,
+        ));
+        assert_eq!(shutdown_calls.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -3806,6 +4513,26 @@ mod tests {
     }
 
     #[test]
+    fn terminal_start_and_shell_admission_have_one_linearization_order() {
+        let terminal_first = super::ShutdownCoordinator::default();
+        terminal_first.mark_terminal_start();
+        let mut admission_called = false;
+        assert!(!terminal_first.try_startup_admission(|| {
+            admission_called = true;
+            true
+        }));
+        assert!(!admission_called);
+
+        let admission_first = super::ShutdownCoordinator::default();
+        assert!(admission_first.try_startup_admission(|| true));
+        admission_first.mark_terminal_start();
+        assert!(admission_first.terminal_started());
+        assert!(!admission_first.try_startup_admission(|| {
+            panic!("terminal publication must suppress every later admission")
+        }));
+    }
+
+    #[test]
     fn startup_resource_owner_transfers_exactly_once() {
         let owner = super::StartupOwner::<u8>::default();
         let resource = std::sync::Arc::new(7);
@@ -4140,7 +4867,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_stages_storage_and_cleanup_owners_before_native_failure_points() {
+    fn setup_stages_extension_service_for_lossless_shell_handoff() {
         let source = include_str!("lib.rs");
         let production = source
             .split("#[cfg(test)]")
@@ -4168,6 +4895,20 @@ mod tests {
             1,
             "exactly one temporary blocker owner must predate setup"
         );
+        assert_eq!(
+            production
+                .matches(".manage(StartupExtensionService::default())")
+                .count(),
+            1,
+            "exactly one move-only extension owner must predate setup"
+        );
+        assert_eq!(
+            production
+                .matches(".manage(StartupStore::default())")
+                .count(),
+            1,
+            "exactly one temporary Store owner must predate setup"
+        );
         assert!(setup.contains("let setup_result: SetupResult = (|| {"));
         assert!(setup.contains("contain_tauri_setup_failure(setup_result"));
         assert!(setup.contains("APP_STORE.set(store.clone()).map_err"));
@@ -4175,6 +4916,9 @@ mod tests {
         let watchdog = setup
             .find("shutdown.prepare_hard_exit_watchdog()")
             .expect("pre-armed hard-exit watchdog");
+        let repository_root = setup
+            .find("ExtensionRepositoryRoot::from_app_data_directory(&data_dir)")
+            .expect("validated extension repository namespace");
         let storage = setup
             .find("SqliteStore::open(&data_dir)")
             .expect("early storage admission");
@@ -4182,6 +4926,7 @@ mod tests {
             .find("WebviewWindowBuilder::from_config")
             .expect("main privileged WebView construction");
         assert!(watchdog < storage);
+        assert!(repository_root < storage);
         assert!(storage < main_webview);
 
         let parent_handle = setup
@@ -4204,24 +4949,66 @@ mod tests {
         let engine_transfer = setup
             .find("if !startup_engine.transfer_to(&engine)")
             .expect("exact engine ownership transfer");
+        let startup_store_owner = setup
+            .find("if !startup_store.install(store.clone())")
+            .expect("temporary pre-shell Store owner");
+        let store_transfer = setup
+            .find("if !startup_store.transfer_to(&store)")
+            .expect("exact Store ownership transfer");
         let blocker_start = setup
             .find("let blocker = blocker_service::start(&data_dir)")
             .expect("managed blocker construction");
         let startup_blocker_owner = setup
             .find("if !startup_blocker.install(blocker.clone())")
             .expect("temporary pre-shell blocker owner");
+        let store_authority = setup
+            .find("store.claim_extension_native_ownership_authority()")
+            .expect("unique Store extension authority claim");
+        let host_factory = setup
+            .find(".take_extension_runtime_host_factory()")
+            .expect("unique native-host factory transfer");
+        let service_launch = setup
+            .find("ExtensionServiceOwner::launch(launch_input, startup_deadline)")
+            .expect("extension-service worker launch");
+        let service_install = setup
+            .find("startup_extension_service.install(extension_service)")
+            .expect("temporary extension owner installation");
+        let service_take = setup
+            .find("startup_extension_service.take()")
+            .expect("exact extension owner handoff");
+        let terminal_failure_callback = setup
+            .find("let shell_terminal_failure: ShellTerminalFailureCallback")
+            .expect("terminal Shell failure callback");
         let shell_spawn = setup
-            .find("zephium_app::spawn(engine.clone(), store, blocker.clone(), chrome, emit)")
-            .expect("shell actor construction");
+            .find("let shell = match zephium_app::spawn_suspended(")
+            .expect("suspended shell actor construction");
         let blocker_transfer = setup
             .find("if !startup_blocker.transfer_to(&blocker)")
             .expect("exact blocker ownership transfer");
+        let callback_publication = setup
+            .find("slot.set(shell.callback_handle())")
+            .expect("native callback ingress publication");
+        let actor_admission = setup
+            .find("if !shutdown.try_admit_shell(&shell)")
+            .expect("linearized post-publication actor admission");
+        let post_admission_terminal_gate = setup
+            .find("terminal shutdown overtook Shell actor admission")
+            .expect("post-admission terminal gate");
+        let pre_panel_terminal_gate = setup
+            .find("terminal shutdown started before privileged panel construction")
+            .expect("pre-panel terminal gate");
         let panel_webview = setup
             .find("let panel_builder = tauri::WebviewWindowBuilder::new")
             .expect("panel privileged WebView construction");
+        let pre_navigation_terminal_gate = setup
+            .find("terminal shutdown started before trusted application navigation")
+            .expect("pre-navigation terminal gate");
         let panel_navigation = setup
             .find("panel_window.navigate(app_url.clone())?")
             .expect("hardened panel navigation");
+        let post_panel_navigation_terminal_gate = setup
+            .find("terminal shutdown overtook privileged panel navigation")
+            .expect("post-panel-navigation terminal gate");
         let main_navigation = setup
             .find("window.navigate(app_url)?")
             .expect("hardened main navigation");
@@ -4229,17 +5016,121 @@ mod tests {
             .find("startup-probe: Linux privileged WebViews are hardened and composed")
             .expect("post-hardening Linux startup probe");
         assert!(engine_install < startup_engine_owner);
+        assert!(startup_store_owner < engine_install);
         assert!(startup_engine_owner < shell_owner);
         assert!(shell_owner < engine_transfer);
         assert!(blocker_start < startup_blocker_owner);
-        assert!(startup_blocker_owner < shell_spawn);
+        assert!(startup_blocker_owner < store_authority);
+        assert!(store_authority < host_factory);
+        assert!(host_factory < service_launch);
+        assert!(service_launch < service_install);
+        assert!(service_install < service_take);
+        assert!(service_take < terminal_failure_callback);
+        assert!(terminal_failure_callback < shell_spawn);
         assert!(shell_spawn < shell_owner);
+        assert!(shell_owner < store_transfer);
         assert!(shell_owner < blocker_transfer);
+        assert!(engine_transfer < blocker_transfer);
+        assert!(blocker_transfer < store_transfer);
+        assert!(engine_transfer < actor_admission);
+        assert!(blocker_transfer < actor_admission);
+        assert!(store_transfer < actor_admission);
+        assert!(engine_transfer < callback_publication);
+        assert!(blocker_transfer < callback_publication);
+        assert!(store_transfer < callback_publication);
+        assert!(callback_publication < actor_admission);
+        assert!(actor_admission < post_admission_terminal_gate);
+        assert!(post_admission_terminal_gate < pre_panel_terminal_gate);
+        assert!(pre_panel_terminal_gate < panel_webview);
+        assert!(actor_admission < panel_webview);
         assert!(shell_owner < panel_webview);
+        assert!(panel_webview < pre_navigation_terminal_gate);
+        assert!(pre_navigation_terminal_gate < panel_navigation);
         assert!(panel_webview < panel_navigation);
+        assert!(panel_navigation < post_panel_navigation_terminal_gate);
+        assert!(post_panel_navigation_terminal_gate < main_navigation);
         assert!(panel_navigation < main_navigation);
         assert!(main_navigation < linux_startup_probe);
         assert!(!setup.contains("app.manage(shutdown.clone())"));
+        for forbidden_wait in [
+            "wait_for_startup_until(",
+            "retry_startup_until(",
+            "settle_startup_until(",
+            "shutdown_startup_extension_service_until(",
+        ] {
+            assert!(
+                !setup.contains(forbidden_wait),
+                "Tauri setup must not wait on extension/native settlement: {forbidden_wait}"
+            );
+        }
+        assert!(setup.contains("failure.worker_cleanup_proven()"));
+        assert!(setup.contains("failure.into_parts()"));
+        assert!(setup.contains("startup_extension_service.install(extension_service)"));
+        assert!(setup.contains("request_shell_terminal_failure("));
+        assert!(setup.contains("&extension_failure_shutdown"));
+
+        let terminal_failure_diagnostic = production
+            .split("fn request_shell_terminal_failure(")
+            .nth(1)
+            .expect("Shell terminal-failure dispatcher")
+            .split("fn request_orderly_terminal_failure(")
+            .next()
+            .expect("bounded Shell terminal-failure dispatcher");
+        assert!(terminal_failure_diagnostic
+            .contains("runtime: terminal application shell failure: {error}"));
+        assert!(terminal_failure_diagnostic.contains("coordinator.signal_terminal_start(app)"));
+        assert!(terminal_failure_diagnostic.contains("request_orderly_terminal_failure(app)"));
+        let terminal_signal = terminal_failure_diagnostic
+            .find("coordinator.signal_terminal_start(app)")
+            .unwrap();
+        let terminal_diagnostic = terminal_failure_diagnostic
+            .find("write_diagnostic(format_args!")
+            .unwrap();
+        let terminal_request = terminal_failure_diagnostic
+            .find("request_orderly_terminal_failure(app)")
+            .unwrap();
+        assert!(terminal_signal < terminal_diagnostic);
+        assert!(terminal_diagnostic < terminal_request);
+
+        let terminal_marker = production
+            .split("fn mark_terminal_start(&self)")
+            .nth(1)
+            .expect("terminal-start linearization")
+            .split("fn try_admit_shell(&self")
+            .next()
+            .expect("bounded terminal-start linearization");
+        let terminal_lock = terminal_marker.find("startup_admission").unwrap();
+        let terminal_publish = terminal_marker
+            .find("self.terminal_started.store(true, Ordering::Release)")
+            .unwrap();
+        assert!(terminal_lock < terminal_publish);
+        let shell_admission = production
+            .split("fn try_startup_admission(&self")
+            .nth(1)
+            .expect("Shell-admission linearization")
+            .split("fn try_admit_shell(&self")
+            .next()
+            .expect("bounded Shell-admission linearization");
+        let admission_lock = shell_admission.find("startup_admission").unwrap();
+        let terminal_observation = shell_admission
+            .find("self.terminal_started.load(Ordering::Acquire)")
+            .unwrap();
+        let gate_admission = shell_admission.find("admit()").unwrap();
+        assert!(admission_lock < terminal_observation);
+        assert!(terminal_observation < gate_admission);
+        let handle_admission = production
+            .split("fn try_admit_shell(&self")
+            .nth(1)
+            .expect("Handle startup-gate admission")
+            .split("fn prepare_hard_exit_watchdog")
+            .next()
+            .expect("bounded Handle startup-gate admission");
+        assert!(handle_admission.contains("self.try_startup_admission"));
+        assert!(handle_admission.contains("shell.admit_startup()"));
+
+        let shell_manage_failure = &setup[shell_owner..engine_transfer];
+        assert!(shell_manage_failure.contains("shutdown.request_terminal_startup_failure("));
+        assert!(shell_manage_failure.contains("Some(shell)"));
 
         let run_event = production
             .split("fn handle_run_event(")
@@ -4259,32 +5150,65 @@ mod tests {
     }
 
     #[test]
-    fn pre_shell_failure_reaps_store_native_and_blocker_under_one_deadline() {
+    fn pre_shell_failure_reaps_extension_service_store_native_and_blocker_under_one_deadline() {
         let source = include_str!("lib.rs");
         let production = source
             .split("#[cfg(test)]")
             .next()
             .expect("desktop production source");
-        let cleanup = production
+        let claim = production
+            .split("impl TerminalStartupResources {")
+            .nth(1)
+            .expect("terminal startup owner claim")
+            .split("impl ClaimedTerminalStartupResources {")
+            .next()
+            .expect("bounded terminal startup owner claim");
+        let request = production
             .split("fn request_terminal_startup_failure(")
             .nth(1)
-            .expect("terminal startup cleanup")
+            .expect("terminal startup cleanup request")
             .split("fn request_unrecoverable_native_failure(")
             .next()
-            .expect("bounded terminal startup cleanup");
+            .expect("bounded terminal startup cleanup request");
+        let cleanup = production
+            .split("fn cleanup_pre_shell_resources_until(")
+            .nth(1)
+            .expect("pre-shell cleanup implementation")
+            .split("fn cleanup_supplemental_startup_resources(")
+            .next()
+            .expect("bounded pre-shell cleanup implementation");
 
-        let single_flight = cleanup
-            .find("self.started.swap(true, Ordering::AcqRel)")
-            .expect("startup cleanup single-flight gate");
-        let engine_take = cleanup
+        let extension_take = claim
+            .find("extension_owner.and_then(|owner| owner.take())")
+            .expect("move-only extension temporary-owner take");
+        let engine_take = claim
             .find("engine_owner.and_then(|owner| owner.take())")
             .expect("engine temporary-owner take");
-        let blocker_take = cleanup
+        let blocker_take = claim
             .find("blocker_owner.and_then(|owner| owner.take())")
             .expect("blocker temporary-owner take");
-        let deadline = cleanup
+        let store_take = claim
+            .find("store_owner.and_then(|owner| owner.take())")
+            .expect("Store temporary-owner take");
+        assert!(extension_take < engine_take);
+        assert!(engine_take < blocker_take);
+        assert!(blocker_take < store_take);
+
+        let single_flight = request
+            .find("self.started.swap(true, Ordering::AcqRel)")
+            .expect("startup cleanup single-flight gate");
+        let owner_claim = request
+            .find(".claim();")
+            .expect("atomic temporary-owner claim");
+        let deadline = request
             .find("let deadline = std::time::Instant::now()")
             .expect("single cleanup deadline");
+        assert!(single_flight < owner_claim);
+        assert!(owner_claim < deadline);
+
+        let extension = cleanup
+            .find("shutdown_startup_extension_service_until(service, deadline)")
+            .expect("panic-contained extension-service teardown");
         let store = cleanup
             .find("store.shutdown_until(deadline)")
             .expect("storage durability barrier");
@@ -4298,25 +5222,30 @@ mod tests {
             .find("native_wait.recv_timeout(remaining)")
             .expect("native teardown completion");
 
-        assert!(single_flight < engine_take);
-        assert!(single_flight < blocker_take);
-        assert!(engine_take < deadline);
-        assert!(blocker_take < deadline);
-        assert!(deadline < store);
+        assert!(extension < store);
         assert!(store < native);
         assert!(native < blocker);
         assert!(blocker < native_wait);
-        assert_eq!(cleanup.matches("from_secs(8)").count(), 1);
+        assert_eq!(request.matches("PRE_SHELL_CLEANUP_TIMEOUT").count(), 1);
+        assert_eq!(
+            cleanup.matches("std::panic::catch_unwind").count(),
+            3,
+            "Store, engine admission, and blocker cleanup must be independently panic-contained"
+        );
 
         let startup_failure = production
             .split("fn request_startup_failure(")
             .nth(1)
             .expect("startup failure dispatcher")
-            .split("fn request_unrecoverable_native_failure(")
+            .split("fn request_pre_shell_startup_failure_with_extension(")
             .next()
             .expect("bounded startup failure dispatcher");
         assert!(startup_failure.contains("try_state::<StartupBlocker>()"));
+        assert!(startup_failure.contains("try_state::<StartupExtensionService>()"));
+        assert!(startup_failure.contains("try_state::<StartupEngine>()"));
+        assert!(startup_failure.contains("try_state::<StartupStore>()"));
         assert!(!startup_failure.contains("|blocker| blocker.take()"));
+        assert!(!startup_failure.contains("|owner| owner.take()"));
 
         let run_event = production
             .split("fn handle_run_event(")
@@ -4326,7 +5255,11 @@ mod tests {
             .next()
             .expect("bounded desktop run-event handler");
         assert!(run_event.contains("try_state::<StartupBlocker>()"));
+        assert!(run_event.contains("try_state::<StartupExtensionService>()"));
+        assert!(run_event.contains("try_state::<StartupEngine>()"));
+        assert!(run_event.contains("try_state::<StartupStore>()"));
         assert!(!run_event.contains("|blocker| blocker.take()"));
+        assert!(!run_event.contains("|owner| owner.take()"));
     }
 
     #[test]

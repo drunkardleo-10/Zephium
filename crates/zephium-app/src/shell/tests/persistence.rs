@@ -8,6 +8,8 @@ fn hostile_url_churn_cannot_force_repeated_full_session_snapshots() {
         Arc::new(FakeEngine::default()),
         store.clone(),
         Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);

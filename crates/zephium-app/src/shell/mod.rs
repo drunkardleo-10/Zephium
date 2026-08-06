@@ -46,7 +46,8 @@ use crate::actor::{spawn, Handle, TryPushError};
 use crate::actor::{CallbackHandle, CommandQueue};
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
-    EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShutdownOutcome,
+    EmitFn, ExtensionLifecycle, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
+    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 #[cfg(test)]
 use crate::api::{ChromePresentationCallback, PresentationChrome};
@@ -73,6 +74,9 @@ use zephium_core::ports::engine::Engine;
 use zephium_core::ports::engine::{
     DiscardProbeId, EngineEvent, NativeAction, NativeDispatch, NavigationPresentationId, Partition,
     ProfileDataErasureOutcome, ZoomRequestId,
+};
+use zephium_core::ports::extensions::{
+    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -102,8 +106,17 @@ const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(not(test))]
+const EXTENSION_STARTUP_SETTLEMENT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(200);
+#[cfg(test)]
+const EXTENSION_STARTUP_SETTLEMENT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(5);
+const EXTENSION_STARTUP_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
+const EXTENSION_STARTUP_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
-// native teardown, and thread joins consume this one caller-owned deadline.
+// extension-service settlement, native teardown, and thread joins consume
+// this one caller-owned deadline.
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
 #[cfg(test)]
@@ -136,6 +149,13 @@ pub struct Shell {
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
     blocker: blocker::BlockerCoordinator,
+    extension_service: Option<ExtensionLifecycle>,
+    extension_startup_ready: bool,
+    extension_startup_terminal: bool,
+    extension_startup_retry_exponent: u8,
+    extension_startup_not_before: Option<std::time::Instant>,
+    terminal_failure: Option<ShellTerminalFailureCallback>,
+    terminal_failure_handoff_panicked: bool,
     engine: SharedEngine,
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
@@ -143,6 +163,38 @@ pub struct Shell {
     emit: EmitFn,
     #[cfg(test)]
     auto_settle_content_rules: bool,
+}
+
+pub(super) struct ShellPorts {
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    extension_service: ExtensionLifecycle,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+}
+
+impl ShellPorts {
+    pub(super) fn new(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        extension_service: ExtensionLifecycle,
+        terminal_failure: ShellTerminalFailureCallback,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self {
+            engine,
+            store,
+            blocker,
+            extension_service,
+            terminal_failure,
+            chrome,
+            emit,
+        }
+    }
 }
 
 impl Shell {
@@ -154,11 +206,15 @@ impl Shell {
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            engine,
-            store,
-            Arc::new(tests::ImmediateAllowAllCompiler),
-            chrome,
-            emit,
+            ShellPorts::new(
+                engine,
+                store,
+                Arc::new(tests::ImmediateAllowAllCompiler),
+                tests::clean_extension_lifecycle(),
+                Box::new(|_| {}),
+                chrome,
+                emit,
+            ),
             None,
             true,
         )
@@ -172,18 +228,100 @@ impl Shell {
         chrome: SharedChrome,
         emit: EmitFn,
     ) -> Self {
-        Self::with_store_reads(engine, store, blocker, chrome, emit, None, false)
+        Self::with_store_reads(
+            ShellPorts::new(
+                engine,
+                store,
+                blocker,
+                tests::clean_extension_lifecycle(),
+                Box::new(|_| {}),
+                chrome,
+                emit,
+            ),
+            None,
+            false,
+        )
     }
 
-    pub(super) fn with_store_reads(
+    #[cfg(test)]
+    pub(super) fn new_with_extension_lifecycle(
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
+        extension_service: ExtensionLifecycle,
         chrome: SharedChrome,
         emit: EmitFn,
+    ) -> Self {
+        Self::new_with_extension_lifecycle_and_failure(
+            engine,
+            store,
+            blocker,
+            extension_service,
+            Box::new(|_| {}),
+            chrome,
+            emit,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_extension_lifecycle_and_failure(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        extension_service: ExtensionLifecycle,
+        terminal_failure: ShellTerminalFailureCallback,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(
+            ShellPorts::new(
+                engine,
+                store,
+                blocker,
+                extension_service,
+                terminal_failure,
+                chrome,
+                emit,
+            ),
+            None,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_store_reads(
+        ports: ShellPorts,
         store_reads: impl Into<Option<StoreReadQueue>>,
         #[cfg(test)] auto_settle_content_rules: bool,
     ) -> Self {
+        let mut shell = Self::with_store_reads_deferred_blocker_catalog(
+            ports,
+            store_reads,
+            #[cfg(test)]
+            auto_settle_content_rules,
+        );
+        shell.initialize_blocker_catalog();
+        shell
+    }
+
+    /// Builds only actor-owned state and does not enter any external port.
+    /// The actor installs `ShellExitGuard` before completing catalog admission,
+    /// so a panic cannot drop the move-only extension lifecycle or strand the
+    /// Store/native/blocker cleanup graph outside an observable terminal path.
+    pub(super) fn with_store_reads_deferred_blocker_catalog(
+        ports: ShellPorts,
+        store_reads: impl Into<Option<StoreReadQueue>>,
+        #[cfg(test)] auto_settle_content_rules: bool,
+    ) -> Self {
+        let ShellPorts {
+            engine,
+            store,
+            blocker,
+            extension_service,
+            terminal_failure,
+            chrome,
+            emit,
+        } = ports;
         Self {
             profiles: Profiles::default(),
             spaces: Spaces::default(),
@@ -206,7 +344,14 @@ impl Shell {
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
-            blocker: blocker::BlockerCoordinator::new(blocker),
+            blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            extension_service: Some(extension_service),
+            extension_startup_ready: false,
+            extension_startup_terminal: false,
+            extension_startup_retry_exponent: 0,
+            extension_startup_not_before: None,
+            terminal_failure: Some(terminal_failure),
+            terminal_failure_handoff_panicked: false,
             engine,
             store,
             store_reads: store_reads.into(),
@@ -217,13 +362,28 @@ impl Shell {
         }
     }
 
+    pub(super) fn initialize_blocker_catalog(&mut self) {
+        self.blocker.initialize_catalog();
+    }
+
     pub(super) fn attach_queue(&mut self, queue: CommandQueue) {
-        self.self_queue = Some(queue);
+        self.attach_queue_for_terminal_cleanup(queue);
         self.schedule_blocker_catalog_activation_poll();
+    }
+
+    /// Installs only the actor's self-queue for a startup cancellation. No
+    /// timer or external coordinator work is admitted before the queued
+    /// terminal barrier is consumed.
+    pub(super) fn attach_queue_for_terminal_cleanup(&mut self, queue: CommandQueue) {
+        self.self_queue = Some(queue);
     }
 
     pub(super) fn is_shutdown(&self) -> bool {
         self.shutdown_result.is_some()
+    }
+
+    pub(super) fn terminal_failure_handoff_panicked(&self) -> bool {
+        self.terminal_failure_handoff_panicked
     }
 
     pub fn handle(&mut self, cmd: Command) {
@@ -442,6 +602,12 @@ impl Shell {
             Command::StoreRead(result) => self.on_store_read(result),
             Command::Persist => self.persist(),
             Command::Tick => {
+                if !self.bootstrapped {
+                    self.bootstrap();
+                    if !self.bootstrapped {
+                        return;
+                    }
+                }
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
                 self.drive_blocker_preference_reconciliations();
@@ -452,89 +618,364 @@ impl Shell {
                 }
             }
             Command::Engine(event) => self.on_engine_event(event),
-            Command::Shutdown { deadline, ack } => {
-                if std::time::Instant::now() >= deadline {
+            Command::Shutdown { deadline, ack } => self.shutdown_until(deadline, ack),
+        }
+    }
+
+    fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        if std::time::Instant::now() >= deadline {
+            self.retryable_shutdown_failure(ack);
+            return;
+        }
+
+        let mut terminal_clean = true;
+        if let Some(reads) = &self.store_reads {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reads.quiesce_until(deadline)
+            })) {
+                Ok(true) => {}
+                Ok(false) => {
                     self.retryable_shutdown_failure(ack);
                     return;
                 }
-                if self
-                    .store_reads
-                    .as_ref()
-                    .is_some_and(|reads| !reads.quiesce_until(deadline))
-                {
-                    self.retryable_shutdown_failure(ack);
-                    return;
+                Err(_) => {
+                    crate::diagnostic!("shutdown: storage-reader quiescence panicked");
+                    terminal_clean = false;
                 }
-                self.clear_pending_store_reads();
-                self.persist();
-                let storage_clean = match self.store.shutdown_until(deadline) {
-                    StoreShutdownOutcome::Clean => true,
-                    StoreShutdownOutcome::RetryableFailure => {
-                        // The store proves its terminal command was not
-                        // entered, so native teardown has not started and a
-                        // temporarily unavailable filesystem can be retried
-                        // without losing the live engine or storage actor.
-                        self.retryable_shutdown_failure(ack);
-                        return;
-                    }
-                    StoreShutdownOutcome::Unclean => {
-                        // Durability/actor ownership crossed an uncertain
-                        // terminal boundary. Continued browsing cannot be
-                        // reconciled safely. Still initiate both independent
-                        // teardown barriers below so the remaining portion of
-                        // the process deadline can release native and blocker
-                        // resources before the outer watchdog exits non-zero.
-                        eprintln!(
-                            "shutdown: storage actor termination was not proven before the deadline"
-                        );
-                        false
-                    }
-                };
-                // The store's terminal marker is ordered after every admitted
-                // preference callback. Fold those exact outcomes before
-                // deciding which retained operation ids cannot reach native
-                // settlement during teardown.
-                self.drain_blocker_inbox();
-                self.finish_pending_blocker_operations_for_shutdown();
-                if let Some(reads) = &self.store_reads {
-                    reads.stop();
-                }
-                let (native_done, native_wait) = sync_channel(1);
-                self.engine.shutdown(Box::new(move |clean| {
-                    let _ = native_done.send(clean);
-                }));
-                // Native teardown and blocker worker joins are independent
-                // once storage durability is proven. Start the native barrier
-                // first, then spend the same absolute deadline on blocker
-                // shutdown instead of serially delaying WebView destruction.
-                let blocker_clean = match self.blocker.shutdown_until(deadline) {
-                    BlockerShutdownOutcome::Clean => true,
-                    BlockerShutdownOutcome::Unclean => {
-                        eprintln!(
-                            "shutdown: content-policy compiler termination was not proven before the deadline"
-                        );
-                        false
-                    }
-                };
-                let native_budget = deadline.saturating_duration_since(std::time::Instant::now());
-                let clean = native_wait.recv_timeout(native_budget).unwrap_or(false);
-                if !clean {
-                    // Teardown may already have destroyed some or all native
-                    // state. Never resume the actor after this point; process
-                    // exit is the final bounded cleanup and the next startup
-                    // refuses stale private data it cannot remove.
-                    eprintln!(
-                        "shutdown: native cleanup did not acknowledge cleanly; forcing process exit"
-                    );
-                }
-                let outcome = if storage_clean && clean && blocker_clean {
-                    ShutdownOutcome::Clean
-                } else {
-                    ShutdownOutcome::Unclean
-                };
-                self.shutdown_result = Some(outcome);
-                let _ = ack.send(outcome);
             }
+        }
+        self.clear_pending_store_reads();
+
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {
+            crate::diagnostic!("shutdown: final session snapshot panicked");
+            terminal_clean = false;
+        }
+
+        // Preserve retryability only while every earlier boundary is still
+        // known-good and before the unique extension owner is consumed.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.store.flush_until(deadline)
+        })) {
+            Ok(true) => {}
+            Ok(false) if terminal_clean => {
+                self.retryable_shutdown_failure(ack);
+                return;
+            }
+            Ok(false) => {
+                crate::diagnostic!("shutdown: storage durability preflight was not proven");
+                terminal_clean = false;
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: storage durability preflight panicked");
+                terminal_clean = false;
+            }
+        }
+
+        let extension_service_clean = self.shutdown_extension_service_until(deadline);
+        // Fold every result already published before Store's terminal
+        // barrier while ordinary Store/native admission is still valid. Any
+        // follow-up reconciliation is then ordered ahead of Store shutdown.
+        // A projection or adapter panic is terminal, but cannot skip the
+        // independent Store/native/blocker barriers below.
+        let pre_store_coordination_clean = if std::time::Instant::now() >= deadline {
+            false
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.drain_blocker_inbox();
+            }))
+            .is_ok()
+        };
+        if !pre_store_coordination_clean {
+            crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
+        }
+        let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.store.shutdown_until(deadline)
+        })) {
+            Ok(StoreShutdownOutcome::Clean) => true,
+            Ok(StoreShutdownOutcome::RetryableFailure) => {
+                crate::diagnostic!(
+                    "shutdown: storage rejected terminal teardown after extension-service shutdown"
+                );
+                false
+            }
+            Ok(StoreShutdownOutcome::Unclean) => {
+                crate::diagnostic!(
+                    "shutdown: storage actor termination was not proven before the deadline"
+                );
+                false
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: storage terminal barrier panicked");
+                false
+            }
+        };
+
+        // Projection callbacks are composition ports too. Contain this phase
+        // independently so an unhealthy UI cannot skip native or blocker
+        // teardown after terminal ownership transfer has begun.
+        let post_store_coordination_clean =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.discard_blocker_inbox_for_shutdown();
+                self.finish_pending_blocker_operations_for_shutdown();
+            }))
+            .is_ok();
+        if !post_store_coordination_clean {
+            crate::diagnostic!("shutdown: pending operation finalization panicked");
+        }
+        let coordination_clean = pre_store_coordination_clean && post_store_coordination_clean;
+        let reads_stopped = self.store_reads.as_ref().is_none_or(|reads| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reads.stop())).is_ok()
+        });
+        if !reads_stopped {
+            crate::diagnostic!("shutdown: storage-reader stop panicked");
+        }
+
+        let (native_clean, blocker_clean) = self.shutdown_native_and_blocker_until(deadline);
+
+        let clean = terminal_clean
+            && extension_service_clean
+            && storage_clean
+            && coordination_clean
+            && reads_stopped
+            && native_clean
+            && blocker_clean;
+        let outcome = if clean {
+            ShutdownOutcome::Clean
+        } else {
+            ShutdownOutcome::Unclean
+        };
+        self.shutdown_result = Some(outcome);
+        let _ = ack.send(outcome);
+    }
+
+    fn shutdown_native_and_blocker_until(&self, deadline: std::time::Instant) -> (bool, bool) {
+        let (native_done, native_wait) = sync_channel(1);
+        let native_admitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.engine.shutdown(Box::new(move |clean| {
+                let _ = native_done.send(clean);
+            }));
+        }))
+        .is_ok();
+        if !native_admitted {
+            crate::diagnostic!("shutdown: native cleanup admission panicked");
+        }
+
+        // Native teardown and blocker joins are independent and share the
+        // same caller-owned absolute deadline.
+        let blocker_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.blocker.shutdown_until(deadline)
+        })) {
+            Ok(BlockerShutdownOutcome::Clean) => true,
+            Ok(BlockerShutdownOutcome::Unclean) => {
+                crate::diagnostic!(
+                    "shutdown: content-policy compiler termination was not proven before the deadline"
+                );
+                false
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: content-policy compiler shutdown panicked");
+                false
+            }
+        };
+        let native_budget = deadline.saturating_duration_since(std::time::Instant::now());
+        // Observe the callback independently even when admission panicked: a
+        // faulty adapter may have retained callback ownership before unwind.
+        let native_ack_clean = native_wait.recv_timeout(native_budget).unwrap_or(false);
+        let native_clean = native_admitted && native_ack_clean;
+        if !native_clean {
+            crate::diagnostic!(
+                "shutdown: native cleanup did not acknowledge cleanly; forcing process exit"
+            );
+        }
+        (native_clean, blocker_clean)
+    }
+
+    /// Best-effort terminal cleanup for actor unwind or loss of the last
+    /// public handle. No mutable state is persisted and no refusal is
+    /// retryable because the sole authoritative actor is already exiting.
+    pub(super) fn cleanup_after_unexpected_exit_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> bool {
+        let reads_quiesced = self.store_reads.as_ref().is_none_or(|reads| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reads.quiesce_until(deadline)
+            }))
+            .unwrap_or(false)
+        });
+        let reads_stopped = self.store_reads.as_ref().is_none_or(|reads| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reads.stop())).is_ok()
+        });
+        let extension_clean = self.shutdown_extension_service_until(deadline);
+        let storage_clean = matches!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.store.shutdown_until(deadline)
+            })),
+            Ok(StoreShutdownOutcome::Clean)
+        );
+        if !storage_clean {
+            crate::diagnostic!(
+                "shutdown: storage cleanup was not proven during unexpected shell exit"
+            );
+        }
+        let (native_clean, blocker_clean) = self.shutdown_native_and_blocker_until(deadline);
+        reads_quiesced
+            && reads_stopped
+            && extension_clean
+            && storage_clean
+            && native_clean
+            && blocker_clean
+    }
+
+    pub(super) fn report_terminal_failure(&mut self, failure: ShellTerminalFailure) {
+        let Some(callback) = self.terminal_failure.take() else {
+            return;
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(failure))).is_err() {
+            crate::diagnostic!("shutdown: terminal shell failure handoff panicked");
+            self.terminal_failure_handoff_panicked = true;
+        }
+    }
+
+    /// Consumes the unique extension-service owner exactly once.
+    ///
+    /// Returning `false` is terminal: there is no truthful in-process
+    /// reconstruction path for the consumed Store/native authority.
+    pub(super) fn shutdown_extension_service_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> bool {
+        let Some(service) = self.extension_service.take() else {
+            crate::diagnostic!("shutdown: extension-service lifecycle owner is missing");
+            return false;
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.shutdown_until(deadline)
+        })) {
+            Ok(ExtensionServiceShutdownOutcome::Clean) => true,
+            Ok(ExtensionServiceShutdownOutcome::Unclean) => {
+                crate::diagnostic!(
+                    "shutdown: extension-service worker termination was not proven before the deadline"
+                );
+                false
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: extension-service shutdown panicked");
+                false
+            }
+        }
+    }
+
+    /// Settles extension startup away from the native event-loop thread before
+    /// any recovered deletion or raw content view can be admitted.
+    pub(super) fn extension_service_ready_for_bootstrap(&mut self) -> bool {
+        if self.extension_startup_ready {
+            return true;
+        }
+        if self.extension_startup_terminal {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if let Some(not_before) = self
+            .extension_startup_not_before
+            .filter(|not_before| now < *not_before)
+        {
+            // Bootstrap is callable by privileged chrome and by the periodic
+            // maintenance path. Neither may bypass the actor-owned retry
+            // schedule and turn a transient service outage into a hot loop.
+            // Re-arm the exact opportunity as well: a stale timer wake can be
+            // consumed before this command reaches the actor, and queue
+            // saturation can transiently publish an earlier replacement.
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_extension_startup(not_before);
+            }
+            return false;
+        }
+        // Consume this exact due opportunity before entering the lifecycle
+        // port. A transient outcome installs the next one; Ready and terminal
+        // outcomes leave no stale retry authority behind.
+        self.extension_startup_not_before = None;
+        let Some(service) = self.extension_service.as_mut() else {
+            crate::diagnostic!("bootstrap: extension-service lifecycle owner is missing");
+            self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupLifecycleMissing);
+            return false;
+        };
+        let deadline = now
+            .checked_add(EXTENSION_STARTUP_SETTLEMENT_TIMEOUT)
+            .unwrap_or(now);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.settle_startup_until(deadline)
+        }));
+        match outcome {
+            Ok(ExtensionServiceStartupOutcome::Ready) => {
+                self.extension_startup_ready = true;
+                self.extension_startup_retry_exponent = 0;
+                self.extension_startup_not_before = None;
+                if let Some(queue) = &self.self_queue {
+                    queue.cancel_extension_startup();
+                }
+                true
+            }
+            Ok(
+                ExtensionServiceStartupOutcome::Unavailable
+                | ExtensionServiceStartupOutcome::TimedOut
+                | ExtensionServiceStartupOutcome::RetryableNotAdmitted,
+            ) => {
+                crate::diagnostic!(
+                    "bootstrap: extension-service startup is temporarily unsettled; retaining all extension-sensitive work"
+                );
+                self.schedule_extension_startup_retry();
+                false
+            }
+            Ok(ExtensionServiceStartupOutcome::CleanupRequired) => {
+                crate::diagnostic!(
+                    "bootstrap: extension-service cleanup remains required; refusing extension-sensitive initialization"
+                );
+                self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupCleanupRequired);
+                false
+            }
+            Ok(ExtensionServiceStartupOutcome::FailedClosed) => {
+                crate::diagnostic!(
+                    "bootstrap: extension-service startup failed closed; refusing extension-sensitive initialization"
+                );
+                self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupFailedClosed);
+                false
+            }
+            Err(_) => {
+                crate::diagnostic!(
+                    "bootstrap: extension-service startup lifecycle panicked; refusing extension-sensitive initialization"
+                );
+                self.fail_extension_startup(
+                    ShellTerminalFailure::ExtensionStartupLifecyclePanicked,
+                );
+                false
+            }
+        }
+    }
+
+    fn fail_extension_startup(&mut self, failure: ShellTerminalFailure) {
+        self.extension_startup_terminal = true;
+        self.extension_startup_not_before = None;
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_extension_startup();
+        }
+        self.report_terminal_failure(failure);
+    }
+
+    fn schedule_extension_startup_retry(&mut self) {
+        let shift = self.extension_startup_retry_exponent.min(4);
+        let factor = 1_u32 << shift;
+        let delay = EXTENSION_STARTUP_RETRY_BASE
+            .checked_mul(factor)
+            .unwrap_or(EXTENSION_STARTUP_RETRY_MAX)
+            .min(EXTENSION_STARTUP_RETRY_MAX);
+        self.extension_startup_retry_exponent =
+            self.extension_startup_retry_exponent.saturating_add(1);
+        let now = std::time::Instant::now();
+        let deadline = now.checked_add(delay).unwrap_or(now);
+        self.extension_startup_not_before = Some(deadline);
+        if let Some(queue) = &self.self_queue {
+            queue.schedule_extension_startup(deadline);
         }
     }
 
@@ -551,13 +992,31 @@ impl Shell {
         for command in recovered {
             self.handle(command);
         }
+        let restore_extension_startup =
+            !self.extension_startup_ready && !self.extension_startup_terminal;
+        let now = std::time::Instant::now();
+        let extension_retry_deadline = restore_extension_startup.then(|| {
+            // Preserve the actor's exact outstanding opportunity. The timer
+            // may still hold it, or may have consumed it immediately before
+            // its Bootstrap command was rejected by the sealed queue. A
+            // missing opportunity means startup had not yet been attempted,
+            // so it is eligible immediately after reopening.
+            let deadline = self.extension_startup_not_before.unwrap_or(now);
+            self.extension_startup_not_before = Some(deadline);
+            deadline
+        });
         if let Some(queue) = &self.self_queue {
             // A timer wake removes its entry before trying to enter the actor.
             // If it raced the shutdown barrier it was truthfully rejected as
             // sealed, so explicitly restore every still-live exact reveal
             // obligation when the retryable barrier reopens. Both maps remain
             // bounded to one entry per logical item.
-            let now = std::time::Instant::now();
+            if let Some(deadline) = extension_retry_deadline {
+                // Extension timer wakes consume their exact entry before
+                // queue admission. A wake rejected by the sealed shutdown
+                // barrier must be restored when that retryable barrier opens.
+                queue.schedule_extension_startup(deadline);
+            }
             for (id, pending) in &self.presentation.pending_presentations {
                 queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
             }
@@ -617,4 +1076,4 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

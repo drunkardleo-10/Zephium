@@ -338,7 +338,9 @@ pub fn harden_privileged(window: &WebviewWindow) -> bool {
         let configuration = unsafe { webkit.configuration() };
         let data_store = unsafe { configuration.websiteDataStore() };
         if unsafe { data_store.isPersistent() } {
-            eprintln!("security: privileged WKWebView data store is persistent");
+            crate::write_diagnostic(format_args!(
+                "security: privileged WKWebView data store is persistent"
+            ));
             return;
         }
         // Never depend on feature/default interactions for release inspector
@@ -358,9 +360,9 @@ pub fn harden_privileged(window: &WebviewWindow) -> bool {
                 && !delegates.iter().any(|state| state.label == installed_label)
         });
         if !can_install {
-            eprintln!(
+            crate::write_diagnostic(format_args!(
                 "security: privileged WKWebView delegate registry rejected label {installed_label}"
-            );
+            ));
             return;
         }
         let generation = NEXT_PRIVILEGED_DELEGATE_GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -474,7 +476,9 @@ impl Chrome for ChromeAdapter {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             layout.pending = None;
             layout.scheduled = false;
-            eprintln!("layout: macOS chrome frame was rejected by the main event loop");
+            crate::write_diagnostic(format_args!(
+                "layout: macOS chrome frame was rejected by the main event loop"
+            ));
             return false;
         }
         true
@@ -529,7 +533,9 @@ fn dispatch_chrome_layout(
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.pending = None;
             state.scheduled = false;
-            eprintln!("layout: coalesced macOS chrome frame was rejected by the main event loop");
+            crate::write_diagnostic(format_args!(
+                "layout: coalesced macOS chrome frame was rejected by the main event loop"
+            ));
         }
     }))
 }

@@ -387,7 +387,7 @@ impl Shell {
             // Engine dispatch failure after lifecycle retirement is terminal
             // at the native boundary. Keep the closing obligation visible;
             // pretending the old view survived would permit unsafe reuse.
-            eprintln!("engine: native discard was not admitted");
+            crate::diagnostic!("engine: native discard was not admitted");
         }
     }
 

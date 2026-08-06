@@ -1,15 +1,97 @@
 use super::*;
 
+fn wait_for_actor_condition(timeout: std::time::Duration, condition: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    condition()
+}
+
+struct ActorExitBlocker {
+    order: Arc<Mutex<Vec<&'static str>>>,
+    maintain_calls: Arc<std::sync::atomic::AtomicUsize>,
+    shutdown_calls: Arc<std::sync::atomic::AtomicUsize>,
+    panic_on_maintain: bool,
+}
+
+impl BlockerCompiler for ActorExitBlocker {
+    fn compile(
+        &self,
+        profile: ProfileId,
+        generation: ContentPolicyGeneration,
+        config: BlockerConfig,
+        done: Box<dyn FnOnce(BlockerCompileOutcome) + Send>,
+    ) -> BlockerDispatch {
+        ImmediateAllowAllCompiler.compile(profile, generation, config, done)
+    }
+
+    fn retire_profile(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce() + Send>,
+    ) -> BlockerRetirementDispatch {
+        ImmediateAllowAllCompiler.retire_profile(profile, done)
+    }
+
+    fn shutdown_until(&self, _deadline: std::time::Instant) -> BlockerShutdownOutcome {
+        self.shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.order.lock().unwrap().push("blocker");
+        BlockerShutdownOutcome::Clean
+    }
+}
+
+impl BlockerCatalog for ActorExitBlocker {
+    fn maintain(&self) -> BlockerCatalogSnapshot {
+        self.maintain_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        assert!(
+            !self.panic_on_maintain,
+            "injected initial blocker-catalog panic"
+        );
+        test_catalog_snapshot()
+    }
+
+    fn request_refresh(&self) -> BlockerCatalogRefreshDispatch {
+        BlockerCatalogRefreshDispatch::Busy
+    }
+}
+
 #[test]
 fn actor_panic_terminalizes_pending_and_later_shutdown_requests() {
     let store = Arc::new(FakeStore::default());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    *store.barrier_order.lock().unwrap() = Some(Arc::clone(&order));
+    *store.shutdown_outcome.lock().unwrap() = Some(StoreShutdownOutcome::Clean);
     store
         .panic_on_load
         .store(true, std::sync::atomic::Ordering::Release);
+    let engine = Arc::new(FakeEngine::default());
+    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let blocker_shutdown_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker_maintain_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker = Arc::new(ActorExitBlocker {
+        order: Arc::clone(&order),
+        maintain_calls: blocker_maintain_calls,
+        shutdown_calls: Arc::clone(&blocker_shutdown_calls),
+        panic_on_maintain: false,
+    });
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let (terminal_tx, terminal_rx) = sync_channel(1);
     let handle = spawn(
-        Arc::new(FakeEngine::default()),
-        store,
-        Arc::new(ImmediateAllowAllCompiler),
+        engine.clone(),
+        store.clone(),
+        blocker,
+        extension_service,
+        Box::new(move |failure| {
+            let _ = terminal_tx.send(failure);
+        }),
         Arc::new(FakeChrome),
         Box::new(|_| {}),
     )
@@ -24,6 +106,280 @@ fn actor_panic_terminalizes_pending_and_later_shutdown_requests() {
         ShutdownOutcome::Unclean
     );
     assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        terminal_rx.recv().unwrap(),
+        ShellTerminalFailure::ActorExitedUnexpectedly
+    );
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "actor unwind must explicitly consume the extension-service owner"
+    );
+    assert!(!extension_state
+        .dropped_without_shutdown
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        store
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        blocker_shutdown_calls.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["extensions", "store-final", "engine", "blocker"]
+    );
+}
+
+#[test]
+fn initial_blocker_catalog_panic_keeps_full_shell_under_terminal_cleanup() {
+    let store = Arc::new(FakeStore::default());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    *store.barrier_order.lock().unwrap() = Some(Arc::clone(&order));
+    *store.shutdown_outcome.lock().unwrap() = Some(StoreShutdownOutcome::Clean);
+    let engine = Arc::new(FakeEngine::default());
+    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let blocker_shutdown_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker_maintain_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker = Arc::new(ActorExitBlocker {
+        order: Arc::clone(&order),
+        maintain_calls: blocker_maintain_calls,
+        shutdown_calls: Arc::clone(&blocker_shutdown_calls),
+        panic_on_maintain: true,
+    });
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let callback_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_calls_for_actor = Arc::clone(&callback_calls);
+    let (terminal_tx, terminal_rx) = sync_channel(1);
+
+    let handle = spawn(
+        engine.clone(),
+        store.clone(),
+        blocker,
+        extension_service,
+        Box::new(move |failure| {
+            callback_calls_for_actor.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let _ = terminal_tx.send(failure);
+        }),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    )
+    .expect("worker construction and ownership handoff must succeed");
+
+    assert_eq!(
+        terminal_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("guarded construction panic must reach the terminal callback"),
+        ShellTerminalFailure::ActorExitedUnexpectedly
+    );
+    assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(callback_calls.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(terminal_rx.try_recv().is_err());
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert!(!extension_state
+        .dropped_without_shutdown
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        store
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        blocker_shutdown_calls.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["extensions", "store-final", "engine", "blocker"]
+    );
+}
+
+#[test]
+fn suspended_actor_enters_no_external_port_before_composition_admission() {
+    let store = Arc::new(FakeStore::default());
+    *store.shutdown_outcome.lock().unwrap() = Some(StoreShutdownOutcome::Clean);
+    let engine = Arc::new(FakeEngine::default());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    *store.barrier_order.lock().unwrap() = Some(Arc::clone(&order));
+    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let maintain_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker_shutdown_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker = Arc::new(ActorExitBlocker {
+        order: Arc::clone(&order),
+        maintain_calls: Arc::clone(&maintain_calls),
+        shutdown_calls: Arc::clone(&blocker_shutdown_calls),
+        panic_on_maintain: true,
+    });
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_observed_publication = Arc::clone(&published);
+    let callback_order = Arc::clone(&order);
+    let (terminal_tx, terminal_rx) = sync_channel(1);
+
+    let handle = crate::spawn_suspended(
+        engine.clone(),
+        store.clone(),
+        blocker,
+        extension_service,
+        Box::new(move |failure| {
+            assert!(
+                callback_observed_publication.load(std::sync::atomic::Ordering::Acquire),
+                "terminal callback must not run before desktop publishes ownership"
+            );
+            callback_order.lock().unwrap().push("terminal");
+            let _ = terminal_tx.send(failure);
+        }),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    )
+    .expect("suspended Shell construction");
+
+    assert!(handle.wait_until_startup_suspended(
+        std::time::Instant::now() + std::time::Duration::from_secs(2)
+    ));
+    assert_eq!(maintain_calls.load(std::sync::atomic::Ordering::Acquire), 0);
+    assert!(order.lock().unwrap().is_empty());
+
+    // Models desktop publishing the Handle and clearing all temporary owners.
+    published.store(true, std::sync::atomic::Ordering::Release);
+    assert!(handle.admit_startup());
+    assert!(!handle.admit_startup(), "admission is exactly once");
+    assert_eq!(
+        terminal_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("guarded startup panic reaches the published owner"),
+        ShellTerminalFailure::ActorExitedUnexpectedly
+    );
+    assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Unclean);
+
+    assert_eq!(maintain_calls.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        store
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        blocker_shutdown_calls.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["terminal", "extensions", "store-final", "engine", "blocker"]
+    );
+}
+
+#[test]
+fn terminal_barrier_cancels_suspended_startup_without_external_admission() {
+    let store = Arc::new(FakeStore::default());
+    *store.shutdown_outcome.lock().unwrap() = Some(StoreShutdownOutcome::Clean);
+    let engine = Arc::new(FakeEngine::default());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    *store.barrier_order.lock().unwrap() = Some(Arc::clone(&order));
+    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let maintain_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker_shutdown_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let blocker = Arc::new(ActorExitBlocker {
+        order: Arc::clone(&order),
+        maintain_calls: Arc::clone(&maintain_calls),
+        shutdown_calls: Arc::clone(&blocker_shutdown_calls),
+        panic_on_maintain: false,
+    });
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let terminal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let terminal_calls_for_actor = Arc::clone(&terminal_calls);
+    let handle = crate::spawn_suspended(
+        engine.clone(),
+        store.clone(),
+        blocker,
+        extension_service,
+        Box::new(move |_| {
+            terminal_calls_for_actor.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    )
+    .expect("suspended Shell construction");
+
+    assert!(handle.wait_until_startup_suspended(
+        std::time::Instant::now() + std::time::Duration::from_secs(2)
+    ));
+    assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(maintain_calls.load(std::sync::atomic::Ordering::Acquire), 0);
+    assert_eq!(terminal_calls.load(std::sync::atomic::Ordering::Acquire), 0);
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        store
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        blocker_shutdown_calls.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &[
+            "store-preflight",
+            "extensions",
+            "store-final",
+            "engine",
+            "blocker",
+        ]
+    );
 }
 
 #[test]
@@ -33,6 +389,8 @@ fn spawned_actor_processes_dispatched_commands() {
         Arc::new(FakeEngine::default()),
         Arc::new(FakeStore::default()),
         Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |s| {
             let _ = tx.send(s);
@@ -61,6 +419,8 @@ fn slow_history_sqlite_read_never_blocks_shell_coordination() {
         Arc::new(FakeEngine::default()),
         store,
         Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);
@@ -96,6 +456,8 @@ fn tracked_operation_has_exact_admission_and_actor_disposition_id() {
         Arc::new(FakeEngine::default()),
         Arc::new(FakeStore::default()),
         Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);
@@ -133,6 +495,8 @@ fn spawned_shutdown_is_ordered_behind_prior_commands() {
         Arc::new(FakeEngine::default()),
         store.clone(),
         Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             let _ = tx.send(projection);
@@ -185,7 +549,7 @@ fn spawned_shutdown_is_ordered_behind_prior_commands() {
             .iter()
             .filter(|event| **event == "flush")
             .count(),
-        1
+        2
     );
 }
 
@@ -195,6 +559,8 @@ fn dropping_last_handle_does_not_cancel_an_accepted_shutdown_barrier() {
         Arc::new(FakeEngine::default()),
         Arc::new(FakeStore::default()),
         Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(|_| {}),
     )
@@ -209,4 +575,87 @@ fn dropping_last_handle_does_not_cancel_an_accepted_shutdown_barrier() {
             .unwrap(),
         ShutdownOutcome::Clean
     );
+}
+
+#[test]
+fn bounded_startup_observation_cannot_starve_a_queued_shutdown() {
+    let (extension_service, extension_state) = extension_lifecycle_with_startup_outcomes([
+        zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Unavailable,
+    ]);
+    extension_state
+        .wait_until_startup_deadline
+        .store(true, std::sync::atomic::Ordering::Release);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    )
+    .expect("spawn test shell");
+
+    assert!(handle.dispatch(Command::Bootstrap));
+    let completion = handle.shutdown();
+
+    assert_eq!(completion.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(
+        extension_state
+            .startup_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+#[test]
+fn real_timer_thread_retries_transient_extension_startup_once() {
+    use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{Ready, Unavailable};
+
+    let store = Arc::new(FakeStore::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_startup_outcomes([Unavailable, Ready]);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    )
+    .expect("spawn test shell");
+
+    assert!(handle.dispatch(Command::Bootstrap));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state
+            .startup_calls
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 2
+            && store
+                .load_session_calls
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 1
+    ));
+    assert_eq!(
+        extension_state
+            .startup_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        2,
+        "one actual timer wake must settle the retained startup attempt"
+    );
+    assert_eq!(
+        store
+            .load_session_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Clean);
 }

@@ -211,7 +211,7 @@ fn exhausted_space_aggregate_refuses_first_run_without_panicking() {
 }
 
 #[test]
-fn unavailable_deletion_journal_prevents_bootstrap_and_native_views() {
+fn failed_pending_profile_deletion_load_prevents_bootstrap_views_and_native_erasure() {
     let store = Arc::new(FakeStore::default());
     store
         .pending_load_failures
@@ -223,7 +223,9 @@ fn unavailable_deletion_journal_prevents_bootstrap_and_native_views() {
     assert!(!shell.bootstrapped);
     assert!(shell.windows.focused().is_none());
     assert!(last(&screen).tabs.is_empty());
-    assert!(engine.calls().is_empty());
+    let calls = engine.calls();
+    assert!(!calls.iter().any(|call| call.starts_with("create ")));
+    assert!(!calls.iter().any(|call| call.starts_with("erase-profile ")));
 }
 
 #[test]
@@ -321,4 +323,333 @@ fn forged_degraded_profile_report_cannot_bootstrap_an_unrelated_session() {
     assert!(!shell.bootstrapped);
     assert!(shell.degraded_storage_profiles.is_empty());
     assert!(engine.calls().is_empty());
+}
+
+#[test]
+fn retryable_extension_startup_has_zero_store_or_native_side_effects() {
+    use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{
+        RetryableNotAdmitted, TimedOut, Unavailable,
+    };
+
+    for outcome in [Unavailable, TimedOut, RetryableNotAdmitted] {
+        let store = Arc::new(FakeStore::default());
+        let engine = Arc::new(FakeEngine::default());
+        let (extension_service, extension_state) =
+            extension_lifecycle_with_startup_outcomes([outcome]);
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = Shell::new_with_extension_lifecycle_and_failure(
+            engine.clone(),
+            store.clone(),
+            Arc::new(ImmediateAllowAllCompiler),
+            extension_service,
+            {
+                let failures = Arc::clone(&failures);
+                Box::new(move |failure| failures.lock().unwrap().push(failure))
+            },
+            Arc::new(FakeChrome),
+            Box::new(|_| {}),
+        );
+        let queue = CommandQueue::new();
+        shell.attach_queue(queue.clone());
+
+        let forged = ItemId::from(80_001);
+        shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+            id: forged,
+            loading: false,
+        }));
+        shell.handle(Command::Bootstrap);
+        shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+            id: forged,
+            loading: false,
+        }));
+        shell.handle(Command::Engine(EngineEvent::Crashed { id: forged }));
+        shell.handle(Command::Engine(EngineEvent::ProfileProcessExited {
+            profile: ProfileId::from(80_002),
+            ids: vec![forged],
+        }));
+
+        assert!(!shell.bootstrapped, "{outcome:?}");
+        assert_eq!(
+            extension_state
+                .startup_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "{outcome:?}"
+        );
+        assert_eq!(
+            store
+                .pending_deletion_load_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "{outcome:?}"
+        );
+        assert_eq!(
+            store
+                .load_session_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "{outcome:?}"
+        );
+        assert!(store.events.lock().unwrap().is_empty(), "{outcome:?}");
+        assert!(engine.calls().is_empty(), "{outcome:?}");
+        assert_eq!(engine.warm_spare_calls(), 0, "{outcome:?}");
+        assert!(failures.lock().unwrap().is_empty(), "{outcome:?}");
+        assert!(
+            queue.has_extension_startup_deadline_for_test(),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn transient_extension_startup_retries_then_bootstraps_once() {
+    use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{Ready, Unavailable};
+
+    let store = Arc::new(FakeStore::default());
+    let engine = Arc::new(FakeEngine::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_startup_outcomes([Unavailable, Ready]);
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let mut shell = Shell::new_with_extension_lifecycle_and_failure(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        {
+            let failures = Arc::clone(&failures);
+            Box::new(move |failure| failures.lock().unwrap().push(failure))
+        },
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+    let queue = CommandQueue::new();
+    shell.attach_queue(queue.clone());
+
+    shell.handle(Command::Bootstrap);
+    assert!(!shell.bootstrapped);
+    assert_eq!(
+        store
+            .pending_deletion_load_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert!(engine.calls().is_empty());
+    assert!(queue.has_extension_startup_deadline_for_test());
+
+    for _ in 0..16 {
+        shell.handle(Command::Bootstrap);
+    }
+    assert!(!shell.bootstrapped);
+    assert_eq!(
+        extension_state
+            .startup_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "external Bootstrap calls must not bypass the retry not-before gate"
+    );
+    assert_eq!(
+        queue.extension_startup_deadline_for_test(),
+        shell.extension_startup_not_before,
+        "hostile early commands must preserve the exact actor-owned wake"
+    );
+
+    let due = std::time::Instant::now();
+    shell.extension_startup_not_before = Some(due);
+    queue.schedule_extension_startup(due);
+    assert!(matches!(
+        queue.wait_for_timer(due + std::time::Duration::from_secs(1)),
+        crate::actor::TimerWake::ExtensionStartup
+    ));
+    shell.handle(Command::Bootstrap);
+    assert!(shell.bootstrapped);
+    assert_eq!(
+        extension_state
+            .startup_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+    assert_eq!(
+        store
+            .pending_deletion_load_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        store
+            .load_session_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("install-content-rules ")));
+    assert!(!queue.has_extension_startup_deadline_for_test());
+    assert!(failures.lock().unwrap().is_empty());
+
+    shell.handle(Command::Bootstrap);
+    assert_eq!(
+        extension_state
+            .startup_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        2,
+        "Ready is sticky and must not settle the lifecycle again"
+    );
+}
+
+#[test]
+fn terminal_extension_startup_cancels_retry_and_hands_off_fatal_once() {
+    use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{
+        CleanupRequired, FailedClosed,
+    };
+
+    for (outcome, expected) in [
+        (
+            CleanupRequired,
+            ShellTerminalFailure::ExtensionStartupCleanupRequired,
+        ),
+        (
+            FailedClosed,
+            ShellTerminalFailure::ExtensionStartupFailedClosed,
+        ),
+    ] {
+        let store = Arc::new(FakeStore::default());
+        let engine = Arc::new(FakeEngine::default());
+        let (extension_service, extension_state) =
+            extension_lifecycle_with_startup_outcomes([outcome]);
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = Shell::new_with_extension_lifecycle_and_failure(
+            engine.clone(),
+            store.clone(),
+            Arc::new(ImmediateAllowAllCompiler),
+            extension_service,
+            {
+                let failures = Arc::clone(&failures);
+                Box::new(move |failure| failures.lock().unwrap().push(failure))
+            },
+            Arc::new(FakeChrome),
+            Box::new(|_| {}),
+        );
+        let queue = CommandQueue::new();
+        shell.attach_queue(queue.clone());
+        queue.schedule_extension_startup(std::time::Instant::now());
+
+        shell.handle(Command::Bootstrap);
+        shell.handle(Command::Bootstrap);
+        let forged = ItemId::from(80_003);
+        shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+            id: forged,
+            loading: false,
+        }));
+        shell.handle(Command::Engine(EngineEvent::Crashed { id: forged }));
+        shell.handle(Command::Engine(EngineEvent::ProfileProcessExited {
+            profile: ProfileId::from(80_004),
+            ids: vec![forged],
+        }));
+
+        assert_eq!(failures.lock().unwrap().as_slice(), &[expected]);
+        assert_eq!(
+            extension_state
+                .startup_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert!(!queue.has_extension_startup_deadline_for_test());
+        assert_eq!(
+            store
+                .pending_deletion_load_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert!(store.events.lock().unwrap().is_empty());
+        assert!(engine.calls().is_empty());
+        assert_eq!(engine.warm_spare_calls(), 0);
+    }
+}
+
+#[test]
+fn panicking_extension_startup_is_contained_and_handed_off_as_fatal() {
+    let store = Arc::new(FakeStore::default());
+    let engine = Arc::new(FakeEngine::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_startup_outcomes(std::iter::empty());
+    extension_state
+        .panic_on_startup
+        .store(true, std::sync::atomic::Ordering::Release);
+    let (failure_tx, failure_rx) = sync_channel(1);
+    let mut shell = Shell::new_with_extension_lifecycle_and_failure(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(move |failure| {
+            let _ = failure_tx.send(failure);
+        }),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+
+    shell.handle(Command::Bootstrap);
+
+    assert_eq!(
+        failure_rx.recv().unwrap(),
+        ShellTerminalFailure::ExtensionStartupLifecyclePanicked
+    );
+    assert!(!shell.bootstrapped);
+    assert_eq!(
+        store
+            .pending_deletion_load_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert!(engine.calls().is_empty());
+}
+
+#[test]
+fn missing_extension_lifecycle_is_handed_off_as_a_terminal_invariant_failure() {
+    let store = Arc::new(FakeStore::default());
+    let engine = Arc::new(FakeEngine::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let (failure_tx, failure_rx) = sync_channel(1);
+    let mut shell = Shell::new_with_extension_lifecycle_and_failure(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(move |failure| {
+            let _ = failure_tx.send(failure);
+        }),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+    let owner = shell
+        .extension_service
+        .take()
+        .expect("test removes the unique owner explicitly");
+
+    shell.handle(Command::Bootstrap);
+
+    assert_eq!(
+        failure_rx.recv().unwrap(),
+        ShellTerminalFailure::ExtensionStartupLifecycleMissing
+    );
+    assert!(!shell.bootstrapped);
+    assert_eq!(
+        store
+            .pending_deletion_load_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert!(engine.calls().is_empty());
+    assert_eq!(
+        owner.shutdown_until(test_shutdown_deadline()),
+        ExtensionServiceShutdownOutcome::Clean
+    );
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
 }

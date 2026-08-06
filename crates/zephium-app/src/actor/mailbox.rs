@@ -16,6 +16,7 @@ use crate::{Command, StoreReadResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum CoalescedKey {
+    Bootstrap,
     Title(ItemId),
     Url(ItemId),
     Loading(ItemId),
@@ -113,6 +114,7 @@ pub(crate) struct CommandQueueInner {
 #[derive(Default)]
 pub(crate) struct TimerState {
     stopped: bool,
+    extension_startup_deadline: Option<std::time::Instant>,
     pub(crate) persist_deadline: Option<std::time::Instant>,
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
@@ -131,6 +133,7 @@ pub(crate) struct PresentationDeadline {
 
 pub(crate) enum TimerWake {
     Maintenance,
+    ExtensionStartup,
     Persist,
     Favicon {
         id: ItemId,
@@ -287,7 +290,10 @@ impl CommandQueue {
         false
     }
 
-    pub(crate) fn release_handle(&self) {
+    /// Releases one public owner and reports whether this was the final owner.
+    /// The caller uses that transition to cancel a still-suspended actor before
+    /// its independent startup gate could otherwise remain asleep forever.
+    pub(crate) fn release_handle(&self) -> bool {
         let should_stop = {
             let mut state = self
                 .inner
@@ -321,6 +327,7 @@ impl CommandQueue {
         if should_stop {
             self.stop_ticker();
         }
+        should_stop
     }
 
     pub(crate) fn try_push(&self, command: Command) -> Result<(), TryPushError> {
@@ -435,6 +442,7 @@ impl CommandQueue {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         timer.stopped = true;
+        timer.extension_startup_deadline = None;
         timer.persist_deadline = None;
         timer.favicon_deadlines.clear();
         timer.presentation_deadlines.clear();
@@ -456,6 +464,45 @@ impl CommandQueue {
         }
         timer.persist_deadline = Some(deadline);
         self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn schedule_extension_startup(&self, deadline: std::time::Instant) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer.extension_startup_deadline = Some(
+            timer
+                .extension_startup_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn cancel_extension_startup(&self) {
+        self.inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extension_startup_deadline = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_extension_startup_deadline_for_test(&self) -> bool {
+        self.extension_startup_deadline_for_test().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn extension_startup_deadline_for_test(&self) -> Option<std::time::Instant> {
+        self.inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extension_startup_deadline
     }
 
     pub(crate) fn cancel_persist(&self) {
@@ -727,6 +774,13 @@ impl CommandQueue {
             }
             let now = std::time::Instant::now();
             if timer
+                .extension_startup_deadline
+                .is_some_and(|deadline| now >= deadline)
+            {
+                timer.extension_startup_deadline = None;
+                return TimerWake::ExtensionStartup;
+            }
+            if timer
                 .persist_deadline
                 .is_some_and(|deadline| now >= deadline)
             {
@@ -810,6 +864,9 @@ impl CommandQueue {
                 .map_or(maintenance_deadline, |persist| {
                     persist.min(maintenance_deadline)
                 });
+            if let Some(extension_startup) = timer.extension_startup_deadline {
+                deadline = deadline.min(extension_startup);
+            }
             if let Some((_, favicon, _)) = next_favicon {
                 deadline = deadline.min(favicon);
             }
@@ -943,6 +1000,7 @@ fn command_is_observational_query(command: &Command) -> bool {
 
 fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
     match command {
+        Command::Bootstrap => Some(CoalescedKey::Bootstrap),
         Command::Engine(event) => CoalescedKey::of(event),
         Command::SetWindowSize(_) => Some(CoalescedKey::WindowSize),
         Command::SetWindowVisible(_) => Some(CoalescedKey::WindowVisible),

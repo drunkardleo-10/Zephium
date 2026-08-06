@@ -233,12 +233,42 @@ pub(super) struct BlockerCoordinator {
     pending_catalog_activation_poll: Option<PendingCatalogActivationPoll>,
     exhausted_catalog_activation_poll_revision: Option<u64>,
     compiler_terminal: bool,
+    catalog_initialized: bool,
     last_projected_status: Cell<Option<FocusedBlockerStatus>>,
 }
 
 impl BlockerCoordinator {
-    pub(super) fn new(service: SharedBlocker) -> Self {
-        let mut catalog = service.maintain();
+    /// Constructs a fail-closed coordinator without entering the external
+    /// catalog port. The production actor uses this narrow form so it can put
+    /// the complete Shell behind its terminal cleanup guard before a faulty
+    /// blocker implementation is allowed to unwind.
+    pub(super) fn new_deferred(service: SharedBlocker) -> Self {
+        Self {
+            profiles: HashMap::new(),
+            inbox: Arc::new(Mutex::new(BlockerInbox::default())),
+            service,
+            catalog: BlockerCatalogSnapshot::not_configured(),
+            catalog_authority: CatalogAuthority::default(),
+            next_generation: Some(1),
+            next_store_token: Some(1),
+            pending_catalog_refresh: None,
+            pending_catalog_activation_poll: None,
+            exhausted_catalog_activation_poll_revision: None,
+            // No compilation can be authorized until the guarded initial
+            // snapshot has passed the same structural validation as before.
+            compiler_terminal: true,
+            catalog_initialized: false,
+            last_projected_status: Cell::new(None),
+        }
+    }
+
+    /// Enters the external catalog port exactly once during Shell admission.
+    /// Callers must already own the Shell through an unexpected-exit guard.
+    pub(super) fn initialize_catalog(&mut self) {
+        if self.catalog_initialized {
+            return;
+        }
+        let mut catalog = self.service.maintain();
         let catalog_authority = if catalog_snapshot_valid(catalog) {
             CatalogAuthority::from_initial(catalog)
         } else {
@@ -249,20 +279,10 @@ impl BlockerCoordinator {
         if compiler_terminal {
             catalog.phase = BlockerCatalogPhase::Failed(BlockerCatalogFailure::Internal);
         }
-        Self {
-            profiles: HashMap::new(),
-            inbox: Arc::new(Mutex::new(BlockerInbox::default())),
-            service,
-            catalog,
-            catalog_authority,
-            next_generation: Some(1),
-            next_store_token: Some(1),
-            pending_catalog_refresh: None,
-            pending_catalog_activation_poll: None,
-            exhausted_catalog_activation_poll_revision: None,
-            compiler_terminal,
-            last_projected_status: Cell::new(None),
-        }
+        self.catalog = catalog;
+        self.catalog_authority = catalog_authority;
+        self.compiler_terminal = compiler_terminal;
+        self.catalog_initialized = true;
     }
 
     fn allocate_generation(&mut self) -> Option<ContentPolicyGeneration> {
@@ -2097,6 +2117,22 @@ impl Shell {
         }
     }
 
+    /// Drops terminally late compiler and Store results without interpreting
+    /// them. Once Store teardown has begun, ordinary result consumers are no
+    /// longer safe: an indeterminate mutation can schedule a reconciliation
+    /// Store read, and a compile result can dispatch new native policy work.
+    /// Pending user operations are settled separately from their last known
+    /// phase by [`Self::finish_pending_blocker_operations_for_shutdown`].
+    pub(super) fn discard_blocker_inbox_for_shutdown(&mut self) {
+        let mut inbox = self
+            .blocker
+            .inbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inbox.results.clear();
+        inbox.store_results.clear();
+    }
+
     pub(super) fn consume_blocker_compile_result(&mut self, profile: ProfileId) {
         let Some(result) = self.blocker.take_compile_result(profile) else {
             return;
@@ -2385,7 +2421,9 @@ impl Shell {
             ContentRuleSettlement::Applied { .. } | ContentRuleSettlement::Retained { .. } => {
                 // A contradictory generation is not authoritative proof of
                 // either the desired policy or the previously retained one.
-                eprintln!("content blocker: rejected contradictory native policy settlement");
+                crate::diagnostic!(
+                    "content blocker: rejected contradictory native policy settlement"
+                );
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
                     entry.applied_config = None;
                     entry.pending_coverage = None;
@@ -2441,7 +2479,7 @@ impl Shell {
                 .is_some_and(|entry| entry.state == BlockerProfileState::Uninitialized)
                 && !self.start_blocker_profile(profile)
             {
-                eprintln!(
+                crate::diagnostic!(
                     "content blocker: profile policy compilation was not admitted; views remain unavailable"
                 );
             }

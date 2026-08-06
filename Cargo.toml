@@ -23,6 +23,7 @@ zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
 zephium-extension-authority = { path = "crates/zephium-extension-authority", version = "=0.1.0" }
 zephium-extension-repository = { path = "crates/zephium-extension-repository", version = "=0.1.0" }
 zephium-extension-runtime-api = { path = "crates/zephium-extension-runtime-api", version = "=0.1.0" }
+zephium-extension-service = { path = "crates/zephium-extension-service", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
 zephium-private-fs = { path = "crates/zephium-private-fs", version = "=0.1.0" }
