@@ -20,16 +20,17 @@ use zephium_core::extensions::{
     ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint, ExtensionRuntimeOperationAuthority,
     ExtensionUserInvocationKind,
 };
+use zephium_core::ids::ProfileId;
 use zephium_extension_runtime_api::{
     ExtensionPackageAccessView, ExtensionRuntimeActivationDisposition, ExtensionRuntimeFailure,
     ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
     ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
     ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
-    ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
-    ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
-    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeOwnershipDisposition,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
-    ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostPublicationPort,
+    ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
+    ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeNativeIdentityExpectation,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRetirementDisposition,
 };
 
 use crate::MainThreadDispatch;
@@ -519,6 +520,58 @@ struct RegistryEntry {
     reservation: Arc<ReservationControl>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileObligationStatus {
+    Absent,
+    Present,
+    Unavailable,
+    InvariantFailed,
+}
+
+/// One physical profile-fence callback may exist across the platform main
+/// dispatcher and the reentrant host queue. A timed-out waiter does not release
+/// this admission; the retained callback releases it only when that callback
+/// is actually dropped or finishes its read-only audit.
+struct ProfileFenceIngress {
+    in_flight: AtomicBool,
+}
+
+impl ProfileFenceIngress {
+    fn shared() -> Arc<Self> {
+        Arc::new(Self {
+            in_flight: AtomicBool::new(false),
+        })
+    }
+
+    fn try_admit(self: &Arc<Self>) -> Option<ProfileFenceAdmission> {
+        if self
+            .in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        Some(ProfileFenceAdmission {
+            ingress: Arc::clone(self),
+        })
+    }
+}
+
+struct ProfileFenceAdmission {
+    ingress: Arc<ProfileFenceIngress>,
+}
+
+impl Drop for ProfileFenceAdmission {
+    fn drop(&mut self) {
+        let released = self
+            .ingress
+            .in_flight
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        debug_assert!(released, "profile-fence admission released exactly once");
+    }
+}
+
 /// Sole UI-thread owner registry.
 pub(super) struct ExtensionRuntimeRegistry {
     gate: ExtensionRuntimeFactoryGate,
@@ -769,8 +822,128 @@ impl ExtensionRuntimeRegistry {
         self.sealed && !self.invariant_failed && self.entries.is_empty() && self.gate.is_quiescent()
     }
 
+    /// Audits the complete process-local obligation ledger at one bounded
+    /// synchronization point. The UI-thread registry cannot mutate while this
+    /// method runs, and holding the gate lock excludes concurrent reservation
+    /// creation or passive unattached release.
+    fn profile_obligation_status(&mut self, profile: ProfileId) -> ProfileObligationStatus {
+        if self.invariant_failed || self.gate.inner.invariant_failed.load(Ordering::Acquire) {
+            return ProfileObligationStatus::InvariantFailed;
+        }
+
+        let state = match self.gate.inner.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return ProfileObligationStatus::Unavailable;
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                self.invariant_failed = true;
+                self.gate
+                    .inner
+                    .invariant_failed
+                    .store(true, Ordering::Release);
+                return ProfileObligationStatus::InvariantFailed;
+            }
+        };
+
+        let activation_reservations = state
+            .reservations
+            .iter()
+            .filter(|record| record.kind == ReservationKind::Activation)
+            .count();
+        let recovery_reservations = state.reservations.len() - activation_reservations;
+        let records_are_unique = state
+            .reservations
+            .iter()
+            .enumerate()
+            .all(|(index, record)| {
+                state.reservations[index + 1..].iter().all(|other| {
+                    record.generation != other.generation
+                        && !record.owner.same_native_lineage(other.owner)
+                })
+            });
+        let generations_precede_frontier = state.next_generation.is_none_or(|next| {
+            state
+                .reservations
+                .iter()
+                .all(|record| record.generation.get() < next)
+        });
+        let entries_are_unique = self.entries.iter().enumerate().all(|(index, entry)| {
+            self.entries[index + 1..].iter().all(|other| {
+                entry.generation != other.generation
+                    && !entry.owner.same_native_lineage(other.owner)
+            })
+        });
+        let entries_match_attached_records = self.entries.iter().all(|entry| {
+            entry.owner == entry.reservation.owner()
+                && entry.generation == entry.reservation.generation
+                && entry.reservation.phase() == RESERVATION_ATTACHED
+                && Arc::ptr_eq(&entry.reservation.gate.inner, &self.gate.inner)
+                && state
+                    .reservations
+                    .iter()
+                    .filter(|record| {
+                        record.owner == entry.owner
+                            && record.generation == entry.generation
+                            && record.kind == entry.reservation.binding.kind()
+                            && record.attached
+                    })
+                    .count()
+                    == 1
+        });
+        let attached_records_match_entries = state.reservations.iter().all(|record| {
+            let entry_count = self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.owner == record.owner
+                        && entry.generation == record.generation
+                        && entry.reservation.binding.kind() == record.kind
+                })
+                .count();
+            if record.attached {
+                entry_count == 1
+            } else {
+                entry_count == 0
+            }
+        });
+        let healthy = self.entries.len() <= MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS
+            && state.reservations.len() <= MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS
+            && activation_reservations <= MAX_ACTIVATION_RESERVATIONS
+            && recovery_reservations <= MAX_RECOVERY_RESERVATIONS
+            && records_are_unique
+            && generations_precede_frontier
+            && entries_are_unique
+            && entries_match_attached_records
+            && attached_records_match_entries
+            && !self.gate.inner.invariant_failed.load(Ordering::Acquire);
+        if !healthy {
+            drop(state);
+            self.invariant_failed = true;
+            self.gate
+                .inner
+                .invariant_failed
+                .store(true, Ordering::Release);
+            return ProfileObligationStatus::InvariantFailed;
+        }
+
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.owner.key.profile() == profile)
+            || state
+                .reservations
+                .iter()
+                .any(|record| record.owner.key.profile() == profile)
+        {
+            ProfileObligationStatus::Present
+        } else {
+            ProfileObligationStatus::Absent
+        }
+    }
+
     #[allow(dead_code)]
-    pub(super) fn has_profile_obligation(&self, profile: zephium_core::ids::ProfileId) -> bool {
+    pub(super) fn has_profile_obligation(&self, profile: ProfileId) -> bool {
         self.invariant_failed
             || self
                 .entries
@@ -818,6 +991,12 @@ enum HostCallState<Result> {
     Running,
     Complete(Option<Result>),
     Cancelled,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HostCallWaitMode {
+    OwnershipMutation,
+    ReadOnlyFence,
 }
 
 struct HostCall<Output> {
@@ -897,7 +1076,11 @@ impl<Output> HostCall<Output> {
         true
     }
 
-    fn wait(&self, deadline: Option<Instant>) -> Result<Output, HostCallFailure> {
+    fn wait(
+        &self,
+        deadline: Option<Instant>,
+        mode: HostCallWaitMode,
+    ) -> Result<Output, HostCallFailure> {
         if self.invariant_failed.load(Ordering::Acquire) {
             return Err(HostCallFailure::Invariant);
         }
@@ -948,17 +1131,41 @@ impl<Output> HostCall<Output> {
                     }
                 }
                 HostCallState::Running => {
-                    // Once UI-thread work starts, its native adapter owns the
-                    // exact deadline and must settle before authority can be
-                    // returned. Timing out this waiter would allow a late
-                    // ownership mutation to race a contradictory result.
-                    state = match self.changed.wait(state) {
-                        Ok(state) => state,
-                        Err(_) => {
+                    if mode == HostCallWaitMode::ReadOnlyFence {
+                        let Some(deadline) = deadline else {
                             self.invariant_failed.store(true, Ordering::Release);
                             return Err(HostCallFailure::Invariant);
+                        };
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(HostCallFailure::TimedOut);
                         }
-                    };
+                        let wait = deadline.saturating_duration_since(now);
+                        let (next, timeout) = match self.changed.wait_timeout(state, wait) {
+                            Ok(waited) => waited,
+                            Err(_) => {
+                                self.invariant_failed.store(true, Ordering::Release);
+                                return Err(HostCallFailure::Invariant);
+                            }
+                        };
+                        state = next;
+                        if timeout.timed_out() && matches!(*state, HostCallState::Running) {
+                            return Err(HostCallFailure::TimedOut);
+                        }
+                    } else {
+                        // Once ownership-changing UI-thread work starts, its
+                        // native adapter owns the exact deadline and must
+                        // settle before authority can be returned. Timing out
+                        // this waiter would allow a late ownership mutation to
+                        // race a contradictory result.
+                        state = match self.changed.wait(state) {
+                            Ok(state) => state,
+                            Err(_) => {
+                                self.invariant_failed.store(true, Ordering::Release);
+                                return Err(HostCallFailure::Invariant);
+                            }
+                        };
+                    }
                 }
             }
         }
@@ -974,6 +1181,41 @@ where
     Output: Send + 'static,
     Operation: FnOnce(&mut EngineHost) -> Output + Send + 'static,
 {
+    dispatch_host_call_with_mode(
+        dispatch,
+        deadline,
+        HostCallWaitMode::OwnershipMutation,
+        operation,
+    )
+}
+
+fn dispatch_bounded_host_fence<Output, Operation>(
+    dispatch: &MainThreadDispatch,
+    deadline: Instant,
+    operation: Operation,
+) -> Result<Output, HostCallFailure>
+where
+    Output: Send + 'static,
+    Operation: FnOnce(&mut EngineHost) -> Output + Send + 'static,
+{
+    dispatch_host_call_with_mode(
+        dispatch,
+        Some(deadline),
+        HostCallWaitMode::ReadOnlyFence,
+        operation,
+    )
+}
+
+fn dispatch_host_call_with_mode<Output, Operation>(
+    dispatch: &MainThreadDispatch,
+    deadline: Option<Instant>,
+    mode: HostCallWaitMode,
+    operation: Operation,
+) -> Result<Output, HostCallFailure>
+where
+    Output: Send + 'static,
+    Operation: FnOnce(&mut EngineHost) -> Output + Send + 'static,
+{
     let completion = Arc::new(HostCall::new());
     let queued_completion = Arc::clone(&completion);
     let scheduled = dispatch(Box::new(move || {
@@ -981,20 +1223,29 @@ where
             return;
         }
         let host_completion = Arc::clone(&queued_completion);
-        if !super::dispatch::try_with_extension_runtime(move |host| {
+        let host_task = move |host: &mut EngineHost| {
             if !host_completion.begin() {
                 return;
             }
             let result = operation(host);
             host_completion.complete(Ok(result));
-        }) {
+        };
+        let accepted = match mode {
+            HostCallWaitMode::OwnershipMutation => {
+                super::dispatch::try_with_extension_runtime(host_task)
+            }
+            HostCallWaitMode::ReadOnlyFence => {
+                super::dispatch::try_with_extension_runtime_profile_fence(host_task)
+            }
+        };
+        if !accepted {
             queued_completion.complete(Err(HostCallFailure::Unavailable));
         }
     }));
     if !scheduled && completion.cancel_pending() {
         return Err(HostCallFailure::Unavailable);
     }
-    completion.wait(deadline)
+    completion.wait(deadline, mode)
 }
 
 #[derive(Clone, Copy)]
@@ -1007,6 +1258,7 @@ enum AdapterAvailability {
 struct EngineFactoryPort {
     dispatch: MainThreadDispatch,
     gate: ExtensionRuntimeFactoryGate,
+    profile_fence_ingress: Arc<ProfileFenceIngress>,
     adapters: AdapterAvailability,
 }
 
@@ -1050,6 +1302,68 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
             dispatch: Arc::clone(&self.dispatch),
             reservation,
         }))
+    }
+
+    fn profile_absence_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> Result<(), ExtensionRuntimeHostProfileAbsenceDisposition> {
+        if Instant::now() >= deadline {
+            return Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut);
+        }
+        let Some(admission) = self.profile_fence_ingress.try_admit() else {
+            return Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable);
+        };
+        let result = dispatch_bounded_host_fence(&self.dispatch, deadline, move |host| {
+            // This guard intentionally survives a caller timeout. It leaves
+            // only when the physical callback is dropped or finishes.
+            let _admission = admission;
+            if Instant::now() >= deadline {
+                return Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut);
+            }
+            let status = host
+                .extension_runtime_registry
+                .profile_obligation_status(profile);
+            if Instant::now() >= deadline {
+                return Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut);
+            }
+            match status {
+                ProfileObligationStatus::Absent => Ok(()),
+                ProfileObligationStatus::Present => {
+                    Err(ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain)
+                }
+                ProfileObligationStatus::Unavailable => {
+                    Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+                }
+                ProfileObligationStatus::InvariantFailed => {
+                    Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed)
+                }
+            }
+        });
+        let disposition = match result {
+            Ok(disposition) => disposition,
+            Err(HostCallFailure::TimedOut) => {
+                Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut)
+            }
+            Err(HostCallFailure::Unavailable) => {
+                Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+            }
+            Err(HostCallFailure::Invariant) => {
+                Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed)
+            }
+        };
+        if matches!(
+            disposition,
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed)
+        ) {
+            return disposition;
+        }
+        if Instant::now() >= deadline {
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut)
+        } else {
+            disposition
+        }
     }
 }
 
@@ -1413,6 +1727,7 @@ impl ExtensionRuntimeHostFactorySlot {
         let factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(EngineFactoryPort {
             dispatch,
             gate: gate.clone(),
+            profile_fence_ingress: ProfileFenceIngress::shared(),
             adapters,
         }));
         Self {
@@ -1471,6 +1786,7 @@ impl ExtensionRuntimeHostFactorySlot {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use zephium_core::extensions::{
@@ -1800,6 +2116,175 @@ mod tests {
     }
 
     #[test]
+    fn profile_absence_fence_maps_expiry_and_dispatch_refusal_without_an_absence_claim() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&dispatches);
+        let dispatch: MainThreadDispatch = Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            false
+        });
+        let mut port = EngineFactoryPort {
+            dispatch,
+            gate: ExtensionRuntimeFactoryGate::new(),
+            profile_fence_ingress: ProfileFenceIngress::shared(),
+            adapters: AdapterAvailability::LogicalHarness,
+        };
+
+        assert!(matches!(
+            port.profile_absence_until(ProfileId::from(7), Instant::now()),
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut)
+        ));
+        assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+        for expected_dispatches in 1..=2 {
+            assert!(matches!(
+                port.profile_absence_until(
+                    ProfileId::from(7),
+                    Instant::now() + std::time::Duration::from_secs(60),
+                ),
+                Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+            ));
+            assert_eq!(dispatches.load(Ordering::Relaxed), expected_dispatches);
+        }
+    }
+
+    #[test]
+    fn timed_out_pending_profile_fence_retains_one_physical_ingress_until_late_drop() {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+
+        let queued = Arc::new(Mutex::new(VecDeque::<Task>::new()));
+        let for_dispatch = Arc::clone(&queued);
+        let dispatch: MainThreadDispatch = Arc::new(move |task| {
+            for_dispatch.lock().expect("dispatch queue").push_back(task);
+            true
+        });
+        let ingress = ProfileFenceIngress::shared();
+        let mut port = EngineFactoryPort {
+            dispatch,
+            gate: ExtensionRuntimeFactoryGate::new(),
+            profile_fence_ingress: Arc::clone(&ingress),
+            adapters: AdapterAvailability::LogicalHarness,
+        };
+
+        assert!(matches!(
+            port.profile_absence_until(
+                ProfileId::from(7),
+                Instant::now() + std::time::Duration::from_millis(100),
+            ),
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut)
+        ));
+        assert_eq!(queued.lock().expect("dispatch queue").len(), 1);
+
+        // The timed-out task still physically owns the only ingress. A retry
+        // is refused before allocating or dispatching another callback.
+        assert!(matches!(
+            port.profile_absence_until(
+                ProfileId::from(7),
+                Instant::now() + std::time::Duration::from_secs(60),
+            ),
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+        ));
+        assert_eq!(queued.lock().expect("dispatch queue").len(), 1);
+
+        let late = queued
+            .lock()
+            .expect("dispatch queue")
+            .pop_front()
+            .expect("one late callback");
+        late();
+        let readmitted = ingress
+            .try_admit()
+            .expect("late cancelled callback releases physical ingress");
+        drop(readmitted);
+    }
+
+    #[test]
+    fn running_read_only_host_fence_can_time_out_without_waiting_for_completion() {
+        let ingress = ProfileFenceIngress::shared();
+        let admission = ingress.try_admit().expect("first physical fence");
+        let call = HostCall::<()>::new();
+        assert!(call.begin());
+
+        assert_eq!(
+            call.wait(Some(Instant::now()), HostCallWaitMode::ReadOnlyFence),
+            Err(HostCallFailure::TimedOut)
+        );
+        assert!(ingress.try_admit().is_none());
+        call.complete(Ok(()));
+        drop(admission);
+        let readmitted = ingress
+            .try_admit()
+            .expect("late running completion releases physical ingress");
+        drop(readmitted);
+    }
+
+    #[test]
+    fn profile_absence_audit_covers_unattached_and_attached_obligations_exactly() {
+        let profile = ProfileId::from(7);
+        let other_profile = ProfileId::from(8);
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::Absent
+        );
+        let reservation = gate
+            .reserve(recovery_binding(owner(2, 1, 1)))
+            .expect("unattached reservation");
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::Present
+        );
+        assert_eq!(
+            registry.profile_obligation_status(other_profile),
+            ProfileObligationStatus::Absent
+        );
+
+        let generation = reservation.generation;
+        registry
+            .attach(reservation)
+            .expect("UI registry attachment");
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::Present
+        );
+        assert!(registry
+            .prove_absence(owner(2, 1, 1), generation)
+            .expect("exact native absence"));
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::Absent
+        );
+    }
+
+    #[test]
+    fn profile_absence_audit_refuses_contended_or_inconsistent_ledgers() {
+        let profile = ProfileId::from(7);
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let lock_view = gate.clone();
+        let guard = lock_view.inner.state.lock().expect("gate lock");
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::Unavailable
+        );
+        drop(guard);
+
+        let reservation = gate
+            .reserve(recovery_binding(owner(2, 1, 1)))
+            .expect("reservation");
+        reservation
+            .mark_attached()
+            .expect("deliberately incomplete test attachment");
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::InvariantFailed
+        );
+        assert!(registry.invariant_failed);
+        assert!(gate.inner.invariant_failed.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn profile_barrier_includes_unattached_factory_reservations() {
         let profile = ProfileId::from(7);
         let other_profile = ProfileId::from(8);
@@ -2029,6 +2514,10 @@ mod tests {
 
         assert!(registry.has_profile_obligation(ProfileId::from(7)));
         assert!(registry.has_profile_obligation(ProfileId::from(8)));
+        assert_eq!(
+            registry.profile_obligation_status(ProfileId::from(7)),
+            ProfileObligationStatus::InvariantFailed
+        );
     }
 
     #[test]
@@ -2178,13 +2667,17 @@ mod tests {
     #[test]
     fn poisoned_gate_fails_closed_and_passive_drop_does_not_mutate_it() {
         let gate = ExtensionRuntimeFactoryGate::new();
-        let registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
         let reservation = gate
             .reserve(recovery_binding(owner(2, 1, 1)))
             .expect("reservation before poison");
         gate.poison_for_test();
         assert!(registry.has_profile_obligation(ProfileId::from(7)));
         assert!(registry.has_profile_obligation(ProfileId::from(8)));
+        assert_eq!(
+            registry.profile_obligation_status(ProfileId::from(7)),
+            ProfileObligationStatus::InvariantFailed
+        );
         drop(reservation);
         assert!(matches!(
             gate.reserve(recovery_binding(owner(2, 2, 2))),
@@ -2257,9 +2750,15 @@ mod tests {
             panic!("poison extension host call");
         })
         .join();
-        assert_eq!(call.wait(None), Err(HostCallFailure::Invariant));
+        assert_eq!(
+            call.wait(None, HostCallWaitMode::OwnershipMutation),
+            Err(HostCallFailure::Invariant)
+        );
         assert!(!call.begin());
         call.complete(Ok(()));
-        assert_eq!(call.wait(None), Err(HostCallFailure::Invariant));
+        assert_eq!(
+            call.wait(None, HostCallWaitMode::OwnershipMutation),
+            Err(HostCallFailure::Invariant)
+        );
     }
 }

@@ -5,11 +5,17 @@
 //! native runtime registry. Binding is side-effect free: it may reserve
 //! bounded process-local state, but it must not dispatch to the UI thread or
 //! call a native API. Native ownership-changing work remains behind the
-//! lifecycle ports returned by the engine.
+//! lifecycle ports returned by the engine. Profile-absence inspection is a
+//! separate, deadline-bounded UI-thread fence and never performs native work.
 
 use std::error::Error;
 use std::fmt;
+use std::marker::PhantomData;
 use std::mem::size_of;
+use std::num::NonZeroU64;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
@@ -18,6 +24,7 @@ use zephium_core::extensions::{
     ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
     ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
 };
+use zephium_core::ids::ProfileId;
 
 use crate::{
     ExtensionPackageAccess, ExtensionRuntimeActivationBuildError,
@@ -897,10 +904,134 @@ impl fmt::Debug for ExtensionRuntimeHostActivationPorts {
     }
 }
 
+/// Non-authorizing disposition of a process-local profile-absence fence.
+///
+/// A trusted host port returns `Ok(())` when it observes absence. The public
+/// factory converts only that fresh observation into opaque linear
+/// [`ExtensionRuntimeHostProfileAbsenceEvidence`]. None of these refusal
+/// dispositions authorize profile deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ExtensionRuntimeHostProfileAbsenceDisposition {
+    /// At least one attached or unattached runtime obligation remains.
+    ObligationsRemain,
+    /// The fence did not complete before its exact deadline.
+    TimedOut,
+    /// The trusted host could not inspect its UI-thread registry.
+    Unavailable,
+    /// Registry or reservation-ledger invariants could not be established.
+    InvariantFailed,
+}
+
+struct ExtensionRuntimeHostFactoryEpoch;
+
+/// Linear evidence of one fresh process-local profile-absence observation.
+///
+/// The evidence is bound to the exact requested profile, the exact live host
+/// factory epoch, and one nonwrapping fence generation. It also keeps that
+/// factory mutably borrowed, so no later activation, recovery, or second fence
+/// can pass through the factory before the evidence is consumed or dropped.
+/// The serialized service must still hold its own profile-retirement fence and
+/// join this process-local evidence with durable retirement state; this value
+/// grants no native, package, Store, or deletion authority by itself.
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeHostProfileAbsenceEvidence;
+/// fn require_clone<T: Clone>() {}
+/// fn cannot_clone<'factory>() {
+///     require_clone::<ExtensionRuntimeHostProfileAbsenceEvidence<'factory>>();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeHostProfileAbsenceEvidence;
+/// fn require_send<T: Send>() {}
+/// fn cannot_cross_the_serialized_worker<'factory>() {
+///     require_send::<ExtensionRuntimeHostProfileAbsenceEvidence<'factory>>();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use std::time::Instant;
+/// use zephium_core::ids::ProfileId;
+/// use zephium_extension_runtime_api::ExtensionRuntimeHostFactory;
+/// fn cannot_reuse_factory_while_evidence_is_live(factory: &mut ExtensionRuntimeHostFactory) {
+///     let evidence = factory
+///         .profile_absence_until(ProfileId::from(7), Instant::now())
+///         .unwrap();
+///     let _replay = factory.profile_absence_until(ProfileId::from(8), Instant::now());
+///     drop(evidence);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use std::marker::PhantomData;
+/// use zephium_core::ids::ProfileId;
+/// use zephium_extension_runtime_api::ExtensionRuntimeHostProfileAbsenceEvidence;
+/// fn cannot_forge<'factory>() -> ExtensionRuntimeHostProfileAbsenceEvidence<'factory> {
+///     ExtensionRuntimeHostProfileAbsenceEvidence {
+///         profile: ProfileId::from(7),
+///         fence_generation: 1,
+///         factory_epoch: PhantomData,
+///     }
+/// }
+/// ```
+#[must_use = "profile-runtime absence evidence must be consumed by the retirement protocol"]
+pub struct ExtensionRuntimeHostProfileAbsenceEvidence<'factory> {
+    profile: ProfileId,
+    fence_generation: NonZeroU64,
+    _factory_epoch: Arc<ExtensionRuntimeHostFactoryEpoch>,
+    _factory_borrow: PhantomData<&'factory mut ExtensionRuntimeHostFactory>,
+    _worker_private: PhantomData<Rc<()>>,
+}
+
+impl ExtensionRuntimeHostProfileAbsenceEvidence<'_> {
+    /// Exact profile observed absent by the trusted host.
+    #[must_use]
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    /// Nonzero, nonwrapping generation of this factory fence attempt.
+    #[must_use]
+    pub const fn fence_generation(&self) -> u64 {
+        self.fence_generation.get()
+    }
+
+    /// Returns whether this evidence is bound to `profile`.
+    ///
+    /// This comparison is non-authorizing; retirement must consume the
+    /// evidence rather than retaining the boolean.
+    #[must_use]
+    pub fn is_for_profile(&self, profile: ProfileId) -> bool {
+        self.profile == profile
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_factory_epoch(
+        &self,
+        other: &ExtensionRuntimeHostProfileAbsenceEvidence<'_>,
+    ) -> bool {
+        Arc::ptr_eq(&self._factory_epoch, &other._factory_epoch)
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeHostProfileAbsenceEvidence<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeHostProfileAbsenceEvidence")
+            .field("profile", &self.profile)
+            .field("fence_generation", &self.fence_generation)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Unique trusted engine factory implementation.
 ///
 /// Binding methods must not dispatch UI work or call native APIs. They may
-/// reserve bounded logical slots and construct passive proxies.
+/// reserve bounded logical slots and construct passive proxies. The profile
+/// absence method is the sole exception: it may dispatch a read-only registry
+/// fence and must honor its exact deadline.
 pub trait ExtensionRuntimeHostFactoryPort: Send {
     /// Binds one fresh provisional activation reservation and its exact proxy pair.
     ///
@@ -919,6 +1050,22 @@ pub trait ExtensionRuntimeHostFactoryPort: Send {
         &mut self,
         context: ExtensionRuntimeHostRecoveryContext,
     ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError>;
+
+    /// Inspects all process-local runtime obligations for one profile.
+    ///
+    /// Implementations must cover attached registry entries, unattached
+    /// factory reservations, and registry invariant health. `Ok(())` is only a
+    /// trusted, non-authorizing observation for the wrapper to bind; a timeout,
+    /// dispatch failure, or incomplete audit must return a refusal. The caller
+    /// must prevent later activation or recovery ingress for the profile before
+    /// asking the factory to mint evidence.
+    fn profile_absence_until(
+        &mut self,
+        _profile: ProfileId,
+        _deadline: Instant,
+    ) -> Result<(), ExtensionRuntimeHostProfileAbsenceDisposition> {
+        Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+    }
 }
 
 /// Unique move-only engine host factory held by the serialized service.
@@ -951,12 +1098,73 @@ pub trait ExtensionRuntimeHostFactoryPort: Send {
 #[must_use = "the unique native extension host factory must remain serialized"]
 pub struct ExtensionRuntimeHostFactory {
     port: Box<dyn ExtensionRuntimeHostFactoryPort>,
+    epoch: Arc<ExtensionRuntimeHostFactoryEpoch>,
+    next_profile_fence_generation: Option<NonZeroU64>,
 }
 
 impl ExtensionRuntimeHostFactory {
     /// Creates a unique factory around a trusted engine implementation.
     pub fn from_trusted_port(port: Box<dyn ExtensionRuntimeHostFactoryPort>) -> Self {
-        Self { port }
+        Self {
+            port,
+            epoch: Arc::new(ExtensionRuntimeHostFactoryEpoch),
+            next_profile_fence_generation: NonZeroU64::new(1),
+        }
+    }
+
+    /// Fences all process-local runtime obligations for one profile.
+    ///
+    /// `Ok` is opaque linear evidence bound to this exact factory, profile, and
+    /// fence generation. The serialized service must already prevent other
+    /// activation ingress for `profile` and must join this process-local result
+    /// with its durable retirement protocol before deleting profile data.
+    pub fn profile_absence_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> Result<
+        ExtensionRuntimeHostProfileAbsenceEvidence<'_>,
+        ExtensionRuntimeHostProfileAbsenceDisposition,
+    > {
+        if Instant::now() >= deadline {
+            return Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut);
+        }
+        let Some(fence_generation) = self.next_profile_fence_generation else {
+            return Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed);
+        };
+        self.next_profile_fence_generation = fence_generation
+            .get()
+            .checked_add(1)
+            .and_then(NonZeroU64::new);
+
+        match self.port.profile_absence_until(profile, deadline) {
+            Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed) => {
+                return Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed);
+            }
+            Err(disposition) => {
+                return if Instant::now() >= deadline {
+                    Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut)
+                } else {
+                    Err(disposition)
+                };
+            }
+            Ok(()) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut);
+        }
+        Ok(ExtensionRuntimeHostProfileAbsenceEvidence {
+            profile,
+            fence_generation,
+            _factory_epoch: Arc::clone(&self.epoch),
+            _factory_borrow: PhantomData,
+            _worker_private: PhantomData,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_profile_fence_generation_for_test(&mut self, generation: u64) {
+        self.next_profile_fence_generation = NonZeroU64::new(generation);
     }
 
     /// Binds a fresh activation without invoking a native lifecycle method.

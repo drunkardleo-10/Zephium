@@ -814,6 +814,43 @@ impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
     }
 }
 
+#[derive(Default)]
+struct ProfileAbsenceProbe {
+    calls: AtomicUsize,
+    observation: Mutex<Option<(ProfileId, Instant)>>,
+}
+
+struct ProfileAbsencePort {
+    probe: Arc<ProfileAbsenceProbe>,
+    observation: Result<(), ExtensionRuntimeHostProfileAbsenceDisposition>,
+}
+
+impl ExtensionRuntimeHostFactoryPort for ProfileAbsencePort {
+    fn bind_activation(
+        &mut self,
+        _context: &ExtensionRuntimeHostActivationContext<'_>,
+    ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+        Err(ExtensionRuntimeHostBindError::Unavailable)
+    }
+
+    fn bind_recovery(
+        &mut self,
+        _context: ExtensionRuntimeHostRecoveryContext,
+    ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError> {
+        Err(ExtensionRuntimeHostBindError::Unavailable)
+    }
+
+    fn profile_absence_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> Result<(), ExtensionRuntimeHostProfileAbsenceDisposition> {
+        self.probe.calls.fetch_add(1, Ordering::Relaxed);
+        *self.probe.observation.lock().expect("probe lock") = Some((profile, deadline));
+        self.observation
+    }
+}
+
 fn bind_activation_with(
     fixture: ActivationFixture,
     port: FakeFactoryPort,
@@ -835,6 +872,137 @@ fn bind_activation_with(
         .bind_activation(fixture.into_binding())
         .expect("host activation binding");
     (activation, probe, runtime, owned, release, evidence)
+}
+
+#[test]
+fn profile_absence_fence_refuses_an_expired_deadline_without_calling_the_port() {
+    let probe = Arc::new(ProfileAbsenceProbe::default());
+    let mut factory =
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(ProfileAbsencePort {
+            probe: Arc::clone(&probe),
+            observation: Ok(()),
+        }));
+
+    assert!(matches!(
+        factory.profile_absence_until(ProfileId::from(7), Instant::now()),
+        Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut)
+    ));
+    assert_eq!(probe.calls.load(Ordering::Relaxed), 0);
+    assert!(probe.observation.lock().expect("probe lock").is_none());
+}
+
+#[test]
+fn profile_absence_fence_forwards_the_exact_identity_deadline_and_closed_refusal() {
+    let profile = ProfileId::from(7);
+    let dispositions = [
+        ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain,
+        ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut,
+        ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable,
+        ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed,
+    ];
+
+    for disposition in dispositions {
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        let probe = Arc::new(ProfileAbsenceProbe::default());
+        let mut factory =
+            ExtensionRuntimeHostFactory::from_trusted_port(Box::new(ProfileAbsencePort {
+                probe: Arc::clone(&probe),
+                observation: Err(disposition),
+            }));
+
+        assert!(matches!(
+            factory.profile_absence_until(profile, deadline),
+            Err(actual) if actual == disposition
+        ));
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *probe.observation.lock().expect("probe lock"),
+            Some((profile, deadline))
+        );
+    }
+}
+
+#[test]
+fn profile_absence_evidence_is_profile_bound_factory_bound_and_nonreplayable() {
+    let profile = ProfileId::from(7);
+    let other_profile = ProfileId::from(8);
+    let first_probe = Arc::new(ProfileAbsenceProbe::default());
+    let second_probe = Arc::new(ProfileAbsenceProbe::default());
+    let mut first = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(ProfileAbsencePort {
+        probe: Arc::clone(&first_probe),
+        observation: Ok(()),
+    }));
+    let mut second = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(ProfileAbsencePort {
+        probe: Arc::clone(&second_probe),
+        observation: Ok(()),
+    }));
+
+    let first_evidence = first
+        .profile_absence_until(profile, Instant::now() + std::time::Duration::from_secs(60))
+        .expect("fresh first-factory evidence");
+    let second_evidence = second
+        .profile_absence_until(profile, Instant::now() + std::time::Duration::from_secs(60))
+        .expect("fresh second-factory evidence");
+
+    assert_eq!(first_evidence.profile(), profile);
+    assert!(first_evidence.is_for_profile(profile));
+    assert!(!first_evidence.is_for_profile(other_profile));
+    assert_eq!(first_evidence.fence_generation(), 1);
+    assert_eq!(second_evidence.fence_generation(), 1);
+    assert!(!first_evidence.shares_factory_epoch(&second_evidence));
+    drop(first_evidence);
+    drop(second_evidence);
+
+    let next = first
+        .profile_absence_until(profile, Instant::now() + std::time::Duration::from_secs(60))
+        .expect("later first-factory evidence");
+    assert_eq!(next.fence_generation(), 2);
+    assert_eq!(first_probe.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(second_probe.calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn profile_absence_fence_generation_never_wraps_or_reuses_identity() {
+    let probe = Arc::new(ProfileAbsenceProbe::default());
+    let mut factory =
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(ProfileAbsencePort {
+            probe: Arc::clone(&probe),
+            observation: Ok(()),
+        }));
+    factory.set_next_profile_fence_generation_for_test(u64::MAX);
+
+    let final_evidence = factory
+        .profile_absence_until(
+            ProfileId::from(7),
+            Instant::now() + std::time::Duration::from_secs(60),
+        )
+        .expect("final nonwrapping generation");
+    assert_eq!(final_evidence.fence_generation(), u64::MAX);
+    drop(final_evidence);
+
+    assert!(matches!(
+        factory.profile_absence_until(
+            ProfileId::from(7),
+            Instant::now() + std::time::Duration::from_secs(60),
+        ),
+        Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed)
+    ));
+    assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn factory_ports_without_an_absence_fence_make_no_absence_claim() {
+    let probe = Arc::new(HostProbe::default());
+    let mut factory =
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(FakeFactoryPort::normal(probe)));
+
+    assert!(matches!(
+        factory.profile_absence_until(
+            ProfileId::from(7),
+            Instant::now() + std::time::Duration::from_secs(60),
+        ),
+        Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+    ));
 }
 
 fn published_receipt_with(

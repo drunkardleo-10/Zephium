@@ -108,6 +108,9 @@ enum HostTaskPriority {
     Observation,
     Lifecycle,
     Close,
+    // A read-only profile fence owns an independently bounded slot. It must
+    // never consume the exact owner-debt cohort below.
+    ExtensionRuntimeProfileFence,
     // Exact extension-owner lifecycle and terminal debts are never keyed,
     // coalesced, replaced, or admitted from an ordinary task's capacity.
     ExtensionRuntime,
@@ -164,13 +167,22 @@ const EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
     2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
 const NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
     NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY;
+// The unique runtime factory admits at most one physical profile-fence
+// callback across the platform dispatcher and this reentrant host queue. Keep
+// its slot below the exact owner band so a timed-out read cannot crowd out a
+// lifecycle or publication debt.
+const EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY: usize = 1;
+const NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        - EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY;
 // One globally coalesced commit gate per native view remains admissible even
 // if ordinary observations/lifecycle work fill their band. The native view
 // resource ceiling proves no more distinct live commit keys can exist while
 // the host is re-entrantly borrowed.
 const NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize = MAX_NATIVE_VIEW_RESOURCES;
 const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
+    NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+        - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 
 pub(crate) fn install(
@@ -406,6 +418,19 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::ExtensionRuntime, None, f)
+}
+
+/// Admit the sole read-only extension profile-absence fence.
+///
+/// This separately budgeted slot cannot consume the exact owner lifecycle and
+/// publication cohort. The factory-side ingress prevents a second physical
+/// callback from reaching this queue while a timed-out callback is still
+/// retained by the platform dispatcher or this host queue.
+pub(super) fn try_with_extension_runtime_profile_fence<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::ExtensionRuntimeProfileFence, None, f)
 }
 
 pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
@@ -775,6 +800,17 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // is never borrowed by retries while the UI thread is stalled.
         return false;
     }
+    if queued.priority == HostTaskPriority::ExtensionRuntimeProfileFence
+        && pending
+            .iter()
+            .filter(|task| task.priority == HostTaskPriority::ExtensionRuntimeProfileFence)
+            .count()
+            >= EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+    {
+        // A stale timed-out callback remains a physical queue occupant until
+        // the UI borrow unwinds. Never borrow another band for a duplicate.
+        return false;
+    }
     if queued.priority != HostTaskPriority::ExtensionRuntime {
         let Some(key) = queued.key else {
             return enqueue_bounded_pending(pending, queued);
@@ -814,8 +850,11 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
         HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ExtensionRuntime => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
-        _ if matches!(queued.key, Some(HostTaskKey::NavigationCommit(_))) => {
+        HostTaskPriority::ExtensionRuntimeProfileFence => {
             NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        }
+        _ if matches!(queued.key, Some(HostTaskKey::NavigationCommit(_))) => {
+            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
         }
         _ => NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY,
     };
@@ -854,6 +893,7 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
         // Accepted owner operations are exact authority debts. Replacing one
         // would leak or fabricate native ownership settlement.
         HostTaskPriority::ExtensionRuntime => None,
+        HostTaskPriority::ExtensionRuntimeProfileFence => None,
         // Its dedicated band guarantees the bounded first cohort. Past that
         // point rejecting this attempt is safer than dropping an already
         // admitted close/lifecycle obligation; the public retirement gate has
@@ -1248,6 +1288,44 @@ mod tests {
     }
 
     #[test]
+    fn profile_fence_has_one_separate_slot_and_cannot_consume_exact_owner_debts() {
+        let mut pending = VecDeque::new();
+        assert!(enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
+        ));
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
+        ));
+
+        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::ExtensionRuntime)
+            ));
+        }
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntime)
+        ));
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntimeProfileFence)
+                .count(),
+            EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
+                .count(),
+            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+    }
+
+    #[test]
     fn reentrant_queue_bounds_shutdown_and_prioritizes_close() {
         let mut pending = VecDeque::new();
         for _ in 0..NORMAL_PENDING_HOST_TASK_CAPACITY {
@@ -1285,6 +1363,15 @@ mod tests {
                 )
             ));
         }
+        assert_eq!(
+            pending.len(),
+            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+        );
+
+        assert!(enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
+        ));
         assert_eq!(
             pending.len(),
             NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
@@ -1352,6 +1439,15 @@ mod tests {
         }
         assert_eq!(
             pending.len(),
+            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+        );
+
+        assert!(enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
+        ));
+        assert_eq!(
+            pending.len(),
             NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
         );
 
@@ -1393,7 +1489,14 @@ mod tests {
                 .iter()
                 .filter(|task| task.priority == HostTaskPriority::Lifecycle)
                 .count(),
-            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| { task.priority == HostTaskPriority::ExtensionRuntimeProfileFence })
+                .count(),
+            EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(
             pending
@@ -1420,7 +1523,14 @@ mod tests {
                 .iter()
                 .filter(|task| task.priority == HostTaskPriority::Lifecycle)
                 .count(),
-            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| { task.priority == HostTaskPriority::ExtensionRuntimeProfileFence })
+                .count(),
+            EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(
             pending
@@ -1592,7 +1702,7 @@ mod tests {
             &mut pending,
             keyed(HostTaskPriority::Lifecycle, commit)
         ));
-        assert!(pending.len() <= NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY);
+        assert!(pending.len() <= NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY);
     }
 
     #[test]
