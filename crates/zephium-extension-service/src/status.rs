@@ -13,8 +13,20 @@ const OVERFLOW_WAIT_SLICE: Duration = Duration::from_secs(24 * 60 * 60);
 pub enum ExtensionServicePhase {
     /// The native thread exists but has not published readiness yet.
     Starting,
-    /// The worker accepts bounded actor work.
+    /// The worker is admitting and recovering its private repository.
+    OpeningRepository,
+    /// The worker is loading the complete durable native-ownership journal.
+    LoadingOwnershipJournal,
+    /// The worker is reconciling cleanup-only ownership and package state.
+    ReconcilingCleanup,
+    /// Startup recovery completed with no unresolved native-owner rows.
     Ready,
+    /// Durable possible-owner rows remain and extension activation is disabled.
+    CleanupRequired,
+    /// Startup did not make a readiness claim and may be retried by the owner.
+    StartupUnavailable,
+    /// Startup failed closed; extension activation remains disabled.
+    StartupFailed,
     /// Admission is sealed and the reserved shutdown barrier is queued.
     ShutdownQueued,
     /// The owner joined the worker and validated its clean-exit evidence.
@@ -82,12 +94,25 @@ impl SharedStatus {
         *self.lock()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_ready(&self) {
+        self.publish_startup(ExtensionServicePhase::Ready);
+    }
+
+    pub(crate) fn publish_startup(&self, phase: ExtensionServicePhase) {
         let mut snapshot = self.lock();
-        if snapshot.phase != ExtensionServicePhase::Starting {
+        if matches!(
+            snapshot.phase,
+            ExtensionServicePhase::Ready
+                | ExtensionServicePhase::CleanupRequired
+                | ExtensionServicePhase::StartupFailed
+                | ExtensionServicePhase::ShutdownQueued
+                | ExtensionServicePhase::Stopped
+                | ExtensionServicePhase::Failed
+        ) {
             return;
         }
-        Self::publish_locked(&mut snapshot, ExtensionServicePhase::Ready, &self.changed);
+        Self::publish_locked(&mut snapshot, phase, &self.changed);
     }
 
     pub(crate) fn publish(&self, phase: ExtensionServicePhase) {
@@ -170,6 +195,31 @@ mod tests {
         status.publish_ready();
 
         assert_eq!(status.snapshot(), queued);
+    }
+
+    #[test]
+    fn readiness_can_follow_startup_reconciliation() {
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        let status = SharedStatus::new(worker);
+        status.publish(ExtensionServicePhase::OpeningRepository);
+        status.publish(ExtensionServicePhase::LoadingOwnershipJournal);
+        status.publish(ExtensionServicePhase::ReconcilingCleanup);
+
+        status.publish_ready();
+
+        assert_eq!(status.snapshot().phase(), ExtensionServicePhase::Ready);
+    }
+
+    #[test]
+    fn readiness_cannot_regress_a_settled_startup_outcome() {
+        let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
+        let status = SharedStatus::new(worker);
+        status.publish(ExtensionServicePhase::CleanupRequired);
+        let settled = status.snapshot();
+
+        status.publish_ready();
+
+        assert_eq!(status.snapshot(), settled);
     }
 
     #[test]

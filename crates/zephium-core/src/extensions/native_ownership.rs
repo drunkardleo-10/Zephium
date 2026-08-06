@@ -1185,6 +1185,14 @@ impl ExtensionNativeOwnershipJournalApplication {
         &self.journal
     }
 
+    /// Consumes the validated application and returns its next journal.
+    ///
+    /// This keeps mutation projection linear for actors that must install the
+    /// exact locally predicted state only after its persistence CAS succeeds.
+    pub fn into_journal(self) -> ExtensionNativeOwnershipJournal {
+        self.journal
+    }
+
     pub const fn kind(&self) -> ExtensionNativeOwnershipMutationKind {
         self.kind
     }

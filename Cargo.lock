@@ -6306,6 +6306,13 @@ dependencies = [
 [[package]]
 name = "zephium-extension-service"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "zephium-core",
+ "zephium-extension-repository",
+ "zephium-private-fs",
+ "zephium-store",
+]
 
 [[package]]
 name = "zephium-ipc"
