@@ -167,6 +167,13 @@ impl Shell {
             } else {
                 self.schedule_profile_deletion_retry(profile);
             }
+            if self.extension_lifecycle_terminal {
+                self.profile_deletion.batch_deadline = None;
+                crate::diagnostic!(
+                    "bootstrap: recovered profile deletion failed closed; refusing native view construction"
+                );
+                return;
+            }
         }
         self.profile_deletion.batch_deadline = None;
         if splits

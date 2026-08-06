@@ -2559,6 +2559,11 @@ fn durable_profile_deletion_retires_compiler_work_before_native_erasure() {
         .lock()
         .unwrap()
         .push_back(ProfileDeletionAuthorizeOutcome::Authorized);
+    store
+        .finalize_outcomes
+        .lock()
+        .unwrap()
+        .push_back(ProfileDeletionFinalizeOutcome::Completed);
     engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
 
     shell.handle(delete_operation("delete-with-blocker", profile));
@@ -2610,6 +2615,11 @@ fn profile_deletion_wins_over_a_stale_explicit_policy_retry() {
         .lock()
         .unwrap()
         .push_back(ProfileDeletionAuthorizeOutcome::Authorized);
+    store
+        .finalize_outcomes
+        .lock()
+        .unwrap()
+        .push_back(ProfileDeletionFinalizeOutcome::Completed);
     engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
     shell.handle(delete_operation("delete-policy-race", profile));
     assert_eq!(

@@ -35,6 +35,15 @@ impl Shell {
             crate::diagnostic!("engine: ignored native event before bootstrap");
             return;
         }
+        // Retirement may already have installed a permanent extension-worker
+        // fence even when its caller observed only a retryable result. From
+        // deletion admission onward, stale native facts for that profile may
+        // neither mutate actor state nor recreate a renderer. Process-global
+        // runtime status remains independent of any profile quarantine.
+        if self.engine_event_targets_quarantined_profile(&event) {
+            crate::diagnostic!("engine: ignored native event for quarantined profile");
+            return;
+        }
         match event {
             EngineEvent::RuntimeRestartRequired => {
                 if !self.runtime_restart_required {
@@ -243,6 +252,46 @@ impl Shell {
                 }
             }
         }
+    }
+
+    fn engine_event_targets_quarantined_profile(&self, event: &EngineEvent) -> bool {
+        let profile = match event {
+            EngineEvent::RuntimeRestartRequired => None,
+            EngineEvent::ContentRulesSettled { profile, .. }
+            | EngineEvent::ViewDiscarded { profile, .. }
+            | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
+            EngineEvent::UserContentSettled {
+                scope: ContentScope::Profile(profile),
+                ..
+            } => Some(*profile),
+            EngineEvent::UserContentSettled {
+                scope: ContentScope::Global,
+                ..
+            } => None,
+            EngineEvent::SplitChanged { window, .. } => {
+                self.windows.get(*window).map(|window| window.profile)
+            }
+            EngineEvent::TitleChanged { id, .. }
+            | EngineEvent::UrlChanged { id, .. }
+            | EngineEvent::PresentationPending { id, .. }
+            | EngineEvent::PresentationReady { id, .. }
+            | EngineEvent::NavigationFailed { id, .. }
+            | EngineEvent::ZoomSettled { id, .. }
+            | EngineEvent::NativeActionFailed { id, .. }
+            | EngineEvent::LoadingChanged { id, .. }
+            | EngineEvent::FaviconPixels { id, .. }
+            | EngineEvent::DiscardSafety { id, .. }
+            | EngineEvent::NavState { id, .. }
+            | EngineEvent::NewWindowRequested { id, .. }
+            | EngineEvent::PermissionRequested { id, .. }
+            | EngineEvent::DownloadRequested { id, .. }
+            | EngineEvent::ViewCreationFailed { id }
+            | EngineEvent::Crashed { id }
+            | EngineEvent::Captured { id, .. }
+            | EngineEvent::HtmlExtracted { id, .. } => self.profile_of_item(*id),
+            EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),
+        };
+        profile.is_some_and(|profile| self.profile_deletion_quarantines(profile))
     }
 
     fn should_record_visit(&mut self, id: ItemId, url: &str) -> bool {

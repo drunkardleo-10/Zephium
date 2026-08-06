@@ -136,6 +136,21 @@ pub(super) struct FakeExtensionLifecycleState {
     pub(super) startup_outcomes: Mutex<
         std::collections::VecDeque<zephium_core::ports::extensions::ExtensionServiceStartupOutcome>,
     >,
+    pub(super) retirement_calls: std::sync::atomic::AtomicUsize,
+    pub(super) retirement_continuation_calls: std::sync::atomic::AtomicUsize,
+    pub(super) retirement_profiles: Mutex<Vec<ProfileId>>,
+    pub(super) retirement_deadlines: Mutex<Vec<std::time::Instant>>,
+    pub(super) retirement_outcomes: Mutex<
+        std::collections::VecDeque<
+            zephium_core::ports::extensions::ExtensionProfileRetirementDisposition,
+        >,
+    >,
+    /// Overrides whether the fake invokes the continuation, allowing tests to
+    /// prove the application detects a lifecycle implementation that violates
+    /// disposition/callback consistency.
+    pub(super) retirement_invoke_override: Mutex<Option<bool>>,
+    pub(super) panic_on_retirement: std::sync::atomic::AtomicBool,
+    pub(super) panic_after_retirement_continuation: std::sync::atomic::AtomicBool,
     pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
     pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
     pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
@@ -193,6 +208,62 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
             .unwrap()
             .pop_front()
             .unwrap_or(zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready)
+    }
+
+    fn with_profile_retired_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: std::time::Instant,
+        continuation: Box<dyn FnOnce() + '_>,
+    ) -> zephium_core::ports::extensions::ExtensionProfileRetirementDisposition {
+        self.state
+            .retirement_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.state.retirement_profiles.lock().unwrap().push(profile);
+        self.state
+            .retirement_deadlines
+            .lock()
+            .unwrap()
+            .push(deadline);
+        assert!(
+            !self
+                .state
+                .panic_on_retirement
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected extension profile-retirement panic"
+        );
+        let disposition = self
+            .state
+            .retirement_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(
+                zephium_core::ports::extensions::ExtensionProfileRetirementDisposition::Continued,
+            );
+        let invoke = self
+            .state
+            .retirement_invoke_override
+            .lock()
+            .unwrap()
+            .unwrap_or(
+                disposition
+                    == zephium_core::ports::extensions::ExtensionProfileRetirementDisposition::Continued,
+            );
+        if invoke {
+            self.state
+                .retirement_continuation_calls
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            continuation();
+            assert!(
+                !self
+                    .state
+                    .panic_after_retirement_continuation
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "injected post-continuation extension profile-retirement panic"
+            );
+        }
+        disposition
     }
 
     fn shutdown_until(
@@ -1097,6 +1168,14 @@ type OperationLog = Arc<Mutex<Vec<OperationDisposition>>>;
 fn setup_with_operation_log(
     store: Arc<FakeStore>,
 ) -> (Shell, Arc<FakeEngine>, Screen, OperationLog) {
+    setup_with_operation_log_and_lifecycle(store, clean_extension_lifecycle(), Box::new(|_| {}))
+}
+
+fn setup_with_operation_log_and_lifecycle(
+    store: Arc<FakeStore>,
+    extension_service: ExtensionLifecycle,
+    terminal_failure: ShellTerminalFailureCallback,
+) -> (Shell, Arc<FakeEngine>, Screen, OperationLog) {
     let engine = Arc::new(FakeEngine::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
@@ -1111,9 +1190,12 @@ fn setup_with_operation_log(
     let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
     let operation_sink = operations.clone();
-    let mut shell = Shell::new(
+    let mut shell = Shell::new_with_extension_lifecycle_and_failure(
         engine.clone(),
         store,
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        terminal_failure,
         Arc::new(FakeChrome),
         Box::new(move |projection| {
             if let Projection::OperationProcessed(completion) = &projection {

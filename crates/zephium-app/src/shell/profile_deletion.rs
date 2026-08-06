@@ -8,6 +8,10 @@ const PROFILE_DELETION_RETRY_BASE: std::time::Duration = std::time::Duration::fr
 const PROFILE_DELETION_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(super) enum ProfileDeletionPhase {
+    /// No Store deletion authority exists yet. The next action must run the
+    /// first authorization inside the extension-service retirement
+    /// continuation; a copied retirement status is never consulted.
+    ExtensionFenceForAuthorization,
     /// Authorization RPC entered the storage actor but its result missed the
     /// caller deadline. An ordered journal read must resolve that attempt
     /// before a retry builds a fresh post-removal snapshot from the current
@@ -24,6 +28,10 @@ pub(super) enum ProfileDeletionPhase {
         attempt: u64,
     },
     FinalizeReady,
+    /// Extension retirement or a post-retirement invariant failed closed.
+    /// The durable journal and native data remain untouched while the
+    /// composition root terminates the process.
+    FailedClosed,
 }
 
 pub(super) struct ProfileDeletionState {
@@ -65,6 +73,13 @@ pub(super) struct ProfileDeletionCoordinator {
     pub(super) batch_deadline: Option<std::time::Instant>,
 }
 
+enum ProfileRetirementBoundarySettlement {
+    Settled(ExtensionProfileRetirementDisposition),
+    LifecycleMissing,
+    Panicked,
+    ContractViolated,
+}
+
 impl Default for ProfileDeletionCoordinator {
     fn default() -> Self {
         Self {
@@ -81,6 +96,12 @@ impl Shell {
         profile: ProfileId,
         operation_id: Option<String>,
     ) -> OperationDisposition {
+        if self.extension_lifecycle_terminal {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreAdmissionRejected,
+            );
+        }
         // One foreground deletion at a time keeps durable/native ownership
         // unambiguous. Crash-recovered journal rows may coexist, but a new
         // deletion waits until those obligations are resolved.
@@ -96,68 +117,48 @@ impl Shell {
                 OperationReason::ProfileDeletionPolicyRejected,
             );
         };
-        let deadline = std::time::Instant::now() + PROFILE_DELETION_STORE_TIMEOUT;
-        let authorization_revision = self.persistence.session_revision;
-        let outcome = self
-            .store
-            .authorize_profile_deletion(profile, filtered, deadline);
-        match outcome {
-            ProfileDeletionAuthorizeOutcome::Authorized => {
-                self.profile_deletion.states.insert(
-                    profile,
-                    ProfileDeletionState::new(
-                        ProfileDeletionPhase::NativeReady,
-                        operation_id,
-                        authorization_revision,
-                    ),
-                );
-                self.apply_profile_tombstone(profile);
-                operation_result(
-                    OperationOutcome::Deferred,
-                    OperationReason::NativeWorkPending,
-                )
-            }
-            ProfileDeletionAuthorizeOutcome::AlreadyAuthorized => {
-                self.profile_deletion.states.insert(
-                    profile,
-                    ProfileDeletionState::new(
-                        ProfileDeletionPhase::ResolveAuthorizedJournal,
-                        operation_id,
-                        authorization_revision,
-                    ),
-                );
-                self.apply_profile_tombstone(profile);
-                operation_result(
-                    OperationOutcome::Deferred,
-                    OperationReason::StoreWorkPending,
-                )
-            }
-            ProfileDeletionAuthorizeOutcome::OutcomeUnknown => {
-                self.profile_deletion.states.insert(
-                    profile,
-                    ProfileDeletionState::new(
-                        ProfileDeletionPhase::Authorizing {
-                            may_reauthorize: false,
-                        },
-                        operation_id,
-                        authorization_revision,
-                    ),
-                );
-                operation_result(
-                    OperationOutcome::Deferred,
-                    OperationReason::StoreWorkPending,
-                )
-            }
-            ProfileDeletionAuthorizeOutcome::NotRegistered
-            | ProfileDeletionAuthorizeOutcome::SessionConflict
-            | ProfileDeletionAuthorizeOutcome::InvalidSession
-            | ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
-            | ProfileDeletionAuthorizeOutcome::NotAdmitted
-            | ProfileDeletionAuthorizeOutcome::Failed => operation_result(
+        // Profile retirement is monotonic inside the extension worker even
+        // when the bounded call returns Unavailable. Do not install that fence
+        // while a native page can still execute, and do not rely on a later
+        // best-effort close as proof. The actor's view bit is the exact native
+        // lifecycle obligation: it remains set through construction and
+        // discard until the corresponding native terminal event.
+        if self
+            .items
+            .view_ids()
+            .into_iter()
+            .any(|id| self.profile_of_item(id) == Some(profile))
+        {
+            return operation_result(
                 OperationOutcome::Rejected,
-                OperationReason::StoreAdmissionRejected,
-            ),
+                OperationReason::ProfileDeletionPolicyRejected,
+            );
         }
+        // Validate policy and canonical snapshot construction before the
+        // irreversible process-local extension fence. The snapshot is rebuilt
+        // inside the continuation so this preflight never becomes authority.
+        drop(filtered);
+        let authorization_revision = self.persistence.session_revision;
+        self.profile_deletion.states.insert(
+            profile,
+            ProfileDeletionState::new(
+                ProfileDeletionPhase::ExtensionFenceForAuthorization,
+                operation_id,
+                authorization_revision,
+            ),
+        );
+        // From this point through durable tombstoning (or process restart),
+        // the state row is a process-local quarantine. A retirement attempt
+        // may already have installed its permanent worker fence even when it
+        // cannot settle before the deadline, so this row is never removed on
+        // a retryable result.
+        self.cancel_pending_blocker_mutation(profile, OperationReason::ProfileDeletionInProgress);
+        self.blocker.retire_profile(profile);
+        self.finish_terminalized_blocker_native_operations();
+        operation_result(
+            OperationOutcome::Deferred,
+            OperationReason::StoreWorkPending,
+        )
     }
 
     /// Builds the exact canonical post-removal state without mutating any
@@ -326,11 +327,15 @@ impl Shell {
     }
 
     pub(super) fn drive_profile_deletion(&mut self, profile: ProfileId) {
+        if self.extension_lifecycle_terminal {
+            return;
+        }
         enum Action {
+            FenceAuthorization,
             ReconcileAuthorization(bool),
             ResolveAuthorizedJournal,
-            StartNative(u64),
-            Finalize,
+            FenceNative,
+            FenceFinalize,
             None,
         }
 
@@ -339,36 +344,232 @@ impl Shell {
                 return;
             };
             match state.phase {
+                ProfileDeletionPhase::ExtensionFenceForAuthorization => Action::FenceAuthorization,
                 ProfileDeletionPhase::Authorizing {
                     may_reauthorize, ..
                 } => Action::ReconcileAuthorization(may_reauthorize),
                 ProfileDeletionPhase::ResolveAuthorizedJournal => Action::ResolveAuthorizedJournal,
-                ProfileDeletionPhase::NativeReady => {
-                    state.attempt_generation = state.attempt_generation.wrapping_add(1);
-                    if state.attempt_generation == 0 {
-                        state.attempt_generation = 1;
-                    }
-                    let attempt = state.attempt_generation;
-                    state.phase = ProfileDeletionPhase::NativeInFlight { attempt };
-                    state.retry_exponent = 0;
-                    Action::StartNative(attempt)
-                }
+                ProfileDeletionPhase::NativeReady => Action::FenceNative,
                 ProfileDeletionPhase::NativeInFlight { .. } => Action::None,
-                ProfileDeletionPhase::FinalizeReady => Action::Finalize,
+                ProfileDeletionPhase::FinalizeReady => Action::FenceFinalize,
+                ProfileDeletionPhase::FailedClosed => Action::None,
             }
         };
         if let Some(queue) = &self.self_queue {
             queue.cancel_profile_deletion(profile);
         }
         match action {
+            Action::FenceAuthorization => {
+                let deadline = self.profile_retirement_deadline();
+                let settlement =
+                    self.with_retired_extension_profile(profile, deadline, move |shell| {
+                        shell.authorize_profile_deletion_after_fence(profile, deadline)
+                    });
+                if self.settle_profile_retirement_boundary(profile, settlement)
+                    && !self
+                        .profile_deletion
+                        .states
+                        .get(&profile)
+                        .is_some_and(|state| {
+                            matches!(
+                                state.phase,
+                                ProfileDeletionPhase::ExtensionFenceForAuthorization
+                                    | ProfileDeletionPhase::FailedClosed
+                            )
+                        })
+                {
+                    self.drive_profile_deletion(profile);
+                }
+            }
             Action::ReconcileAuthorization(may_reauthorize) => {
                 self.reconcile_profile_authorization(profile, may_reauthorize)
             }
             Action::ResolveAuthorizedJournal => self.resolve_authorized_journal(profile),
-            Action::StartNative(attempt) => self.start_native_profile_erasure(profile, attempt),
-            Action::Finalize => self.finalize_profile_deletion(profile),
+            Action::FenceNative => {
+                let deadline = self.profile_retirement_deadline();
+                let settlement =
+                    self.with_retired_extension_profile(profile, deadline, move |shell| {
+                        shell.start_native_profile_erasure_after_fence(profile)
+                    });
+                if self.settle_profile_retirement_boundary(profile, settlement) {
+                    // A native adapter may have completed synchronously. The
+                    // callback only populated the bounded inbox while the
+                    // lifecycle owner was temporarily outside `Shell`; drain
+                    // it after the owner is restored.
+                    self.consume_profile_deletion_outcome(profile);
+                }
+            }
+            Action::FenceFinalize => {
+                let deadline = self.profile_retirement_deadline();
+                let settlement =
+                    self.with_retired_extension_profile(profile, deadline, move |shell| {
+                        shell.finalize_profile_deletion_after_fence(profile, deadline)
+                    });
+                let _ = self.settle_profile_retirement_boundary(profile, settlement);
+            }
             Action::None => {}
         }
+    }
+
+    /// Process-local quarantine established before the first monotonic
+    /// extension retirement attempt. Restart may clear a row that never
+    /// reached Store authorization; this process may not.
+    pub(super) fn profile_deletion_quarantines(&self, profile: ProfileId) -> bool {
+        self.profile_deletion.states.contains_key(&profile)
+    }
+
+    pub(super) fn profile_deletion_quarantines_item(&self, id: ItemId) -> bool {
+        self.profile_of_item(id)
+            .is_some_and(|profile| self.profile_deletion_quarantines(profile))
+    }
+
+    fn profile_retirement_deadline(&self) -> std::time::Instant {
+        self.profile_deletion.batch_deadline.unwrap_or_else(|| {
+            let now = std::time::Instant::now();
+            now.checked_add(PROFILE_DELETION_STORE_TIMEOUT)
+                .unwrap_or(now)
+        })
+    }
+
+    /// Temporarily moves the unique lifecycle owner out of `Shell` so the
+    /// continuation can borrow the rest of the actor state. The owner is
+    /// restored before any follow-up phase is driven, including after a panic.
+    fn with_retired_extension_profile(
+        &mut self,
+        profile: ProfileId,
+        deadline: std::time::Instant,
+        continuation: impl FnOnce(&mut Self),
+    ) -> ProfileRetirementBoundarySettlement {
+        let Some(mut service) = self.extension_service.take() else {
+            return ProfileRetirementBoundarySettlement::LifecycleMissing;
+        };
+        let continuation_invoked = std::cell::Cell::new(false);
+        let settlement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.with_profile_retired_until(
+                profile,
+                deadline,
+                Box::new(|| {
+                    continuation_invoked.set(true);
+                    continuation(self);
+                }),
+            )
+        }));
+        self.extension_service = Some(service);
+        match settlement {
+            Ok(disposition)
+                if continuation_invoked.get()
+                    == matches!(
+                        disposition,
+                        ExtensionProfileRetirementDisposition::Continued
+                    ) =>
+            {
+                ProfileRetirementBoundarySettlement::Settled(disposition)
+            }
+            Ok(_) => ProfileRetirementBoundarySettlement::ContractViolated,
+            Err(_) => ProfileRetirementBoundarySettlement::Panicked,
+        }
+    }
+
+    /// Interprets only retry/terminal control flow. No Store or Engine effect
+    /// is authorized by the copied disposition; those effects already ran, if
+    /// at all, inside the lifecycle-owned continuation.
+    fn settle_profile_retirement_boundary(
+        &mut self,
+        profile: ProfileId,
+        settlement: ProfileRetirementBoundarySettlement,
+    ) -> bool {
+        match settlement {
+            ProfileRetirementBoundarySettlement::Settled(
+                ExtensionProfileRetirementDisposition::Continued,
+            ) => !self.extension_lifecycle_terminal,
+            ProfileRetirementBoundarySettlement::Settled(
+                ExtensionProfileRetirementDisposition::Unavailable,
+            ) => {
+                self.schedule_profile_deletion_retry(profile);
+                false
+            }
+            ProfileRetirementBoundarySettlement::Settled(
+                ExtensionProfileRetirementDisposition::FailedClosed,
+            ) => {
+                self.fail_profile_retirement(
+                    profile,
+                    ShellTerminalFailure::ExtensionProfileRetirementFailedClosed,
+                );
+                false
+            }
+            ProfileRetirementBoundarySettlement::LifecycleMissing => {
+                self.fail_profile_retirement(
+                    profile,
+                    ShellTerminalFailure::ExtensionProfileRetirementLifecycleMissing,
+                );
+                false
+            }
+            ProfileRetirementBoundarySettlement::Panicked => {
+                self.fail_profile_retirement(
+                    profile,
+                    ShellTerminalFailure::ExtensionProfileRetirementBoundaryPanicked,
+                );
+                false
+            }
+            ProfileRetirementBoundarySettlement::ContractViolated => {
+                self.fail_profile_retirement(
+                    profile,
+                    ShellTerminalFailure::ExtensionProfileRetirementContractViolated,
+                );
+                false
+            }
+        }
+    }
+
+    fn fail_profile_retirement(&mut self, profile: ProfileId, failure: ShellTerminalFailure) {
+        if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
+            state.phase = ProfileDeletionPhase::FailedClosed;
+        }
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_profile_deletion(profile);
+            queue.cancel_extension_startup();
+        }
+        self.extension_lifecycle_terminal = true;
+        self.extension_startup_not_before = None;
+        self.report_terminal_failure(failure);
+    }
+
+    fn fail_profile_deletion_invariant(&mut self, profile: ProfileId) {
+        crate::diagnostic!(
+            "profile deletion: post-retirement Store invariant failed; preserving durable profile data"
+        );
+        self.fail_profile_retirement(
+            profile,
+            ShellTerminalFailure::ExtensionProfileDeletionInvariant,
+        );
+    }
+
+    fn authorize_profile_deletion_after_fence(
+        &mut self,
+        profile: ProfileId,
+        deadline: std::time::Instant,
+    ) {
+        if !matches!(
+            self.profile_deletion
+                .states
+                .get(&profile)
+                .map(|state| &state.phase),
+            Some(ProfileDeletionPhase::ExtensionFenceForAuthorization)
+        ) {
+            self.fail_profile_deletion_invariant(profile);
+            return;
+        }
+        let Some(filtered) = self.filtered_session_for_profile_deletion(profile) else {
+            self.fail_profile_deletion_invariant(profile);
+            return;
+        };
+        if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
+            state.authorization_revision = self.persistence.session_revision;
+        }
+        let outcome = self
+            .store
+            .authorize_profile_deletion(profile, filtered, deadline);
+        self.handle_profile_authorization_outcome(profile, outcome);
     }
 
     fn reconcile_profile_authorization(&mut self, profile: ProfileId, may_reauthorize: bool) {
@@ -379,6 +580,7 @@ impl Shell {
                     .find(|deletion| deletion.profile == profile)
                 {
                     self.authorization_is_durable(profile, deletion.native_erasure_verified);
+                    self.drive_profile_deletion(profile);
                     return;
                 }
                 if !may_reauthorize {
@@ -386,27 +588,25 @@ impl Shell {
                     return;
                 }
                 // The ordered absence proves the previous attempt did not
-                // publish an authorization. Rebuild from current aggregates so
-                // survivor mutations accepted since that attempt cannot be
-                // overwritten by a stale snapshot, and re-run all policy and
-                // canonical-form checks at the same boundary.
-                let Some(filtered) = self.filtered_session_for_profile_deletion(profile) else {
-                    self.finish_profile_deletion_operation(
-                        profile,
-                        OperationOutcome::Rejected,
-                        OperationReason::ProfileDeletionPolicyRejected,
-                    );
+                // publish an authorization. Re-run policy now, but do not
+                // mutate Store directly: the fresh snapshot and authorization
+                // must execute inside a new retirement continuation.
+                if self
+                    .filtered_session_for_profile_deletion(profile)
+                    .is_none()
+                {
+                    // Authorizing is reachable only after a successful
+                    // process-local extension fence. Removing the state here
+                    // would reactivate a profile whose extension ingress can
+                    // never be reopened in this worker.
+                    self.fail_profile_deletion_invariant(profile);
                     return;
-                };
+                }
                 if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                     state.authorization_revision = self.persistence.session_revision;
+                    state.phase = ProfileDeletionPhase::ExtensionFenceForAuthorization;
                 }
-                let outcome = self.store.authorize_profile_deletion(
-                    profile,
-                    filtered,
-                    std::time::Instant::now() + PROFILE_DELETION_STORE_TIMEOUT,
-                );
-                self.handle_profile_authorization_outcome(profile, outcome);
+                self.drive_profile_deletion(profile);
             }
             ProfileDeletionLoad::Failed => self.schedule_profile_deletion_retry(profile),
         }
@@ -427,24 +627,39 @@ impl Shell {
                     state.phase = ProfileDeletionPhase::ResolveAuthorizedJournal;
                     state.retry_exponent = 0;
                 }
-                self.resolve_authorized_journal(profile);
             }
             ProfileDeletionAuthorizeOutcome::OutcomeUnknown => {
                 // The ordered journal query is the only legal arbiter after a
                 // deadline. Absence is not used to guess success; the next
                 // bounded retry may re-run the idempotent authorization.
-                self.reconcile_profile_authorization(profile, false);
+                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
+                    state.phase = ProfileDeletionPhase::Authorizing {
+                        may_reauthorize: false,
+                    };
+                    state.retry_exponent = 0;
+                }
             }
             ProfileDeletionAuthorizeOutcome::NotRegistered
             | ProfileDeletionAuthorizeOutcome::SessionConflict
             | ProfileDeletionAuthorizeOutcome::InvalidSession
-            | ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
-            | ProfileDeletionAuthorizeOutcome::NotAdmitted
-            | ProfileDeletionAuthorizeOutcome::Failed => self.finish_profile_deletion_operation(
-                profile,
-                OperationOutcome::Rejected,
-                OperationReason::StoreAdmissionRejected,
-            ),
+            | ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending => {
+                // Policy/canonical validation already passed and the exact
+                // extension service just proved the durable/native ownership
+                // cohort absent. These outcomes can only mean the Store and
+                // application authorities disagree; reactivating the now
+                // permanently fenced profile would be unsafe.
+                self.fail_profile_deletion_invariant(profile)
+            }
+            ProfileDeletionAuthorizeOutcome::NotAdmitted
+            | ProfileDeletionAuthorizeOutcome::Failed => {
+                // No terminal Store contradiction was proven. Retain the
+                // fenced state and retry without touching aggregate/native
+                // data.
+                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
+                    state.phase = ProfileDeletionPhase::ExtensionFenceForAuthorization;
+                }
+                self.schedule_profile_deletion_retry(profile);
+            }
         }
     }
 
@@ -456,6 +671,7 @@ impl Shell {
                     .find(|deletion| deletion.profile == profile)
                 {
                     self.authorization_is_durable(profile, deletion.native_erasure_verified);
+                    self.drive_profile_deletion(profile);
                 } else {
                     // `AlreadyAuthorized` and a missing journal row conflict.
                     // Keep the logical tombstone and retry; never recreate the
@@ -491,10 +707,33 @@ impl Shell {
             // without pretending this scheduling pass is another mutation.
             self.schedule_current_session_persist();
         }
-        self.drive_profile_deletion(profile);
     }
 
-    fn start_native_profile_erasure(&mut self, profile: ProfileId, attempt: u64) {
+    fn start_native_profile_erasure_after_fence(&mut self, profile: ProfileId) {
+        if !self
+            .profile_deletion
+            .states
+            .get(&profile)
+            .is_some_and(|state| matches!(state.phase, ProfileDeletionPhase::NativeReady))
+        {
+            self.fail_profile_deletion_invariant(profile);
+            return;
+        }
+        let attempt = {
+            let state = self
+                .profile_deletion
+                .states
+                .get_mut(&profile)
+                .expect("phase validation retained exact deletion state");
+            state.attempt_generation = state.attempt_generation.wrapping_add(1);
+            if state.attempt_generation == 0 {
+                state.attempt_generation = 1;
+            }
+            let attempt = state.attempt_generation;
+            state.phase = ProfileDeletionPhase::NativeInFlight { attempt };
+            state.retry_exponent = 0;
+            attempt
+        };
         let inbox = self.profile_deletion.inbox.clone();
         let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
             queue: Arc::downgrade(&queue.inner),
@@ -516,9 +755,6 @@ impl Shell {
                 }
             }),
         );
-        // Some engines can reject or complete synchronously. Drain only after
-        // the caller has installed the exact in-flight generation.
-        self.consume_profile_deletion_outcome(profile);
     }
 
     pub(super) fn drain_profile_deletion_inbox(&mut self) {
@@ -577,11 +813,20 @@ impl Shell {
         }
     }
 
-    fn finalize_profile_deletion(&mut self, profile: ProfileId) {
-        let deadline = self
+    fn finalize_profile_deletion_after_fence(
+        &mut self,
+        profile: ProfileId,
+        deadline: std::time::Instant,
+    ) {
+        if !self
             .profile_deletion
-            .batch_deadline
-            .unwrap_or_else(|| std::time::Instant::now() + PROFILE_DELETION_STORE_TIMEOUT);
+            .states
+            .get(&profile)
+            .is_some_and(|state| matches!(state.phase, ProfileDeletionPhase::FinalizeReady))
+        {
+            self.fail_profile_deletion_invariant(profile);
+            return;
+        }
         if std::time::Instant::now() >= deadline {
             self.schedule_profile_deletion_retry(profile);
             return;
@@ -593,8 +838,13 @@ impl Shell {
                 OperationOutcome::Applied,
                 OperationReason::ProfileDeletionCompleted,
             ),
-            ProfileDeletionFinalizeOutcome::NotAuthorized
-            | ProfileDeletionFinalizeOutcome::NotAdmitted
+            ProfileDeletionFinalizeOutcome::NotAuthorized => {
+                // FinalizeReady is created only from a durable journal row
+                // after native proof. Losing that authorization after the
+                // extension fence is a terminal Store/application conflict.
+                self.fail_profile_deletion_invariant(profile)
+            }
+            ProfileDeletionFinalizeOutcome::NotAdmitted
             | ProfileDeletionFinalizeOutcome::OutcomeUnknown
             | ProfileDeletionFinalizeOutcome::Failed => {
                 if std::time::Instant::now() >= deadline {

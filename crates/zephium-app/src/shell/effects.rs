@@ -76,7 +76,36 @@ impl Shell {
     }
 
     pub(super) fn apply(&mut self, effects: Vec<Effect>) -> NativeWork {
-        let (effects, mut native) = self.blocker_gate_effects(effects);
+        // Deletion quarantine dominates every other profile policy. Filter
+        // before the blocker gate so an effect can never be retained there
+        // and replayed after the extension worker has installed its monotonic
+        // retirement fence.
+        let mut admitted = Vec::with_capacity(effects.len());
+        let mut native = NativeWork::default();
+        for effect in effects {
+            match effect {
+                Effect::CreateView { id, .. } if self.profile_deletion_quarantines_item(id) => {
+                    self.zoom.pending.remove(&id);
+                    self.items.view_creation_failed(id);
+                    native.rejected = true;
+                    crate::diagnostic!(
+                        "profile deletion: refused native view creation for quarantined profile"
+                    );
+                }
+                Effect::Navigate { id, request, .. }
+                    if self.profile_deletion_quarantines_item(id) =>
+                {
+                    self.items.navigation_failed(id, request);
+                    native.rejected = true;
+                    crate::diagnostic!(
+                        "profile deletion: refused native navigation for quarantined profile"
+                    );
+                }
+                effect => admitted.push(effect),
+            }
+        }
+        let (effects, blocker_native) = self.blocker_gate_effects(admitted);
+        native.merge(blocker_native);
         if effects.is_empty() {
             return native;
         }

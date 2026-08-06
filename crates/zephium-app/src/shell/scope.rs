@@ -14,6 +14,9 @@ impl Shell {
     /// placed in a space require an exact match; profile-wide favorites may
     /// appear in any space owned by that same profile.
     pub(super) fn item_in_scope(&self, id: ItemId, profile: ProfileId, space: SpaceId) -> bool {
+        if self.profile_deletion_quarantines(profile) {
+            return false;
+        }
         if self
             .spaces
             .get(space)

@@ -10,6 +10,13 @@ impl Shell {
     }
 
     pub(super) fn open_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
+        if self
+            .windows
+            .focused()
+            .is_some_and(|window| self.profile_deletion_quarantines(window.profile))
+        {
+            return None;
+        }
         let win = self.windows.focused_mut()?;
         let space = win.space;
         let id = ItemId::generate();

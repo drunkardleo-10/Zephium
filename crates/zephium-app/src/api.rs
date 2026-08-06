@@ -34,6 +34,11 @@ pub enum ShellTerminalFailure {
     ExtensionStartupFailedClosed,
     ExtensionStartupLifecyclePanicked,
     ExtensionStartupLifecycleMissing,
+    ExtensionProfileRetirementFailedClosed,
+    ExtensionProfileRetirementBoundaryPanicked,
+    ExtensionProfileRetirementLifecycleMissing,
+    ExtensionProfileRetirementContractViolated,
+    ExtensionProfileDeletionInvariant,
     ActorExitedUnexpectedly,
 }
 
@@ -45,6 +50,21 @@ impl std::fmt::Display for ShellTerminalFailure {
             Self::ExtensionStartupLifecyclePanicked => "extension startup lifecycle panicked",
             Self::ExtensionStartupLifecycleMissing => {
                 "extension startup lifecycle owner is missing"
+            }
+            Self::ExtensionProfileRetirementFailedClosed => {
+                "extension profile retirement failed closed"
+            }
+            Self::ExtensionProfileRetirementBoundaryPanicked => {
+                "extension profile retirement boundary panicked"
+            }
+            Self::ExtensionProfileRetirementLifecycleMissing => {
+                "extension profile retirement lifecycle owner is missing"
+            }
+            Self::ExtensionProfileRetirementContractViolated => {
+                "extension profile retirement continuation contract was violated"
+            }
+            Self::ExtensionProfileDeletionInvariant => {
+                "profile deletion violated a post-retirement invariant"
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
         })

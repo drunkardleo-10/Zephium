@@ -72,11 +72,12 @@ use zephium_core::ports::chrome::ChromeFrame;
 #[cfg(test)]
 use zephium_core::ports::engine::Engine;
 use zephium_core::ports::engine::{
-    DiscardProbeId, EngineEvent, NativeAction, NativeDispatch, NavigationPresentationId, Partition,
-    ProfileDataErasureOutcome, ZoomRequestId,
+    ContentScope, DiscardProbeId, EngineEvent, NativeAction, NativeDispatch,
+    NavigationPresentationId, Partition, ProfileDataErasureOutcome, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
-    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
+    ExtensionProfileRetirementDisposition, ExtensionServiceShutdownOutcome,
+    ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -151,7 +152,10 @@ pub struct Shell {
     blocker: blocker::BlockerCoordinator,
     extension_service: Option<ExtensionLifecycle>,
     extension_startup_ready: bool,
-    extension_startup_terminal: bool,
+    /// Any terminal extension lifecycle failure permanently closes bootstrap
+    /// and profile-deletion progress for this process while the desktop
+    /// composition root converges on orderly shutdown.
+    extension_lifecycle_terminal: bool,
     extension_startup_retry_exponent: u8,
     extension_startup_not_before: Option<std::time::Instant>,
     terminal_failure: Option<ShellTerminalFailureCallback>,
@@ -347,7 +351,7 @@ impl Shell {
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
             extension_service: Some(extension_service),
             extension_startup_ready: false,
-            extension_startup_terminal: false,
+            extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
             terminal_failure: Some(terminal_failure),
@@ -869,11 +873,11 @@ impl Shell {
     /// Settles extension startup away from the native event-loop thread before
     /// any recovered deletion or raw content view can be admitted.
     pub(super) fn extension_service_ready_for_bootstrap(&mut self) -> bool {
+        if self.extension_lifecycle_terminal {
+            return false;
+        }
         if self.extension_startup_ready {
             return true;
-        }
-        if self.extension_startup_terminal {
-            return false;
         }
         let now = std::time::Instant::now();
         if let Some(not_before) = self
@@ -954,7 +958,7 @@ impl Shell {
     }
 
     fn fail_extension_startup(&mut self, failure: ShellTerminalFailure) {
-        self.extension_startup_terminal = true;
+        self.extension_lifecycle_terminal = true;
         self.extension_startup_not_before = None;
         if let Some(queue) = &self.self_queue {
             queue.cancel_extension_startup();
@@ -993,7 +997,7 @@ impl Shell {
             self.handle(command);
         }
         let restore_extension_startup =
-            !self.extension_startup_ready && !self.extension_startup_terminal;
+            !self.extension_startup_ready && !self.extension_lifecycle_terminal;
         let now = std::time::Instant::now();
         let extension_retry_deadline = restore_extension_startup.then(|| {
             // Preserve the actor's exact outstanding opportunity. The timer
