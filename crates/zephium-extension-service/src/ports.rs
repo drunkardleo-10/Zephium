@@ -1,14 +1,17 @@
 use std::time::{Duration, Instant};
 
+use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
+    ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionServiceLifecycle,
     ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
     ExtensionServiceStartupOutcome as CoreExtensionServiceStartupOutcome,
 };
 
 use crate::{
-    ExtensionServiceOwner, ExtensionServiceShutdownEvidence, ExtensionServiceStartupOutcome,
-    ExtensionServiceStartupWait, ExtensionServiceStatusSnapshot, ExtensionServiceStatusWait,
+    ExtensionServiceOwner, ExtensionServiceProfileRetirementOutcome,
+    ExtensionServiceShutdownEvidence, ExtensionServiceStartupOutcome, ExtensionServiceStartupWait,
+    ExtensionServiceStatusSnapshot, ExtensionServiceStatusWait,
 };
 
 /// A startup retry may continue after the application actor's short
@@ -78,8 +81,38 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         project_lifecycle_startup_outcome(observed)
     }
 
+    fn with_profile_retired_until(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+        continuation: Box<dyn FnOnce() + '_>,
+    ) -> CoreExtensionProfileRetirementDisposition {
+        let outcome = ExtensionServiceOwner::retire_profile_until(self, profile, deadline);
+        continue_after_profile_retirement(outcome, continuation)
+    }
+
     fn shutdown_until(self: Box<Self>, deadline: Instant) -> CoreExtensionServiceShutdownOutcome {
         project_lifecycle_shutdown_outcome(ExtensionServiceOwner::shutdown_until(*self, deadline))
+    }
+}
+
+fn continue_after_profile_retirement(
+    outcome: ExtensionServiceProfileRetirementOutcome,
+    continuation: Box<dyn FnOnce() + '_>,
+) -> CoreExtensionProfileRetirementDisposition {
+    match outcome {
+        ExtensionServiceProfileRetirementOutcome::Retired => {
+            continuation();
+            CoreExtensionProfileRetirementDisposition::Continued
+        }
+        ExtensionServiceProfileRetirementOutcome::Unavailable(_) => {
+            drop(continuation);
+            CoreExtensionProfileRetirementDisposition::Unavailable
+        }
+        ExtensionServiceProfileRetirementOutcome::FailedClosed(_) => {
+            drop(continuation);
+            CoreExtensionProfileRetirementDisposition::FailedClosed
+        }
     }
 }
 
@@ -124,14 +157,51 @@ fn project_lifecycle_shutdown_outcome(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use crate::{
-        ExtensionServiceCleanupEvidence, ExtensionServicePhase, ExtensionServiceReadyEvidence,
+        ExtensionServiceCleanupEvidence, ExtensionServicePhase,
+        ExtensionServiceProfileRetirementFailureReason,
+        ExtensionServiceProfileRetirementUnavailableReason, ExtensionServiceReadyEvidence,
         ExtensionServiceStartupFailure, ExtensionServiceStartupFailureReason,
         ExtensionServiceStartupUnavailable, ExtensionServiceStartupUnavailableReason,
         ExtensionServiceWorkerIdentity,
     };
     use zephium_core::extensions::ExtensionNativeOwnershipJournalRevision;
+
+    #[test]
+    fn only_direct_retired_settlement_invokes_the_continuation() {
+        let calls = Cell::new(0_u8);
+        assert_eq!(
+            continue_after_profile_retirement(
+                ExtensionServiceProfileRetirementOutcome::Unavailable(
+                    ExtensionServiceProfileRetirementUnavailableReason::WorkerBusy,
+                ),
+                Box::new(|| calls.set(calls.get() + 1)),
+            ),
+            CoreExtensionProfileRetirementDisposition::Unavailable
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            continue_after_profile_retirement(
+                ExtensionServiceProfileRetirementOutcome::FailedClosed(
+                    ExtensionServiceProfileRetirementFailureReason::WorkerUnavailable,
+                ),
+                Box::new(|| calls.set(calls.get() + 1)),
+            ),
+            CoreExtensionProfileRetirementDisposition::FailedClosed
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            continue_after_profile_retirement(
+                ExtensionServiceProfileRetirementOutcome::Retired,
+                Box::new(|| calls.set(calls.get() + 1)),
+            ),
+            CoreExtensionProfileRetirementDisposition::Continued
+        );
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn startup_settlement_projection_preserves_every_authorizing_class() {

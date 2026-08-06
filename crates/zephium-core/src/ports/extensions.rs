@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use crate::ids::ProfileId;
+
 /// Application-facing result of consuming the extension-service owner.
 ///
 /// `Unclean` is terminal. The concrete service may retain more precise
@@ -41,6 +43,31 @@ pub enum ExtensionServiceStartupOutcome {
     RetryableNotAdmitted,
 }
 
+/// Coarse settlement of one synchronous profile-retirement continuation.
+///
+/// This value is deliberately informational and publicly constructible. It is
+/// not an unforgeable capability. Zephium's audited composition rule is that
+/// Store authorization, native website-data erasure, and Store finalization
+/// occur only inside the continuation passed to
+/// [`ExtensionServiceLifecycle::with_profile_retired_until`]. The service
+/// invokes that continuation only after its worker directly settles the exact
+/// profile as retired. App-level behavior tests protect all three call sites;
+/// the Rust type system does not independently enforce that architectural
+/// rule.
+#[must_use = "profile-retirement continuation settlement must be checked"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionProfileRetirementDisposition {
+    /// The service proved retirement and invoked the continuation exactly
+    /// once before returning.
+    Continued,
+    /// Retirement did not settle in this attempt. The continuation was not
+    /// invoked and profile data must remain intact for a bounded retry.
+    Unavailable,
+    /// The service failed closed. The continuation was not invoked and the
+    /// current process must not continue profile deletion.
+    FailedClosed,
+}
+
 /// Move-only application lifecycle boundary for the extension service.
 ///
 /// The unique owner is held behind a `Box` and consumed by shutdown. This
@@ -57,6 +84,32 @@ pub trait ExtensionServiceLifecycle: Send {
     /// [`ExtensionServiceStartupOutcome::Ready`] permits extension-sensitive
     /// application bootstrap.
     fn settle_startup_until(&mut self, deadline: Instant) -> ExtensionServiceStartupOutcome;
+
+    /// Permanently fences `profile`, proves every extension-owned durable,
+    /// package, and native obligation absent, then invokes `continuation`
+    /// exactly once before returning [`ExtensionProfileRetirementDisposition::Continued`].
+    ///
+    /// The continuation is the authority boundary. Implementations must drop
+    /// it without invocation for every unavailable or failed-closed result.
+    /// Zephium callers must put Store authorization, native website-data
+    /// erasure, or Store finalization *inside* this continuation and must not
+    /// branch on the copied return value to perform those effects later. This
+    /// is an audited composition rule, not a type-level capability guarantee.
+    ///
+    /// This call may wait until the absolute `deadline` and follows the same
+    /// native-event-loop restriction as [`Self::settle_startup_until`]. The
+    /// default is fail-closed so test-only or compatibility lifecycle adapters
+    /// cannot accidentally authorize deletion when they have no retirement
+    /// implementation.
+    fn with_profile_retired_until(
+        &mut self,
+        _profile: ProfileId,
+        _deadline: Instant,
+        continuation: Box<dyn FnOnce() + '_>,
+    ) -> ExtensionProfileRetirementDisposition {
+        drop(continuation);
+        ExtensionProfileRetirementDisposition::FailedClosed
+    }
 
     /// Seals service admission and consumes the unique owner while attempting
     /// to prove worker termination and resource release by `deadline`.
@@ -83,6 +136,16 @@ mod tests {
             ExtensionServiceStartupOutcome::Ready
         }
 
+        fn with_profile_retired_until(
+            &mut self,
+            _profile: ProfileId,
+            _deadline: Instant,
+            continuation: Box<dyn FnOnce() + '_>,
+        ) -> ExtensionProfileRetirementDisposition {
+            continuation();
+            ExtensionProfileRetirementDisposition::Continued
+        }
+
         fn shutdown_until(self: Box<Self>, _deadline: Instant) -> ExtensionServiceShutdownOutcome {
             self.consumed.store(true, Ordering::Release);
             ExtensionServiceShutdownOutcome::Clean
@@ -103,6 +166,17 @@ mod tests {
             lifecycle.settle_startup_until(Instant::now()),
             ExtensionServiceStartupOutcome::Ready
         );
+        let continued = Arc::new(AtomicBool::new(false));
+        let continued_by_callback = Arc::clone(&continued);
+        assert_eq!(
+            lifecycle.with_profile_retired_until(
+                ProfileId::from(7),
+                Instant::now(),
+                Box::new(move || continued_by_callback.store(true, Ordering::Release)),
+            ),
+            ExtensionProfileRetirementDisposition::Continued
+        );
+        assert!(continued.load(Ordering::Acquire));
         assert_eq!(
             lifecycle.shutdown_until(Instant::now()),
             ExtensionServiceShutdownOutcome::Clean
