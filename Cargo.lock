@@ -6254,6 +6254,7 @@ dependencies = [
  "windows-core 0.61.2",
  "wry",
  "zephium-core",
+ "zephium-extension-runtime-api",
 ]
 
 [[package]]

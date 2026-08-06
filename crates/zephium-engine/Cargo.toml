@@ -40,6 +40,7 @@ required-features = ["native-web-extension-probes"]
 
 [dependencies]
 zephium-core.workspace = true
+zephium-extension-runtime-api.workspace = true
 wry.workspace = true
 serde_json.workspace = true
 tempfile = { workspace = true, optional = true }

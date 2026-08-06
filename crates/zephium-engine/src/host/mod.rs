@@ -2,6 +2,7 @@ mod construction;
 mod content_rules;
 mod discard;
 mod dispatch;
+pub(crate) mod extension_runtime;
 mod extensions;
 mod lifecycle;
 mod navigation;
@@ -341,6 +342,7 @@ pub(crate) struct EngineHost {
     private_runtime: zephium_core::webview2::RuntimeGeneration,
     views: HashMap<ItemId, ObservedView>,
     native_resources: NativeResourceLedger,
+    extension_runtime_registry: extension_runtime::ExtensionRuntimeRegistry,
     extension_document_authority: ExtensionDocumentAuthority,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,

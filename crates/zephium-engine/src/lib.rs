@@ -760,6 +760,7 @@ pub struct WebviewEngine {
     runtime_security_advisories: RuntimeSecurityAdvisories,
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
     user_content_dispatch: Arc<UserContentDispatchGate>,
+    extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot,
 }
 
 const MAX_IN_FLIGHT_USER_CONTENT_REQUESTS: usize = 4;
@@ -932,12 +933,15 @@ pub fn install(
             fail_native_host_admission(&event_delivery, &retirement, &fatal, reason)
         }) as Arc<dyn Fn(&'static str) + Send + Sync>
     };
+    let extension_runtime_host =
+        host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(dispatch.clone());
     host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
         initial_user_content.generation,
         initial_user_content.content,
+        extension_runtime_host.gate(),
         sink.clone(),
         native_terminal_failure,
     )?;
@@ -950,6 +954,7 @@ pub fn install(
         runtime_security_advisories,
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+        extension_runtime_host,
     })
 }
 
@@ -968,6 +973,17 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// Takes the process-unique native extension-runtime host factory.
+    ///
+    /// The factory is deliberately move-only and serialized. Exactly one
+    /// caller can acquire it, including when several startup threads race.
+    #[must_use]
+    pub fn take_extension_runtime_host_factory(
+        &self,
+    ) -> Option<zephium_extension_runtime_api::ExtensionRuntimeHostFactory> {
+        self.extension_runtime_host.take()
+    }
+
     /// Feed an update signal from a privileged environment into the same
     /// sticky, deduplicated gate used by raw environments. This does not
     /// restart or rebuild anything; the shell owns user notification and the
@@ -1630,6 +1646,10 @@ impl Engine for WebviewEngine {
     }
 
     fn shutdown(&self, done: Box<dyn FnOnce(bool) + Send>) {
+        // Seal process-local extension reservations before queuing the native
+        // teardown barrier. A racing service bind can therefore never appear
+        // behind shutdown even when the event-loop dispatch is delayed.
+        self.extension_runtime_host.seal();
         let completion = Arc::new(std::sync::Mutex::new(Some(done)));
         let dispatched_completion = completion.clone();
         if !self.run(move || {
@@ -1660,6 +1680,54 @@ mod tests {
 
     fn test_layout_updates() -> Arc<layout_queue::LatestLayouts<PendingLayout>> {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
+    }
+
+    fn engine_with_extension_runtime_factory() -> WebviewEngine {
+        WebviewEngine {
+            dispatch: Arc::new(|_| false),
+            sink: Arc::new(|_| {}),
+            retirement: Arc::new(Mutex::new(RetirementGate::default())),
+            event_delivery: Arc::new(EventDeliveryGate::default()),
+            fatal_security_failure: Arc::new(|_| {}),
+            runtime_security_advisories: RuntimeSecurityAdvisories::new(),
+            layout_updates: test_layout_updates(),
+            user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(
+                Arc::new(|_| false),
+            ),
+        }
+    }
+
+    #[test]
+    fn extension_runtime_host_factory_is_taken_exactly_once() {
+        let engine = engine_with_extension_runtime_factory();
+        assert!(engine.take_extension_runtime_host_factory().is_some());
+        assert!(engine.take_extension_runtime_host_factory().is_none());
+    }
+
+    #[test]
+    fn concurrent_extension_runtime_factory_take_has_one_winner() {
+        let engine = Arc::new(engine_with_extension_runtime_factory());
+        let start = Arc::new(std::sync::Barrier::new(9));
+        let winners = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let engine = Arc::clone(&engine);
+            let start = Arc::clone(&start);
+            let winners = Arc::clone(&winners);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                if engine.take_extension_runtime_host_factory().is_some() {
+                    winners.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            worker.join().expect("factory-take worker must not panic");
+        }
+        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        assert!(engine.take_extension_runtime_host_factory().is_none());
     }
 
     #[test]
@@ -1765,6 +1833,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: gate.clone(),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
         let profile = ProfileId::from(1);
 
@@ -1808,6 +1878,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         for scale in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.29, 3.01] {
@@ -1889,6 +1961,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
@@ -1922,6 +1996,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         engine.erase_profile_data(
@@ -2004,6 +2080,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
         let profile = ProfileId::from(91);
         let id = ItemId::from(1);
@@ -2367,6 +2445,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
         let (tx, rx) = mpsc::channel();
         engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
@@ -2662,6 +2742,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         assert_eq!(engine.close(id), NativeDispatch::Rejected);
@@ -2693,6 +2775,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         assert_eq!(
@@ -2759,6 +2843,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         assert_eq!(
@@ -2806,6 +2892,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         for window in 0..MAX_PENDING_LAYOUT_WINDOWS as u64 {
@@ -2868,6 +2956,8 @@ mod tests {
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
+            extension_runtime_host:
+                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
 
         assert_eq!(engine.reload(id), NativeDispatch::Scheduled);

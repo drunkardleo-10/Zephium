@@ -133,6 +133,7 @@ impl EngineHost {
             && self.windows_cleanup_debts.is_empty()
             && !self.windows_cleanup_invariant_failed
             && !self.native_resource_accounting_failed
+            && self.extension_runtime_registry.is_quiescent()
             && self.native_resources.is_quiescent()
             && self
                 .environments
@@ -181,6 +182,7 @@ impl EngineHost {
     fn shutdown_common(&mut self) {
         // Shutdown is a terminal authority barrier, including runtimes that
         // currently have no tab-scoped grant rows.
+        self.extension_runtime_registry.seal();
         self.extension_document_authority.revoke_all();
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {

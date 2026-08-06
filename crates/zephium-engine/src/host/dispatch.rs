@@ -108,6 +108,9 @@ enum HostTaskPriority {
     Observation,
     Lifecycle,
     Close,
+    // Exact extension-owner lifecycle and terminal debts are never keyed,
+    // coalesced, replaced, or admitted from an ordinary task's capacity.
+    ExtensionRuntime,
     ProfileErasure,
     Shutdown,
 }
@@ -153,13 +156,21 @@ const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     zephium_core::session::MAX_SESSION_PROFILES;
 const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY - PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
+// A lifecycle call and its independently held publication proxy can each
+// contribute one accepted task for every bounded logical owner reservation.
+// Reserve and independently hard-cap that complete cohort before navigation
+// and ordinary work.
+const EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
+    2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
+const NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY;
 // One globally coalesced commit gate per native view remains admissible even
 // if ordinary observations/lifecycle work fill their band. The native view
 // resource ceiling proves no more distinct live commit keys can exist while
 // the host is re-entrantly borrowed.
 const NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize = MAX_NATIVE_VIEW_RESOURCES;
 const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
+    NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 
 pub(crate) fn install(
@@ -167,6 +178,7 @@ pub(crate) fn install(
     data_root: PathBuf,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
+    extension_runtime_gate: super::extension_runtime::ExtensionRuntimeFactoryGate,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
@@ -219,6 +231,8 @@ pub(crate) fn install(
             private_runtime,
             views: HashMap::new(),
             native_resources: NativeResourceLedger::default(),
+            extension_runtime_registry:
+                super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),
             extension_document_authority: super::extensions::ExtensionDocumentAuthority::default(),
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
@@ -379,6 +393,19 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::ProfileErasure, None, f)
+}
+
+/// Admit one exact extension-runtime lifecycle or terminal debt.
+///
+/// The dedicated band is noncoalescing and cannot be consumed or replaced by
+/// ordinary renderer work. Shutdown sealing rejects new debts, while every
+/// debt admitted before the shutdown barrier remains ahead of it in FIFO
+/// order.
+pub(super) fn try_with_extension_runtime<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::ExtensionRuntime, None, f)
 }
 
 pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
@@ -736,7 +763,22 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // when exercised directly as well.
         return false;
     }
-    if let Some(key) = queued.key {
+    if queued.priority == HostTaskPriority::ExtensionRuntime
+        && pending
+            .iter()
+            .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
+            .count()
+            >= EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+    {
+        // These are exact, noncoalescible owner obligations. Their reserved
+        // band is also a hard cohort ceiling; spare ordinary/navigation space
+        // is never borrowed by retries while the UI thread is stalled.
+        return false;
+    }
+    if queued.priority != HostTaskPriority::ExtensionRuntime {
+        let Some(key) = queued.key else {
+            return enqueue_bounded_pending(pending, queued);
+        };
         if matches!(key, HostTaskKey::NavigationCommit(_)) {
             // A newer exact commit makes an older still-queued commit task a
             // stale no-op. Coalesce globally (not merely adjacently), keeping
@@ -759,6 +801,10 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
             return true;
         }
     }
+    enqueue_bounded_pending(pending, queued)
+}
+
+fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTask) -> bool {
     if queued.priority == HostTaskPriority::Normal
         && pending.len() >= NORMAL_PENDING_HOST_TASK_CAPACITY
     {
@@ -767,8 +813,9 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
     let capacity = match queued.priority {
         HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
+        HostTaskPriority::ExtensionRuntime => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
         _ if matches!(queued.key, Some(HostTaskKey::NavigationCommit(_))) => {
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
         }
         _ => NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY,
     };
@@ -799,10 +846,14 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
             .iter()
             .position(|task| task.priority < queued.priority),
         HostTaskPriority::Observation | HostTaskPriority::Lifecycle | HostTaskPriority::Close => {
-            pending
-                .iter()
-                .position(|task| task.priority < queued.priority)
+            pending.iter().position(|task| {
+                task.priority < queued.priority
+                    && task.priority != HostTaskPriority::ExtensionRuntime
+            })
         }
+        // Accepted owner operations are exact authority debts. Replacing one
+        // would leak or fabricate native ownership settlement.
+        HostTaskPriority::ExtensionRuntime => None,
         // Its dedicated band guarantees the bounded first cohort. Past that
         // point rejecting this attempt is safer than dropping an already
         // admitted close/lifecycle obligation; the public retirement gate has
@@ -1129,6 +1180,74 @@ mod tests {
     }
 
     #[test]
+    fn extension_runtime_band_is_hard_capped_in_an_otherwise_empty_queue() {
+        let mut pending = VecDeque::new();
+        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::ExtensionRuntime)
+            ));
+        }
+        for _ in 0..(2 * EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY) {
+            assert!(!enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::ExtensionRuntime)
+            ));
+        }
+        assert_eq!(pending.len(), EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY);
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
+                .count(),
+            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+    }
+
+    #[test]
+    fn extension_runtime_band_recovers_only_after_an_exact_task_leaves() {
+        let mut pending = VecDeque::new();
+        let key = HostTaskKey::View(ItemId::from(1_u128));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::ExtensionRuntime, key)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::ExtensionRuntime, key)
+        ));
+        assert_eq!(pending.len(), 2, "exact tasks are never coalesced");
+        for _ in 2..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::ExtensionRuntime)
+            ));
+        }
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntime)
+        ));
+
+        drop(
+            pending
+                .pop_front()
+                .expect("one exact task leaves the queue"),
+        );
+        assert!(enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntime)
+        ));
+        assert_eq!(pending.len(), EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY);
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
+                .count(),
+            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+    }
+
+    #[test]
     fn reentrant_queue_bounds_shutdown_and_prioritizes_close() {
         let mut pending = VecDeque::new();
         for _ in 0..NORMAL_PENDING_HOST_TASK_CAPACITY {
@@ -1164,6 +1283,17 @@ mod tests {
                     HostTaskPriority::Lifecycle,
                     HostTaskKey::NavigationCommit(ItemId::from(raw as u128))
                 )
+            ));
+        }
+        assert_eq!(
+            pending.len(),
+            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+
+        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::ExtensionRuntime)
             ));
         }
         assert_eq!(
@@ -1222,8 +1352,23 @@ mod tests {
         }
         assert_eq!(
             pending.len(),
+            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+
+        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::ExtensionRuntime)
+            ));
+        }
+        assert_eq!(
+            pending.len(),
             NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
         );
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::ExtensionRuntime)
+        ));
 
         for _ in 0..PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
@@ -1248,7 +1393,14 @@ mod tests {
                 .iter()
                 .filter(|task| task.priority == HostTaskPriority::Lifecycle)
                 .count(),
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
+                .count(),
+            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(
             pending
@@ -1268,7 +1420,14 @@ mod tests {
                 .iter()
                 .filter(|task| task.priority == HostTaskPriority::Lifecycle)
                 .count(),
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
+                .count(),
+            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(
             pending
@@ -1433,7 +1592,7 @@ mod tests {
             &mut pending,
             keyed(HostTaskPriority::Lifecycle, commit)
         ));
-        assert!(pending.len() <= NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY);
+        assert!(pending.len() <= NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY);
     }
 
     #[test]
