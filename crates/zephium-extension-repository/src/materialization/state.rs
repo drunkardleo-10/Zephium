@@ -469,7 +469,7 @@ impl From<ExtensionCatalogGenerationRole> for HistoricalCatalogRole {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DurablePackagePin {
     pub(crate) profile_id: ProfileId,

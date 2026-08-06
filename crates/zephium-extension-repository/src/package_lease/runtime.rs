@@ -6,8 +6,8 @@ use std::sync::{Arc, Weak};
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
 use crate::materialization::{
-    PackageLeaseRepositoryIdentity, VerifiedActivePackageSnapshot, VerifiedRollbackPackageSnapshot,
-    MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_PACKAGE_PINS,
+    OwnerPackagePinIdentity, PackageLeaseRepositoryIdentity, VerifiedActivePackageSnapshot,
+    VerifiedRollbackPackageSnapshot, MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_PACKAGE_PINS,
 };
 use crate::state::Digest32;
 
@@ -18,6 +18,13 @@ pub(super) struct LeasePresence {
     pub(super) repository: PackageLeaseRepositoryIdentity,
     pub(super) profile: ProfileId,
     pub(super) install: ExtensionInstallId,
+    pub(super) binding: LeasePresenceBinding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LeasePresenceBinding {
+    DurablePin(OwnerPackagePinIdentity),
+    Reconciliation,
 }
 
 type LeaseOwner = (ProfileId, ExtensionInstallId);
@@ -86,11 +93,40 @@ impl PackageLeaseRuntime {
         Ok(shared)
     }
 
-    pub(super) fn reserve(
+    pub(super) fn reserve_owner(
+        &mut self,
+        repository: PackageLeaseRepositoryIdentity,
+        pin: OwnerPackagePinIdentity,
+    ) -> Result<Arc<LeasePresence>, LocalLeaseError> {
+        let (profile, install) = pin.lease_owner();
+        self.reserve(
+            repository,
+            profile,
+            install,
+            LeasePresenceBinding::DurablePin(pin),
+        )
+    }
+
+    pub(super) fn reserve_reconciliation(
         &mut self,
         repository: PackageLeaseRepositoryIdentity,
         profile: ProfileId,
         install: ExtensionInstallId,
+    ) -> Result<Arc<LeasePresence>, LocalLeaseError> {
+        self.reserve(
+            repository,
+            profile,
+            install,
+            LeasePresenceBinding::Reconciliation,
+        )
+    }
+
+    fn reserve(
+        &mut self,
+        repository: PackageLeaseRepositoryIdentity,
+        profile: ProfileId,
+        install: ExtensionInstallId,
+        binding: LeasePresenceBinding,
     ) -> Result<Arc<LeasePresence>, LocalLeaseError> {
         self.live.retain(|_, value| value.strong_count() != 0);
         let owner = (profile, install);
@@ -106,6 +142,7 @@ impl PackageLeaseRuntime {
             repository,
             profile,
             install,
+            binding,
         });
         self.live.insert(owner, Arc::downgrade(&presence));
         Ok(presence)

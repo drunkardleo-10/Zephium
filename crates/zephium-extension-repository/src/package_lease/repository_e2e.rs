@@ -29,7 +29,10 @@ use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledPackageAuthority,
     ProductExtensionManifestAuthority, ProductExtensionRuntimeTarget,
 };
-use zephium_extension_package::{CanonicalExtensionTreeIndex, PortableRelativePath};
+use zephium_extension_package::{
+    CanonicalExtensionTreeIndex, PortableRelativePath, MAX_EXTENSION_LEGAL_NOTICE_BYTES,
+    MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+};
 use zephium_extension_runtime_api::{
     ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessError,
     ExtensionPackageAccessView, ExtensionRuntimeActivationDisposition,
@@ -47,7 +50,7 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
-use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
+use zephium_private_fs::{ByteLimit, LockedPrivateNamespace, PrivateComponent, PrivateFsError};
 
 use super::api::{
     ActiveBundledPackageLease, BundledCatalogGenerationRole, BundledCurrentCatalogSet,
@@ -63,14 +66,14 @@ use super::runtime_access::{
 };
 use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
-    current_catalog_set_projection, install_orphan_package_record_stage_for_e2e,
-    install_resumable_package_record_stage_for_e2e, load_active_package_pin_admission,
-    open_product_manifest_authority, plan_current_catalog_package_pin,
-    plan_owner_package_pin_removal, preflight_package_object_capacity, prepare_rollback_package,
-    remove_owner_package_pin, repository_package_io_count,
-    reset_completed_package_verification_count, reset_repository_package_io_count,
-    MaterializationTransitionError, OwnerPackagePinPlan, OwnerPackagePinRemovalPlan,
-    PackageObjectIntentDisposition,
+    current_catalog_set_projection, gc_legal_object, gc_tree_object, gc_tree_retired,
+    install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
+    load_active_package_pin_admission, open_product_manifest_authority,
+    plan_current_catalog_package_pin, plan_owner_package_pin_removal,
+    preflight_package_object_capacity, prepare_rollback_package, remove_owner_package_pin,
+    repository_package_io_count, reset_completed_package_verification_count,
+    reset_repository_package_io_count, MaterializationTransitionError, OwnerPackagePinPlan,
+    OwnerPackagePinRemovalPlan, PackageObjectIntentDisposition,
 };
 use crate::state::Digest32;
 use crate::{
@@ -79,6 +82,7 @@ use crate::{
     BundledPackageRuntimeSelection, BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,
     BundledReleaseSourceError, ExtensionRepository, ExtensionRepositoryError,
+    ProfilePackageAbsenceRevalidationError, ProfilePackageObligation, ProfilePackageObligationKind,
 };
 
 use crate::repository_e2e_fixture as fixture;
@@ -1043,6 +1047,178 @@ fn settle_compatibility_host_activation(
     };
     let authority = receipt.reclaim_after_absence(release_entry).unwrap();
     (access, authority)
+}
+
+#[test]
+fn profile_package_audit_distinguishes_live_durable_and_absent_owners() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_active(&mut repository, &active);
+    let profile = ProfileId::from(89);
+    let fixture = EligibilityFixture::active(&active, profile, ExtensionInstallId::from(97));
+    let binding = fixture.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let ProfilePackageObligation::Absent(pre_acquisition_absence) = repository
+        .audit_profile_package_obligations(profile)
+        .unwrap()
+    else {
+        panic!("unowned profile was reported to have a package obligation");
+    };
+    let lease = acquire_active(&mut repository, binding).unwrap();
+    assert_eq!(
+        repository.revalidate_profile_package_absence(profile, pre_acquisition_absence),
+        Err(ProfilePackageAbsenceRevalidationError::ObligationsRemain(
+            ProfilePackageObligationKind::SameOpenPresence {
+                durable_pin_count: 1,
+                same_open_presence_count: 1,
+            }
+        ))
+    );
+
+    let live = repository
+        .audit_profile_package_obligations(profile)
+        .unwrap();
+    let ProfilePackageObligation::Present(live) = live else {
+        panic!("live package owner was reported absent");
+    };
+    assert_eq!(
+        live,
+        ProfilePackageObligationKind::SameOpenPresence {
+            durable_pin_count: 1,
+            same_open_presence_count: 1,
+        }
+    );
+
+    let unrelated = ProfileId::from(101);
+    let unrelated_audit = repository
+        .audit_profile_package_obligations(unrelated)
+        .unwrap();
+    let ProfilePackageObligation::Absent(unrelated_absence) = unrelated_audit else {
+        panic!("unrelated profile inherited another profile's package pin");
+    };
+    assert_eq!(unrelated_absence.profile(), unrelated);
+
+    drop(lease);
+    let durable = repository
+        .audit_profile_package_obligations(profile)
+        .unwrap();
+    assert!(matches!(
+        durable,
+        ProfilePackageObligation::Present(ProfilePackageObligationKind::DurablePins { count: 1 })
+    ));
+
+    drop(repository);
+    let mut reopened = harness.open();
+    assert!(matches!(
+        reopened.audit_profile_package_obligations(profile),
+        Ok(ProfilePackageObligation::Present(
+            ProfilePackageObligationKind::DurablePins { count: 1 }
+        ))
+    ));
+}
+
+#[test]
+fn profile_package_audit_revalidates_the_outer_catalog_inventory() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    establish_active(&mut repository, &active);
+    let digest = Digest32::from_bytes(active.catalog_digest().bytes());
+    let stage = crate::names::catalog_stage(digest);
+    let replacement_identity = repository
+        .writer_catalogs()
+        .write_new_synced(
+            &stage,
+            fixture::ACTIVE_CATALOG_BYTES,
+            ByteLimit::new(MAX_EXTENSION_RELEASE_CATALOG_BYTES).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .writer_catalogs()
+            .replace_verified_regular(&stage, &crate::names::catalog_file(digest))
+            .unwrap(),
+        replacement_identity
+    );
+
+    assert!(matches!(
+        repository.audit_profile_package_obligations(ProfileId::from(103)),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+    assert!(repository.writer_is_sealed());
+}
+
+#[test]
+fn profile_package_audit_reauthenticates_legal_bytes() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    establish_active(&mut repository, &active);
+    {
+        let runtime = repository.writer_materialization().unwrap();
+        let package = runtime._package_records.values().next().unwrap();
+        let legal_id = package.legal.sha256;
+        let mut corrupt = fixture::LEGAL_NOTICE_BYTES.to_vec();
+        corrupt[0] ^= 0xFF;
+        let stage = PrivateComponent::new("profile-audit-legal.stage").unwrap();
+        runtime
+            ._records
+            .write_new_synced(
+                &stage,
+                &corrupt,
+                ByteLimit::new(MAX_EXTENSION_LEGAL_NOTICE_BYTES as usize).unwrap(),
+            )
+            .unwrap();
+        runtime
+            ._records
+            .seal_verified_regular(&stage)
+            .unwrap()
+            .unwrap();
+        runtime
+            ._records
+            .replace_verified_regular(&stage, &gc_legal_object(legal_id))
+            .unwrap();
+    }
+
+    assert!(matches!(
+        repository.audit_profile_package_obligations(ProfileId::from(107)),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+    assert!(repository.writer_is_sealed());
+}
+
+#[test]
+fn profile_package_audit_reopens_tree_roots_and_rejects_replacement() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    establish_active(&mut repository, &active);
+    {
+        let runtime = repository.writer_materialization().unwrap();
+        let package = runtime._package_records.values().next().unwrap();
+        let tree_id = package.tree_index.tree_sha256;
+        let original = runtime
+            ._trees
+            .open_sealed_private_child(&gc_tree_object(tree_id))
+            .unwrap();
+        let retired_name = gc_tree_retired(tree_id, runtime._state.generation + 1).unwrap();
+        drop(
+            original
+                .publish_noreplace(&runtime._trees, &retired_name)
+                .unwrap(),
+        );
+        let replacement = runtime
+            ._trees
+            .create_new_private_child(&gc_tree_object(tree_id))
+            .unwrap();
+        drop(replacement.seal().unwrap());
+    }
+
+    assert!(matches!(
+        repository.audit_profile_package_obligations(ProfileId::from(109)),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+    assert!(repository.writer_is_sealed());
 }
 
 #[test]

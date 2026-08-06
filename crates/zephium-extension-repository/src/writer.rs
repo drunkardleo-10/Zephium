@@ -637,7 +637,7 @@ const fn cleanup_error_requires_sealing(error: CleanupError) -> bool {
     }
 }
 
-const fn filesystem_error_requires_sealing(error: PrivateFsError) -> bool {
+pub(crate) const fn filesystem_error_requires_sealing(error: PrivateFsError) -> bool {
     match error {
         PrivateFsError::NotFound
         | PrivateFsError::ReservedComponent

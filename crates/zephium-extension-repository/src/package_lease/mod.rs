@@ -3,6 +3,7 @@
 mod api;
 mod manifest_bindings;
 mod policy;
+mod profile_audit;
 mod repository;
 mod resource;
 mod runtime;
@@ -15,6 +16,10 @@ pub use api::{
     BundledPackageResourceError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
 };
 pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
+pub use profile_audit::{
+    ProfilePackageAbsenceEvidence, ProfilePackageAbsenceRevalidationError,
+    ProfilePackageObligation, ProfilePackageObligationKind,
+};
 pub(crate) use runtime::PackageLeaseRuntime;
 pub use runtime_access::{
     ActiveBundledRuntimeHostActivation, ActiveBundledRuntimeHostActivationBindingRefusal,

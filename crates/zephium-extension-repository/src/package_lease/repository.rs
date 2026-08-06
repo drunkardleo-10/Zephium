@@ -167,8 +167,6 @@ impl ExtensionRepository {
         binding: ExtensionPackagePinAcquisitionBinding,
     ) -> Result<ActiveBundledPackageLease, BundledPackageLeaseError> {
         let expected_current = catalog_set_identity(&binding);
-        let profile = binding.profile();
-        let install = binding.install_id();
         let (mut current, fresh, admission) = self.load_fresh_active(expected_current, &binding)?;
         let plan = self.plan_exact_pin(&admission)?;
         let (pin, fresh) = match plan {
@@ -210,7 +208,7 @@ impl ExtensionRepository {
         };
         let presence = self
             .package_leases
-            .reserve(current.repository(), profile, install)
+            .reserve_owner(current.repository(), pin)
             .map_err(map_local_acquire)?;
         Ok(ActiveBundledPackageLease {
             core: PackageLeaseCore {
@@ -231,8 +229,6 @@ impl ExtensionRepository {
         binding: ExtensionPackagePinAcquisitionBinding,
     ) -> Result<RollbackBundledPackageLease, BundledPackageLeaseError> {
         let expected_current = catalog_set_identity(&binding);
-        let profile = binding.profile();
-        let install = binding.install_id();
         let (mut current, fresh, admission) =
             self.load_fresh_rollback(expected_current, &binding)?;
         let plan = self.plan_exact_pin(&admission)?;
@@ -275,7 +271,7 @@ impl ExtensionRepository {
         };
         let presence = self
             .package_leases
-            .reserve(current.repository(), profile, install)
+            .reserve_owner(current.repository(), pin)
             .map_err(map_local_acquire)?;
         Ok(RollbackBundledPackageLease {
             core: PackageLeaseCore {
@@ -356,22 +352,22 @@ impl ExtensionRepository {
                 trees: materialization._trees.identity(),
             }
         };
-        let presence =
-            match self
-                .package_leases
-                .reserve(repository, binding.profile(), binding.install_id())
-            {
-                Ok(presence) => presence,
-                Err(LocalLeaseError::AlreadyOpen | LocalLeaseError::ConcurrentLease) => {
-                    return Err(BundledPackageLeaseReleaseError::ConcurrentLease);
-                }
-                Err(LocalLeaseError::SnapshotMismatch | LocalLeaseError::CapacityExhausted) => {
-                    self.writer_seal();
-                    return Err(BundledPackageLeaseReleaseError::Repository(
-                        ExtensionRepositoryError::RecoveryAmbiguous,
-                    ));
-                }
-            };
+        let presence = match self.package_leases.reserve_reconciliation(
+            repository,
+            binding.profile(),
+            binding.install_id(),
+        ) {
+            Ok(presence) => presence,
+            Err(LocalLeaseError::AlreadyOpen | LocalLeaseError::ConcurrentLease) => {
+                return Err(BundledPackageLeaseReleaseError::ConcurrentLease);
+            }
+            Err(LocalLeaseError::SnapshotMismatch | LocalLeaseError::CapacityExhausted) => {
+                self.writer_seal();
+                return Err(BundledPackageLeaseReleaseError::Repository(
+                    ExtensionRepositoryError::RecoveryAmbiguous,
+                ));
+            }
+        };
         let result = self.reconcile_bundled_package_pin_release_inner(binding);
         self.package_leases.retire_presence(&presence);
         result

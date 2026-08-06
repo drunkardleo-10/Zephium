@@ -781,7 +781,7 @@ fn run_internal_repository_e2e_tests() {
     // whose regular-build tests already ran in the workspace suite.
     const TEST_SELECTIONS: [(&str, usize, bool); 8] = [
         ("writer::repository_e2e_tests::", 22, false),
-        ("package_lease::repository_e2e::", 14, false),
+        ("package_lease::repository_e2e::", 18, false),
         ("garbage_collection::tests::", 10, false),
         ("materialization::measurement::tests::", 3, false),
         (

@@ -32,15 +32,24 @@ pub(crate) fn read_required_sealed_record(
     name: &PrivateComponent,
     maximum: usize,
 ) -> Result<Vec<u8>, ExtensionRepositoryError> {
+    read_required_sealed_record_with(directory, name, maximum, |reader| {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn read_required_sealed_record_with(
+    directory: &PrivateDirectory,
+    name: &PrivateComponent,
+    maximum: usize,
+    read: impl FnOnce(&mut dyn std::io::Read) -> Result<Vec<u8>, std::io::Error>,
+) -> Result<Vec<u8>, ExtensionRepositoryError> {
     let read = directory
-        .with_bounded_sealed_regular_reader(name, ByteLimit::new(maximum)?, |reader| {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes)?;
-            Ok::<_, std::io::Error>(bytes)
-        })
+        .with_bounded_sealed_regular_reader(name, ByteLimit::new(maximum)?, read)
         .map_err(map_recovery_fs)?
         .ok_or(ExtensionRepositoryError::RecoveryAmbiguous)?;
-    read.map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)
+    read.map_err(|_| ExtensionRepositoryError::FileSystem(PrivateFsError::Io))
 }
 
 pub(crate) fn verify_required_sealed_record(
@@ -92,5 +101,47 @@ pub(crate) fn map_initialization_fs(error: PrivateFsError) -> ExtensionRepositor
             ExtensionRepositoryError::RecoveryAmbiguous
         }
         other => ExtensionRepositoryError::FileSystem(other),
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use zephium_private_fs::LockedPrivateNamespace;
+
+    use super::*;
+
+    #[test]
+    fn callback_read_failure_remains_retryable_after_filesystem_reproof() {
+        #[cfg(target_os = "macos")]
+        let temporary = tempfile::tempdir_in("/private/tmp").unwrap();
+        #[cfg(target_os = "linux")]
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let namespace =
+            LockedPrivateNamespace::open_or_create(temporary.path().join("repository")).unwrap();
+        let name = PrivateComponent::new("sealed.record").unwrap();
+        namespace
+            .directory()
+            .write_new_synced(&name, b"authenticated", ByteLimit::new(32).unwrap())
+            .unwrap();
+        namespace
+            .directory()
+            .seal_verified_regular(&name)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            read_required_sealed_record_with(namespace.directory(), &name, 32, |_reader| {
+                Err(std::io::Error::other("injected read failure"))
+            }),
+            Err(ExtensionRepositoryError::FileSystem(PrivateFsError::Io))
+        );
+        assert_eq!(
+            read_required_sealed_record(namespace.directory(), &name, 32).unwrap(),
+            b"authenticated"
+        );
     }
 }

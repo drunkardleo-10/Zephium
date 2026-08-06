@@ -25,6 +25,7 @@ mod objects;
 mod package_lease;
 mod policy;
 mod prepare;
+mod profile_audit;
 mod records;
 mod recovery;
 mod runtime;
@@ -89,6 +90,7 @@ pub(crate) use prepare::{
     open_product_manifest_authority, prepare_active_package, prepare_rollback_package,
     PreparationError, PreparedActivePackage, PreparedRollbackPackage,
 };
+pub(crate) use profile_audit::{audit_profile_package_pins, DurableProfilePackageAudit};
 pub(crate) use records::{
     CatalogAnchor, MAX_CATALOG_SET_PACKAGES, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
 };

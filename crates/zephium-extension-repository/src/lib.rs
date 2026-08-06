@@ -62,12 +62,13 @@ pub use package_lease::{
     BundledManifestBindingsError, BundledPackageLease, BundledPackageLeaseError,
     BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
     BundledPackageResourceError, BundledRuntimeHostActivationBindingError,
-    BundledRuntimePackageAccessBuildError, RollbackBundledPackageLease,
-    RollbackBundledPackageReleaseRequest, RollbackBundledRuntimeHostActivation,
-    RollbackBundledRuntimeHostActivationBindingRefusal, RollbackBundledRuntimePackageAccess,
-    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
-    RollbackBundledRuntimePackageRecoveryRefusal, RollbackBundledRuntimePackageRecoveryToken,
-    RollbackBundledRuntimePackageRejoinRefusal,
+    BundledRuntimePackageAccessBuildError, ProfilePackageAbsenceEvidence,
+    ProfilePackageAbsenceRevalidationError, ProfilePackageObligation, ProfilePackageObligationKind,
+    RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
+    RollbackBundledRuntimeHostActivation, RollbackBundledRuntimeHostActivationBindingRefusal,
+    RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal,
+    RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
+    RollbackBundledRuntimePackageRecoveryToken, RollbackBundledRuntimePackageRejoinRefusal,
 };
 pub use settlement::{BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome};
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

@@ -10,6 +10,7 @@ use zephium_core::extensions::{
     ExtensionPackageIdentity, ExtensionPackagePayloadIdentity, ExtensionPackagePinReleaseBinding,
     ExtensionRuntimeBackendTarget,
 };
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_private_fs::{ByteLimit, DirectoryIdentity, FileIdentity, PrivateFsError};
 
 use super::catalog_set::{
@@ -367,7 +368,7 @@ impl CurrentCatalogPackagePinProof {
 /// Store's native incarnation prevents owner ABA across repository reopen.
 /// The consuming transition proof separately binds the current repository
 /// generation and directory identity for in-process compare-and-swap safety.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OwnerPackagePinIdentity(DurablePackagePin);
 
 impl From<DurablePackagePin> for OwnerPackagePinIdentity {
@@ -377,6 +378,11 @@ impl From<DurablePackagePin> for OwnerPackagePinIdentity {
 }
 
 impl OwnerPackagePinIdentity {
+    /// Returns the process-local lease registry key for this exact pin.
+    pub(crate) const fn lease_owner(self) -> (ProfileId, ExtensionInstallId) {
+        (self.0.profile_id, self.0.install_id)
+    }
+
     /// Compares the Store-owned portion of this exact repository pin.
     ///
     /// Package-record identity is deliberately resolved through the recovered

@@ -389,12 +389,12 @@ fn live_presence_registry_prunes_dead_owners() {
     let (_temporary, _namespace, repository) = repository_identity();
     let mut runtime = PackageLeaseRuntime::new();
     let expired = runtime
-        .reserve(repository, ProfileId::from(1), ExtensionInstallId::from(1))
+        .reserve_reconciliation(repository, ProfileId::from(1), ExtensionInstallId::from(1))
         .unwrap();
     assert_eq!(runtime.live.len(), 1);
     drop(expired);
     let live = runtime
-        .reserve(repository, ProfileId::from(2), ExtensionInstallId::from(2))
+        .reserve_reconciliation(repository, ProfileId::from(2), ExtensionInstallId::from(2))
         .unwrap();
     assert_eq!(runtime.live.len(), 1);
     assert_eq!(live.profile, ProfileId::from(2));
@@ -409,7 +409,7 @@ fn live_presence_registry_enforces_the_durable_pin_ceiling() {
     for owner in 0..MAX_DURABLE_PACKAGE_PINS {
         retained.push(
             runtime
-                .reserve(
+                .reserve_reconciliation(
                     repository,
                     ProfileId::from(owner as u128 + 1),
                     ExtensionInstallId::from(owner as u128 + 1),
@@ -418,7 +418,7 @@ fn live_presence_registry_enforces_the_durable_pin_ceiling() {
         );
     }
     assert!(matches!(
-        runtime.reserve(
+        runtime.reserve_reconciliation(
             repository,
             ProfileId::from(u128::MAX),
             ExtensionInstallId::from(u128::MAX),
