@@ -54,14 +54,20 @@ pub use materialization::{
 };
 pub use package_lease::{
     ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest,
-    ActiveBundledRuntimePackageAccessBuildRefusal, ActiveBundledRuntimePackageRecoveryError,
-    ActiveBundledRuntimePackageRecoveryRefusal, BundledCatalogGenerationRole,
-    BundledCurrentCatalogSet, BundledCurrentManifestBindings, BundledManifestBindingsError,
-    BundledPackageLease, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
-    BundledPackageLeaseReleaseOutcome, BundledPackageResourceError,
+    ActiveBundledRuntimeHostActivation, ActiveBundledRuntimeHostActivationBindingRefusal,
+    ActiveBundledRuntimePackageAccess, ActiveBundledRuntimePackageAccessBuildRefusal,
+    ActiveBundledRuntimePackageRecoveryError, ActiveBundledRuntimePackageRecoveryRefusal,
+    ActiveBundledRuntimePackageRecoveryToken, ActiveBundledRuntimePackageRejoinRefusal,
+    BundledCatalogGenerationRole, BundledCurrentCatalogSet, BundledCurrentManifestBindings,
+    BundledManifestBindingsError, BundledPackageLease, BundledPackageLeaseError,
+    BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
+    BundledPackageResourceError, BundledRuntimeHostActivationBindingError,
     BundledRuntimePackageAccessBuildError, RollbackBundledPackageLease,
-    RollbackBundledPackageReleaseRequest, RollbackBundledRuntimePackageAccessBuildRefusal,
-    RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
+    RollbackBundledPackageReleaseRequest, RollbackBundledRuntimeHostActivation,
+    RollbackBundledRuntimeHostActivationBindingRefusal, RollbackBundledRuntimePackageAccess,
+    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
+    RollbackBundledRuntimePackageRecoveryRefusal, RollbackBundledRuntimePackageRecoveryToken,
+    RollbackBundledRuntimePackageRejoinRefusal,
 };
 pub use settlement::{BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome};
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

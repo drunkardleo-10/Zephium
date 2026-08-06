@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{Cursor, Read};
+use std::mem::{size_of, size_of_val};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,7 +9,8 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
-    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionGrantAuthority,
+    ExtensionActiveTabGrantWitness, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose, ExtensionGrantAuthority,
     ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantDigest,
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantRevision,
     ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
@@ -16,9 +18,11 @@ use zephium_core::extensions::{
     ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePinAcquisitionBinding,
-    ExtensionPackagePinAcquisitionDenial, ExtensionPackagePinReleaseBinding,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
+    ExtensionOperationAuthorityDenial, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinAcquisitionDenial,
+    ExtensionPackagePinReleaseBinding, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
+    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
+    ExtensionUserInvocationKind,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
@@ -27,11 +31,21 @@ use zephium_extension_authority::{
 };
 use zephium_extension_package::{CanonicalExtensionTreeIndex, PortableRelativePath};
 use zephium_extension_runtime_api::{
-    ExtensionPackageAccessBuildError, ExtensionPackageAccessError, ExtensionPackageAccessView,
-    ExtensionRuntimeActivationDisposition, ExtensionRuntimeActivationRequest,
-    ExtensionRuntimeActivationSettlement, ExtensionRuntimeFailure, ExtensionRuntimeLifecyclePort,
-    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipPort,
-    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+    ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessError,
+    ExtensionPackageAccessView, ExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeActivationSettlement, ExtensionRuntimeFailure, ExtensionRuntimeHostActivation,
+    ExtensionRuntimeHostActivationBinding, ExtensionRuntimeHostActivationBindingError,
+    ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
+    ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
+    ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
+    ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
+    ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
+    ExtensionRuntimeLifecyclePort, ExtensionRuntimeNativeIdentityExpectation,
+    ExtensionRuntimeOwnerAddress, ExtensionRuntimeOwnershipDisposition,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeOwnershipPort, ExtensionRuntimeResourcePlan,
+    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeRetirementSettlement,
+    ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
+    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
@@ -42,8 +56,10 @@ use super::api::{
 };
 use super::repository::{arm_post_pin_reverify_hook, arm_release_planning_error_hook};
 use super::runtime_access::{
-    arm_provider_retained_bytes_override, ActiveBundledRuntimePackageRecoveryError,
-    BundledRuntimePackageAccessBuildError, RollbackBundledRuntimePackageRecoveryError,
+    arm_provider_retained_bytes_override, ActiveBundledRuntimePackageAccess,
+    ActiveBundledRuntimePackageRecoveryError, ActiveBundledRuntimePackageRecoveryToken,
+    BundledRuntimeHostActivationBindingError, BundledRuntimePackageAccessBuildError,
+    RollbackBundledRuntimePackageRecoveryError,
 };
 use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
@@ -539,10 +555,101 @@ fn acquisition_entry(
     .unwrap()
 }
 
-fn release_binding(
+fn native_may_own_entry(
     acquisition: &ExtensionPackagePinAcquisitionBinding,
-) -> ExtensionPackagePinReleaseBinding {
-    release_binding_with(
+) -> ExtensionNativeOwnershipEntry {
+    native_may_own_entry_with_backend(acquisition, acquisition.runtime_backend())
+}
+
+fn native_absent_preparing_entry(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+) -> ExtensionNativeOwnershipEntry {
+    ExtensionNativeOwnershipEntry::from_persisted(
+        acquisition.key(),
+        acquisition.journal_operation(),
+        ExtensionNativeOwnershipEntryRevision::INITIAL,
+        acquisition.package().clone(),
+        acquisition.catalog_set_digest(),
+        acquisition.catalog_role(),
+        acquisition.store_catalog_revision(),
+        acquisition.store_install_revision(),
+        acquisition.store_grant_revision(),
+        acquisition.grant_digest(),
+        acquisition.runtime_backend(),
+        acquisition.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+    )
+    .unwrap()
+}
+
+fn native_may_own_entry_with_backend(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+    backend: ExtensionRuntimeBackendTarget,
+) -> ExtensionNativeOwnershipEntry {
+    native_may_own_entry_with_lineage(
+        acquisition,
+        acquisition.key(),
+        acquisition.catalog_set_digest(),
+        acquisition.catalog_role(),
+        backend,
+        acquisition.native_incarnation(),
+    )
+}
+
+fn native_may_own_entry_with_lineage(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+    key: ExtensionNativeOwnershipKey,
+    catalog_set_digest: ExtensionCatalogSetDigest,
+    catalog_role: ExtensionCatalogGenerationRole,
+    backend: ExtensionRuntimeBackendTarget,
+    native_incarnation: ExtensionNativeIncarnation,
+) -> ExtensionNativeOwnershipEntry {
+    ExtensionNativeOwnershipEntry::from_persisted(
+        key,
+        ExtensionNativeOwnershipOperation::new(native_incarnation.get()).unwrap(),
+        ExtensionNativeOwnershipEntryRevision::new(2).unwrap(),
+        acquisition.package().clone(),
+        catalog_set_digest,
+        catalog_role,
+        acquisition.store_catalog_revision(),
+        acquisition.store_install_revision(),
+        acquisition.store_grant_revision(),
+        acquisition.grant_digest(),
+        backend,
+        native_incarnation,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+    )
+    .unwrap()
+}
+
+fn native_owned_entry(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+) -> ExtensionNativeOwnershipEntry {
+    ExtensionNativeOwnershipEntry::from_persisted(
+        acquisition.key(),
+        acquisition.journal_operation(),
+        ExtensionNativeOwnershipEntryRevision::new(3).unwrap(),
+        acquisition.package().clone(),
+        acquisition.catalog_set_digest(),
+        acquisition.catalog_role(),
+        acquisition.store_catalog_revision(),
+        acquisition.store_install_revision(),
+        acquisition.store_grant_revision(),
+        acquisition.grant_digest(),
+        acquisition.runtime_backend(),
+        acquisition.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeOwned,
+    )
+    .unwrap()
+}
+
+fn release_entry(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+) -> ExtensionNativeOwnershipEntry {
+    release_entry_with(
         acquisition,
         acquisition.browsing_context(),
         acquisition.runtime_backend(),
@@ -550,13 +657,13 @@ fn release_binding(
     )
 }
 
-fn release_binding_with(
+fn release_entry_with(
     acquisition: &ExtensionPackagePinAcquisitionBinding,
     browsing_context: ExtensionGrantBrowsingContext,
     backend: ExtensionRuntimeBackendTarget,
     native_incarnation: ExtensionNativeIncarnation,
-) -> ExtensionPackagePinReleaseBinding {
-    let entry = ExtensionNativeOwnershipEntry::from_persisted(
+) -> ExtensionNativeOwnershipEntry {
+    ExtensionNativeOwnershipEntry::from_persisted(
         ExtensionNativeOwnershipKey::new(
             acquisition.profile(),
             acquisition.install_id(),
@@ -576,7 +683,27 @@ fn release_binding_with(
         ExtensionNativeOwnershipIntent::Release,
         ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn release_binding(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+) -> ExtensionPackagePinReleaseBinding {
+    release_binding_with(
+        acquisition,
+        acquisition.browsing_context(),
+        acquisition.runtime_backend(),
+        acquisition.native_incarnation(),
+    )
+}
+
+fn release_binding_with(
+    acquisition: &ExtensionPackagePinAcquisitionBinding,
+    browsing_context: ExtensionGrantBrowsingContext,
+    backend: ExtensionRuntimeBackendTarget,
+    native_incarnation: ExtensionNativeIncarnation,
+) -> ExtensionPackagePinReleaseBinding {
+    let entry = release_entry_with(acquisition, browsing_context, backend, native_incarnation);
     ExtensionPackagePinReleaseBinding::mint(&entry).unwrap()
 }
 
@@ -624,43 +751,298 @@ fn install_catalog(
     .unwrap()
 }
 
-struct CompatibilityNativeRootGate;
+struct SuccessfulCompatibilityLifecycle {
+    retained_bytes: usize,
+}
 
-impl ExtensionRuntimeOwnershipPort for CompatibilityNativeRootGate {
+impl ExtensionRuntimeOwnershipPort for SuccessfulCompatibilityLifecycle {
     fn retained_bytes(&self) -> usize {
-        0
+        self.retained_bytes
     }
 
     fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
-        panic!("rejected compatibility root probe cannot retire")
+        ExtensionRuntimeRetirementDisposition::Retired
     }
 
     fn reconcile_ownership_until(
         &mut self,
         _deadline: Instant,
     ) -> ExtensionRuntimeOwnershipDisposition {
-        panic!("rejected compatibility root probe cannot reconcile")
+        ExtensionRuntimeOwnershipDisposition::Absent
     }
 }
 
-impl ExtensionRuntimeLifecyclePort for CompatibilityNativeRootGate {
+impl ExtensionRuntimeLifecyclePort for SuccessfulCompatibilityLifecycle {
     fn activate_until(
         &mut self,
         access: &mut ExtensionPackageAccessView<'_>,
         _deadline: Instant,
     ) -> ExtensionRuntimeActivationDisposition {
-        assert_eq!(access.target(), ExtensionRuntimeTarget::Compatibility);
-        let mut visitor_called = false;
-        assert_eq!(
-            access.visit_native_root(&mut |_root: &Path| {
-                visitor_called = true;
-                Ok(())
-            }),
-            Err(ExtensionPackageAccessError::NativeRootUnavailable)
-        );
-        assert!(!visitor_called);
-        ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::PackageRejected)
+        if access.target() != ExtensionRuntimeTarget::Compatibility {
+            return ExtensionRuntimeActivationDisposition::Rejected(
+                ExtensionRuntimeFailure::UnsupportedTarget,
+            );
+        }
+        match access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())) {
+            Ok(Ok(())) => ExtensionRuntimeActivationDisposition::Activated(
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+            ),
+            Ok(Err(_)) | Err(_) => ExtensionRuntimeActivationDisposition::Rejected(
+                ExtensionRuntimeFailure::PackageRejected,
+            ),
+        }
     }
+}
+
+impl ExtensionRuntimeHostLifecyclePort for SuccessfulCompatibilityLifecycle {}
+
+struct SuccessfulCompatibilityPublication {
+    owner: ExtensionRuntimeOwnerAddress,
+    generation: ExtensionRuntimeHostRegistryGeneration,
+    authority: Option<ExtensionRuntimeOperationAuthority>,
+    retained_bytes: usize,
+}
+
+impl ExtensionRuntimeHostPublicationPort for SuccessfulCompatibilityPublication {
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn publish_operation_authority(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        _owned_entry: &ExtensionNativeOwnershipEntry,
+        _evidence: ExtensionRuntimeOwnershipEvidence,
+        authority: ExtensionRuntimeOperationAuthority,
+    ) -> Result<(), ExtensionRuntimeHostPublicationPortRefusal> {
+        if owner != self.owner || generation != self.generation || self.authority.is_some() {
+            return Err(ExtensionRuntimeHostPublicationPortRefusal::new(
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                authority,
+            ));
+        }
+        self.authority = Some(authority);
+        Ok(())
+    }
+
+    fn reclaim_operation_authority(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        _release_entry: &ExtensionNativeOwnershipEntry,
+    ) -> Result<ExtensionRuntimeOperationAuthority, ExtensionRuntimeHostBindError> {
+        if owner != self.owner || generation != self.generation {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        self.authority
+            .take()
+            .ok_or(ExtensionRuntimeHostBindError::InternalInvariant)
+    }
+
+    fn mint_active_tab_grant_witness(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        runtime: &ExtensionRuntimeFingerprint,
+        invocation: ExtensionUserInvocationKind,
+    ) -> Result<ExtensionActiveTabGrantWitness, ExtensionOperationAuthorityDenial> {
+        if owner != self.owner || generation != self.generation {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        self.authority
+            .as_ref()
+            .ok_or(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)?
+            .mint_active_tab_grant_witness(runtime, invocation)
+    }
+
+    fn mint_document_authority_witness(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        runtime: &ExtensionRuntimeFingerprint,
+        purpose: ExtensionDocumentPurpose,
+    ) -> Result<ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial> {
+        if owner != self.owner || generation != self.generation {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        self.authority
+            .as_ref()
+            .ok_or(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)?
+            .mint_document_authority_witness(runtime, purpose)
+    }
+}
+
+struct SuccessfulCompatibilityHostFactory {
+    lifecycle_retained_bytes: usize,
+    publication_retained_bytes: usize,
+}
+
+impl SuccessfulCompatibilityHostFactory {
+    fn normal() -> Self {
+        Self {
+            lifecycle_retained_bytes: size_of::<SuccessfulCompatibilityLifecycle>(),
+            publication_retained_bytes: size_of::<SuccessfulCompatibilityPublication>(),
+        }
+    }
+}
+
+fn active_compatibility_host_transient_retained_bytes(
+    access: &ActiveBundledRuntimePackageAccess,
+) -> usize {
+    size_of::<ExtensionRuntimeHostActivationBinding>()
+        .checked_add(
+            access
+                .package_access_retained_bytes()
+                .checked_sub(size_of::<ExtensionPackageAccess>())
+                .unwrap(),
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                access
+                    .operation_authority_retained_bytes()
+                    .checked_sub(size_of::<ExtensionRuntimeOperationAuthority>())
+                    .unwrap(),
+            )
+        })
+        .and_then(|bytes| bytes.checked_add(size_of::<SuccessfulCompatibilityLifecycle>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<SuccessfulCompatibilityPublication>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<ExtensionRuntimeHostActivation>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<ActiveBundledRuntimePackageRecoveryToken>()))
+        .expect("bounded compatibility host transient accounting")
+}
+
+impl ExtensionRuntimeHostFactoryPort for SuccessfulCompatibilityHostFactory {
+    fn bind_activation(
+        &mut self,
+        context: &ExtensionRuntimeHostActivationContext<'_>,
+    ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+        if context.target() != ExtensionRuntimeTarget::Compatibility
+            || context.identity_expectation()
+                != ExtensionRuntimeNativeIdentityExpectation::Compatibility
+        {
+            return Err(ExtensionRuntimeHostBindError::UnsupportedBackend);
+        }
+        let generation = ExtensionRuntimeHostRegistryGeneration::new(1)
+            .ok_or(ExtensionRuntimeHostBindError::IdentityExhausted)?;
+        Ok(ExtensionRuntimeHostActivationPorts::new(
+            generation,
+            Box::new(SuccessfulCompatibilityLifecycle {
+                retained_bytes: self.lifecycle_retained_bytes,
+            }),
+            Box::new(SuccessfulCompatibilityPublication {
+                owner: context.owner(),
+                generation,
+                authority: None,
+                retained_bytes: self.publication_retained_bytes,
+            }),
+        ))
+    }
+
+    fn bind_recovery(
+        &mut self,
+        _context: ExtensionRuntimeHostRecoveryContext,
+    ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError> {
+        Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+    }
+}
+
+struct UnsupportedHostFactory;
+
+impl ExtensionRuntimeHostFactoryPort for UnsupportedHostFactory {
+    fn bind_activation(
+        &mut self,
+        _context: &ExtensionRuntimeHostActivationContext<'_>,
+    ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+        Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+    }
+
+    fn bind_recovery(
+        &mut self,
+        _context: ExtensionRuntimeHostRecoveryContext,
+    ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError> {
+        Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+    }
+}
+
+fn cancel_compatibility_host_activation(
+    activation: zephium_extension_runtime_api::ExtensionRuntimeHostActivation,
+) -> (
+    ExtensionNativeOwnershipEntry,
+    ExtensionPackageAccess,
+    ExtensionRuntimeOperationAuthority,
+) {
+    let (entry, access, authority, expectation) = activation.cancel_before_attempt();
+    assert_eq!(
+        expectation,
+        ExtensionRuntimeNativeIdentityExpectation::Compatibility
+    );
+    (entry, access, authority)
+}
+
+fn cancel_active_repository_host(
+    access: super::runtime_access::ActiveBundledRuntimePackageAccess,
+    entry: ExtensionNativeOwnershipEntry,
+) -> (
+    super::runtime_access::ActiveBundledRuntimePackageRecoveryToken,
+    ExtensionNativeOwnershipEntry,
+    ExtensionPackageAccess,
+    ExtensionRuntimeOperationAuthority,
+) {
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let host = access.try_into_host_activation(entry, &mut host).unwrap();
+    let (activation, recovery) = host.into_parts();
+    let (entry, access, authority) = cancel_compatibility_host_activation(activation);
+    (recovery, entry, access, authority)
+}
+
+fn cancel_rollback_repository_host(
+    access: super::runtime_access::RollbackBundledRuntimePackageAccess,
+    entry: ExtensionNativeOwnershipEntry,
+) -> (
+    super::runtime_access::RollbackBundledRuntimePackageRecoveryToken,
+    ExtensionNativeOwnershipEntry,
+    ExtensionPackageAccess,
+    ExtensionRuntimeOperationAuthority,
+) {
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let host = access.try_into_host_activation(entry, &mut host).unwrap();
+    let (activation, recovery) = host.into_parts();
+    let (entry, access, authority) = cancel_compatibility_host_activation(activation);
+    (recovery, entry, access, authority)
+}
+
+fn settle_compatibility_host_activation(
+    activation: zephium_extension_runtime_api::ExtensionRuntimeHostActivation,
+    owned_entry: ExtensionNativeOwnershipEntry,
+    release_entry: &ExtensionNativeOwnershipEntry,
+) -> (ExtensionPackageAccess, ExtensionRuntimeOperationAuthority) {
+    let (request, pending) = activation.into_parts();
+    let owner = match request.settle_until(Instant::now() + Duration::from_secs(60)) {
+        ExtensionRuntimeActivationSettlement::Activated(owner) => owner,
+        settlement => panic!("unexpected activation settlement: {settlement:?}"),
+    };
+    let receipt = pending
+        .authorize(
+            owned_entry,
+            ExtensionRuntimeOwnershipEvidence::Compatibility,
+        )
+        .unwrap()
+        .publish()
+        .unwrap();
+    let access = match owner
+        .into_retirement_request()
+        .settle_until(Instant::now() + Duration::from_secs(60))
+    {
+        ExtensionRuntimeRetirementSettlement::Retired(access) => access,
+        settlement => panic!("unexpected retirement settlement: {settlement:?}"),
+    };
+    let authority = receipt.reclaim_after_absence(release_entry).unwrap();
+    (access, authority)
 }
 
 #[test]
@@ -1414,8 +1796,32 @@ fn reopened_requests_are_rejected_and_old_incarnation_cannot_remove_replacement(
         Err(BundledPackageLeaseError::OwnerConflict)
     ));
     let replay_binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let reopened_preparing_entry = native_absent_preparing_entry(&replay_binding);
     let replacement_live = acquire_active(&mut repository, replay_binding).unwrap();
-    let mut replacement_release = replacement_live.into_release_request();
+    let replacement_runtime = replacement_live
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    assert_eq!(
+        replacement_runtime.target(),
+        ExtensionRuntimeTarget::Compatibility
+    );
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = replacement_runtime
+        .try_into_host_activation(reopened_preparing_entry.clone(), &mut host)
+        .expect_err("a reopened preparing row must not cross the native-call frontier");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHost(
+            ExtensionRuntimeHostActivationBindingError::OwnershipPhaseMismatch
+        )
+    );
+    let (replacement_runtime, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, reopened_preparing_entry);
+    let mut replacement_release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            replacement_runtime,
+        )
+        .unwrap();
     let before_wrong_open = harness.snapshot();
     assert_eq!(
         repository.release_active_bundled_package_lease(&mut old_release, &first_cleanup),
@@ -1854,11 +2260,90 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(211), ExtensionInstallId::from(223));
     let binding = owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let mut different_set_bytes = binding.catalog_set_digest().bytes();
+    different_set_bytes[0] ^= 0xff;
+    let mismatched_native_entries = vec![
+        native_may_own_entry_with_backend(&binding, ExtensionRuntimeBackendTarget::WindowsNative),
+        native_may_own_entry_with_lineage(
+            &binding,
+            binding.key(),
+            binding.catalog_set_digest(),
+            ExtensionCatalogGenerationRole::Rollback,
+            binding.runtime_backend(),
+            binding.native_incarnation(),
+        ),
+        native_may_own_entry_with_lineage(
+            &binding,
+            binding.key(),
+            ExtensionCatalogSetDigest::from_bytes(different_set_bytes),
+            binding.catalog_role(),
+            binding.runtime_backend(),
+            binding.native_incarnation(),
+        ),
+        native_may_own_entry_with_lineage(
+            &binding,
+            ExtensionNativeOwnershipKey::new(
+                ProfileId::from(227),
+                binding.install_id(),
+                binding.browsing_context(),
+            ),
+            binding.catalog_set_digest(),
+            binding.catalog_role(),
+            binding.runtime_backend(),
+            binding.native_incarnation(),
+        ),
+        native_may_own_entry_with_lineage(
+            &binding,
+            binding.key(),
+            binding.catalog_set_digest(),
+            binding.catalog_role(),
+            binding.runtime_backend(),
+            binding.native_incarnation().next().unwrap(),
+        ),
+    ];
     let cleanup = release_binding(&binding);
     let mut access = acquire_active(&mut repository, binding)
         .unwrap()
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
+    assert_eq!(
+        access.fingerprint().instance().profile(),
+        ProfileId::from(211)
+    );
+    assert_eq!(
+        access.fingerprint().instance().install_id(),
+        ExtensionInstallId::from(223)
+    );
+    assert_eq!(
+        access.fingerprint().instance().generation(),
+        ExtensionRuntimeGeneration::INITIAL
+    );
+    assert!(access.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    assert!(access.package_access_retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    let resource_plan_exclusive_bytes = access
+        .resources()
+        .retained_bytes()
+        .checked_sub(size_of::<ExtensionRuntimeResourcePlan>())
+        .unwrap();
+    let operation_authority_exclusive_bytes = access
+        .operation_authority_retained_bytes()
+        .checked_sub(size_of::<ExtensionRuntimeOperationAuthority>())
+        .unwrap();
+    assert!(
+        size_of_val(&access)
+            .checked_add(operation_authority_exclusive_bytes)
+            .unwrap()
+            > size_of::<ExtensionPackageAccess>(),
+        "the nominal wrapper and operation authority must leave a real aggregate-accounting edge"
+    );
+    let pre_host_fixed_bytes = size_of_val(&access)
+        .checked_add(resource_plan_exclusive_bytes)
+        .and_then(|bytes| bytes.checked_add(operation_authority_exclusive_bytes))
+        .unwrap();
+    let provider_bytes_at_pre_host_limit = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .checked_sub(pre_host_fixed_bytes)
+        .unwrap();
+    assert_ne!(provider_bytes_at_pre_host_limit, 0);
     let expected_index =
         CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
     {
@@ -1919,7 +2404,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let nested_cleanup = release_binding(&nested_binding);
     let mut nested_access = acquire_active(&mut repository, nested_binding)
         .unwrap()
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
     assert_eq!(
         access.visit_manifest(&mut |reader: &mut dyn Read| {
@@ -1964,22 +2449,190 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         BundledPackageLeaseReleaseOutcome::Released
     );
 
-    let request =
-        ExtensionRuntimeActivationRequest::try_new(access, Box::new(CompatibilityNativeRootGate))
-            .unwrap();
-    let access = match request.settle_until(Instant::now() + Duration::from_secs(60)) {
-        ExtensionRuntimeActivationSettlement::Rejected { access, failure } => {
-            assert_eq!(failure, ExtensionRuntimeFailure::PackageRejected);
-            access
-        }
-        settlement => panic!("unexpected native-root gate settlement: {settlement:?}"),
-    };
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    for mismatched_entry in mismatched_native_entries {
+        let refusal = access
+            .try_into_host_activation(mismatched_entry.clone(), &mut host)
+            .expect_err("a mismatched repository/native lineage must fail before host activation");
+        assert_eq!(
+            refusal.reason(),
+            BundledRuntimeHostActivationBindingError::RepositoryBindingMismatch
+        );
+        let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+        assert_eq!(returned_entry, mismatched_entry);
+        access = returned_access;
+    }
     let mut release =
         super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(access)
             .unwrap();
     assert_eq!(
         repository
             .release_active_bundled_package_lease(&mut release, &cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let exact_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(277), ExtensionInstallId::from(281));
+    let exact_limit_binding =
+        exact_limit_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let exact_limit_cleanup = release_binding(&exact_limit_binding);
+    let exact_limit_lease = acquire_active(&mut repository, exact_limit_binding).unwrap();
+    arm_provider_retained_bytes_override(provider_bytes_at_pre_host_limit);
+    let exact_limit_access = exact_limit_lease
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .expect("the exact aggregate retained-byte ceiling must be accepted");
+    assert_eq!(
+        exact_limit_access.retained_bytes(),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let mut exact_limit_release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            exact_limit_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut exact_limit_release, &exact_limit_cleanup,)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let over_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(283), ExtensionInstallId::from(293));
+    let over_limit_binding =
+        over_limit_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let over_limit_cleanup = release_binding(&over_limit_binding);
+    let over_limit_lease = acquire_active(&mut repository, over_limit_binding).unwrap();
+    arm_provider_retained_bytes_override(provider_bytes_at_pre_host_limit + 1);
+    let refusal = over_limit_lease
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .expect_err("one byte above the aggregate retained-byte ceiling must be refused");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimePackageAccessBuildError::RetainedBytesExceeded
+    );
+    let mut over_limit_release = refusal.try_into_lease().unwrap().into_release_request();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut over_limit_release, &over_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    // Calibrate the complete factory-transition and maximum-future host charge
+    // from a one-byte provider. The role token participates in both states.
+    let host_baseline_owner =
+        EligibilityFixture::active(&active, ProfileId::from(317), ExtensionInstallId::from(331));
+    let host_baseline_binding =
+        host_baseline_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let host_baseline_entry = native_may_own_entry(&host_baseline_binding);
+    let host_baseline_cleanup = release_binding(&host_baseline_binding);
+    arm_provider_retained_bytes_override(1);
+    let host_baseline_access = acquire_active(&mut repository, host_baseline_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let host_baseline_transient_retained_bytes =
+        active_compatibility_host_transient_retained_bytes(&host_baseline_access);
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let host_baseline = host_baseline_access
+        .try_into_host_activation(host_baseline_entry.clone(), &mut host)
+        .unwrap();
+    let host_fixed_bytes = host_baseline_transient_retained_bytes
+        .max(host_baseline.maximum_future_retained_bytes())
+        .checked_sub(1)
+        .unwrap();
+    let provider_bytes_at_complete_host_limit = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .checked_sub(host_fixed_bytes)
+        .unwrap();
+    assert_ne!(provider_bytes_at_complete_host_limit, 0);
+    assert!(provider_bytes_at_complete_host_limit < provider_bytes_at_pre_host_limit);
+    let (activation, recovery) = host_baseline.into_parts();
+    let (returned_entry, access, authority) = cancel_compatibility_host_activation(activation);
+    assert_eq!(returned_entry, host_baseline_entry);
+    let mut release = recovery
+        .try_into_release_request(access, authority)
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &host_baseline_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let complete_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(337), ExtensionInstallId::from(347));
+    let complete_limit_binding =
+        complete_limit_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let complete_limit_entry = native_may_own_entry(&complete_limit_binding);
+    let complete_limit_cleanup = release_binding(&complete_limit_binding);
+    arm_provider_retained_bytes_override(provider_bytes_at_complete_host_limit);
+    let complete_limit_access = acquire_active(&mut repository, complete_limit_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .expect("pre-host state below its own ceiling");
+    let complete_limit_transient_retained_bytes =
+        active_compatibility_host_transient_retained_bytes(&complete_limit_access);
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let complete_limit_host = complete_limit_access
+        .try_into_host_activation(complete_limit_entry.clone(), &mut host)
+        .expect("the exact complete host owner ceiling must be accepted");
+    assert_eq!(
+        complete_limit_transient_retained_bytes
+            .max(complete_limit_host.maximum_future_retained_bytes()),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let (activation, recovery) = complete_limit_host.into_parts();
+    let (returned_entry, access, authority) = cancel_compatibility_host_activation(activation);
+    assert_eq!(returned_entry, complete_limit_entry);
+    let mut release = recovery
+        .try_into_release_request(access, authority)
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &complete_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let complete_over_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(349), ExtensionInstallId::from(353));
+    let complete_over_limit_binding = complete_over_limit_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let complete_over_limit_entry = native_may_own_entry(&complete_over_limit_binding);
+    let complete_over_limit_cleanup = release_binding(&complete_over_limit_binding);
+    arm_provider_retained_bytes_override(provider_bytes_at_complete_host_limit + 1);
+    let complete_over_limit_access = acquire_active(&mut repository, complete_over_limit_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .expect("the one-byte aggregate excess must reach host assembly");
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let refusal = complete_over_limit_access
+        .try_into_host_activation(complete_over_limit_entry.clone(), &mut host)
+        .expect_err("one byte above the complete owner ceiling must be refused losslessly");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHostFactory(
+            ExtensionRuntimeHostBindError::RetainedBytesExceeded
+        )
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, complete_over_limit_entry);
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &complete_over_limit_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -1991,7 +2644,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let passive_cleanup = release_binding(&passive_binding);
     let passive_access = acquire_active(&mut repository, passive_binding)
         .unwrap()
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
     assert_eq!(
         repository
@@ -2019,7 +2672,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let replayed_lease = acquire_active(&mut repository, passive_replay_binding).unwrap();
     arm_provider_retained_bytes_override(usize::MAX);
     let refusal = replayed_lease
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .expect_err("overflowing provider accounting must be refused");
     assert_eq!(
         refusal.reason(),
@@ -2042,7 +2695,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     let corrupt_cleanup = release_binding(&corrupt_binding);
     let mut corrupt_access = acquire_active(&mut repository, corrupt_binding)
         .unwrap()
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
     harness.corrupt_manifest_same_length();
     assert_eq!(
@@ -2069,7 +2722,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
 }
 
 #[test]
-fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
+fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
     let (active, rollback) = catalogs();
 
     let active_harness = Harness::new();
@@ -2079,29 +2732,84 @@ fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
         EligibilityFixture::active(&active, ProfileId::from(257), ExtensionInstallId::from(263));
     let active_binding =
         active_owner.acquisition_binding(active_current, ExtensionCatalogGenerationRole::Active);
-    let active_cleanup = release_binding(&active_binding);
+    let active_host_entry = native_may_own_entry(&active_binding);
+    let active_owned_entry = native_owned_entry(&active_binding);
+    let active_release_entry = release_entry(&active_binding);
+    let active_cleanup = ExtensionPackagePinReleaseBinding::mint(&active_release_entry).unwrap();
     let active_access = acquire_active(&mut active_repository, active_binding)
         .unwrap()
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
-    let wrong_role =
-        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
-            active_access,
-        )
-        .expect_err("active access must not become rollback release authority");
-    assert_eq!(
-        wrong_role.reason(),
-        RollbackBundledRuntimePackageRecoveryError::WrongProviderRole
+    let mut active_host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let active_host_activation = active_access
+        .try_into_host_activation(active_host_entry.clone(), &mut active_host)
+        .unwrap();
+    assert!(
+        active_host_activation.maximum_future_retained_bytes()
+            <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
     );
-    let active_access = wrong_role.try_into_access().unwrap();
-    let mut active_release =
-        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
-            active_access,
-        )
+    let (active_activation, active_recovery) = active_host_activation.into_parts();
+    assert_ne!(active_recovery.retained_bytes(), 0);
+    let (active_access, active_operation_authority) = settle_compatibility_host_activation(
+        active_activation,
+        active_owned_entry,
+        &active_release_entry,
+    );
+    assert_eq!(
+        active_operation_authority
+            .fingerprint()
+            .instance()
+            .install_id(),
+        ExtensionInstallId::from(263)
+    );
+    let mut active_release = active_recovery
+        .try_into_release_request(active_access, active_operation_authority)
         .unwrap();
     assert_eq!(
         active_repository
             .release_active_bundled_package_lease(&mut active_release, &active_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let active_refusal_owner =
+        EligibilityFixture::active(&active, ProfileId::from(273), ExtensionInstallId::from(277));
+    let active_refusal_binding = active_refusal_owner
+        .acquisition_binding(active_current, ExtensionCatalogGenerationRole::Active);
+    let active_refusal_host_entry = native_may_own_entry(&active_refusal_binding);
+    let active_refusal_release_entry = release_entry(&active_refusal_binding);
+    let active_refusal_cleanup =
+        ExtensionPackagePinReleaseBinding::mint(&active_refusal_release_entry).unwrap();
+    let active_refusal_access = acquire_active(&mut active_repository, active_refusal_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let mut unsupported_host =
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = active_refusal_access
+        .try_into_host_activation(active_refusal_host_entry.clone(), &mut unsupported_host)
+        .expect_err("unsupported host must refuse before native work");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHostFactory(
+            ExtensionRuntimeHostBindError::UnsupportedBackend
+        )
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, active_refusal_host_entry);
+    let mut active_refusal_release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        active_repository
+            .release_active_bundled_package_lease(
+                &mut active_refusal_release,
+                &active_refusal_cleanup,
+            )
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -2116,30 +2824,269 @@ fn runtime_access_recovery_cannot_cross_active_and_rollback_roles() {
     );
     let rollback_binding = rollback_owner
         .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
-    let rollback_cleanup = release_binding(&rollback_binding);
+    let rollback_host_entry = native_may_own_entry(&rollback_binding);
+    let rollback_preparing_entry = native_absent_preparing_entry(&rollback_binding);
+    let rollback_owned_entry = native_owned_entry(&rollback_binding);
+    let rollback_release_entry = release_entry(&rollback_binding);
+    let rollback_cleanup =
+        ExtensionPackagePinReleaseBinding::mint(&rollback_release_entry).unwrap();
     let rollback_access = acquire_rollback(&mut rollback_repository, rollback_binding)
         .unwrap()
-        .into_runtime_package_access()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
-    let wrong_role =
-        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
-            rollback_access,
-        )
-        .expect_err("rollback access must not become active release authority");
+    let mut rollback_host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let refusal = rollback_access
+        .try_into_host_activation(rollback_preparing_entry.clone(), &mut rollback_host)
+        .expect_err("rollback authority cannot bind before NativeMayOwn");
     assert_eq!(
-        wrong_role.reason(),
-        ActiveBundledRuntimePackageRecoveryError::WrongProviderRole
-    );
-    let rollback_access = wrong_role.try_into_access().unwrap();
-    let mut rollback_release =
-        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
-            rollback_access,
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHost(
+            ExtensionRuntimeHostActivationBindingError::OwnershipPhaseMismatch
         )
+    );
+    let (rollback_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, rollback_preparing_entry);
+    let rollback_host_activation = rollback_access
+        .try_into_host_activation(rollback_host_entry.clone(), &mut rollback_host)
+        .unwrap();
+    assert!(
+        rollback_host_activation.maximum_future_retained_bytes()
+            <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let (rollback_activation, rollback_recovery) = rollback_host_activation.into_parts();
+    assert_ne!(rollback_recovery.retained_bytes(), 0);
+    let (rollback_access, rollback_operation_authority) = settle_compatibility_host_activation(
+        rollback_activation,
+        rollback_owned_entry,
+        &rollback_release_entry,
+    );
+    assert_eq!(
+        rollback_operation_authority
+            .fingerprint()
+            .instance()
+            .install_id(),
+        ExtensionInstallId::from(271)
+    );
+    let mut rollback_release = rollback_recovery
+        .try_into_release_request(rollback_access, rollback_operation_authority)
         .unwrap();
     assert_eq!(
         rollback_repository
             .release_rollback_bundled_package_lease(&mut rollback_release, &rollback_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_refusal_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(307),
+        ExtensionInstallId::from(311),
+    );
+    let rollback_refusal_binding = rollback_refusal_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_refusal_host_entry = native_may_own_entry(&rollback_refusal_binding);
+    let rollback_refusal_release_entry = release_entry(&rollback_refusal_binding);
+    let rollback_refusal_cleanup =
+        ExtensionPackagePinReleaseBinding::mint(&rollback_refusal_release_entry).unwrap();
+    let rollback_refusal_access =
+        acquire_rollback(&mut rollback_repository, rollback_refusal_binding)
+            .unwrap()
+            .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+            .unwrap();
+    let mut unsupported_host =
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = rollback_refusal_access
+        .try_into_host_activation(rollback_refusal_host_entry.clone(), &mut unsupported_host)
+        .expect_err("unsupported host must refuse before native work");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHostFactory(
+            ExtensionRuntimeHostBindError::UnsupportedBackend
+        )
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, rollback_refusal_host_entry);
+    let mut rollback_refusal_release =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut rollback_refusal_release,
+                &rollback_refusal_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let cross_active_owner =
+        EligibilityFixture::active(&active, ProfileId::from(359), ExtensionInstallId::from(367));
+    let cross_active_binding = cross_active_owner
+        .acquisition_binding(active_current, ExtensionCatalogGenerationRole::Active);
+    let cross_active_entry = native_may_own_entry(&cross_active_binding);
+    let cross_active_cleanup = release_binding(&cross_active_binding);
+    let cross_active_access = acquire_active(&mut active_repository, cross_active_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let (active_token, returned_active_entry, active_access, active_authority) =
+        cancel_active_repository_host(cross_active_access, cross_active_entry.clone());
+    assert_eq!(returned_active_entry, cross_active_entry);
+
+    let cross_rollback_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(373),
+        ExtensionInstallId::from(379),
+    );
+    let cross_rollback_binding = cross_rollback_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let cross_rollback_entry = native_may_own_entry(&cross_rollback_binding);
+    let cross_rollback_cleanup = release_binding(&cross_rollback_binding);
+    let cross_rollback_access = acquire_rollback(&mut rollback_repository, cross_rollback_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let (rollback_token, returned_rollback_entry, rollback_access, rollback_authority) =
+        cancel_rollback_repository_host(cross_rollback_access, cross_rollback_entry.clone());
+    assert_eq!(returned_rollback_entry, cross_rollback_entry);
+
+    let refusal = active_token
+        .try_into_release_request(rollback_access, rollback_authority)
+        .expect_err("rollback provider cannot cross the active recovery boundary");
+    assert_eq!(
+        refusal.reason(),
+        ActiveBundledRuntimePackageRecoveryError::WrongProviderRole
+    );
+    assert!(!refusal.requires_fail_stop());
+    let (active_token, rollback_access, rollback_authority) = refusal.try_into_parts().unwrap();
+
+    let refusal = rollback_token
+        .try_into_release_request(active_access, active_authority)
+        .expect_err("active provider cannot cross the rollback recovery boundary");
+    assert_eq!(
+        refusal.reason(),
+        RollbackBundledRuntimePackageRecoveryError::WrongProviderRole
+    );
+    assert!(!refusal.requires_fail_stop());
+    let (rollback_token, active_access, active_authority) = refusal.try_into_parts().unwrap();
+
+    let mut cross_active_release = active_token
+        .try_into_release_request(active_access, active_authority)
+        .unwrap();
+    assert_eq!(
+        active_repository
+            .release_active_bundled_package_lease(&mut cross_active_release, &cross_active_cleanup,)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+    let mut cross_rollback_release = rollback_token
+        .try_into_release_request(rollback_access, rollback_authority)
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut cross_rollback_release,
+                &cross_rollback_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let lineage_fixture =
+        EligibilityFixture::active(&active, ProfileId::from(383), ExtensionInstallId::from(389));
+    let first_incarnation = lineage_fixture.native_incarnation();
+    let second_incarnation = first_incarnation.next().unwrap();
+    let first_harness = Harness::new();
+    let mut first_repository = first_harness.open();
+    let first_current = establish_active(&mut first_repository, &active);
+    let first_binding = lineage_fixture.acquisition_binding_with(
+        first_current,
+        ExtensionCatalogGenerationRole::Active,
+        runtime_backend(),
+        first_incarnation,
+    );
+    let first_entry = native_may_own_entry(&first_binding);
+    let first_access = acquire_active(&mut first_repository, first_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let (first_token, returned_first_entry, first_access, first_authority) =
+        cancel_active_repository_host(first_access, first_entry.clone());
+    assert_eq!(returned_first_entry, first_entry);
+
+    let second_harness = Harness::new();
+    let mut second_repository = second_harness.open();
+    let second_current = establish_active(&mut second_repository, &active);
+    let second_binding = lineage_fixture.acquisition_binding_with(
+        second_current,
+        ExtensionCatalogGenerationRole::Active,
+        runtime_backend(),
+        second_incarnation,
+    );
+    let second_entry = native_may_own_entry(&second_binding);
+    let second_access = acquire_active(&mut second_repository, second_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let (second_token, returned_second_entry, second_access, second_authority) =
+        cancel_active_repository_host(second_access, second_entry.clone());
+    assert_eq!(returned_second_entry, second_entry);
+
+    assert_eq!(
+        first_authority.fingerprint(),
+        second_authority.fingerprint()
+    );
+    assert!(!first_authority.matches_native_ownership_lineage(&second_entry));
+    assert!(!second_authority.matches_native_ownership_lineage(&first_entry));
+
+    let refusal = first_token
+        .try_into_release_request(first_access, second_authority)
+        .expect_err("equal fingerprints cannot replace exact package-pin lineage");
+    assert_eq!(
+        refusal.reason(),
+        ActiveBundledRuntimePackageRecoveryError::InternalBindingMismatch
+    );
+    assert!(refusal.requires_fail_stop());
+    let refusal = match refusal.try_into_parts() {
+        Ok(_) => panic!("fail-stop authority must remain quarantined"),
+        Err(refusal) => refusal,
+    };
+    drop(refusal);
+
+    let refusal = second_token
+        .try_into_release_request(second_access, first_authority)
+        .expect_err("equal fingerprints cannot replace exact package-pin lineage");
+    assert_eq!(
+        refusal.reason(),
+        ActiveBundledRuntimePackageRecoveryError::InternalBindingMismatch
+    );
+    assert!(refusal.requires_fail_stop());
+    let refusal = match refusal.try_into_parts() {
+        Ok(_) => panic!("fail-stop authority must remain quarantined"),
+        Err(refusal) => refusal,
+    };
+    drop(refusal);
+
+    assert_eq!(
+        first_repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .package_pins
+            .len(),
+        1
+    );
+    assert_eq!(
+        second_repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .package_pins
+            .len(),
+        1
     );
 }

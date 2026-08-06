@@ -20,8 +20,9 @@ use zephium_extension_authority::{
     MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 use zephium_extension_package::{
-    CanonicalExtensionTreeIndex, ExtensionReleaseCatalog, ExtensionReleaseCatalogRevision,
-    PortableRelativePath, MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
+    CanonicalExtensionTreeIndex, ChromiumManifestKey, ExtensionReleaseCatalog,
+    ExtensionReleaseCatalogRevision, PortableRelativePath, MAX_EXTENSION_MANIFEST_BYTES,
+    MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
 };
 use zephium_private_fs::{DirectoryIdentity, SealedPrivateDirectory};
 
@@ -362,6 +363,10 @@ macro_rules! impl_snapshot_projection {
                 self.manifest.runtime_target()
             }
 
+            pub(crate) const fn chromium_key(&self) -> Option<&ChromiumManifestKey> {
+                self.manifest.chromium_key()
+            }
+
             pub(crate) const fn index(&self) -> &CanonicalExtensionTreeIndex {
                 &self.index
             }
@@ -388,6 +393,7 @@ macro_rules! impl_snapshot_projection {
                     && self.manifest.catalog_inventory_digest()
                         == other.manifest.catalog_inventory_digest()
                     && self.manifest.admission_digest() == other.manifest.admission_digest()
+                    && self.manifest.chromium_key() == other.manifest.chromium_key()
                     && self.manifest.descriptor() == other.manifest.descriptor()
             }
         }

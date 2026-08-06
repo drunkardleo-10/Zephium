@@ -17,10 +17,15 @@ pub use api::{
 pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
 pub(crate) use runtime::PackageLeaseRuntime;
 pub use runtime_access::{
-    ActiveBundledRuntimePackageAccessBuildRefusal, ActiveBundledRuntimePackageRecoveryError,
-    ActiveBundledRuntimePackageRecoveryRefusal, BundledRuntimePackageAccessBuildError,
-    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
-    RollbackBundledRuntimePackageRecoveryRefusal,
+    ActiveBundledRuntimeHostActivation, ActiveBundledRuntimeHostActivationBindingRefusal,
+    ActiveBundledRuntimePackageAccess, ActiveBundledRuntimePackageAccessBuildRefusal,
+    ActiveBundledRuntimePackageRecoveryError, ActiveBundledRuntimePackageRecoveryRefusal,
+    ActiveBundledRuntimePackageRecoveryToken, ActiveBundledRuntimePackageRejoinRefusal,
+    BundledRuntimeHostActivationBindingError, BundledRuntimePackageAccessBuildError,
+    RollbackBundledRuntimeHostActivation, RollbackBundledRuntimeHostActivationBindingRefusal,
+    RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal,
+    RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
+    RollbackBundledRuntimePackageRecoveryToken, RollbackBundledRuntimePackageRejoinRefusal,
 };
 
 #[cfg(test)]
