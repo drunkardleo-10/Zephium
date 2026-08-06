@@ -12,6 +12,8 @@ use std::mem::size_of;
 
 use crate::ids::{ExtensionInstallId, ProfileId};
 
+use super::runtime::ExtensionRuntimeOperationAuthorityLineage;
+
 use super::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext,
     ExtensionGrantDigest, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
@@ -51,6 +53,8 @@ pub enum ExtensionPackagePinAcquisitionDenial {
     EligibilityGrantRevisionMismatch,
     /// The complete Store grant-authority digests differ.
     EligibilityGrantDigestMismatch,
+    /// Runtime authority belongs to another package-pin operation lineage.
+    OperationAuthorityLineageMismatch,
 }
 
 impl fmt::Display for ExtensionPackagePinAcquisitionDenial {
@@ -307,9 +311,12 @@ impl ExtensionPackagePinAcquisitionBinding {
         self,
         generation: ExtensionRuntimeGeneration,
     ) -> ExtensionPackagePinRuntimeParts {
+        let lineage = ExtensionRuntimeOperationAuthorityLineage::from_entry(&self.entry);
         ExtensionPackagePinRuntimeParts {
             held: ExtensionPackagePinHeldBinding { entry: self.entry },
-            operation_authority: self.eligibility.into_operation_authority(generation),
+            operation_authority: self
+                .eligibility
+                .into_operation_authority(generation, lineage),
         }
     }
 
@@ -423,6 +430,15 @@ impl ExtensionPackagePinHeldBinding {
         self,
         operation_authority: ExtensionRuntimeOperationAuthority,
     ) -> Result<ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinRecombineRefusal> {
+        if !operation_authority.matches_native_ownership_lineage(&self.entry) {
+            return Err(ExtensionPackagePinRecombineRefusal {
+                reason: ExtensionPackagePinAcquisitionDenial::OperationAuthorityLineageMismatch,
+                parts: Box::new(ExtensionPackagePinRuntimeParts {
+                    held: self,
+                    operation_authority,
+                }),
+            });
+        }
         if let Some(reason) = acquisition_denial(&self.entry, operation_authority.eligibility()) {
             return Err(ExtensionPackagePinRecombineRefusal {
                 reason,
@@ -774,9 +790,19 @@ mod tests {
             intent: ExtensionNativeOwnershipIntent,
             phase: ExtensionNativeOwnershipPhase,
         ) -> ExtensionNativeOwnershipEntry {
+            self.entry_with_operation(revision, 1, intent, phase)
+        }
+
+        fn entry_with_operation(
+            &self,
+            revision: u64,
+            operation: u64,
+            intent: ExtensionNativeOwnershipIntent,
+            phase: ExtensionNativeOwnershipPhase,
+        ) -> ExtensionNativeOwnershipEntry {
             ExtensionNativeOwnershipEntry::from_persisted(
                 self.key,
-                ExtensionNativeOwnershipOperation::INITIAL,
+                ExtensionNativeOwnershipOperation::new(operation).unwrap(),
                 ExtensionNativeOwnershipEntryRevision::new(revision).unwrap(),
                 self.package.clone(),
                 self.catalog_set_digest,
@@ -786,7 +812,7 @@ mod tests {
                 self.grant_revision,
                 self.grant_digest,
                 self.backend,
-                ExtensionNativeIncarnation::INITIAL,
+                ExtensionNativeIncarnation::new(operation).unwrap(),
                 intent,
                 phase,
             )
@@ -895,19 +921,26 @@ mod tests {
         let (held, _exact_authority) = binding
             .into_runtime_parts(ExtensionRuntimeGeneration::new(37).unwrap())
             .into_held_binding_and_operation_authority();
+        let wrong_eligibility =
+            runtime_eligibility_for(ProfileId::from(41), ExtensionInstallId::from(13));
+        let wrong_fixture = EntryFixture::from_eligibility(&wrong_eligibility);
+        let wrong_entry = wrong_fixture.acquisition();
         let wrong_authority =
-            runtime_eligibility_for(ProfileId::from(41), ExtensionInstallId::from(13))
-                .into_operation_authority(ExtensionRuntimeGeneration::new(43).unwrap());
+            ExtensionPackagePinAcquisitionBinding::mint(&wrong_entry, wrong_eligibility)
+                .unwrap()
+                .into_runtime_parts(ExtensionRuntimeGeneration::new(43).unwrap())
+                .into_held_binding_and_operation_authority()
+                .1;
 
         let refusal = held.try_recombine(wrong_authority).unwrap_err();
         assert_eq!(
             refusal.reason(),
-            ExtensionPackagePinAcquisitionDenial::EligibilityProfileMismatch
+            ExtensionPackagePinAcquisitionDenial::OperationAuthorityLineageMismatch
         );
         assert!(refusal.retained_bytes() >= size_of::<ExtensionPackagePinRecombineRefusal>());
         assert_eq!(
             format!("{refusal:?}"),
-            "ExtensionPackagePinRecombineRefusal { reason: EligibilityProfileMismatch, authority: \"<redacted>\" }"
+            "ExtensionPackagePinRecombineRefusal { reason: OperationAuthorityLineageMismatch, authority: \"<redacted>\" }"
         );
         let (held, wrong_authority) = refusal.into_parts();
         assert_eq!(held.key(), entry.key());
@@ -915,6 +948,50 @@ mod tests {
             wrong_authority.fingerprint().instance().profile(),
             ProfileId::from(41)
         );
+    }
+
+    #[test]
+    fn same_runtime_fingerprint_cannot_cross_package_pin_operation_lineage() {
+        let first_eligibility = runtime_eligibility();
+        let fixture = EntryFixture::from_eligibility(&first_eligibility);
+        let first_entry = fixture.entry_with_operation(
+            1,
+            1,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+        );
+        let (first_held, first_authority) =
+            ExtensionPackagePinAcquisitionBinding::mint(&first_entry, first_eligibility)
+                .unwrap()
+                .into_runtime_parts(ExtensionRuntimeGeneration::new(47).unwrap())
+                .into_held_binding_and_operation_authority();
+
+        let second_eligibility = runtime_eligibility();
+        let second_entry = fixture.entry_with_operation(
+            1,
+            2,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+        );
+        let (second_held, second_authority) =
+            ExtensionPackagePinAcquisitionBinding::mint(&second_entry, second_eligibility)
+                .unwrap()
+                .into_runtime_parts(ExtensionRuntimeGeneration::new(47).unwrap())
+                .into_held_binding_and_operation_authority();
+
+        assert_eq!(
+            first_authority.fingerprint(),
+            second_authority.fingerprint()
+        );
+        assert!(!second_authority.matches_native_ownership_lineage(&first_entry));
+        let refusal = first_held.try_recombine(second_authority).unwrap_err();
+        assert_eq!(
+            refusal.reason(),
+            ExtensionPackagePinAcquisitionDenial::OperationAuthorityLineageMismatch
+        );
+        let (first_held, second_authority) = refusal.into_parts();
+        assert!(second_held.try_recombine(second_authority).is_ok());
+        assert!(first_held.try_recombine(first_authority).is_ok());
     }
 
     #[test]

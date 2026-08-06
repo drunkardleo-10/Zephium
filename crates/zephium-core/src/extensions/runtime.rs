@@ -19,13 +19,44 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 use super::cohort::ExtensionGrantCohortEntry;
 use super::transient::ExtensionRuntimeFingerprintInput;
 use super::{
-    ApiPermissionName, ExtensionApiGrantDecision, ExtensionDocumentPurpose,
-    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
-    ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionPackageIdentity, ExtensionRuntimeFingerprint,
+    ApiPermissionName, ExtensionApiGrantDecision, ExtensionCatalogGenerationRole,
+    ExtensionCatalogSetDigest, ExtensionDocumentPurpose, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
+    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipOperation,
+    ExtensionPackageIdentity, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
     ExtensionRuntimeGeneration, ExtensionRuntimeInstance, ExtensionUrlScopeDecision,
     ExtensionUserInvocationKind,
 };
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct ExtensionRuntimeOperationAuthorityLineage {
+    catalog_set_digest: ExtensionCatalogSetDigest,
+    catalog_role: ExtensionCatalogGenerationRole,
+    runtime_backend: ExtensionRuntimeBackendTarget,
+    operation: ExtensionNativeOwnershipOperation,
+    native_incarnation: ExtensionNativeIncarnation,
+}
+
+impl ExtensionRuntimeOperationAuthorityLineage {
+    pub(super) fn from_entry(entry: &ExtensionNativeOwnershipEntry) -> Self {
+        Self {
+            catalog_set_digest: entry.catalog_set_digest(),
+            catalog_role: entry.catalog_role(),
+            runtime_backend: entry.runtime_backend(),
+            operation: entry.operation(),
+            native_incarnation: entry.native_incarnation(),
+        }
+    }
+
+    fn matches_entry(self, entry: &ExtensionNativeOwnershipEntry) -> bool {
+        self.catalog_set_digest == entry.catalog_set_digest()
+            && self.catalog_role == entry.catalog_role()
+            && self.runtime_backend == entry.runtime_backend()
+            && self.operation == entry.operation()
+            && self.native_incarnation == entry.native_incarnation()
+    }
+}
 
 /// Stable, path-free denial from minting an extension operation capability.
 ///
@@ -391,11 +422,13 @@ impl ExtensionRuntimeEligibility {
     pub(super) fn into_operation_authority(
         self,
         generation: ExtensionRuntimeGeneration,
+        lineage: ExtensionRuntimeOperationAuthorityLineage,
     ) -> ExtensionRuntimeOperationAuthority {
         let fingerprint = self.fingerprint(generation);
         ExtensionRuntimeOperationAuthority {
             eligibility: self,
             fingerprint,
+            lineage,
             not_sync: PhantomData,
         }
     }
@@ -512,6 +545,7 @@ impl ExtensionRuntimeEligibility {
 pub struct ExtensionRuntimeOperationAuthority {
     eligibility: ExtensionRuntimeEligibility,
     fingerprint: ExtensionRuntimeFingerprint,
+    lineage: ExtensionRuntimeOperationAuthorityLineage,
     not_sync: PhantomData<Cell<()>>,
 }
 
@@ -527,6 +561,27 @@ impl ExtensionRuntimeOperationAuthority {
     /// Conservative logical heap-plus-inline charge retained by this authority.
     pub fn retained_bytes(&self) -> usize {
         size_of::<Self>().saturating_add(self.eligibility.retained_heap_bytes())
+    }
+
+    /// Checks the complete non-fresh Store/package-pin lineage carried by this
+    /// authority against one structural native-ownership row.
+    ///
+    /// This does not prove the row is current. It prevents a capability from a
+    /// different catalog generation, backend, journal operation, or native
+    /// incarnation from being routed into this owner even when both share the
+    /// same user-facing runtime fingerprint.
+    #[must_use]
+    pub fn matches_native_ownership_lineage(&self, entry: &ExtensionNativeOwnershipEntry) -> bool {
+        let instance = self.fingerprint.instance();
+        entry.key().profile() == instance.profile()
+            && entry.key().install_id() == instance.install_id()
+            && entry.key().browsing_context() == self.fingerprint.browsing_context()
+            && entry.package() == self.fingerprint.package()
+            && entry.store_catalog_revision() == self.fingerprint.catalog_revision()
+            && entry.store_install_revision() == self.fingerprint.install_revision()
+            && entry.store_grant_revision() == self.fingerprint.grant_revision()
+            && entry.grant_digest() == self.fingerprint.grant_digest()
+            && self.lineage.matches_entry(entry)
     }
 
     pub(super) fn retained_heap_bytes(&self) -> usize {
@@ -624,6 +679,16 @@ mod tests {
     use crate::injection::{MatchOptions, MatchPattern, MatchSet};
 
     const ALL_URLS: &str = "<all_urls>";
+
+    fn operation_lineage(value: u64) -> ExtensionRuntimeOperationAuthorityLineage {
+        ExtensionRuntimeOperationAuthorityLineage {
+            catalog_set_digest: ExtensionCatalogSetDigest::from_bytes([17; 32]),
+            catalog_role: ExtensionCatalogGenerationRole::Active,
+            runtime_backend: ExtensionRuntimeBackendTarget::LinuxCompatibility,
+            operation: ExtensionNativeOwnershipOperation::new(value).unwrap(),
+            native_incarnation: ExtensionNativeIncarnation::new(value).unwrap(),
+        }
+    }
 
     fn package() -> ExtensionPackageIdentity {
         ExtensionPackageIdentity::new(
@@ -761,7 +826,10 @@ mod tests {
             .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
             .unwrap();
         let runtime = eligibility.fingerprint(generation);
-        (eligibility.into_operation_authority(generation), runtime)
+        (
+            eligibility.into_operation_authority(generation, operation_lineage(generation.get())),
+            runtime,
+        )
     }
 
     #[test]
