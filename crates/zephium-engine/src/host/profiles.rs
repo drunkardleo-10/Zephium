@@ -147,6 +147,27 @@ fn admit_profile_erasure(
     true
 }
 
+/// Refuses destructive profile cleanup while any process-local extension
+/// runtime generation may still own native state for the profile.
+///
+/// The caller installs its durable host tombstone before entering this gate.
+/// A refusal therefore leaves the profile inaccessible while preserving the
+/// exact attempt slot for a later retry after the extension service proves
+/// native absence. Registry or reservation-gate invariant loss is deliberately
+/// global and blocks every profile.
+pub(super) fn extension_runtime_allows_profile_erasure(
+    registry: &super::extension_runtime::ExtensionRuntimeRegistry,
+    profile: ProfileId,
+    completion: &Arc<crate::erasure::Completion>,
+) -> bool {
+    if registry.has_profile_obligation(profile) {
+        completion.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+        false
+    } else {
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProfilePersistenceClass {
     Durable,
@@ -585,6 +606,18 @@ impl EngineHost {
         // owned until the controllers are closed below.
         self.retire_content_policy(profile);
         self.user_content.remove_profile(profile);
+        if !extension_runtime_allows_profile_erasure(
+            &self.extension_runtime_registry,
+            profile,
+            &completion,
+        ) {
+            // The durable Store authorization cannot override a process-local
+            // native owner or even an unattached factory reservation. Keep the
+            // host tombstone and all native website-data resources intact so
+            // the extension service can retire the exact generation before a
+            // later erasure retry.
+            return;
+        }
 
         #[cfg(target_os = "macos")]
         let ephemeral_stores = self

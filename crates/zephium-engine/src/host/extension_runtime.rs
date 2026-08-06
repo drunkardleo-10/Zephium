@@ -1935,6 +1935,7 @@ mod tests {
     fn attached_lineage_conflicts_until_definite_absence() {
         let gate = ExtensionRuntimeFactoryGate::new();
         let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let profile = ProfileId::from(7);
         let first = gate
             .reserve(recovery_binding(owner(2, 1, 1)))
             .expect("first reservation");
@@ -1943,6 +1944,7 @@ mod tests {
             .attach(Arc::clone(&first))
             .expect("UI registry attachment");
         drop(first);
+        assert!(registry.has_profile_obligation(profile));
         assert_eq!(gate.reservation_count(), Some(1));
         let conflict = match gate.reserve(recovery_binding(owner(3, 1, 1))) {
             Ok(_) => panic!("attached lineage remains exclusive"),
@@ -1952,7 +1954,81 @@ mod tests {
         assert!(registry
             .prove_absence(owner(2, 1, 1), generation)
             .expect("definite absence transition"));
+        assert!(!registry.has_profile_obligation(profile));
         assert_eq!(gate.reservation_count(), Some(0));
+    }
+
+    #[test]
+    fn profile_erasure_barrier_refuses_attached_ownership_until_exact_absence() {
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let exact_owner = owner(2, 1, 1);
+        let reservation = gate
+            .reserve(recovery_binding(exact_owner))
+            .expect("recovery reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(reservation)
+            .expect("UI registry attachment");
+
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::sync_channel(1);
+        let blocked = crate::erasure::Completion::start(
+            Box::new(move |outcome| blocked_tx.send(outcome).unwrap()),
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert!(
+            !super::super::profiles::extension_runtime_allows_profile_erasure(
+                &registry,
+                ProfileId::from(7),
+                &blocked,
+            )
+        );
+        assert_eq!(
+            blocked_rx.recv().unwrap(),
+            zephium_core::ports::engine::ProfileDataErasureOutcome::Failed
+        );
+
+        let (other_tx, other_rx) = std::sync::mpsc::sync_channel(1);
+        let other = crate::erasure::Completion::start(
+            Box::new(move |outcome| other_tx.send(outcome).unwrap()),
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert!(
+            super::super::profiles::extension_runtime_allows_profile_erasure(
+                &registry,
+                ProfileId::from(8),
+                &other,
+            )
+        );
+        other.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Verified);
+        assert_eq!(
+            other_rx.recv().unwrap(),
+            zephium_core::ports::engine::ProfileDataErasureOutcome::Verified
+        );
+
+        assert!(registry
+            .prove_absence(exact_owner, generation)
+            .expect("exact native absence"));
+        let retry =
+            crate::erasure::Completion::start(Box::new(|_| {}), Arc::new(AtomicBool::new(true)));
+        assert!(
+            super::super::profiles::extension_runtime_allows_profile_erasure(
+                &registry,
+                ProfileId::from(7),
+                &retry,
+            )
+        );
+        retry.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Verified);
+    }
+
+    #[test]
+    fn profile_barrier_is_global_after_registry_invariant_failure() {
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate);
+        registry.invariant_failed = true;
+
+        assert!(registry.has_profile_obligation(ProfileId::from(7)));
+        assert!(registry.has_profile_obligation(ProfileId::from(8)));
     }
 
     #[test]
@@ -2102,10 +2178,13 @@ mod tests {
     #[test]
     fn poisoned_gate_fails_closed_and_passive_drop_does_not_mutate_it() {
         let gate = ExtensionRuntimeFactoryGate::new();
+        let registry = ExtensionRuntimeRegistry::new(gate.clone());
         let reservation = gate
             .reserve(recovery_binding(owner(2, 1, 1)))
             .expect("reservation before poison");
         gate.poison_for_test();
+        assert!(registry.has_profile_obligation(ProfileId::from(7)));
+        assert!(registry.has_profile_obligation(ProfileId::from(8)));
         drop(reservation);
         assert!(matches!(
             gate.reserve(recovery_binding(owner(2, 2, 2))),
