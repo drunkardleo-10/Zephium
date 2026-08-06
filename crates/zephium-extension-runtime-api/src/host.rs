@@ -1245,6 +1245,55 @@ impl ExtensionRuntimeHostActivation {
             .retained_bytes()
             .saturating_add(self.pending.retained_bytes())
     }
+
+    /// Returns the conservative maximum charge across every future control
+    /// state reachable from this still-unattempted activation.
+    ///
+    /// The charge includes the lifecycle request and the largest unpublished,
+    /// publication, receipt, refusal, or reclaim state that can replace the
+    /// pending-publication capability. Repository and service adapters must add
+    /// any owner-specific companion capability they retain beside this value.
+    #[must_use]
+    pub fn maximum_future_retained_bytes(&self) -> usize {
+        checked_retained_sum([
+            self.request.retained_bytes(),
+            self.pending.max_future_control_retained_bytes(),
+        ])
+    }
+
+    /// Cancels a host activation before any lifecycle or publication attempt.
+    ///
+    /// This is the lossless rollback edge for a higher-level assembler that
+    /// discovers an aggregate owner-budget refusal only after trusted engine
+    /// proxies have been constructed. No lifecycle or publication method has
+    /// run while this atomic value exists. The provisional proxy reservation is
+    /// therefore restored by passive proxy destruction, and every exact input
+    /// to the original authenticated host binding is returned unchanged.
+    #[must_use = "all returned values retain runtime, package, and durable-row authority"]
+    pub fn cancel_before_attempt(
+        self,
+    ) -> (
+        ExtensionNativeOwnershipEntry,
+        ExtensionPackageAccess,
+        ExtensionRuntimeOperationAuthority,
+        ExtensionRuntimeNativeIdentityExpectation,
+    ) {
+        let Self { request, pending } = self;
+        let (access, lifecycle) = request.cancel();
+        let ExtensionRuntimePendingPublication {
+            initial_entry,
+            authority,
+            expectation,
+            generation: _,
+            publication,
+        } = pending;
+        // Neither proxy can have attached while both remain inside the atomic
+        // pre-attempt value. Their shared provisional reservation returns when
+        // the final proxy is destroyed.
+        drop(lifecycle);
+        drop(publication);
+        (initial_entry, access, authority, expectation)
+    }
 }
 
 impl fmt::Debug for ExtensionRuntimeHostActivation {

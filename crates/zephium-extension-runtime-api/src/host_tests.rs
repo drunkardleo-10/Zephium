@@ -1320,6 +1320,50 @@ fn dropping_unattached_host_values_is_passive_and_restores_only_local_admission(
 }
 
 #[test]
+fn pre_attempt_cancellation_restores_exact_binding_without_native_or_publication_calls() {
+    let fixture = ActivationFixture::compatibility(44);
+    let runtime = fixture.runtime();
+    let entry = fixture.initial.clone();
+    let expectation = fixture.expectation;
+    let provider_identity = Arc::clone(&fixture.provider_identity);
+    let provider_dropped = Arc::clone(&fixture.provider_dropped);
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.lifecycle_retained_bytes = 37;
+    port.publication_retained_bytes = 41;
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
+    let activation = factory
+        .bind_activation(fixture.into_binding())
+        .expect("host activation");
+
+    assert!(activation.maximum_future_retained_bytes() >= activation.retained_bytes());
+    assert!(
+        activation.maximum_future_retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let (returned_entry, returned_access, returned_authority, returned_expectation) =
+        activation.cancel_before_attempt();
+
+    assert_eq!(returned_entry, entry);
+    assert_eq!(returned_authority.fingerprint(), &runtime);
+    assert!(returned_authority.matches_native_ownership_lineage(&entry));
+    assert_eq!(returned_expectation, expectation);
+    let returned_provider = returned_access
+        .try_into_delegated_provider::<PinnedProvider>()
+        .expect("exact provider returned from pre-attempt cancellation");
+    assert!(Arc::ptr_eq(&returned_provider.identity, &provider_identity));
+    assert_eq!(probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.reclaim_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(provider_dropped.load(Ordering::Relaxed), 0);
+    drop(returned_provider);
+    assert_eq!(provider_dropped.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn publication_authorization_checks_state_lineage_and_native_identity_losslessly() {
     let fixture = ActivationFixture::macos(18);
     let probe = Arc::new(HostProbe::default());
