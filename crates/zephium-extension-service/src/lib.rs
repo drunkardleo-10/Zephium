@@ -6,12 +6,13 @@
 //! fixed 1,024-entry FIFO, and shutdown owns a separate final slot so overload
 //! cannot make the worker unjoinable.
 //!
-//! The typed startup surface transfers a validated private-repository location
-//! and the Store's unique native-ownership capability into the worker. Before
-//! publishing readiness, that worker settles interrupted package builds and
-//! reconciles every durable row whose native owner is definitely absent.
-//! Possible-owner rows are retained and reported as cleanup-required; no
-//! extension operation authority is exposed by this crate yet.
+//! The typed startup surface transfers a validated private-repository location,
+//! the Store's unique native-ownership capability, and the engine's unique
+//! native-host factory into the worker. Before publishing readiness, that
+//! worker settles interrupted package builds, reconciles possible native
+//! owners one exact lineage at a time, retires owners that still exist, and
+//! releases package pins only after durable native absence. No extension
+//! operation authority is exposed by this crate yet.
 //!
 //! The owner cannot be shared across threads:
 //!
@@ -39,6 +40,7 @@ mod cleanup;
 mod evidence;
 mod journal_store;
 mod mailbox;
+mod native_recovery;
 mod ports;
 mod repository;
 mod startup;

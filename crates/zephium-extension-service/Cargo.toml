@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 zephium-core.workspace = true
 zephium-extension-repository.workspace = true
+zephium-extension-runtime-api.workspace = true
 zephium-private-fs.workspace = true
 zephium-store.workspace = true
 

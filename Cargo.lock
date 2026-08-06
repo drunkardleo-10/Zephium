@@ -6312,6 +6312,7 @@ dependencies = [
  "tempfile",
  "zephium-core",
  "zephium-extension-repository",
+ "zephium-extension-runtime-api",
  "zephium-private-fs",
  "zephium-store",
 ]

@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
+use zephium_extension_runtime_api::ExtensionRuntimeHostFactory;
 use zephium_store::ExtensionNativeOwnershipStoreAuthority;
 
 use crate::{
@@ -131,9 +132,9 @@ fn validate_app_data_directory(path: &Path) -> Result<(), ExtensionRepositoryRoo
 /// Move-only production authority surrendered to one extension-service worker.
 ///
 /// The input combines exactly one process-global native-ownership Store
-/// capability with one lexically admitted repository location. Its fields are
-/// private, and neither the input nor either authority is exposed through the
-/// cloneable service handle.
+/// capability, one lexically admitted repository location, and the engine's
+/// unique native-host factory. Its fields are private, and neither the input
+/// nor any authority is exposed through the cloneable service handle.
 ///
 /// ```compile_fail
 /// use zephium_extension_service::ExtensionServiceLaunchInput;
@@ -144,18 +145,21 @@ fn validate_app_data_directory(path: &Path) -> Result<(), ExtensionRepositoryRoo
 pub struct ExtensionServiceLaunchInput {
     pub(crate) store_authority: ExtensionNativeOwnershipStoreAuthority,
     pub(crate) repository_root: ExtensionRepositoryRoot,
+    pub(crate) host_factory: ExtensionRuntimeHostFactory,
 }
 
 impl ExtensionServiceLaunchInput {
-    /// Binds the unique Store capability and repository location for transfer
-    /// to one extension-service worker.
+    /// Binds the unique Store capability, repository location, and native-host
+    /// factory for transfer to one extension-service worker.
     pub const fn new(
         store_authority: ExtensionNativeOwnershipStoreAuthority,
         repository_root: ExtensionRepositoryRoot,
+        host_factory: ExtensionRuntimeHostFactory,
     ) -> Self {
         Self {
             store_authority,
             repository_root,
+            host_factory,
         }
     }
 }

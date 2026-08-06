@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use crate::journal_store::JournalProjection;
 #[cfg(test)]
 use crate::mailbox::NormalAdmission;
 use crate::mailbox::{Delivery, Mailbox, ShutdownAdmission};
+use crate::native_recovery::NativeRecoveryState;
 use crate::ports::{ExtensionServiceShutdownOutcome, ExtensionServiceStatusPort};
 use crate::repository::ServiceRepository;
 use crate::startup::{
@@ -71,21 +72,34 @@ enum WorkerCommand {
 
 struct WorkerCancellation {
     requested: AtomicBool,
+    shutdown_deadline: Mutex<Option<Instant>>,
 }
 
 impl WorkerCancellation {
     fn new() -> Self {
         Self {
             requested: AtomicBool::new(false),
+            shutdown_deadline: Mutex::new(None),
         }
     }
 
-    fn request(&self) {
+    fn request(&self, deadline: Instant) {
+        *self.lock_shutdown_deadline() = Some(deadline);
         self.requested.store(true, Ordering::Release);
     }
 
     fn is_requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
+    }
+
+    fn shutdown_deadline(&self) -> Option<Instant> {
+        *self.lock_shutdown_deadline()
+    }
+
+    fn lock_shutdown_deadline(&self) -> MutexGuard<'_, Option<Instant>> {
+        self.shutdown_deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -150,8 +164,10 @@ impl ExtensionServiceStatusPort for ExtensionServiceHandle {
 /// Consuming [`Self::shutdown_until`] returns explicit terminal evidence or a
 /// precise failure. Dropping the owner grants the worker a short, bounded grace
 /// period and then detaches it if necessary; callers that require proof must
-/// shut down explicitly. The cloneable observation handle is both `Send` and
-/// `Sync`.
+/// shut down explicitly. An attached unresolved native recovery proxy is
+/// retained in a parked fail-stop worker rather than destroyed, so such a
+/// shutdown cannot produce clean evidence. The cloneable observation handle is
+/// both `Send` and `Sync`.
 pub struct ExtensionServiceOwner {
     worker: ExtensionServiceWorkerIdentity,
     mailbox: Arc<Mailbox<WorkerCommand>>,
@@ -222,8 +238,8 @@ fn spawn_system_worker(task: WorkerTask) -> io::Result<JoinHandle<()>> {
 }
 
 impl ExtensionServiceOwner {
-    /// Launches the serialized extension service with its unique durable
-    /// authorities.
+    /// Launches the serialized extension service with its unique durable and
+    /// native-host authorities.
     ///
     /// This returns after thread creation, before repository I/O. Use
     /// [`Self::wait_for_startup_until`] to obtain explicit readiness or
@@ -287,14 +303,14 @@ impl ExtensionServiceOwner {
                 worker_status.publish(ExtensionServicePhase::Failed);
                 return;
             };
+            let mut state = WorkerState::new(launch.map(|(input, deadline)| {
+                (
+                    WorkerStartupState::new(input),
+                    deadline,
+                    StartupAttempt::INITIAL,
+                )
+            }));
             let worker_result = panic::catch_unwind(AssertUnwindSafe(|| {
-                let mut state = WorkerState::new(launch.map(|(input, deadline)| {
-                    (
-                        WorkerStartupState::new(input),
-                        deadline,
-                        StartupAttempt::INITIAL,
-                    )
-                }));
                 if !state.start(
                     worker,
                     &worker_status,
@@ -316,9 +332,14 @@ impl ExtensionServiceOwner {
             worker_mailbox.close();
             match worker_result {
                 Ok(Some(summary)) => {
+                    if state.has_attached_native_obligation() {
+                        worker_status.publish(ExtensionServicePhase::Failed);
+                        retain_fail_stopped_native_obligation(&mut state);
+                    }
                     // The actor state and every future repository/native
                     // resource it owns are dropped before clean-exit
                     // evidence can become observable.
+                    drop(state);
                     drop(worker_cancellation);
                     drop(worker_startup);
                     drop(worker_status);
@@ -333,10 +354,17 @@ impl ExtensionServiceOwner {
                 Ok(None) => {
                     fail_active_startup(worker, &worker_startup);
                     worker_status.publish(ExtensionServicePhase::Failed);
+                    if state.has_attached_native_obligation() {
+                        retain_fail_stopped_native_obligation(&mut state);
+                    }
                 }
                 Err(payload) => {
                     fail_active_startup(worker, &worker_startup);
                     worker_status.publish(ExtensionServicePhase::Failed);
+                    if state.has_attached_native_obligation() {
+                        retain_fail_stopped_native_obligation(&mut state);
+                    }
+                    drop(state);
                     drop(worker_cancellation);
                     drop(worker_startup);
                     drop(worker_status);
@@ -518,7 +546,7 @@ impl ExtensionServiceOwner {
             self.status.publish(ExtensionServicePhase::Failed);
             return ExtensionServiceShutdownOutcome::EvidenceMissing;
         };
-        self.cancellation.request();
+        self.cancellation.request(deadline);
         match self.mailbox.try_push_shutdown() {
             ShutdownAdmission::Accepted | ShutdownAdmission::AlreadyEnqueued => {
                 self.status.publish(ExtensionServicePhase::ShutdownQueued);
@@ -661,6 +689,12 @@ impl WorkerState {
         )
     }
 
+    fn has_attached_native_obligation(&self) -> bool {
+        self.startup
+            .as_ref()
+            .is_some_and(|startup| startup.native_recovery.has_attached_obligation())
+    }
+
     fn attempt_startup(
         &mut self,
         worker: ExtensionServiceWorkerIdentity,
@@ -681,6 +715,7 @@ impl WorkerState {
             &startup.store,
             &mut startup.projection,
             &mut startup.repository,
+            Some(&mut startup.native_recovery),
             cancellation,
             deadline,
             |progress| match progress {
@@ -738,12 +773,47 @@ impl WorkerState {
             .expect("mailbox admission proves the completion counter bound");
         true
     }
+
+    fn drain_attached_native_before_shutdown(
+        &mut self,
+        status: &SharedStatus,
+        deadline: Instant,
+    ) -> bool {
+        let Some(startup) = self.startup.as_mut() else {
+            return true;
+        };
+        if !startup.native_recovery.has_attached_obligation() {
+            return true;
+        }
+
+        status.publish_startup(ExtensionServicePhase::ReconcilingCleanup);
+        let cancellation = ShutdownDrainCancellation;
+        let _ = reconcile_startup(
+            &startup.store,
+            &mut startup.projection,
+            &mut startup.repository,
+            Some(&mut startup.native_recovery),
+            &cancellation,
+            deadline,
+            |_| {},
+        );
+        !startup.native_recovery.has_attached_obligation()
+    }
+}
+
+struct ShutdownDrainCancellation;
+
+impl CancellationCheck for ShutdownDrainCancellation {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 struct WorkerStartupState {
     store: zephium_store::ExtensionNativeOwnershipStoreAuthority,
     repository: ServiceRepository,
     projection: JournalProjection,
+    native_recovery: NativeRecoveryState,
 }
 
 impl WorkerStartupState {
@@ -752,6 +822,7 @@ impl WorkerStartupState {
             store: input.store_authority,
             repository: ServiceRepository::new(input.repository_root),
             projection: JournalProjection::unknown(),
+            native_recovery: NativeRecoveryState::new(input.host_factory),
         }
     }
 }
@@ -846,7 +917,9 @@ const fn public_unavailable_reason(
         CleanupUnavailable::RepositoryInUse
         | CleanupUnavailable::RepositoryIo
         | CleanupUnavailable::RepositoryRecoveryPending
-        | CleanupUnavailable::StoreObservationPending => {
+        | CleanupUnavailable::StoreObservationPending
+        | CleanupUnavailable::NativeRuntimeUnavailable
+        | CleanupUnavailable::NativeRuntimeCapacity => {
             ExtensionServiceStartupUnavailableReason::ReconciliationPending
         }
     }
@@ -878,6 +951,8 @@ const fn public_failure_reason(reason: CleanupFailure) -> ExtensionServiceStartu
         CleanupFailure::InvalidJournalTransition
         | CleanupFailure::PackagePinMismatch
         | CleanupFailure::ConcurrentPackageLease
+        | CleanupFailure::NativeBindingInvalid
+        | CleanupFailure::NativeHostInvariant
         | CleanupFailure::FrontierLimitExceeded => {
             ExtensionServiceStartupFailureReason::InternalProtocolViolation
         }
@@ -908,6 +983,11 @@ fn run_worker(
                 if !cancellation.is_requested() || state.completed_normal != accepted_normal {
                     return None;
                 }
+                let deadline = cancellation.shutdown_deadline()?;
+                if !state.drain_attached_native_before_shutdown(status, deadline) {
+                    status.publish(ExtensionServicePhase::Failed);
+                    retain_fail_stopped_native_obligation(state);
+                }
                 return Some(WorkerShutdownSummary {
                     accepted_normal,
                     completed_normal: state.completed_normal,
@@ -918,10 +998,26 @@ fn run_worker(
     }
 }
 
+fn retain_fail_stopped_native_obligation(_state: &mut WorkerState) -> ! {
+    // There is no truthful passive-`Drop` path for an attached unresolved
+    // engine registry proxy. Keep the single bounded worker and its authority
+    // parked until process teardown; the owner observes an unclean shutdown,
+    // and engine/Store shutdown remain blocked by the retained obligation.
+    loop {
+        thread::park();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mailbox::EXTENSION_SERVICE_NORMAL_CAPACITY;
+    use zephium_extension_runtime_api::{
+        ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
+        ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
+        ExtensionRuntimeHostFactoryPort, ExtensionRuntimeHostOwnershipPort,
+        ExtensionRuntimeHostRecoveryContext,
+    };
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     use zephium_core::ports::store::StoreShutdownOutcome;
@@ -955,6 +1051,29 @@ mod tests {
 
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
+
+    struct UnsupportedHostFactoryPort;
+
+    impl ExtensionRuntimeHostFactoryPort for UnsupportedHostFactoryPort {
+        fn bind_activation(
+            &mut self,
+            _context: &ExtensionRuntimeHostActivationContext<'_>,
+        ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+            Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+        }
+
+        fn bind_recovery(
+            &mut self,
+            _context: ExtensionRuntimeHostRecoveryContext,
+        ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError>
+        {
+            Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+        }
+    }
+
+    fn unsupported_host_factory() -> ExtensionRuntimeHostFactory {
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactoryPort))
+    }
 
     #[test]
     fn owner_is_send_and_handle_is_send_sync() {
@@ -991,7 +1110,11 @@ mod tests {
         let authority = store.claim_extension_native_ownership_authority().unwrap();
         let repository_root =
             crate::ExtensionRepositoryRoot::from_app_data_directory(app_data.path()).unwrap();
-        let input = crate::ExtensionServiceLaunchInput::new(authority, repository_root);
+        let input = crate::ExtensionServiceLaunchInput::new(
+            authority,
+            repository_root,
+            unsupported_host_factory(),
+        );
         (app_data, store, input)
     }
 
@@ -1226,7 +1349,11 @@ mod tests {
         let repository_root =
             crate::ExtensionRepositoryRoot::from_app_data_directory(app_data.path()).unwrap();
         let owner = ExtensionServiceOwner::launch(
-            crate::ExtensionServiceLaunchInput::new(authority, repository_root),
+            crate::ExtensionServiceLaunchInput::new(
+                authority,
+                repository_root,
+                unsupported_host_factory(),
+            ),
             Instant::now() + Duration::from_secs(5),
         )
         .unwrap();

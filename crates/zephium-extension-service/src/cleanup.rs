@@ -17,6 +17,9 @@ use zephium_private_fs::PrivateFsError;
 use crate::journal_store::{
     JournalBackend, JournalLoadFailure, JournalMutationFailure, JournalProjection,
 };
+use crate::native_recovery::{
+    NativeRecoveryFailure, NativeRecoveryState, NativeRecoveryStep, NativeRecoveryUnavailable,
+};
 use crate::repository::{ServiceRepository, ServiceRepositoryOpenError};
 
 const MAX_CLEANUP_FRONTIERS: usize = MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES * 8 + 16;
@@ -77,6 +80,8 @@ pub(crate) enum CleanupUnavailable {
     RepositoryRecoveryPending,
     StoreNotAdmitted,
     StoreObservationPending,
+    NativeRuntimeUnavailable,
+    NativeRuntimeCapacity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +97,8 @@ pub(crate) enum CleanupFailure {
     InvalidJournalTransition,
     PackagePinMismatch,
     ConcurrentPackageLease,
+    NativeBindingInvalid,
+    NativeHostInvariant,
     FrontierLimitExceeded,
 }
 
@@ -120,6 +127,7 @@ pub(crate) fn reconcile_startup(
     journal_backend: &impl JournalBackend,
     projection: &mut JournalProjection,
     repository: &mut impl CleanupRepositoryBackend,
+    mut native_recovery: Option<&mut NativeRecoveryState>,
     cancellation: &impl CancellationCheck,
     deadline: Instant,
     mut publish_progress: impl FnMut(CleanupProgress),
@@ -160,25 +168,74 @@ pub(crate) fn reconcile_startup(
             publish_progress(CleanupProgress::ReconcilingCleanup);
             continue;
         };
+        if native_recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.has_frontier())
+        {
+            let Some(native_recovery) = native_recovery.as_deref_mut() else {
+                return CleanupStartupOutcome::Failed(CleanupFailure::NativeHostInvariant);
+            };
+            match native_recovery.advance(journal_backend, projection, cancellation, deadline) {
+                NativeRecoveryStep::Progress => {
+                    repository_reopens = 0;
+                    continue;
+                }
+                NativeRecoveryStep::Reload => {
+                    if let Err(error) = projection.reload(journal_backend, deadline) {
+                        return classify_load_error(error);
+                    }
+                    continue;
+                }
+                NativeRecoveryStep::Unsupported => {
+                    return cleanup_required_from_projection(projection);
+                }
+                NativeRecoveryStep::Unavailable(reason) => {
+                    return CleanupStartupOutcome::Unavailable(map_native_unavailable(reason));
+                }
+                NativeRecoveryStep::Failed(reason) => {
+                    return CleanupStartupOutcome::Failed(map_native_failure(reason));
+                }
+            }
+        }
+
         let definite_absence = journal
             .entries()
             .iter()
             .find(|entry| native_absence_is_definite(entry))
             .cloned();
         let Some(entry) = definite_absence else {
-            let possible_owner_count = journal.entries().len();
-            if possible_owner_count == 0 {
-                return CleanupStartupOutcome::Ready {
-                    journal_revision: journal.revision(),
-                };
+            let Some(entry) = journal
+                .entries()
+                .iter()
+                .find(|entry| native_owner_is_possible(entry))
+                .cloned()
+            else {
+                return cleanup_required_from_projection(projection);
+            };
+            let Some(native_recovery) = native_recovery.as_deref_mut() else {
+                return cleanup_required_from_projection(projection);
+            };
+            match native_recovery.begin(entry) {
+                NativeRecoveryStep::Progress => {
+                    repository_reopens = 0;
+                    continue;
+                }
+                NativeRecoveryStep::Reload => {
+                    if let Err(error) = projection.reload(journal_backend, deadline) {
+                        return classify_load_error(error);
+                    }
+                    continue;
+                }
+                NativeRecoveryStep::Unsupported => {
+                    return cleanup_required_from_projection(projection);
+                }
+                NativeRecoveryStep::Unavailable(reason) => {
+                    return CleanupStartupOutcome::Unavailable(map_native_unavailable(reason));
+                }
+                NativeRecoveryStep::Failed(reason) => {
+                    return CleanupStartupOutcome::Failed(map_native_failure(reason));
+                }
             }
-            let Ok(possible_owner_count) = u16::try_from(possible_owner_count) else {
-                return CleanupStartupOutcome::Failed(CleanupFailure::StoreJournalInvalid);
-            };
-            return CleanupStartupOutcome::CleanupRequired {
-                journal_revision: journal.revision(),
-                possible_owner_count,
-            };
         };
 
         match settle_definite_absence(
@@ -231,6 +288,65 @@ fn native_absence_is_definite(entry: &ExtensionNativeOwnershipEntry) -> bool {
             ExtensionNativeOwnershipPhase::NativeAbsentReleasePending
         )
     )
+}
+
+fn native_owner_is_possible(entry: &ExtensionNativeOwnershipEntry) -> bool {
+    matches!(
+        (entry.intent(), entry.phase()),
+        (
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn
+                | ExtensionNativeOwnershipPhase::NativeOwned,
+        ) | (
+            ExtensionNativeOwnershipIntent::Release,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        )
+    )
+}
+
+fn cleanup_required_from_projection(projection: &JournalProjection) -> CleanupStartupOutcome {
+    let Some(journal) = projection.known() else {
+        return CleanupStartupOutcome::Failed(CleanupFailure::StoreJournalInvalid);
+    };
+    let possible_owner_count = journal.entries().len();
+    if possible_owner_count == 0 {
+        return CleanupStartupOutcome::Ready {
+            journal_revision: journal.revision(),
+        };
+    }
+    let Ok(possible_owner_count) = u16::try_from(possible_owner_count) else {
+        return CleanupStartupOutcome::Failed(CleanupFailure::StoreJournalInvalid);
+    };
+    CleanupStartupOutcome::CleanupRequired {
+        journal_revision: journal.revision(),
+        possible_owner_count,
+    }
+}
+
+const fn map_native_unavailable(reason: NativeRecoveryUnavailable) -> CleanupUnavailable {
+    match reason {
+        NativeRecoveryUnavailable::Cancelled => CleanupUnavailable::Cancelled,
+        NativeRecoveryUnavailable::DeadlineExpired => CleanupUnavailable::DeadlineExpired,
+        NativeRecoveryUnavailable::StoreNotAdmitted => CleanupUnavailable::StoreNotAdmitted,
+        NativeRecoveryUnavailable::StoreObservationPending => {
+            CleanupUnavailable::StoreObservationPending
+        }
+        NativeRecoveryUnavailable::BackendUnavailable => {
+            CleanupUnavailable::NativeRuntimeUnavailable
+        }
+        NativeRecoveryUnavailable::CapacityExceeded => CleanupUnavailable::NativeRuntimeCapacity,
+    }
+}
+
+const fn map_native_failure(reason: NativeRecoveryFailure) -> CleanupFailure {
+    match reason {
+        NativeRecoveryFailure::StoreJournalLoadFailed => CleanupFailure::StoreJournalLoadFailed,
+        NativeRecoveryFailure::StoreMutationInvariant => CleanupFailure::StoreMutationInvariant,
+        NativeRecoveryFailure::StoreProjectionMismatch => CleanupFailure::StoreProjectionMismatch,
+        NativeRecoveryFailure::InvalidJournalTransition => CleanupFailure::InvalidJournalTransition,
+        NativeRecoveryFailure::InvalidBinding => CleanupFailure::NativeBindingInvalid,
+        NativeRecoveryFailure::HostInvariant => CleanupFailure::NativeHostInvariant,
+    }
 }
 
 fn settle_definite_absence(
@@ -919,6 +1035,7 @@ mod tests {
             backend,
             &mut projection,
             repository,
+            None,
             cancellation,
             deadline,
             publish_progress,
