@@ -12,6 +12,7 @@ mod grants;
 mod identity;
 mod install;
 mod manifest;
+mod native_grants;
 mod native_ownership;
 mod package_pin;
 mod runtime;
@@ -63,6 +64,11 @@ pub use manifest::{
     MAX_EXTENSION_MANIFEST_RETAINED_BYTES, MAX_EXTENSION_OVERRIDES,
     MAX_EXTENSION_SANDBOX_RESOURCES, MAX_EXTENSION_UNMODELED_DECLARATIONS,
     MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
+};
+pub use native_grants::{
+    ExtensionNativeApiGrant, ExtensionNativeApiGrantIter, ExtensionNativeGrantDecision,
+    ExtensionNativeGrantProjection, ExtensionNativeGrantRequirement, ExtensionNativeHostGrant,
+    ExtensionNativeHostGrantIter,
 };
 pub use native_ownership::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,

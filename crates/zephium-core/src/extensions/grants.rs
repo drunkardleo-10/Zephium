@@ -424,6 +424,29 @@ impl ExtensionGrantAuthority {
         ExtensionGrantPersistenceProjection { authority: self }
     }
 
+    /// Effective file-scheme toggle for one already-admitted runtime context.
+    ///
+    /// Kept crate-private so native projection cannot accidentally expose the
+    /// durable raw toggle. A private runtime would require both independent
+    /// grants before file access could become effective.
+    pub(super) const fn effective_file_access(
+        &self,
+        context: ExtensionGrantBrowsingContext,
+    ) -> bool {
+        self.file_access
+            && (matches!(context, ExtensionGrantBrowsingContext::Regular) || self.private_access)
+    }
+
+    /// Effective private-context toggle for one already-admitted runtime.
+    ///
+    /// Regular runtimes must never inherit a durable future-intent bit.
+    pub(super) const fn effective_private_access(
+        &self,
+        context: ExtensionGrantBrowsingContext,
+    ) -> bool {
+        matches!(context, ExtensionGrantBrowsingContext::Private) && self.private_access
+    }
+
     pub const fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }

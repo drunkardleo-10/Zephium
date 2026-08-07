@@ -23,10 +23,10 @@ use super::{
     ExtensionCatalogSetDigest, ExtensionDocumentPurpose, ExtensionGrantAuthority,
     ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
-    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipOperation,
-    ExtensionPackageIdentity, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
-    ExtensionRuntimeGeneration, ExtensionRuntimeInstance, ExtensionUrlScopeDecision,
-    ExtensionUserInvocationKind,
+    ExtensionNativeGrantProjection, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipOperation, ExtensionPackageIdentity, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
+    ExtensionUrlScopeDecision, ExtensionUserInvocationKind,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -563,6 +563,30 @@ impl ExtensionRuntimeOperationAuthority {
         size_of::<Self>().saturating_add(self.eligibility.retained_heap_bytes())
     }
 
+    /// Projects the complete effective grant state for one exact native
+    /// runtime generation.
+    ///
+    /// The caller must submit the full fingerprint it is configuring. A stale
+    /// generation, grant revision/digest, package, profile, or browsing
+    /// context is rejected before any declaration can be observed. The
+    /// returned borrowed view allocates nothing and remains structural rather
+    /// than authorizing; native activation must retain this operation
+    /// authority and separately join authenticated package and ownership
+    /// evidence.
+    pub fn native_grant_projection(
+        &self,
+        runtime: &ExtensionRuntimeFingerprint,
+    ) -> Result<ExtensionNativeGrantProjection<'_>, ExtensionOperationAuthorityDenial> {
+        if runtime != &self.fingerprint {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        Ok(ExtensionNativeGrantProjection::new(
+            &self.fingerprint,
+            &self.eligibility.manifest,
+            &self.eligibility.grants,
+        ))
+    }
+
     /// Checks the complete non-fresh Store/package-pin lineage carried by this
     /// authority against one structural native-ownership row.
     ///
@@ -669,14 +693,20 @@ mod tests {
     use crate::extensions::{
         ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
         ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
-        ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
-        ExtensionGrantCohort, ExtensionGrantDenial, ExtensionGrantManifestBinding,
-        ExtensionGrantManifestBindings, ExtensionHostPermissionSet, ExtensionInstall,
-        ExtensionInstallCatalog, ExtensionManifestDeclarations, ExtensionManifestDigest,
-        ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
+        ExtensionCompatibilityTargetId, ExtensionContentScriptDeclaration,
+        ExtensionContentScriptGlobDeclaration, ExtensionContentScriptResourceDigest,
+        ExtensionContentScriptRunAt, ExtensionContentScriptWorld,
+        ExtensionContentSecurityPolicyDeclaration, ExtensionGrantCohort, ExtensionGrantDenial,
+        ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionHostPermissionSet,
+        ExtensionInstall, ExtensionInstallCatalog, ExtensionManifestDeclarations,
+        ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
+        ExtensionManifestResourceDigest, ExtensionNativeGrantDecision,
+        ExtensionNativeGrantRequirement, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+        ExtensionPackageRevision, ExtensionTreeDigest, MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
     };
     use crate::injection::{MatchOptions, MatchPattern, MatchSet};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
 
     const ALL_URLS: &str = "<all_urls>";
 
@@ -728,16 +758,51 @@ mod tests {
     }
 
     fn manifest() -> Arc<ExtensionManifestDescriptor> {
+        projection_manifest(&[], &["activeTab", "scripting"], &[], &[ALL_URLS], &[])
+    }
+
+    fn content_script(patterns: &[&str], digest_byte: u8) -> ExtensionContentScriptDeclaration {
+        ExtensionContentScriptDeclaration::new(
+            MatchSet::parse(
+                patterns.iter().copied(),
+                std::iter::empty::<&str>(),
+                MatchOptions::default(),
+            )
+            .unwrap(),
+            ExtensionContentScriptRunAt::DocumentStart,
+            true,
+            ExtensionContentScriptWorld::Isolated,
+            1,
+            0,
+            ExtensionContentScriptGlobDeclaration::Absent,
+            ExtensionContentScriptResourceDigest::from_bytes([digest_byte; 32]),
+        )
+        .unwrap()
+    }
+
+    fn projection_manifest(
+        required_api: &[&str],
+        optional_api: &[&str],
+        required_hosts: &[&str],
+        optional_hosts: &[&str],
+        content_script_hosts: &[&[&str]],
+    ) -> Arc<ExtensionManifestDescriptor> {
+        let scripts = content_script_hosts
+            .iter()
+            .filter(|patterns| !patterns.is_empty())
+            .enumerate()
+            .map(|(index, patterns)| content_script(patterns, 32 + index as u8))
+            .collect();
         let declarations = ExtensionManifestDeclarations::new(
-            api(&[]),
-            api(&["activeTab", "scripting"]),
-            None,
-            Some(hosts(&[ALL_URLS])),
+            api(required_api),
+            api(optional_api),
+            (!required_hosts.is_empty()).then(|| hosts(required_hosts)),
+            (!optional_hosts.is_empty()).then(|| hosts(optional_hosts)),
             None,
             None,
             Vec::new(),
             ExtensionManifestExecutionSurfaces::new(
-                Vec::new(),
+                scripts,
                 ExtensionContentSecurityPolicyDeclaration::new(
                     ExtensionManifestResourceDigest::from_bytes([6; 32]),
                 ),
@@ -770,14 +835,16 @@ mod tests {
         )
     }
 
-    fn cohort(
+    #[allow(clippy::too_many_arguments)]
+    fn cohort_with_manifest(
         profile: ProfileId,
         install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
         granted_api: &[&str],
+        granted_hosts: &[&str],
         file_access: bool,
         private_access: bool,
     ) -> ExtensionGrantCohort {
-        let manifest = manifest();
         let install = ExtensionInstall::from_persisted(
             install_id,
             ExtensionInstallRevision::new(7).unwrap(),
@@ -802,13 +869,35 @@ mod tests {
                 .iter()
                 .map(|name| ApiPermissionName::parse_exact(name).unwrap())
                 .collect(),
-            vec![MatchPattern::parse(ALL_URLS).unwrap()],
+            granted_hosts
+                .iter()
+                .map(|pattern| MatchPattern::parse(pattern).unwrap())
+                .collect(),
             file_access,
             private_access,
             &manifest,
         )
         .unwrap();
         ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority]).unwrap()
+    }
+
+    fn cohort(
+        profile: ProfileId,
+        install_id: ExtensionInstallId,
+        granted_api: &[&str],
+        file_access: bool,
+        private_access: bool,
+    ) -> ExtensionGrantCohort {
+        let manifest = manifest();
+        cohort_with_manifest(
+            profile,
+            install_id,
+            manifest,
+            granted_api,
+            &[ALL_URLS],
+            file_access,
+            private_access,
+        )
     }
 
     fn eligible_runtime(
@@ -822,6 +911,39 @@ mod tests {
         ExtensionRuntimeFingerprint,
     ) {
         let cohort = cohort(profile, install_id, granted_api, file_access, false);
+        let eligibility = cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let runtime = eligibility.fingerprint(generation);
+        (
+            eligibility.into_operation_authority(generation, operation_lineage(generation.get())),
+            runtime,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eligible_runtime_with_manifest(
+        profile: ProfileId,
+        install_id: ExtensionInstallId,
+        generation: ExtensionRuntimeGeneration,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        granted_api: &[&str],
+        granted_hosts: &[&str],
+        file_access: bool,
+        private_access: bool,
+    ) -> (
+        ExtensionRuntimeOperationAuthority,
+        ExtensionRuntimeFingerprint,
+    ) {
+        let cohort = cohort_with_manifest(
+            profile,
+            install_id,
+            manifest,
+            granted_api,
+            granted_hosts,
+            file_access,
+            private_access,
+        );
         let eligibility = cohort
             .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
             .unwrap();
@@ -1060,6 +1182,412 @@ mod tests {
             cohort.runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Private),
             Err(ExtensionRuntimeEligibilityDenial::PrivateBrowsingUnsupported)
         ));
+    }
+
+    #[test]
+    fn native_projection_enumerates_every_api_declaration_and_explicit_denial() {
+        let manifest = projection_manifest(
+            &["zRequired", "bRequired"],
+            &["mOptional", "aOptional"],
+            &[],
+            &[],
+            &[],
+        );
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            ProfileId::from(97),
+            ExtensionInstallId::from(101),
+            ExtensionRuntimeGeneration::new(103).unwrap(),
+            manifest,
+            &["zRequired", "bRequired", "mOptional"],
+            &[],
+            false,
+            false,
+        );
+        let projection = authority.native_grant_projection(&runtime).unwrap();
+        let grants = projection
+            .api_grants()
+            .map(|grant| (grant.name().as_str(), grant.requirement(), grant.decision()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(projection.api_grant_count(), 4);
+        assert_eq!(
+            grants,
+            vec![
+                (
+                    "aOptional",
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+                (
+                    "bRequired",
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "mOptional",
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "zRequired",
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+            ]
+        );
+        assert!(grants
+            .iter()
+            .filter(|(_, requirement, _)| {
+                *requirement == ExtensionNativeGrantRequirement::Required
+            })
+            .all(|(_, _, decision)| decision.is_granted()));
+    }
+
+    #[test]
+    fn native_projection_merges_content_script_hosts_canonically_without_duplicates() {
+        let first_script = ["https://a.example/*", "https://z.example/*"];
+        let second_script = ["https://b.example/*", "https://a.example/*"];
+        let script_hosts: [&[&str]; 2] = [&first_script, &second_script];
+        let manifest = projection_manifest(
+            &[],
+            &[],
+            &["https://z.example/*", "https://c.example/*"],
+            &["https://y.example/*", "https://m.example/*"],
+            &script_hosts,
+        );
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            ProfileId::from(107),
+            ExtensionInstallId::from(109),
+            ExtensionRuntimeGeneration::new(113).unwrap(),
+            manifest,
+            &[],
+            &[
+                "https://a.example/*",
+                "https://b.example/*",
+                "https://c.example/*",
+                "https://z.example/*",
+                "https://y.example/*",
+            ],
+            false,
+            false,
+        );
+        let projection = authority.native_grant_projection(&runtime).unwrap();
+        let grants = projection
+            .host_grants()
+            .map(|grant| {
+                (
+                    grant.pattern().as_str(),
+                    grant.requirement(),
+                    grant.decision(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(projection.host_grant_count(), 6);
+        assert_eq!(
+            grants,
+            vec![
+                (
+                    "https://a.example/*",
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "https://b.example/*",
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "https://c.example/*",
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "https://m.example/*",
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+                (
+                    "https://y.example/*",
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "https://z.example/*",
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_projection_covers_every_bounded_content_script_source_and_optional_tail() {
+        let script_hosts = (0..MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS)
+            .map(|index| format!("https://script-{index:02}.example/*"))
+            .collect::<Vec<_>>();
+        let script_rows = script_hosts
+            .iter()
+            .map(|pattern| vec![pattern.as_str()])
+            .collect::<Vec<_>>();
+        let script_refs = script_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let optional = "https://zz-optional.example/*";
+        let manifest = projection_manifest(&[], &[], &[], &[optional], &script_refs);
+        let granted_hosts = script_hosts
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(optional))
+            .collect::<Vec<_>>();
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            ProfileId::from(173),
+            ExtensionInstallId::from(179),
+            ExtensionRuntimeGeneration::new(181).unwrap(),
+            manifest,
+            &[],
+            &granted_hosts,
+            false,
+            false,
+        );
+        let projection = authority.native_grant_projection(&runtime).unwrap();
+        let grants = projection.host_grants().collect::<Vec<_>>();
+
+        assert_eq!(grants.len(), MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS + 1);
+        assert_eq!(
+            grants.first().unwrap().pattern().as_str(),
+            "https://script-00.example/*"
+        );
+        assert_eq!(
+            grants[MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS - 1].requirement(),
+            ExtensionNativeGrantRequirement::Required
+        );
+        assert_eq!(grants.last().unwrap().pattern().as_str(), optional);
+        assert_eq!(
+            grants.last().unwrap().requirement(),
+            ExtensionNativeGrantRequirement::Optional
+        );
+        assert!(grants.iter().all(|grant| grant.decision().is_granted()));
+    }
+
+    #[test]
+    fn native_projection_item_debug_never_exposes_permission_or_host_text() {
+        let manifest = projection_manifest(
+            &["scripting"],
+            &[],
+            &["https://private.example/*"],
+            &[],
+            &[],
+        );
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            ProfileId::from(191),
+            ExtensionInstallId::from(193),
+            ExtensionRuntimeGeneration::new(197).unwrap(),
+            manifest,
+            &["scripting"],
+            &["https://private.example/*"],
+            false,
+            false,
+        );
+        let projection = authority.native_grant_projection(&runtime).unwrap();
+        let api_debug = format!("{:?}", projection.api_grants().next().unwrap());
+        let host_debug = format!("{:?}", projection.host_grants().next().unwrap());
+
+        assert!(!api_debug.contains("scripting"));
+        assert!(!host_debug.contains("private.example"));
+        assert!(api_debug.contains("<redacted>"));
+        assert!(host_debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn native_projection_keeps_file_and_private_flags_independent_and_effective() {
+        let profile = ProfileId::from(127);
+        let install_id = ExtensionInstallId::from(131);
+        let generation = ExtensionRuntimeGeneration::new(137).unwrap();
+        let (without_file, runtime) = eligible_runtime_with_manifest(
+            profile,
+            install_id,
+            generation,
+            manifest(),
+            &[],
+            &[ALL_URLS],
+            false,
+            true,
+        );
+        let projection = without_file.native_grant_projection(&runtime).unwrap();
+
+        assert_eq!(
+            projection.browsing_context(),
+            ExtensionGrantBrowsingContext::Regular
+        );
+        assert_eq!(projection.host_grant_count(), 1);
+        assert_eq!(
+            projection.host_grants().next().unwrap().decision(),
+            ExtensionNativeGrantDecision::Granted
+        );
+        assert!(!projection.file_scheme_access_granted());
+        assert!(!projection.private_context_access_granted());
+
+        let (with_file, runtime) = eligible_runtime_with_manifest(
+            profile,
+            install_id,
+            generation.next().unwrap(),
+            manifest(),
+            &[],
+            &[ALL_URLS],
+            true,
+            false,
+        );
+        let projection = with_file.native_grant_projection(&runtime).unwrap();
+        assert!(projection.file_scheme_access_granted());
+        assert!(!projection.private_context_access_granted());
+    }
+
+    #[test]
+    fn native_projection_is_exact_runtime_bound_and_reports_grant_context() {
+        let profile = ProfileId::from(139);
+        let install_id = ExtensionInstallId::from(149);
+        let generation = ExtensionRuntimeGeneration::new(151).unwrap();
+        let (authority, runtime) = eligible_runtime(
+            profile,
+            install_id,
+            generation,
+            &["activeTab", "scripting"],
+            false,
+        );
+        let projection = authority.native_grant_projection(&runtime).unwrap();
+
+        assert_eq!(projection.runtime(), &runtime);
+        assert_eq!(projection.grant_revision(), runtime.grant_revision());
+        assert_eq!(projection.grant_digest(), runtime.grant_digest());
+        assert_eq!(
+            projection.retained_bytes(),
+            std::mem::size_of_val(&projection)
+        );
+        assert_eq!(
+            format!("{projection:?}"),
+            "ExtensionNativeGrantProjection { runtime: \"<redacted>\", authority: \"<redacted>\" }"
+        );
+
+        let (_, wrong_generation) = eligible_runtime(
+            profile,
+            install_id,
+            generation.next().unwrap(),
+            &["activeTab", "scripting"],
+            false,
+        );
+        assert!(matches!(
+            authority.native_grant_projection(&wrong_generation),
+            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+        ));
+
+        let (_, different_grants) =
+            eligible_runtime(profile, install_id, generation, &["scripting"], false);
+        assert_eq!(runtime.grant_revision(), different_grants.grant_revision());
+        assert_ne!(runtime.grant_digest(), different_grants.grant_digest());
+        assert!(matches!(
+            authority.native_grant_projection(&different_grants),
+            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+        ));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn native_host_projection_is_globally_sorted_and_deduplicated(
+            explicit in prop::collection::vec(0_u8..12, 0..16),
+            first_script in prop::collection::vec(0_u8..12, 0..16),
+            second_script in prop::collection::vec(0_u8..12, 0..16),
+            optional in prop::collection::vec(20_u8..32, 0..16),
+        ) {
+            fn canonical_hosts(values: Vec<u8>) -> Vec<String> {
+                values
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(|value| format!("https://h{value}.example/*"))
+                    .collect()
+            }
+
+            let explicit = canonical_hosts(explicit);
+            let first_script = canonical_hosts(first_script);
+            let second_script = canonical_hosts(second_script);
+            let optional = canonical_hosts(optional);
+            let explicit_refs = explicit.iter().map(String::as_str).collect::<Vec<_>>();
+            let first_refs = first_script.iter().map(String::as_str).collect::<Vec<_>>();
+            let second_refs = second_script.iter().map(String::as_str).collect::<Vec<_>>();
+            let optional_refs = optional.iter().map(String::as_str).collect::<Vec<_>>();
+            let script_refs: [&[&str]; 2] = [&first_refs, &second_refs];
+
+            let manifest = projection_manifest(
+                &[],
+                &[],
+                &explicit_refs,
+                &optional_refs,
+                &script_refs,
+            );
+            let required = explicit
+                .iter()
+                .chain(first_script.iter())
+                .chain(second_script.iter())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let granted_optional = optional
+                .iter()
+                .filter(|pattern| pattern.as_bytes()[9] % 2 == 0)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let granted = required
+                .iter()
+                .chain(granted_optional.iter())
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let (authority, runtime) = eligible_runtime_with_manifest(
+                ProfileId::from(157),
+                ExtensionInstallId::from(163),
+                ExtensionRuntimeGeneration::new(167).unwrap(),
+                manifest,
+                &[],
+                &granted,
+                false,
+                false,
+            );
+            let projection = authority.native_grant_projection(&runtime).unwrap();
+            let actual = projection
+                .host_grants()
+                .map(|grant| {
+                    (
+                        grant.pattern().as_str().to_owned(),
+                        grant.requirement(),
+                        grant.decision(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut expected = required
+                .iter()
+                .map(|pattern| {
+                    (
+                        pattern.clone(),
+                        ExtensionNativeGrantRequirement::Required,
+                        ExtensionNativeGrantDecision::Granted,
+                    )
+                })
+                .chain(optional.iter().map(|pattern| {
+                    (
+                        pattern.clone(),
+                        ExtensionNativeGrantRequirement::Optional,
+                        if granted_optional.contains(pattern) {
+                            ExtensionNativeGrantDecision::Granted
+                        } else {
+                            ExtensionNativeGrantDecision::Denied
+                        },
+                    )
+                }))
+                .collect::<Vec<_>>();
+            expected.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+            prop_assert_eq!(projection.host_grant_count(), actual.len());
+            prop_assert_eq!(actual, expected);
+        }
     }
 
     #[test]
