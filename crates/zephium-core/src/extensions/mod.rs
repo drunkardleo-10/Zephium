@@ -67,8 +67,8 @@ pub use manifest::{
 };
 pub use native_grants::{
     ExtensionNativeApiGrant, ExtensionNativeApiGrantIter, ExtensionNativeGrantDecision,
-    ExtensionNativeGrantProjection, ExtensionNativeGrantRequirement, ExtensionNativeHostGrant,
-    ExtensionNativeHostGrantIter,
+    ExtensionNativeGrantProjection, ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot,
+    ExtensionNativeHostGrant, ExtensionNativeHostGrantIter,
 };
 pub use native_ownership::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,

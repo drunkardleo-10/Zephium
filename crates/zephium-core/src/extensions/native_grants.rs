@@ -1,15 +1,17 @@
-//! Borrowed native-runtime grant projection.
+//! Native-runtime grant projections and retained structural snapshots.
 //!
 //! This module translates one already-authorized runtime snapshot into the
 //! complete declaration-by-declaration grant state needed by a native adapter.
-//! It deliberately owns no manifest strings or compiled match patterns and
-//! performs no allocation. The projection is structural transport only: it
-//! cannot authorize an extension operation when separated from the
-//! move-only runtime operation authority that created it.
+//! The borrowed projection performs no allocation. Its owned transport form
+//! shallow-retains immutable Arc owners without cloning manifest strings or
+//! compiled match patterns. Both forms are structural only: neither can
+//! authorize an extension operation when separated from the move-only runtime
+//! operation authority that created them.
 
 use std::fmt;
 use std::iter::FusedIterator;
 use std::mem::size_of;
+use std::sync::Arc;
 
 use crate::injection::MatchPattern;
 
@@ -25,6 +27,8 @@ const REQUIRED_HOST_SOURCE_INDEX: usize = 0;
 const CONTENT_SCRIPT_HOST_SOURCE_START: usize = 1;
 const OPTIONAL_HOST_SOURCE_INDEX: usize = MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS + 1;
 const HOST_SOURCE_COUNT: usize = MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS + 2;
+const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
+const RETAINED_ARC_COUNTER_BYTES: usize = 2 * size_of::<usize>();
 
 /// Whether one projected declaration is required or optional in the admitted
 /// manifest.
@@ -169,15 +173,15 @@ impl<'a> ExtensionNativeHostGrant<'a> {
 #[must_use = "native grant projection must be consumed with its operation authority"]
 pub struct ExtensionNativeGrantProjection<'a> {
     runtime: &'a ExtensionRuntimeFingerprint,
-    manifest: &'a ExtensionManifestDescriptor,
-    grants: &'a ExtensionGrantAuthority,
+    manifest: &'a Arc<ExtensionManifestDescriptor>,
+    grants: &'a Arc<ExtensionGrantAuthority>,
 }
 
 impl<'a> ExtensionNativeGrantProjection<'a> {
     pub(super) fn new(
         runtime: &'a ExtensionRuntimeFingerprint,
-        manifest: &'a ExtensionManifestDescriptor,
-        grants: &'a ExtensionGrantAuthority,
+        manifest: &'a Arc<ExtensionManifestDescriptor>,
+        grants: &'a Arc<ExtensionGrantAuthority>,
     ) -> Self {
         debug_assert_eq!(runtime.package(), manifest.package());
         debug_assert_eq!(runtime.package(), grants.package());
@@ -294,12 +298,153 @@ impl<'a> ExtensionNativeGrantProjection<'a> {
     pub const fn retained_bytes(&self) -> usize {
         size_of::<Self>()
     }
+
+    /// Retains this exact structural grant snapshot beyond the authority
+    /// borrow without cloning manifest strings or compiled matchers.
+    ///
+    /// The returned value shallow-clones the immutable admitted manifest and
+    /// grant owners. It remains non-authorizing and must stay joined to the
+    /// originating operation authority, authenticated package access, and
+    /// native ownership reservation before a platform capability is changed.
+    pub fn into_owned_snapshot(self) -> ExtensionNativeGrantSnapshot {
+        ExtensionNativeGrantSnapshot {
+            runtime: self.runtime.clone(),
+            manifest: Arc::clone(self.manifest),
+            grants: Arc::clone(self.grants),
+        }
+    }
 }
 
 impl fmt::Debug for ExtensionNativeGrantProjection<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtensionNativeGrantProjection")
+            .field("runtime", &"<redacted>")
+            .field("authority", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Owned, bounded, non-authorizing native grant transport snapshot.
+///
+/// This value keeps shallow references to the exact immutable Store-admitted
+/// manifest and grant authority plus their complete runtime fingerprint. It
+/// exists so a trusted host can retain grant structure across a side-effect-
+/// free bind and apply it later on the native UI thread without deep-copying
+/// patterns. It cannot mint operation witnesses or prove package/native
+/// ownership.
+///
+/// The snapshot deliberately does not implement `Clone` or serialization:
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionNativeGrantSnapshot;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionNativeGrantSnapshot>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionNativeGrantSnapshot;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<ExtensionNativeGrantSnapshot>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_core::extensions::ExtensionNativeGrantSnapshot;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionNativeGrantSnapshot>();
+/// ```
+#[must_use = "native grant snapshot must remain joined to runtime authority"]
+pub struct ExtensionNativeGrantSnapshot {
+    runtime: ExtensionRuntimeFingerprint,
+    manifest: Arc<ExtensionManifestDescriptor>,
+    grants: Arc<ExtensionGrantAuthority>,
+}
+
+impl ExtensionNativeGrantSnapshot {
+    /// Complete exact runtime generation whose grants are retained.
+    pub const fn runtime(&self) -> &ExtensionRuntimeFingerprint {
+        &self.runtime
+    }
+
+    /// Exact grant-row revision bound into the runtime fingerprint.
+    pub const fn grant_revision(&self) -> ExtensionGrantRevision {
+        self.runtime.grant_revision()
+    }
+
+    /// Exact complete grant digest bound into the runtime fingerprint.
+    pub const fn grant_digest(&self) -> ExtensionGrantDigest {
+        self.runtime.grant_digest()
+    }
+
+    /// Browsing partition for which every retained decision is effective.
+    pub const fn browsing_context(&self) -> ExtensionGrantBrowsingContext {
+        self.runtime.browsing_context()
+    }
+
+    fn projection(&self) -> ExtensionNativeGrantProjection<'_> {
+        ExtensionNativeGrantProjection::new(&self.runtime, &self.manifest, &self.grants)
+    }
+
+    /// Canonically ordered complete API declaration stream.
+    pub fn api_grants(&self) -> ExtensionNativeApiGrantIter<'_> {
+        self.projection().api_grants()
+    }
+
+    /// Exact number of declared API permissions in [`Self::api_grants`].
+    pub fn api_grant_count(&self) -> usize {
+        self.projection().api_grant_count()
+    }
+
+    /// Canonically ordered complete host declaration stream.
+    pub fn host_grants(&self) -> ExtensionNativeHostGrantIter<'_> {
+        self.projection().host_grants()
+    }
+
+    /// Exact number of canonical host authorities in [`Self::host_grants`].
+    pub fn host_grant_count(&self) -> usize {
+        self.projection().host_grant_count()
+    }
+
+    /// Whether `file:` is effectively enabled for this exact runtime context.
+    pub fn file_scheme_access_granted(&self) -> bool {
+        self.projection().file_scheme_access_granted()
+    }
+
+    /// Whether this exact runtime is effectively admitted to private context.
+    pub fn private_context_access_granted(&self) -> bool {
+        self.projection().private_context_access_granted()
+    }
+
+    /// Exact storage newly retained beside the originating operation authority.
+    ///
+    /// The immutable manifest and grant allocations are excluded because the
+    /// authority already charges both in full. A trusted host may use this
+    /// smaller charge only while its control state continuously charges that
+    /// exact authority (or an equivalent quarantine charge) and drops this
+    /// snapshot no later than the matching authority state. Standalone owners
+    /// must use [`Self::retained_bytes`] instead.
+    pub const fn operation_authority_companion_retained_bytes(&self) -> usize {
+        size_of::<Self>()
+    }
+
+    /// Conservative logical inline-plus-shared-payload charge.
+    ///
+    /// The immutable Arc payloads are counted in full so this snapshot remains
+    /// safely bounded even if it outlives every other reference.
+    pub fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.manifest.retained_bytes())
+            .saturating_add(self.grants.retained_bytes())
+            .saturating_add(2 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+            .saturating_add(2 * RETAINED_ARC_COUNTER_BYTES)
+    }
+}
+
+impl fmt::Debug for ExtensionNativeGrantSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionNativeGrantSnapshot")
             .field("runtime", &"<redacted>")
             .field("authority", &"<redacted>")
             .finish()

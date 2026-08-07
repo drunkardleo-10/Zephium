@@ -701,8 +701,9 @@ mod tests {
         ExtensionInstall, ExtensionInstallCatalog, ExtensionManifestDeclarations,
         ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
         ExtensionManifestResourceDigest, ExtensionNativeGrantDecision,
-        ExtensionNativeGrantRequirement, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
-        ExtensionPackageRevision, ExtensionTreeDigest, MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
+        ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
+        MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
     };
     use crate::injection::{MatchOptions, MatchPattern, MatchSet};
     use proptest::prelude::*;
@@ -1487,6 +1488,89 @@ mod tests {
             authority.native_grant_projection(&different_grants),
             Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
         ));
+    }
+
+    #[test]
+    fn owned_native_grant_snapshot_is_shallow_bounded_and_reprojects_after_authority_drop() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+
+        let manifest = projection_manifest(
+            &["scripting"],
+            &["activeTab"],
+            &["https://required.example/*"],
+            &["https://optional.example/*"],
+            &[],
+        );
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            ProfileId::from(199),
+            ExtensionInstallId::from(211),
+            ExtensionRuntimeGeneration::new(223).unwrap(),
+            Arc::clone(&manifest),
+            &["scripting"],
+            &["https://required.example/*"],
+            false,
+            false,
+        );
+        let manifest_owners_before_snapshot = Arc::strong_count(&manifest);
+        let snapshot = authority
+            .native_grant_projection(&runtime)
+            .unwrap()
+            .into_owned_snapshot();
+        assert_eq!(
+            Arc::strong_count(&manifest),
+            manifest_owners_before_snapshot + 1
+        );
+        let witness = authority
+            .mint_document_authority_witness(&runtime, ExtensionDocumentPurpose::ExecuteScript)
+            .expect("structural snapshot creation leaves operation authority usable");
+        assert!(witness.matches(&runtime, ExtensionDocumentPurpose::ExecuteScript));
+        drop(witness);
+        drop(authority);
+        assert_eq!(
+            Arc::strong_count(&manifest),
+            manifest_owners_before_snapshot
+        );
+
+        assert_send::<ExtensionNativeGrantSnapshot>();
+        assert_sync::<ExtensionNativeGrantSnapshot>();
+        assert_eq!(snapshot.runtime(), &runtime);
+        assert_eq!(snapshot.grant_revision(), runtime.grant_revision());
+        assert_eq!(snapshot.grant_digest(), runtime.grant_digest());
+        assert_eq!(
+            snapshot.browsing_context(),
+            ExtensionGrantBrowsingContext::Regular
+        );
+        assert_eq!(
+            snapshot.operation_authority_companion_retained_bytes(),
+            size_of::<ExtensionNativeGrantSnapshot>()
+        );
+        assert!(
+            snapshot.retained_bytes() > snapshot.operation_authority_companion_retained_bytes()
+        );
+        assert_eq!(
+            format!("{snapshot:?}"),
+            "ExtensionNativeGrantSnapshot { runtime: \"<redacted>\", authority: \"<redacted>\" }"
+        );
+
+        assert_eq!(snapshot.api_grant_count(), 2);
+        assert_eq!(snapshot.host_grant_count(), 2);
+        assert_eq!(
+            snapshot
+                .api_grants()
+                .find(|grant| grant.name().as_str() == "activeTab")
+                .unwrap()
+                .decision(),
+            ExtensionNativeGrantDecision::Denied
+        );
+        assert_eq!(
+            snapshot
+                .host_grants()
+                .find(|grant| grant.pattern().as_str() == "https://optional.example/*")
+                .unwrap()
+                .decision(),
+            ExtensionNativeGrantDecision::Denied
+        );
     }
 
     proptest! {
