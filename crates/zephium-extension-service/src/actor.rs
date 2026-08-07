@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 
 use crate::cleanup::{
@@ -17,9 +18,7 @@ use crate::cleanup::{
 };
 use crate::evidence::ExtensionServiceShutdownEvidence;
 use crate::journal_store::JournalProjection;
-#[cfg(test)]
-use crate::mailbox::NormalAdmission;
-use crate::mailbox::{BarrierAdmission, Delivery, Mailbox, ShutdownAdmission};
+use crate::mailbox::{BarrierAdmission, Delivery, Mailbox, NormalAdmission, ShutdownAdmission};
 use crate::native_recovery::NativeRecoveryState;
 use crate::ports::{ExtensionServiceShutdownOutcome, ExtensionServiceStatusPort};
 #[cfg(test)]
@@ -30,6 +29,9 @@ use crate::profile_retirement::{
     ProfileRetirementRegistry, ProfileRetirementResources,
 };
 use crate::repository::ServiceRepository;
+use crate::runtime_coordinator::{
+    RuntimeCoordinator, RuntimeCoordinatorResources, RuntimeDrainOutcome,
+};
 use crate::startup::{
     CurrentStartupObservation, ExtensionServiceLaunchInput, ExtensionServiceStartupFailure,
     ExtensionServiceStartupFailureReason, ExtensionServiceStartupOutcome,
@@ -42,6 +44,14 @@ use crate::status::{
 };
 use crate::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence, ExtensionServiceWorkerIdentity,
+};
+
+mod runtime_operations;
+
+pub use runtime_operations::{
+    ExtensionServiceRuntimeActivationOutcome, ExtensionServiceRuntimeActivationRejectionReason,
+    ExtensionServiceRuntimeActivationUnavailableReason, ExtensionServiceRuntimeFailureReason,
+    ExtensionServiceRuntimeRetirementOutcome, ExtensionServiceRuntimeRetirementUnavailableReason,
 };
 
 const WORKER_NAME: &str = "zephium-extension-service";
@@ -71,6 +81,16 @@ enum WorkerCommand {
         profile: ProfileId,
         deadline: Instant,
         settlement: mpsc::SyncSender<ExtensionServiceProfileRetirementOutcome>,
+    },
+    ActivateRuntime {
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+        settlement: mpsc::SyncSender<ExtensionServiceRuntimeActivationOutcome>,
+    },
+    RetireRuntime {
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+        settlement: mpsc::SyncSender<ExtensionServiceRuntimeRetirementOutcome>,
     },
     #[cfg(test)]
     Drive,
@@ -178,10 +198,10 @@ impl ExtensionServiceStatusPort for ExtensionServiceHandle {
 /// Consuming [`Self::shutdown_until`] returns explicit terminal evidence or a
 /// precise failure. Dropping the owner grants the worker a short, bounded grace
 /// period and then detaches it if necessary; callers that require proof must
-/// shut down explicitly. An attached unresolved native recovery proxy is
+/// shut down explicitly. An attached unresolved runtime or recovery proxy is
 /// retained in a parked fail-stop worker rather than destroyed, so such a
-/// shutdown cannot produce clean evidence. The cloneable observation handle is
-/// both `Send` and `Sync`.
+/// shutdown cannot produce clean evidence. The cloneable observation handle
+/// is both `Send` and `Sync`.
 pub struct ExtensionServiceOwner {
     worker: ExtensionServiceWorkerIdentity,
     mailbox: Arc<Mailbox<WorkerCommand>>,
@@ -346,9 +366,20 @@ impl ExtensionServiceOwner {
             worker_mailbox.close();
             match worker_result {
                 Ok(Some(summary)) => {
-                    if state.has_attached_native_obligation() {
-                        worker_status.publish(ExtensionServicePhase::Failed);
-                        retain_fail_stopped_native_obligation(&mut state);
+                    match worker_shutdown_disposition(&state, &summary) {
+                        WorkerShutdownDisposition::Complete => {}
+                        WorkerShutdownDisposition::RetainAttached => {
+                            worker_status.publish(ExtensionServicePhase::Failed);
+                            retain_fail_stopped_attached_obligation(&mut state);
+                        }
+                        WorkerShutdownDisposition::RefuseEvidence => {
+                            // `run_worker` is the only producer of a summary and
+                            // already drains before returning one. Do not invent
+                            // an alternate cleanup path here: reject the
+                            // inconsistent summary and expose no evidence.
+                            worker_status.publish(ExtensionServicePhase::Failed);
+                            return;
+                        }
                     }
                     // The actor state and every future repository/native
                     // resource it owns are dropped before clean-exit
@@ -368,15 +399,15 @@ impl ExtensionServiceOwner {
                 Ok(None) => {
                     fail_active_startup(worker, &worker_startup);
                     worker_status.publish(ExtensionServicePhase::Failed);
-                    if state.has_attached_native_obligation() {
-                        retain_fail_stopped_native_obligation(&mut state);
+                    if state.has_attached_obligation() {
+                        retain_fail_stopped_attached_obligation(&mut state);
                     }
                 }
                 Err(payload) => {
                     fail_active_startup(worker, &worker_startup);
                     worker_status.publish(ExtensionServicePhase::Failed);
-                    if state.has_attached_native_obligation() {
-                        retain_fail_stopped_native_obligation(&mut state);
+                    if state.has_attached_obligation() {
+                        retain_fail_stopped_attached_obligation(&mut state);
                     }
                     drop(state);
                     drop(worker_cancellation);
@@ -427,6 +458,122 @@ impl ExtensionServiceOwner {
         ExtensionServiceHandle {
             worker: self.worker,
             status: Arc::clone(&self.status),
+        }
+    }
+
+    /// Tries to activate one exact profile/install/browsing-context runtime by
+    /// an absolute deadline.
+    ///
+    /// The key is only an identity selector. The worker reloads and validates
+    /// the complete Store, package, grant, and native authority cohort before
+    /// activation. This call must run away from a native UI/event-loop thread.
+    /// A deadline after mailbox admission does not cancel the accepted work;
+    /// a later call with the same key resumes or observes its exact state.
+    #[must_use = "runtime activation settlement must be checked"]
+    pub fn activate_runtime_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+    ) -> ExtensionServiceRuntimeActivationOutcome {
+        if Instant::now() >= deadline {
+            return ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                ExtensionServiceRuntimeActivationUnavailableReason::DeadlineReached,
+            );
+        }
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::ActivateRuntime {
+            key,
+            deadline,
+            settlement,
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                            ExtensionServiceRuntimeActivationUnavailableReason::DeadlineReached,
+                        )
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                            ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                        )
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                ExtensionServiceRuntimeActivationUnavailableReason::RetryableNotAdmitted,
+            ),
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                )
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                )
+            }
+        }
+    }
+
+    /// Tries to retire one exact profile/install/browsing-context runtime by
+    /// an absolute deadline.
+    ///
+    /// A `NotPresent` settlement is returned only by a currently ready exact
+    /// worker. It is not durable profile-absence evidence and must not replace
+    /// [`Self::retire_profile_until`] in profile deletion. This call follows
+    /// the same native-event-loop and accepted-work semantics as
+    /// [`Self::activate_runtime_until`].
+    #[must_use = "runtime retirement settlement must be checked"]
+    pub fn retire_runtime_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+    ) -> ExtensionServiceRuntimeRetirementOutcome {
+        if Instant::now() >= deadline {
+            return ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached,
+            );
+        }
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::RetireRuntime {
+            key,
+            deadline,
+            settlement,
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                            ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached,
+                        )
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                            ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                        )
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                ExtensionServiceRuntimeRetirementUnavailableReason::RetryableNotAdmitted,
+            ),
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                )
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                )
+            }
         }
     }
 
@@ -786,6 +933,38 @@ fn receive_profile_retirement_until(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeCommandObservationFailure {
+    DeadlineReached,
+    WorkerUnavailable,
+}
+
+fn receive_runtime_command_until<T>(
+    settlement: &Receiver<T>,
+    deadline: Instant,
+) -> Result<T, RuntimeCommandObservationFailure> {
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        return match settlement.try_recv() {
+            Ok(outcome) => Ok(outcome),
+            Err(mpsc::TryRecvError::Empty) => {
+                Err(RuntimeCommandObservationFailure::DeadlineReached)
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(RuntimeCommandObservationFailure::WorkerUnavailable)
+            }
+        };
+    };
+    match settlement.recv_timeout(remaining) {
+        Ok(outcome) => Ok(outcome),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(RuntimeCommandObservationFailure::DeadlineReached)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(RuntimeCommandObservationFailure::WorkerUnavailable)
+        }
+    }
+}
+
 fn wait_for_thread_finish(thread: &JoinHandle<()>, deadline: Instant) -> bool {
     loop {
         if thread.is_finished() {
@@ -803,8 +982,50 @@ struct WorkerState {
     startup: Option<WorkerStartupState>,
     initial_startup: Option<(Instant, StartupAttempt)>,
     retirements: ProfileRetirementRegistry,
+    runtime: RuntimeCoordinator,
     #[cfg(test)]
     retained_probe: Option<TestDropProbe>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeIngressReadiness {
+    Ready,
+    NotReady,
+    StartupFailed(ExtensionServiceStartupFailureReason),
+    ProtocolViolation,
+}
+
+fn runtime_ingress_readiness(
+    worker: ExtensionServiceWorkerIdentity,
+    startup: &SharedStartupOutcome,
+    has_worker_resources: bool,
+) -> RuntimeIngressReadiness {
+    match startup.current() {
+        CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::Ready(evidence))
+            if evidence.worker() == worker && has_worker_resources =>
+        {
+            RuntimeIngressReadiness::Ready
+        }
+        CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::Ready(_)) => {
+            RuntimeIngressReadiness::ProtocolViolation
+        }
+        CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::FailedClosed(
+            failure,
+        )) if failure.worker() == worker => {
+            RuntimeIngressReadiness::StartupFailed(failure.reason())
+        }
+        CurrentStartupObservation::Settled(ExtensionServiceStartupOutcome::FailedClosed(_)) => {
+            RuntimeIngressReadiness::ProtocolViolation
+        }
+        CurrentStartupObservation::Settled(
+            ExtensionServiceStartupOutcome::CleanupRequired(_)
+            | ExtensionServiceStartupOutcome::Unavailable(_),
+        )
+        | CurrentStartupObservation::Await(_) => RuntimeIngressReadiness::NotReady,
+        CurrentStartupObservation::AdmissionFailedClosed | CurrentStartupObservation::Idle => {
+            RuntimeIngressReadiness::ProtocolViolation
+        }
+    }
 }
 
 impl WorkerState {
@@ -818,6 +1039,7 @@ impl WorkerState {
             startup,
             initial_startup,
             retirements: ProfileRetirementRegistry::new(),
+            runtime: RuntimeCoordinator::new(),
             #[cfg(test)]
             retained_probe: None,
         }
@@ -845,10 +1067,13 @@ impl WorkerState {
         )
     }
 
-    fn has_attached_native_obligation(&self) -> bool {
-        self.startup
-            .as_ref()
-            .is_some_and(|startup| startup.native_recovery.has_attached_obligation())
+    fn has_attached_obligation(&self) -> bool {
+        requires_attached_obligation_retention(
+            self.runtime.has_attached_obligation(),
+            self.startup
+                .as_ref()
+                .is_some_and(|startup| startup.native_recovery.has_attached_obligation()),
+        )
     }
 
     fn attempt_startup(
@@ -940,14 +1165,54 @@ impl WorkerState {
                 });
                 let outcome = run_profile_retirement(
                     resources,
+                    &mut self.runtime,
                     &mut self.retirements,
                     profile,
                     deadline,
                     cancellation,
                 );
+                if self.runtime.is_fail_stopped() {
+                    status.publish(ExtensionServicePhase::Failed);
+                }
                 // The caller's observation deadline is independent of worker
                 // completion. A dropped receiver never rolls back the fence.
                 let _ = settlement.try_send(outcome);
+            }
+            WorkerCommand::ActivateRuntime {
+                key,
+                deadline,
+                settlement,
+            } => {
+                let continue_running = self.complete_runtime_activation(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    key,
+                    deadline,
+                    &settlement,
+                );
+                if !continue_running {
+                    return false;
+                }
+            }
+            WorkerCommand::RetireRuntime {
+                key,
+                deadline,
+                settlement,
+            } => {
+                let continue_running = self.complete_runtime_retirement(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    key,
+                    deadline,
+                    &settlement,
+                );
+                if !continue_running {
+                    return false;
+                }
             }
             #[cfg(test)]
             WorkerCommand::Drive => {}
@@ -968,6 +1233,144 @@ impl WorkerState {
             .completed_commands
             .checked_add(1)
             .expect("mailbox admission proves the completion counter bound");
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_runtime_activation(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+        settlement: &mpsc::SyncSender<ExtensionServiceRuntimeActivationOutcome>,
+    ) -> bool {
+        if cancellation.is_requested() {
+            let _ = settlement.try_send(ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                ExtensionServiceRuntimeActivationUnavailableReason::CancellationRequested,
+            ));
+            return true;
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => {}
+            RuntimeIngressReadiness::NotReady => {
+                let _ = settlement.try_send(ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                    ExtensionServiceRuntimeActivationUnavailableReason::ServiceNotReady,
+                ));
+                return true;
+            }
+            RuntimeIngressReadiness::StartupFailed(reason) => {
+                let _ =
+                    settlement.try_send(ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::StartupFailed(reason),
+                    ));
+                return true;
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                let _ =
+                    settlement.try_send(ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+                    ));
+                status.publish(ExtensionServicePhase::Failed);
+                return false;
+            }
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            let _ = settlement.try_send(ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+            ));
+            status.publish(ExtensionServicePhase::Failed);
+            return false;
+        };
+        let profile_fenced = self.retirements.blocks_ingress(key.profile());
+        let outcome = self.runtime.activate_until(
+            RuntimeCoordinatorResources::new(
+                &startup.store,
+                &mut startup.projection,
+                &mut startup.repository,
+                &mut startup.native_recovery,
+            ),
+            key,
+            profile_fenced,
+            deadline,
+        );
+        if matches!(
+            outcome,
+            crate::runtime_coordinator::RuntimeActivationOutcome::FailedClosed(_)
+        ) {
+            status.publish(ExtensionServicePhase::Failed);
+        }
+        let _ = settlement.try_send(outcome.into());
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_runtime_retirement(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+        settlement: &mpsc::SyncSender<ExtensionServiceRuntimeRetirementOutcome>,
+    ) -> bool {
+        if cancellation.is_requested() {
+            let _ = settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                ExtensionServiceRuntimeRetirementUnavailableReason::CancellationRequested,
+            ));
+            return true;
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => {}
+            RuntimeIngressReadiness::NotReady => {
+                let _ = settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                    ExtensionServiceRuntimeRetirementUnavailableReason::ServiceNotReady,
+                ));
+                return true;
+            }
+            RuntimeIngressReadiness::StartupFailed(reason) => {
+                let _ =
+                    settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::StartupFailed(reason),
+                    ));
+                return true;
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                let _ =
+                    settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+                    ));
+                status.publish(ExtensionServicePhase::Failed);
+                return false;
+            }
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            let _ = settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+            ));
+            status.publish(ExtensionServicePhase::Failed);
+            return false;
+        };
+        let outcome = self.runtime.retire_key_until(
+            RuntimeCoordinatorResources::new(
+                &startup.store,
+                &mut startup.projection,
+                &mut startup.repository,
+                &mut startup.native_recovery,
+            ),
+            key,
+            deadline,
+        );
+        if matches!(
+            outcome,
+            crate::runtime_coordinator::RuntimeRetirementOutcome::FailedClosed(_)
+        ) {
+            status.publish(ExtensionServicePhase::Failed);
+        }
+        let _ = settlement.try_send(outcome.into());
         true
     }
 
@@ -995,6 +1398,37 @@ impl WorkerState {
         );
         !startup.native_recovery.has_attached_obligation()
     }
+
+    fn drain_runtime_before_shutdown(&mut self, deadline: Instant) -> bool {
+        let Some(startup) = self.startup.as_mut() else {
+            return !self.runtime.has_obligation() && !self.runtime.is_fail_stopped();
+        };
+        matches!(
+            self.runtime.drain_all_until(
+                RuntimeCoordinatorResources::new(
+                    &startup.store,
+                    &mut startup.projection,
+                    &mut startup.repository,
+                    &mut startup.native_recovery,
+                ),
+                deadline,
+            ),
+            RuntimeDrainOutcome::Drained
+        ) && !self.runtime.has_obligation()
+    }
+
+    fn shutdown_state_is_clean(&self) -> bool {
+        !self.runtime.has_obligation()
+            && !self.runtime.is_fail_stopped()
+            && !self.has_attached_obligation()
+    }
+}
+
+const fn requires_attached_obligation_retention(
+    runtime_attached: bool,
+    recovery_attached: bool,
+) -> bool {
+    runtime_attached || recovery_attached
 }
 
 struct ShutdownDrainCancellation;
@@ -1160,6 +1594,38 @@ struct WorkerShutdownSummary {
     completed_commands: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerShutdownDisposition {
+    Complete,
+    RetainAttached,
+    RefuseEvidence,
+}
+
+const fn classify_worker_shutdown(
+    has_attached_obligation: bool,
+    shutdown_state_is_clean: bool,
+    command_counts_match: bool,
+) -> WorkerShutdownDisposition {
+    if has_attached_obligation {
+        WorkerShutdownDisposition::RetainAttached
+    } else if shutdown_state_is_clean && command_counts_match {
+        WorkerShutdownDisposition::Complete
+    } else {
+        WorkerShutdownDisposition::RefuseEvidence
+    }
+}
+
+fn worker_shutdown_disposition(
+    state: &WorkerState,
+    summary: &WorkerShutdownSummary,
+) -> WorkerShutdownDisposition {
+    classify_worker_shutdown(
+        state.has_attached_obligation(),
+        state.shutdown_state_is_clean(),
+        summary.accepted_commands == summary.completed_commands,
+    )
+}
+
 fn run_worker(
     state: &mut WorkerState,
     worker: ExtensionServiceWorkerIdentity,
@@ -1180,9 +1646,17 @@ fn run_worker(
                     return None;
                 }
                 let deadline = cancellation.shutdown_deadline()?;
+                if !state.drain_runtime_before_shutdown(deadline) {
+                    status.publish(ExtensionServicePhase::Failed);
+                    return None;
+                }
                 if !state.drain_attached_native_before_shutdown(status, deadline) {
                     status.publish(ExtensionServicePhase::Failed);
-                    retain_fail_stopped_native_obligation(state);
+                    return None;
+                }
+                if !state.shutdown_state_is_clean() {
+                    status.publish(ExtensionServicePhase::Failed);
+                    return None;
                 }
                 return Some(WorkerShutdownSummary {
                     accepted_commands,
@@ -1194,15 +1668,18 @@ fn run_worker(
     }
 }
 
-fn retain_fail_stopped_native_obligation(_state: &mut WorkerState) -> ! {
+fn retain_fail_stopped_attached_obligation(_state: &mut WorkerState) -> ! {
     // There is no truthful passive-`Drop` path for an attached unresolved
-    // engine registry proxy. Keep the single bounded worker and its authority
-    // parked until process teardown; the owner observes an unclean shutdown,
-    // and engine/Store shutdown remain blocked by the retained obligation.
+    // engine runtime or recovery proxy. Keep the single bounded worker and its
+    // authority parked until process teardown; the owner observes an unclean
+    // shutdown, and engine/Store shutdown remain blocked by the obligation.
     loop {
         thread::park();
     }
 }
+
+#[cfg(test)]
+mod runtime_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1498,11 +1975,13 @@ mod tests {
     fn expired_retirement_installs_fencing_before_inspecting_deadline_or_startup() {
         let profile = ProfileId::from(3);
         let mut retirements = ProfileRetirementRegistry::new();
+        let mut runtime = RuntimeCoordinator::new();
         let cancellation = WorkerCancellation::new();
 
         assert_eq!(
             run_profile_retirement(
                 None,
+                &mut runtime,
                 &mut retirements,
                 profile,
                 Instant::now(),
@@ -1583,7 +2062,7 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    fn production_input_fixture() -> (
+    pub(super) fn production_input_fixture() -> (
         tempfile::TempDir,
         Arc<SqliteStore>,
         ExtensionServiceLaunchInput,
@@ -1592,7 +2071,7 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    fn production_input_fixture_with_factory(
+    pub(super) fn production_input_fixture_with_factory(
         host_factory: ExtensionRuntimeHostFactory,
     ) -> (
         tempfile::TempDir,

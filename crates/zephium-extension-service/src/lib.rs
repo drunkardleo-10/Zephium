@@ -11,12 +11,15 @@
 //! The typed startup surface transfers a validated private-repository location,
 //! the Store's unique service capability for exact runtime snapshots and
 //! native ownership, and the engine's unique native-host factory into the
-//! worker. Before publishing readiness, that
-//! worker settles interrupted package builds, reconciles possible native
+//! worker. Before publishing readiness, that worker settles interrupted
+//! package builds, reconciles possible native
 //! owners one exact lineage at a time, retires owners that still exist, and
-//! releases package pins only after durable native absence. No extension
-//! operation authority is exposed by this crate yet. Profile-retirement
-//! results are ordinary non-authorizing control-flow settlements.
+//! releases package pins only after durable native absence. The unique owner
+//! exposes bounded activation and exact-runtime retirement commands whose
+//! inputs are identity selectors only; the worker reconstructs and revalidates
+//! Store, repository, grant, and native authority inside its serialized turn.
+//! Returned runtime and profile-retirement values are ordinary path-free,
+//! non-authorizing control-flow settlements.
 //!
 //! The owner cannot be shared across threads:
 //!
@@ -50,7 +53,6 @@ mod native_recovery;
 mod ports;
 mod profile_retirement;
 mod repository;
-#[allow(dead_code)] // Worker ingress wiring lands after the private coordinator is validated.
 mod runtime_coordinator;
 mod startup;
 mod status;
@@ -58,8 +60,11 @@ mod status;
 const _: () = assert!(MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES > 0);
 
 pub use actor::{
-    ExtensionServiceHandle, ExtensionServiceOwner, ExtensionServiceSpawnError,
-    EXTENSION_SERVICE_DEFAULT_SHUTDOWN_TIMEOUT,
+    ExtensionServiceHandle, ExtensionServiceOwner, ExtensionServiceRuntimeActivationOutcome,
+    ExtensionServiceRuntimeActivationRejectionReason,
+    ExtensionServiceRuntimeActivationUnavailableReason, ExtensionServiceRuntimeFailureReason,
+    ExtensionServiceRuntimeRetirementOutcome, ExtensionServiceRuntimeRetirementUnavailableReason,
+    ExtensionServiceSpawnError, EXTENSION_SERVICE_DEFAULT_SHUTDOWN_TIMEOUT,
 };
 pub use evidence::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence,

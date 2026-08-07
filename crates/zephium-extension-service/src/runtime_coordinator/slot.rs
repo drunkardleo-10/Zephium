@@ -312,6 +312,11 @@ pub(super) struct RuntimeFailStopState {
     pub(super) retained: RuntimeFailStopRetained,
 }
 
+// These payloads are deliberately captive. Once the coordinator fail-stops,
+// it must retain every move-only authority whose native or durable ownership
+// may still be attached; inspecting or dropping that authority would invent a
+// settlement the protocol cannot prove.
+#[allow(dead_code)]
 pub(super) enum RuntimeFailStopRetained {
     Prior(Box<RuntimeSlotState>),
     BeginDiverged(Box<JournalActivationDiverged<ServiceRuntimeAcquisitionPlan>>),
@@ -327,11 +332,13 @@ pub(super) enum RuntimeFailStopRetained {
     PublicationReclaimCallPanicked(Box<PublicationReclaimCallPanicAuthority>),
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct RuntimeRowFenceDivergedAuthority {
     pub(super) diverged: RowFenceDiverged,
     pub(super) operation: RuntimeRowFenceOperation,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct PublicationFailStopAuthority {
     pub(super) owner: ExtensionRuntimeOwner,
     pub(super) refusal: ExtensionRuntimePublicationRefusal,
@@ -339,18 +346,21 @@ pub(super) struct PublicationFailStopAuthority {
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct NativeCallPanicAuthority {
     pub(super) pending: ExtensionRuntimePendingPublication,
     pub(super) recovery: ServiceRuntimeRecovery,
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct NativeRetirementCallPanicAuthority {
     pub(super) operation: RuntimeOperationControl,
     pub(super) recovery: ServiceRuntimeRecovery,
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct PublicationReclaimFailStopAuthority {
     pub(super) access: ExtensionPackageAccess,
     pub(super) refusal: ExtensionRuntimePublicationReclaimRefusal,
@@ -358,12 +368,14 @@ pub(super) struct PublicationReclaimFailStopAuthority {
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct PublicationCallPanicAuthority {
     pub(super) owner: ExtensionRuntimeOwner,
     pub(super) recovery: ServiceRuntimeRecovery,
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
 pub(super) struct PublicationReclaimCallPanicAuthority {
     pub(super) access: ExtensionPackageAccess,
     pub(super) recovery: ServiceRuntimeRecovery,

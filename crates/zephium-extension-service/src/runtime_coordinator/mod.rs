@@ -16,10 +16,11 @@ use crate::native_recovery::NativeRecoveryState;
 use crate::repository::ServiceRepository;
 use crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 
-use outcome::RuntimeCoordinatorFailureReason;
-#[allow(unused_imports)]
-// Actor projection is intentionally deferred until the private gate is green.
-pub(crate) use outcome::{RuntimeActivationOutcome, RuntimeDrainOutcome, RuntimeRetirementOutcome};
+pub(crate) use outcome::{
+    RuntimeActivationOutcome, RuntimeActivationRejectionReason, RuntimeActivationUnavailableReason,
+    RuntimeCoordinatorFailureReason, RuntimeDrainOutcome, RuntimeRetirementOutcome,
+    RuntimeRetirementUnavailableReason,
+};
 use slot::RuntimeSlot;
 
 const _: () = assert!(MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES == 3);
@@ -66,6 +67,10 @@ impl RuntimeCoordinator {
         self.slots.iter().any(Option::is_some)
     }
 
+    pub(crate) const fn is_fail_stopped(&self) -> bool {
+        self.fail_stop.is_some()
+    }
+
     pub(crate) fn has_profile_obligation(&self, profile: ProfileId) -> bool {
         self.slots
             .iter()
@@ -95,6 +100,14 @@ impl RuntimeCoordinator {
         };
         *vacant = Some(RuntimeSlot::planning(key));
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admit_planning_slot_for_test(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+    ) -> Result<(), RuntimeActivationOutcome> {
+        self.admit_planning_slot(key)
     }
 
     fn admit_fresh_before_deadline(
@@ -156,6 +169,14 @@ impl RuntimeCoordinator {
 
     fn enter_fail_stop(&mut self, reason: RuntimeCoordinatorFailureReason) {
         self.fail_stop.get_or_insert(reason);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enter_fail_stop_without_slot_for_test(
+        &mut self,
+        reason: RuntimeCoordinatorFailureReason,
+    ) {
+        self.enter_fail_stop(reason);
     }
 
     fn slot(&self, key: ExtensionNativeOwnershipKey) -> Option<&RuntimeSlot> {

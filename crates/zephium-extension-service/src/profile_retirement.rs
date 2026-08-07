@@ -19,6 +19,10 @@ use crate::cleanup::{
 use crate::journal_store::JournalProjection;
 use crate::native_recovery::NativeRecoveryState;
 use crate::repository::ServiceRepository;
+use crate::runtime_coordinator::{
+    RuntimeCoordinator, RuntimeCoordinatorFailureReason, RuntimeCoordinatorResources,
+    RuntimeRetirementOutcome, RuntimeRetirementUnavailableReason,
+};
 
 const MAX_PROFILE_RETIREMENT_STATES: usize = 64;
 const _: () = assert!(MAX_SESSION_PROFILES == MAX_PROFILE_RETIREMENT_STATES);
@@ -229,8 +233,14 @@ impl<'worker> ProfileRetirementResources<'worker> {
 }
 
 /// Advances one permanently fenced profile through its exact proof chain.
+///
+/// Worker-owned live and interrupted runtime slots retire before the generic
+/// durable cleanup path observes their rows. Repository and native absence can
+/// therefore never be inferred around a coordinator authority that still
+/// belongs to this worker.
 pub(crate) fn retire_profile_until(
     resources: Option<ProfileRetirementResources<'_>>,
+    runtime: &mut RuntimeCoordinator,
     retirements: &mut ProfileRetirementRegistry,
     profile: ProfileId,
     deadline: Instant,
@@ -273,6 +283,44 @@ pub(crate) fn retire_profile_until(
         repository,
         native_recovery,
     } = resources;
+
+    #[allow(unreachable_patterns)]
+    match runtime.retire_profile_until(
+        RuntimeCoordinatorResources::new(
+            store,
+            &mut *projection,
+            &mut *repository,
+            &mut *native_recovery,
+        ),
+        profile,
+        deadline,
+    ) {
+        RuntimeRetirementOutcome::Retired | RuntimeRetirementOutcome::NotPresent => {}
+        RuntimeRetirementOutcome::Unavailable(reason) => {
+            return match runtime_retirement_unavailable(reason) {
+                Ok(reason) => ExtensionServiceProfileRetirementOutcome::Unavailable(reason),
+                Err(reason) => retirements.fail_closed(profile, reason),
+            };
+        }
+        RuntimeRetirementOutcome::FailedClosed(reason) => {
+            return retirements.fail_closed(profile, runtime_retirement_failure(reason));
+        }
+        _ => {
+            return retirements.fail_closed(
+                profile,
+                ExtensionServiceProfileRetirementFailureReason::InternalProtocolViolation,
+            );
+        }
+    }
+    if runtime.has_profile_obligation(profile) {
+        return retirements.fail_closed(
+            profile,
+            ExtensionServiceProfileRetirementFailureReason::InternalProtocolViolation,
+        );
+    }
+    if let Some(reason) = retirement_refusal(cancellation, deadline) {
+        return ExtensionServiceProfileRetirementOutcome::Unavailable(reason);
+    }
 
     // Drain only this profile's exact durable journal rows. Unrelated rows and
     // native frontiers are neither advanced nor used as deletion evidence.
@@ -400,6 +448,63 @@ pub(crate) fn retire_profile_until(
     outcome
 }
 
+#[allow(unreachable_patterns)]
+const fn runtime_retirement_unavailable(
+    reason: RuntimeRetirementUnavailableReason,
+) -> Result<
+    ExtensionServiceProfileRetirementUnavailableReason,
+    ExtensionServiceProfileRetirementFailureReason,
+> {
+    Ok(match reason {
+        RuntimeRetirementUnavailableReason::DeadlineReached => {
+            ExtensionServiceProfileRetirementUnavailableReason::DeadlineReached
+        }
+        RuntimeRetirementUnavailableReason::StoreNotAdmitted
+        | RuntimeRetirementUnavailableReason::StoreObservationPending => {
+            ExtensionServiceProfileRetirementUnavailableReason::StoreUnavailable
+        }
+        RuntimeRetirementUnavailableReason::RepositoryUnavailable => {
+            ExtensionServiceProfileRetirementUnavailableReason::RepositoryUnavailable
+        }
+        RuntimeRetirementUnavailableReason::NativeRetained(_)
+        | RuntimeRetirementUnavailableReason::NativeOwnershipUncertain(_)
+        | RuntimeRetirementUnavailableReason::PublicationReclaimPending => {
+            ExtensionServiceProfileRetirementUnavailableReason::NativeRuntimeUnavailable
+        }
+        RuntimeRetirementUnavailableReason::ActivationReconciliationPending => {
+            ExtensionServiceProfileRetirementUnavailableReason::ObligationsRemain
+        }
+        _ => {
+            return Err(ExtensionServiceProfileRetirementFailureReason::InternalProtocolViolation);
+        }
+    })
+}
+
+#[allow(unreachable_patterns)]
+const fn runtime_retirement_failure(
+    reason: RuntimeCoordinatorFailureReason,
+) -> ExtensionServiceProfileRetirementFailureReason {
+    match reason {
+        RuntimeCoordinatorFailureReason::JournalInvalid
+        | RuntimeCoordinatorFailureReason::JournalDiverged => {
+            ExtensionServiceProfileRetirementFailureReason::OwnershipJournalInvalid
+        }
+        RuntimeCoordinatorFailureReason::RepositoryInvariant => {
+            ExtensionServiceProfileRetirementFailureReason::RepositoryCorrupt
+        }
+        RuntimeCoordinatorFailureReason::HostInvariant
+        | RuntimeCoordinatorFailureReason::NativeCallPanicked => {
+            ExtensionServiceProfileRetirementFailureReason::NativeRuntimeInvariant
+        }
+        RuntimeCoordinatorFailureReason::GenerationExhausted
+        | RuntimeCoordinatorFailureReason::RetainedBytesOverflow
+        | RuntimeCoordinatorFailureReason::InternalProtocolViolation => {
+            ExtensionServiceProfileRetirementFailureReason::InternalProtocolViolation
+        }
+        _ => ExtensionServiceProfileRetirementFailureReason::InternalProtocolViolation,
+    }
+}
+
 fn retirement_refusal(
     cancellation: &impl CancellationCheck,
     deadline: Instant,
@@ -490,6 +595,7 @@ fn settle_repository_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zephium_extension_runtime_api::ExtensionRuntimeFailure;
 
     #[test]
     fn registry_is_bounded_monotonic_and_never_evicts() {
@@ -545,5 +651,67 @@ mod tests {
             registry.mark_retired(failed),
             ExtensionServiceProfileRetirementOutcome::FailedClosed(reason)
         );
+    }
+
+    #[test]
+    fn coordinator_unavailability_never_becomes_profile_absence() {
+        use ExtensionServiceProfileRetirementUnavailableReason as Public;
+        use RuntimeRetirementUnavailableReason as Private;
+
+        for (private, public) in [
+            (Private::DeadlineReached, Public::DeadlineReached),
+            (Private::StoreNotAdmitted, Public::StoreUnavailable),
+            (Private::StoreObservationPending, Public::StoreUnavailable),
+            (
+                Private::RepositoryUnavailable,
+                Public::RepositoryUnavailable,
+            ),
+            (
+                Private::NativeRetained(ExtensionRuntimeFailure::Internal),
+                Public::NativeRuntimeUnavailable,
+            ),
+            (
+                Private::NativeOwnershipUncertain(ExtensionRuntimeFailure::Internal),
+                Public::NativeRuntimeUnavailable,
+            ),
+            (
+                Private::PublicationReclaimPending,
+                Public::NativeRuntimeUnavailable,
+            ),
+            (
+                Private::ActivationReconciliationPending,
+                Public::ObligationsRemain,
+            ),
+        ] {
+            assert_eq!(runtime_retirement_unavailable(private), Ok(public));
+        }
+    }
+
+    #[test]
+    fn every_coordinator_failure_projects_to_a_sticky_profile_failure() {
+        use ExtensionServiceProfileRetirementFailureReason as Public;
+        use RuntimeCoordinatorFailureReason as Private;
+
+        for (private, public) in [
+            (
+                Private::GenerationExhausted,
+                Public::InternalProtocolViolation,
+            ),
+            (Private::JournalInvalid, Public::OwnershipJournalInvalid),
+            (Private::JournalDiverged, Public::OwnershipJournalInvalid),
+            (Private::RepositoryInvariant, Public::RepositoryCorrupt),
+            (Private::HostInvariant, Public::NativeRuntimeInvariant),
+            (Private::NativeCallPanicked, Public::NativeRuntimeInvariant),
+            (
+                Private::RetainedBytesOverflow,
+                Public::InternalProtocolViolation,
+            ),
+            (
+                Private::InternalProtocolViolation,
+                Public::InternalProtocolViolation,
+            ),
+        ] {
+            assert_eq!(runtime_retirement_failure(private), public);
+        }
     }
 }

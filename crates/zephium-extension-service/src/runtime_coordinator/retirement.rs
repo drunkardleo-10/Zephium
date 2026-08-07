@@ -264,13 +264,13 @@ impl RuntimeCoordinator {
                 RuntimeRetirementUnavailableReason::StoreObservationPending,
             );
         }
-        if self.slot(key).is_none() {
-            return RuntimeRetirementOutcome::NotPresent;
-        }
         if Instant::now() >= deadline {
             return RuntimeRetirementOutcome::Unavailable(
                 RuntimeRetirementUnavailableReason::DeadlineReached,
             );
+        }
+        if self.slot(key).is_none() {
+            return RuntimeRetirementOutcome::NotPresent;
         }
         let Some(mut state) = self.slot_mut(key).and_then(|slot| slot.take_state()) else {
             self.enter_fail_stop(RuntimeCoordinatorFailureReason::InternalProtocolViolation);
