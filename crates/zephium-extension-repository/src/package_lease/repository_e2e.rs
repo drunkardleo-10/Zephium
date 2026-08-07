@@ -10,19 +10,22 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
     ExtensionActiveTabGrantWitness, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-    ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose, ExtensionGrantAuthority,
+    ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
     ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantDigest,
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantRevision,
     ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
     ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionManifestDigest,
     ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement, ExtensionNativeIncarnation,
     ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryRevision,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
-    ExtensionNativeOwnershipPhase, ExtensionOperationAuthorityDenial, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionPackagePinAcquisitionBinding,
-    ExtensionPackagePinAcquisitionDenial, ExtensionPackagePinReleaseBinding,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint,
-    ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
+    ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
+    ExtensionOperationAuthorityDenial, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinAcquisitionDenial,
+    ExtensionPackagePinReleaseBinding, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
+    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
+    ExtensionUserInvocationKind,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
@@ -52,6 +55,11 @@ use zephium_extension_runtime_api::{
 };
 use zephium_private_fs::{ByteLimit, LockedPrivateNamespace, PrivateComponent, PrivateFsError};
 
+use super::acquisition_plan::{
+    BundledRuntimeAcquisitionError, BundledRuntimeAcquisitionPlan,
+    BundledRuntimeAcquisitionPlanRefusalReason,
+    MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES,
+};
 use super::api::{
     ActiveBundledPackageLease, BundledCatalogGenerationRole, BundledCurrentCatalogSet,
     BundledPackageLease, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
@@ -559,6 +567,64 @@ fn acquisition_entry(
     .unwrap()
 }
 
+#[derive(Clone)]
+struct OwnershipEntryFixture {
+    key: ExtensionNativeOwnershipKey,
+    operation: ExtensionNativeOwnershipOperation,
+    revision: ExtensionNativeOwnershipEntryRevision,
+    package: ExtensionPackageIdentity,
+    catalog_set_digest: ExtensionCatalogSetDigest,
+    catalog_role: ExtensionCatalogGenerationRole,
+    store_catalog_revision: ExtensionInstallCatalogRevision,
+    store_install_revision: ExtensionInstallRevision,
+    store_grant_revision: ExtensionGrantRevision,
+    grant_digest: ExtensionGrantDigest,
+    runtime_backend: ExtensionRuntimeBackendTarget,
+    native_incarnation: ExtensionNativeIncarnation,
+    intent: ExtensionNativeOwnershipIntent,
+    phase: ExtensionNativeOwnershipPhase,
+}
+
+impl OwnershipEntryFixture {
+    fn from_entry(entry: &ExtensionNativeOwnershipEntry) -> Self {
+        Self {
+            key: entry.key(),
+            operation: entry.operation(),
+            revision: entry.revision(),
+            package: entry.package().clone(),
+            catalog_set_digest: entry.catalog_set_digest(),
+            catalog_role: entry.catalog_role(),
+            store_catalog_revision: entry.store_catalog_revision(),
+            store_install_revision: entry.store_install_revision(),
+            store_grant_revision: entry.store_grant_revision(),
+            grant_digest: entry.grant_digest(),
+            runtime_backend: entry.runtime_backend(),
+            native_incarnation: entry.native_incarnation(),
+            intent: entry.intent(),
+            phase: entry.phase(),
+        }
+    }
+
+    fn build(&self) -> Result<ExtensionNativeOwnershipEntry, impl std::fmt::Debug> {
+        ExtensionNativeOwnershipEntry::from_persisted(
+            self.key,
+            self.operation,
+            self.revision,
+            self.package.clone(),
+            self.catalog_set_digest,
+            self.catalog_role,
+            self.store_catalog_revision,
+            self.store_install_revision,
+            self.store_grant_revision,
+            self.grant_digest,
+            self.runtime_backend,
+            self.native_incarnation,
+            self.intent,
+            self.phase,
+        )
+    }
+}
+
 fn native_may_own_entry(
     acquisition: &ExtensionPackagePinAcquisitionBinding,
 ) -> ExtensionNativeOwnershipEntry {
@@ -735,6 +801,19 @@ fn acquire_rollback(
         }
         Err(error) => Err(error),
     }
+}
+
+fn applied_preparing_for_plan(
+    plan: &BundledRuntimeAcquisitionPlan,
+) -> ExtensionNativeOwnershipEntry {
+    let journal = ExtensionNativeOwnershipJournal::empty();
+    let revision = journal.revision();
+    journal
+        .apply(revision, plan.ownership_begin_mutation())
+        .unwrap()
+        .entry()
+        .expect("Begin must produce an exact preparing row")
+        .clone()
 }
 
 fn install_catalog(
@@ -1556,6 +1635,455 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
     ));
     assert!(repository_package_io_count() > 0);
     assert!(repository.writer_is_sealed());
+}
+
+#[test]
+fn repository_owned_acquisition_plan_derives_begin_and_reuses_its_verified_snapshot() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_active(&mut repository, &active);
+    let observed = repository.current_bundled_catalog_set().unwrap().unwrap();
+    assert_eq!(observed.identity(), current);
+    let owner =
+        EligibilityFixture::active(&active, ProfileId::from(151), ExtensionInstallId::from(157));
+
+    reset_repository_package_io_count();
+    let plan = repository
+        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .unwrap();
+    assert_eq!(repository_package_io_count(), 1);
+    assert!(plan.retained_bytes() <= MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES);
+    assert_eq!(
+        format!("{plan:?}"),
+        format!(
+            "BundledRuntimeAcquisitionPlan {{ authority: \"<redacted>\", retained_bytes: {} }}",
+            plan.retained_bytes()
+        )
+    );
+
+    let ExtensionNativeOwnershipJournalMutation::Begin(preparation) =
+        plan.ownership_begin_mutation()
+    else {
+        panic!("an acquisition plan emitted a non-Begin mutation");
+    };
+    assert_eq!(
+        preparation.catalog_role(),
+        ExtensionCatalogGenerationRole::Active
+    );
+    assert_eq!(preparation.runtime_backend(), runtime_backend());
+    assert_eq!(preparation.package(), owner.eligibility().package());
+
+    let preparing = applied_preparing_for_plan(&plan);
+    arm_post_pin_reverify_hook(|| {
+        assert_eq!(
+            repository_package_io_count(),
+            1,
+            "planned snapshot was reloaded before the durable pin transition"
+        );
+    });
+    let lease = match repository.acquire_bundled_runtime_lease(plan, &preparing) {
+        Ok(BundledPackageLease::Active(lease)) => lease,
+        result => panic!("unexpected planned active acquisition: {result:?}"),
+    };
+    assert_eq!(lease.profile(), ProfileId::from(151));
+    assert_eq!(lease.install_id(), ExtensionInstallId::from(157));
+    assert_eq!(repository_package_io_count(), 2);
+}
+
+#[test]
+fn rollback_acquisition_plan_derives_begin_and_reverifies_after_pin() {
+    let (active, rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let current = establish_rollback(&mut repository, &active, &rollback);
+    let observed = repository.current_bundled_catalog_set().unwrap().unwrap();
+    assert_eq!(observed.identity(), current);
+    assert_eq!(observed.role(), BundledCatalogGenerationRole::Rollback);
+    let owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(159),
+        ExtensionInstallId::from(161),
+    );
+
+    reset_repository_package_io_count();
+    let plan = repository
+        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .unwrap();
+    assert_eq!(repository_package_io_count(), 1);
+    let ExtensionNativeOwnershipJournalMutation::Begin(preparation) =
+        plan.ownership_begin_mutation()
+    else {
+        panic!("a rollback acquisition plan emitted a non-Begin mutation");
+    };
+    assert_eq!(
+        preparation.catalog_role(),
+        ExtensionCatalogGenerationRole::Rollback
+    );
+    assert_eq!(preparation.runtime_backend(), runtime_backend());
+    assert_eq!(preparation.package(), owner.eligibility().package());
+
+    let preparing = applied_preparing_for_plan(&plan);
+    arm_post_pin_reverify_hook(|| {
+        assert_eq!(
+            repository_package_io_count(),
+            1,
+            "rollback planned snapshot was reloaded before the durable pin transition"
+        );
+    });
+    let lease = match repository.acquire_bundled_runtime_lease(plan, &preparing) {
+        Ok(BundledPackageLease::Rollback(lease)) => lease,
+        result => panic!("unexpected planned rollback acquisition: {result:?}"),
+    };
+    assert_eq!(lease.profile(), ProfileId::from(159));
+    assert_eq!(lease.install_id(), ExtensionInstallId::from(161));
+    assert_eq!(repository_package_io_count(), 2);
+}
+
+#[test]
+fn planning_refusal_returns_the_exact_eligibility_before_begin() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let identity = establish_active(&mut repository, &active);
+    let owner =
+        EligibilityFixture::active(&active, ProfileId::from(163), ExtensionInstallId::from(167));
+    let wrong_role = BundledCurrentCatalogSet {
+        identity,
+        role: BundledCatalogGenerationRole::Rollback,
+    };
+
+    let refusal = repository
+        .plan_bundled_runtime_acquisition(wrong_role, owner.eligibility())
+        .unwrap_err();
+    assert!(matches!(
+        refusal.reason(),
+        BundledPackageLeaseError::WrongCatalogRole
+    ));
+    let (reason, eligibility) = refusal.into_parts();
+    assert!(matches!(reason, BundledPackageLeaseError::WrongCatalogRole));
+    assert_eq!(eligibility.profile(), ProfileId::from(163));
+    assert_eq!(eligibility.install_id(), ExtensionInstallId::from(167));
+    assert_eq!(eligibility.package(), owner.eligibility().package());
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+}
+
+#[test]
+fn acquisition_plan_rejects_every_distinct_applied_row_field_and_valid_wrong_shape() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    establish_active(&mut repository, &active);
+    let observed = repository.current_bundled_catalog_set().unwrap().unwrap();
+    let owner =
+        EligibilityFixture::active(&active, ProfileId::from(168), ExtensionInstallId::from(169));
+    let mut plan = repository
+        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .unwrap();
+    let expected_begin = plan.ownership_begin_mutation();
+    let exact = applied_preparing_for_plan(&plan);
+    let base = OwnershipEntryFixture::from_entry(&exact);
+    let mut mismatches = Vec::new();
+
+    macro_rules! mismatch {
+        ($label:literal, $field:ident = $value:expr) => {{
+            let mut candidate = base.clone();
+            candidate.$field = $value;
+            mismatches.push(($label, candidate.build().unwrap()));
+        }};
+    }
+
+    mismatch!(
+        "key.profile",
+        key = ExtensionNativeOwnershipKey::new(
+            ProfileId::from(170),
+            base.key.install_id(),
+            base.key.browsing_context(),
+        )
+    );
+    mismatch!(
+        "key.install",
+        key = ExtensionNativeOwnershipKey::new(
+            base.key.profile(),
+            ExtensionInstallId::from(171),
+            base.key.browsing_context(),
+        )
+    );
+    mismatch!(
+        "key.context",
+        key = ExtensionNativeOwnershipKey::new(
+            base.key.profile(),
+            base.key.install_id(),
+            ExtensionGrantBrowsingContext::Private,
+        )
+    );
+    mismatch!(
+        "package",
+        package = ExtensionPackageIdentity::new(
+            base.package.authority(),
+            ExtensionPackageKey::from_bytes([0x5a; 32]),
+            base.package.revision(),
+            base.package.payload(),
+            base.package.manifest_sha256(),
+            base.package.tree_sha256(),
+        )
+    );
+    let mut catalog_set_bytes = base.catalog_set_digest.bytes();
+    catalog_set_bytes[0] ^= 0xff;
+    mismatch!(
+        "catalog_set_digest",
+        catalog_set_digest = ExtensionCatalogSetDigest::from_bytes(catalog_set_bytes)
+    );
+    mismatch!(
+        "catalog_role",
+        catalog_role = ExtensionCatalogGenerationRole::Rollback
+    );
+    mismatch!(
+        "store_catalog_revision",
+        store_catalog_revision = base.store_catalog_revision.next().unwrap()
+    );
+    mismatch!(
+        "store_install_revision",
+        store_install_revision = base.store_install_revision.next().unwrap()
+    );
+    mismatch!(
+        "store_grant_revision",
+        store_grant_revision = base.store_grant_revision.next().unwrap()
+    );
+    let mut grant_digest_bytes = base.grant_digest.bytes();
+    grant_digest_bytes[0] ^= 0xff;
+    mismatch!(
+        "grant_digest",
+        grant_digest = ExtensionGrantDigest::from_bytes(grant_digest_bytes)
+    );
+    mismatch!(
+        "runtime_backend",
+        runtime_backend = alternate_runtime_backend()
+    );
+
+    let mut may_own = base.clone();
+    may_own.revision = ExtensionNativeOwnershipEntryRevision::new(2).unwrap();
+    may_own.phase = ExtensionNativeOwnershipPhase::NativeMayOwn;
+    mismatches.push(("revision/NativeMayOwn shape", may_own.build().unwrap()));
+    let mut owned = base.clone();
+    owned.revision = ExtensionNativeOwnershipEntryRevision::new(3).unwrap();
+    owned.phase = ExtensionNativeOwnershipPhase::NativeOwned;
+    mismatches.push(("revision/NativeOwned shape", owned.build().unwrap()));
+    let mut release = base.clone();
+    release.revision = ExtensionNativeOwnershipEntryRevision::new(4).unwrap();
+    release.intent = ExtensionNativeOwnershipIntent::Release;
+    release.phase = ExtensionNativeOwnershipPhase::NativeAbsentReleasePending;
+    mismatches.push(("Release shape", release.build().unwrap()));
+
+    for (field, mismatch) in mismatches {
+        let BundledRuntimeAcquisitionError::PlanRefused(refusal) = repository
+            .acquire_bundled_runtime_lease(plan, &mismatch)
+            .unwrap_err()
+        else {
+            panic!("mismatched applied field `{field}` crossed the recovery cutoff");
+        };
+        assert_eq!(
+            refusal.reason(),
+            BundledRuntimeAcquisitionPlanRefusalReason::AppliedOwnershipMismatch,
+            "unexpected refusal for `{field}`"
+        );
+        plan = refusal.into_plan();
+        assert_eq!(plan.ownership_begin_mutation(), expected_begin);
+        assert!(repository
+            .writer_materialization()
+            .unwrap()
+            ._state
+            .package_pins
+            .is_empty());
+    }
+
+    let mut wrong_operation = base.clone();
+    wrong_operation.operation =
+        ExtensionNativeOwnershipOperation::new(base.native_incarnation.next().unwrap().get())
+            .unwrap();
+    assert!(
+        wrong_operation.build().is_err(),
+        "Core must make operation/incarnation disagreement unrepresentable"
+    );
+    let mut wrong_revision = base.clone();
+    wrong_revision.revision = ExtensionNativeOwnershipEntryRevision::new(2).unwrap();
+    assert!(
+        wrong_revision.build().is_err(),
+        "Core must make a noninitial preparing revision unrepresentable"
+    );
+
+    let expected_native_identity = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        [b'a'; 32],
+    )
+    .unwrap();
+    let native_identity = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        [b'a'; 32],
+    )
+    .unwrap();
+    // The fixture plan uses a compatibility backend, which cannot represent a
+    // native identity at all. Use one internally consistent native backend so
+    // these refusals isolate the Preparing-phase identity prohibition.
+    assert!(
+        ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            base.key,
+            base.operation,
+            base.revision,
+            base.package.clone(),
+            base.catalog_set_digest,
+            base.catalog_role,
+            base.store_catalog_revision,
+            base.store_install_revision,
+            base.store_grant_revision,
+            base.grant_digest,
+            ExtensionRuntimeBackendTarget::MacosNative,
+            Some(expected_native_identity),
+            None,
+            base.native_incarnation,
+            base.intent,
+            base.phase,
+        )
+        .is_err()
+    );
+    assert!(
+        ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            base.key,
+            base.operation,
+            base.revision,
+            base.package,
+            base.catalog_set_digest,
+            base.catalog_role,
+            base.store_catalog_revision,
+            base.store_install_revision,
+            base.store_grant_revision,
+            base.grant_digest,
+            ExtensionRuntimeBackendTarget::MacosNative,
+            None,
+            Some(native_identity),
+            base.native_incarnation,
+            base.intent,
+            base.phase,
+        )
+        .is_err()
+    );
+
+    drop(plan);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+}
+
+#[test]
+fn wrong_applied_row_and_repository_open_return_the_unchanged_plan() {
+    let (active, _rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    establish_active(&mut repository, &active);
+    let observed = repository.current_bundled_catalog_set().unwrap().unwrap();
+    let first =
+        EligibilityFixture::active(&active, ProfileId::from(173), ExtensionInstallId::from(179));
+    let second =
+        EligibilityFixture::active(&active, ProfileId::from(181), ExtensionInstallId::from(191));
+    let first_plan = repository
+        .plan_bundled_runtime_acquisition(observed, first.eligibility())
+        .unwrap();
+    let expected_begin = first_plan.ownership_begin_mutation();
+    let second_plan = repository
+        .plan_bundled_runtime_acquisition(observed, second.eligibility())
+        .unwrap();
+    let wrong_entry = applied_preparing_for_plan(&second_plan);
+    drop(second_plan);
+
+    let BundledRuntimeAcquisitionError::PlanRefused(refusal) = repository
+        .acquire_bundled_runtime_lease(first_plan, &wrong_entry)
+        .unwrap_err()
+    else {
+        panic!("a mismatched applied row crossed the durable-recovery cutoff");
+    };
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeAcquisitionPlanRefusalReason::AppliedOwnershipMismatch
+    );
+    let first_plan = refusal.into_plan();
+    assert_eq!(first_plan.ownership_begin_mutation(), expected_begin);
+    let preparing = applied_preparing_for_plan(&first_plan);
+
+    let unrelated_harness = Harness::new();
+    let mut unrelated = unrelated_harness.open();
+    let BundledRuntimeAcquisitionError::PlanRefused(refusal) = unrelated
+        .acquire_bundled_runtime_lease(first_plan, &preparing)
+        .unwrap_err()
+    else {
+        panic!("a stale repository-open plan crossed the durable-recovery cutoff");
+    };
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeAcquisitionPlanRefusalReason::WrongRepositoryOpen
+    );
+    let first_plan = refusal.into_plan();
+    assert_eq!(first_plan.ownership_begin_mutation(), expected_begin);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+
+    // A process-local plan intentionally retains its authenticated sealed root.
+    // That lifetime pins the private namespace itself, so a same-storage reopen
+    // cannot coexist with the plan and must fail before any package pin exists.
+    drop(repository);
+    assert!(matches!(
+        LockedPrivateNamespace::open_or_create(&harness.repository_path),
+        Err(PrivateFsError::LockUnavailable)
+    ));
+    drop(first_plan);
+
+    let mut reopened = harness.open();
+    assert!(reopened
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+}
+
+#[test]
+fn exact_begin_then_repository_drift_requires_durable_recovery() {
+    let (active, rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    establish_active(&mut repository, &active);
+    let observed = repository.current_bundled_catalog_set().unwrap().unwrap();
+    let owner =
+        EligibilityFixture::active(&active, ProfileId::from(193), ExtensionInstallId::from(197));
+    let plan = repository
+        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .unwrap();
+    let preparing = applied_preparing_for_plan(&plan);
+    establish_rollback(&mut repository, &active, &rollback);
+
+    assert!(matches!(
+        repository.acquire_bundled_runtime_lease(plan, &preparing),
+        Err(BundledRuntimeAcquisitionError::DurableRecoveryRequired(
+            BundledPackageLeaseError::StaleSelection
+        ))
+    ));
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
 }
 
 #[test]

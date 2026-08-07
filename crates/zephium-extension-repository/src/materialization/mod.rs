@@ -74,8 +74,10 @@ pub(crate) use objects::{
 };
 pub(crate) use package_lease::{
     current_catalog_set_projection, load_active_manifest_bindings,
-    load_active_package_pin_admission, load_rollback_manifest_bindings,
-    load_rollback_package_pin_admission, validated_resumable_build_in_progress,
+    load_active_package_pin_admission, load_active_package_snapshot,
+    load_rollback_manifest_bindings, load_rollback_package_pin_admission,
+    load_rollback_package_snapshot, validated_resumable_build_in_progress,
+    verify_active_package_pin_admission, verify_rollback_package_pin_admission,
     CurrentCatalogSetProjection, PackageLeaseRepositoryIdentity, PackagePinAdmissionError,
     PackagePinLoadError, SnapshotLoadError, SnapshotObjectPhase, VerifiedActivePackageSnapshot,
     VerifiedCatalogRole, VerifiedPackagePinAdmission, VerifiedRollbackPackageSnapshot,

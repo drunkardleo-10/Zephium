@@ -2,18 +2,28 @@
 
 use std::sync::Arc;
 
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+use zephium_core::extensions::ExtensionCatalogGenerationRole;
 use zephium_core::extensions::{
-    ExtensionCatalogGenerationRole, ExtensionPackagePinAcquisitionBinding,
-    ExtensionPackagePinReleaseBinding,
+    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinReleaseBinding,
 };
 use zephium_extension_authority::BundledPackageAuthority;
 
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+use super::api::BundledPackageLease;
 use super::api::{
     ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
-    BundledCurrentCatalogSet, BundledPackageLease, BundledPackageLeaseError,
-    BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome, PackageLeaseCore,
-    PackageReleaseRequestCore, PackageReleaseRequestState, RollbackBundledPackageLease,
-    RollbackBundledPackageReleaseRequest,
+    BundledCurrentCatalogSet, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
+    BundledPackageLeaseReleaseOutcome, PackageLeaseCore, PackageReleaseRequestCore,
+    PackageReleaseRequestState, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
 };
 use super::policy::{
     map_lease_operation_error, map_local_acquire, map_release_finish, map_release_operation_error,
@@ -145,7 +155,12 @@ impl ExtensionRepository {
     /// which prevents a stale Store projection from being replayed after
     /// release while retaining borrowed eligibility for later fingerprint and
     /// operation-authority construction.
-    pub fn acquire_bundled_package_lease(
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub(crate) fn acquire_bundled_package_lease(
         &mut self,
         binding: ExtensionPackagePinAcquisitionBinding,
     ) -> Result<BundledPackageLease, BundledPackageLeaseError> {
@@ -162,12 +177,28 @@ impl ExtensionRepository {
         }
     }
 
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
     fn acquire_active_bundled_package_lease(
         &mut self,
         binding: ExtensionPackagePinAcquisitionBinding,
     ) -> Result<ActiveBundledPackageLease, BundledPackageLeaseError> {
         let expected_current = catalog_set_identity(&binding);
-        let (mut current, fresh, admission) = self.load_fresh_active(expected_current, &binding)?;
+        let (current, fresh, admission) = self.load_fresh_active(expected_current, &binding)?;
+        self.acquire_preverified_active(current, fresh, admission, binding)
+    }
+
+    pub(super) fn acquire_preverified_active(
+        &mut self,
+        mut current: crate::materialization::CurrentCatalogSetProjection,
+        fresh: VerifiedActivePackageSnapshot,
+        admission: VerifiedPackagePinAdmission,
+        binding: ExtensionPackagePinAcquisitionBinding,
+    ) -> Result<ActiveBundledPackageLease, BundledPackageLeaseError> {
+        let expected_current = catalog_set_identity(&binding);
         let plan = self.plan_exact_pin(&admission)?;
         let (pin, fresh) = match plan {
             OwnerPackagePinPlan::IdempotentReplay { pin } => (pin, fresh),
@@ -224,13 +255,28 @@ impl ExtensionRepository {
         })
     }
 
+    #[cfg(all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    ))]
     fn acquire_rollback_bundled_package_lease(
         &mut self,
         binding: ExtensionPackagePinAcquisitionBinding,
     ) -> Result<RollbackBundledPackageLease, BundledPackageLeaseError> {
         let expected_current = catalog_set_identity(&binding);
-        let (mut current, fresh, admission) =
-            self.load_fresh_rollback(expected_current, &binding)?;
+        let (current, fresh, admission) = self.load_fresh_rollback(expected_current, &binding)?;
+        self.acquire_preverified_rollback(current, fresh, admission, binding)
+    }
+
+    pub(super) fn acquire_preverified_rollback(
+        &mut self,
+        mut current: crate::materialization::CurrentCatalogSetProjection,
+        fresh: VerifiedRollbackPackageSnapshot,
+        admission: VerifiedPackagePinAdmission,
+        binding: ExtensionPackagePinAcquisitionBinding,
+    ) -> Result<RollbackBundledPackageLease, BundledPackageLeaseError> {
+        let expected_current = catalog_set_identity(&binding);
         let plan = self.plan_exact_pin(&admission)?;
         let (pin, fresh) = match plan {
             OwnerPackagePinPlan::IdempotentReplay { pin } => (pin, fresh),
@@ -453,7 +499,7 @@ impl ExtensionRepository {
         Ok((current, fresh, admission))
     }
 
-    fn require_current(
+    pub(super) fn require_current(
         &mut self,
         expected: BundledCatalogSetIdentity,
     ) -> Result<crate::materialization::CurrentCatalogSetProjection, BundledPackageLeaseError> {
@@ -481,7 +527,7 @@ impl ExtensionRepository {
         }
     }
 
-    fn finish_pin_admission_error(
+    pub(super) fn finish_pin_admission_error(
         &mut self,
         error: PackagePinAdmissionError,
     ) -> BundledPackageLeaseError {
@@ -506,7 +552,10 @@ impl ExtensionRepository {
         }
     }
 
-    fn finish_pin_load_error(&mut self, error: PackagePinLoadError) -> BundledPackageLeaseError {
+    pub(super) fn finish_pin_load_error(
+        &mut self,
+        error: PackagePinLoadError,
+    ) -> BundledPackageLeaseError {
         match error {
             PackagePinLoadError::Snapshot(error) => self.finish_snapshot_error(error),
             PackagePinLoadError::Admission(error) => self.finish_pin_admission_error(error),

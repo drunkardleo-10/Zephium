@@ -61,7 +61,9 @@ pub use package_lease::{
     BundledCatalogGenerationRole, BundledCurrentCatalogSet, BundledCurrentManifestBindings,
     BundledManifestBindingsError, BundledPackageLease, BundledPackageLeaseError,
     BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
-    BundledPackageResourceError, BundledRuntimeHostActivationBindingError,
+    BundledPackageResourceError, BundledRuntimeAcquisitionError, BundledRuntimeAcquisitionPlan,
+    BundledRuntimeAcquisitionPlanRefusal, BundledRuntimeAcquisitionPlanRefusalReason,
+    BundledRuntimeAcquisitionPlanningRefusal, BundledRuntimeHostActivationBindingError,
     BundledRuntimePackageAccessBuildError, ProfilePackageAbsenceEvidence,
     ProfilePackageAbsenceRevalidationError, ProfilePackageObligation, ProfilePackageObligationKind,
     RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
@@ -69,6 +71,7 @@ pub use package_lease::{
     RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal,
     RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
     RollbackBundledRuntimePackageRecoveryToken, RollbackBundledRuntimePackageRejoinRefusal,
+    MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES,
 };
 pub use settlement::{BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome};
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

@@ -1,5 +1,6 @@
 //! Opaque authenticated package leases and exact owner-pin release authority.
 
+mod acquisition_plan;
 mod api;
 mod manifest_bindings;
 mod policy;
@@ -9,6 +10,11 @@ mod resource;
 mod runtime;
 mod runtime_access;
 
+pub use acquisition_plan::{
+    BundledRuntimeAcquisitionError, BundledRuntimeAcquisitionPlan,
+    BundledRuntimeAcquisitionPlanRefusal, BundledRuntimeAcquisitionPlanRefusalReason,
+    BundledRuntimeAcquisitionPlanningRefusal, MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES,
+};
 pub use api::{
     ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledCatalogGenerationRole,
     BundledCurrentCatalogSet, BundledPackageLease, BundledPackageLeaseError,

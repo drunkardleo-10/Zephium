@@ -409,7 +409,7 @@ impl_snapshot_projection!(
     ProductAdmittedRollbackExtensionManifest
 );
 
-fn verify_active_package_pin_admission(
+pub(crate) fn verify_active_package_pin_admission(
     current: &CurrentCatalogSetProjection,
     snapshot: &VerifiedActivePackageSnapshot,
     binding: &ExtensionPackagePinAcquisitionBinding,
@@ -425,7 +425,7 @@ fn verify_active_package_pin_admission(
     )
 }
 
-fn verify_rollback_package_pin_admission(
+pub(crate) fn verify_rollback_package_pin_admission(
     current: &CurrentCatalogSetProjection,
     snapshot: &VerifiedRollbackPackageSnapshot,
     binding: &ExtensionPackagePinAcquisitionBinding,
@@ -538,7 +538,7 @@ pub(crate) fn load_rollback_package_pin_admission(
     Ok((snapshot, admission))
 }
 
-fn load_active_package_snapshot(
+pub(crate) fn load_active_package_snapshot(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
     exact_catalog_bytes: &[u8],
@@ -655,7 +655,7 @@ pub(crate) fn load_active_manifest_bindings(
     finish_manifest_bindings(bindings)
 }
 
-fn load_rollback_package_snapshot(
+pub(crate) fn load_rollback_package_snapshot(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
     exact_catalog_bytes: &[u8],

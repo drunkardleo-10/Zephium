@@ -2,6 +2,7 @@
 
 mod adblock_provenance;
 mod blocker_seed;
+mod extension_runtime_acquisition_boundary;
 mod webview2_extension_boundary;
 
 use std::process::{exit, Command};
@@ -42,6 +43,9 @@ fn main() {
         Some("check-extension-runtime-host-assembler") => {
             check_extension_runtime_host_assembler_call_sites()
         }
+        Some("check-extension-runtime-acquisition-boundary") => {
+            check_extension_runtime_acquisition_boundary()
+        }
         Some("check-webview2-extension-boundary") => check_webview2_extension_boundary(),
         Some("check-blocker-seed") if arguments.len() == 1 => {
             let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -81,7 +85,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-webview2-extension-boundary|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -536,6 +540,7 @@ fn ci() {
     reject_ambient_internal_repository_cfg();
     share_workspace_target_dir();
     check_extension_runtime_host_assembler_call_sites();
+    check_extension_runtime_acquisition_boundary();
     check_webview2_extension_boundary();
     check_engine_floors();
     check_advisory_exceptions();
@@ -594,6 +599,14 @@ fn check_webview2_extension_boundary() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     if let Err(error) = webview2_extension_boundary::check(&repository) {
         eprintln!("WebView2 extension boundary failed: {error}");
+        exit(1);
+    }
+}
+
+fn check_extension_runtime_acquisition_boundary() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = extension_runtime_acquisition_boundary::check(&repository) {
+        eprintln!("extension runtime acquisition boundary failed: {error}");
         exit(1);
     }
 }
@@ -792,7 +805,7 @@ fn run_internal_repository_e2e_tests() {
     // whose regular-build tests already ran in the workspace suite.
     const TEST_SELECTIONS: [(&str, usize, bool); 8] = [
         ("writer::repository_e2e_tests::", 22, false),
-        ("package_lease::repository_e2e::", 18, false),
+        ("package_lease::repository_e2e::", 24, false),
         ("garbage_collection::tests::", 10, false),
         ("materialization::measurement::tests::", 3, false),
         (
