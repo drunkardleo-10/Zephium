@@ -197,7 +197,7 @@ pub struct ExtensionServiceOwner {
 ///
 /// The refusal retains the exact move-only launch input. A transient operating
 /// system thread-creation failure therefore cannot consume Store's one-shot
-/// native-ownership capability or force a process restart merely to retry.
+/// extension-service capability or force a process restart merely to retry.
 pub struct ExtensionServiceSpawnError {
     source: io::Error,
     input: ExtensionServiceLaunchInput,
@@ -1006,7 +1006,7 @@ impl CancellationCheck for ShutdownDrainCancellation {
 }
 
 struct WorkerStartupState {
-    store: zephium_store::ExtensionNativeOwnershipStoreAuthority,
+    store: zephium_store::ExtensionServiceStoreAuthority,
     repository: ServiceRepository,
     projection: JournalProjection,
     native_recovery: NativeRecoveryState,
@@ -1227,16 +1227,18 @@ mod tests {
     use zephium_core::{
         extensions::{
             ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-            ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
-            ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-            ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-            ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
-            ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
-            ExtensionPackagePayloadIdentity, ExtensionPackagePinReleaseBinding,
-            ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
+            ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantManifestBindings,
+            ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+            ExtensionManifestDigest, ExtensionNativeOwnershipJournalMutation,
+            ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+            ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation,
+            ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+            ExtensionPackagePinReleaseBinding, ExtensionPackageRevision,
+            ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
         },
         ids::{ExtensionInstallId, ProfileId},
         ports::store::{
+            ExtensionGrantCohortLoadOutcome, ExtensionInstallCatalogLoadOutcome,
             ExtensionNativeOwnershipJournalLoadOutcome,
             ExtensionNativeOwnershipJournalMutationApplied,
             ExtensionNativeOwnershipJournalMutationOutcome, Store,
@@ -1247,9 +1249,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     use zephium_store::SqliteStore;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    use zephium_store::{
-        ExtensionNativeOwnershipStoreAuthority, ExtensionNativeOwnershipStoreCallOutcome,
-    };
+    use zephium_store::{ExtensionServiceStoreAuthority, ExtensionServiceStoreCallOutcome};
 
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
@@ -1599,7 +1599,7 @@ mod tests {
         // production path validation for a test convenience.
         let app_data = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let store = Arc::new(SqliteStore::in_memory().unwrap());
-        let authority = store.claim_extension_native_ownership_authority().unwrap();
+        let authority = store.claim_extension_service_store_authority().unwrap();
         let repository_root =
             crate::ExtensionRepositoryRoot::from_app_data_directory(app_data.path()).unwrap();
         let input =
@@ -1699,11 +1699,30 @@ mod tests {
         };
         assert_eq!(error.source_error().kind(), io::ErrorKind::Other);
 
-        let owner = ExtensionServiceOwner::launch(
-            error.into_launch_input(),
-            Instant::now() + Duration::from_secs(5),
-        )
-        .unwrap();
+        let input = error.into_launch_input();
+        assert_eq!(
+            input.store_authority.load_install_catalog_until(
+                ProfileId::from(1),
+                Instant::now() + Duration::from_secs(5),
+            ),
+            ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionInstallCatalogLoadOutcome::NotRegistered,
+            ),
+            "spawn refusal did not return the exact Store authority"
+        );
+        assert_eq!(
+            input.store_authority.load_grant_cohort_until(
+                ProfileId::from(1),
+                ExtensionGrantManifestBindings::new(Vec::new()).unwrap(),
+                Instant::now() + Duration::from_secs(5),
+            ),
+            ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionGrantCohortLoadOutcome::NotRegistered,
+            ),
+            "spawn refusal lost the Store authority's snapshot surface"
+        );
+        let owner =
+            ExtensionServiceOwner::launch(input, Instant::now() + Duration::from_secs(5)).unwrap();
         assert!(matches!(
             owner.wait_for_startup_until(Instant::now() + Duration::from_secs(5)),
             ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(_))
@@ -1875,16 +1894,16 @@ mod tests {
     #[test]
     fn production_startup_reconciles_a_real_release_pending_row_before_ready() {
         fn mutation_applied(
-            authority: &ExtensionNativeOwnershipStoreAuthority,
+            authority: &ExtensionServiceStoreAuthority,
             expected: ExtensionNativeOwnershipJournalRevision,
             mutation: ExtensionNativeOwnershipJournalMutation,
         ) -> ExtensionNativeOwnershipJournalMutationApplied {
-            match authority.mutate_until(
+            match authority.mutate_native_ownership_until(
                 expected,
                 mutation,
                 Instant::now() + Duration::from_secs(5),
             ) {
-                ExtensionNativeOwnershipStoreCallOutcome::Completed(
+                ExtensionServiceStoreCallOutcome::Completed(
                     ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied),
                 ) => applied,
                 outcome => panic!("native-ownership fixture mutation failed: {outcome:?}"),
@@ -1905,7 +1924,7 @@ mod tests {
         });
         assert!(store.flush_until(Instant::now() + Duration::from_secs(5)));
 
-        let authority = store.claim_extension_native_ownership_authority().unwrap();
+        let authority = store.claim_extension_service_store_authority().unwrap();
         let runtime_backend = if cfg!(target_os = "macos") {
             ExtensionRuntimeBackendTarget::MacosNative
         } else {
@@ -2004,11 +2023,11 @@ mod tests {
         drop(store);
 
         let reopened = Arc::new(SqliteStore::open(app_data.path()).unwrap());
-        let reopened_authority = reopened
-            .claim_extension_native_ownership_authority()
-            .unwrap();
-        let journal = match reopened_authority.load_until(Instant::now() + Duration::from_secs(5)) {
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+        let reopened_authority = reopened.claim_extension_service_store_authority().unwrap();
+        let journal = match reopened_authority
+            .load_native_ownership_until(Instant::now() + Duration::from_secs(5))
+        {
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal),
             ) => journal,
             outcome => panic!("settled native-ownership journal did not reload: {outcome:?}"),

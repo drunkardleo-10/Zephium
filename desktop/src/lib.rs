@@ -3523,7 +3523,7 @@ pub fn run() {
                         "startup extension-service cleanup owner is unavailable",
                     )
                 })?;
-            let store_authority = store.claim_extension_native_ownership_authority()?;
+            let store_authority = store.claim_extension_service_store_authority()?;
             let host_factory = engine
                 .take_extension_runtime_host_factory()
                 .ok_or_else(|| {
@@ -4962,7 +4962,7 @@ mod tests {
             .find("if !startup_blocker.install(blocker.clone())")
             .expect("temporary pre-shell blocker owner");
         let store_authority = setup
-            .find("store.claim_extension_native_ownership_authority()")
+            .find("store.claim_extension_service_store_authority()")
             .expect("unique Store extension authority claim");
         let host_factory = setup
             .find(".take_extension_runtime_host_factory()")

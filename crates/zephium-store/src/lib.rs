@@ -10,6 +10,6 @@ mod pane;
 mod windows_file_identity;
 
 pub use actor::{
-    ExtensionNativeOwnershipStoreAuthority, ExtensionNativeOwnershipStoreAuthorityClaimError,
-    ExtensionNativeOwnershipStoreCallOutcome, SqliteStore,
+    ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError,
+    ExtensionServiceStoreCallOutcome, SqliteStore,
 };

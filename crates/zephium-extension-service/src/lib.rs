@@ -9,8 +9,9 @@
 //! when ordinary work is saturated.
 //!
 //! The typed startup surface transfers a validated private-repository location,
-//! the Store's unique native-ownership capability, and the engine's unique
-//! native-host factory into the worker. Before publishing readiness, that
+//! the Store's unique service capability for exact runtime snapshots and
+//! native ownership, and the engine's unique native-host factory into the
+//! worker. Before publishing readiness, that
 //! worker settles interrupted package builds, reconciles possible native
 //! owners one exact lineage at a time, retires owners that still exist, and
 //! releases package pins only after durable native absence. No extension

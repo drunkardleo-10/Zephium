@@ -5,7 +5,7 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 use zephium_extension_runtime_api::ExtensionRuntimeHostFactory;
-use zephium_store::ExtensionNativeOwnershipStoreAuthority;
+use zephium_store::ExtensionServiceStoreAuthority;
 
 use crate::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence, ExtensionServiceStatusSnapshot,
@@ -131,10 +131,12 @@ fn validate_app_data_directory(path: &Path) -> Result<(), ExtensionRepositoryRoo
 
 /// Move-only production authority surrendered to one extension-service worker.
 ///
-/// The input combines exactly one process-global native-ownership Store
+/// The input combines exactly one process-global extension-service Store
 /// capability, one lexically admitted repository location, and the engine's
-/// unique native-host factory. Its fields are private, and neither the input
-/// nor any authority is exposed through the cloneable service handle.
+/// unique native-host factory. The Store capability permits exact install and
+/// grant reads plus native-ownership reconciliation, but no install or grant
+/// mutation. Its fields are private, and neither the input nor any authority
+/// is exposed through the cloneable service handle.
 ///
 /// ```compile_fail
 /// use zephium_extension_service::ExtensionServiceLaunchInput;
@@ -143,16 +145,16 @@ fn validate_app_data_directory(path: &Path) -> Result<(), ExtensionRepositoryRoo
 /// require_clone::<ExtensionServiceLaunchInput>();
 /// ```
 pub struct ExtensionServiceLaunchInput {
-    pub(crate) store_authority: ExtensionNativeOwnershipStoreAuthority,
+    pub(crate) store_authority: ExtensionServiceStoreAuthority,
     pub(crate) repository_root: ExtensionRepositoryRoot,
     pub(crate) host_factory: ExtensionRuntimeHostFactory,
 }
 
 impl ExtensionServiceLaunchInput {
     /// Binds the unique Store capability, repository location, and native-host
-    /// factory for transfer to one extension-service worker.
+    /// factory for lossless transfer to one extension-service worker.
     pub const fn new(
-        store_authority: ExtensionNativeOwnershipStoreAuthority,
+        store_authority: ExtensionServiceStoreAuthority,
         repository_root: ExtensionRepositoryRoot,
         host_factory: ExtensionRuntimeHostFactory,
     ) -> Self {

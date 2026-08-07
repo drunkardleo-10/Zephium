@@ -82,7 +82,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
             terminal_admitted: false,
         }),
         shutdown_clean: AtomicBool::new(false),
-        extension_native_ownership_authority_claimed: AtomicBool::new(false),
+        extension_service_store_authority_claimed: AtomicBool::new(false),
     }
 }
 
@@ -498,21 +498,25 @@ fn expected_native_ownership_identity() -> ExtensionExpectedNativeOwnershipIdent
 }
 
 fn load_native_ownership_journal(
-    authority: &ExtensionNativeOwnershipStoreAuthority,
+    authority: &ExtensionServiceStoreAuthority,
 ) -> ExtensionNativeOwnershipJournalLoadOutcome {
-    match authority.load_until(Instant::now() + STORE_RPC_TIMEOUT) {
-        ExtensionNativeOwnershipStoreCallOutcome::Completed(outcome) => outcome,
+    match authority.load_native_ownership_until(Instant::now() + STORE_RPC_TIMEOUT) {
+        ExtensionServiceStoreCallOutcome::Completed(outcome) => outcome,
         other => panic!("native-ownership journal load did not settle: {other:?}"),
     }
 }
 
 fn mutate_native_ownership_journal(
-    authority: &ExtensionNativeOwnershipStoreAuthority,
+    authority: &ExtensionServiceStoreAuthority,
     expected: ExtensionNativeOwnershipJournalRevision,
     mutation: ExtensionNativeOwnershipJournalMutation,
 ) -> ExtensionNativeOwnershipJournalMutationOutcome {
-    match authority.mutate_until(expected, mutation, Instant::now() + STORE_RPC_TIMEOUT) {
-        ExtensionNativeOwnershipStoreCallOutcome::Completed(outcome) => outcome,
+    match authority.mutate_native_ownership_until(
+        expected,
+        mutation,
+        Instant::now() + STORE_RPC_TIMEOUT,
+    ) {
+        ExtensionServiceStoreCallOutcome::Completed(outcome) => outcome,
         other => panic!("native-ownership journal mutation did not settle: {other:?}"),
     }
 }
@@ -1724,7 +1728,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
     let install = ExtensionInstallId::from(901);
     {
         let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
-        let authority = store.claim_extension_native_ownership_authority().unwrap();
+        let authority = store.claim_extension_service_store_authority().unwrap();
         store.save_session(sample());
         assert!(store.flush());
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(initial) =
@@ -1834,9 +1838,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
 
     {
         let reopened = Arc::new(SqliteStore::open(dir.path()).unwrap());
-        let authority = reopened
-            .claim_extension_native_ownership_authority()
-            .unwrap();
+        let authority = reopened.claim_extension_service_store_authority().unwrap();
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) =
             load_native_ownership_journal(&authority)
         else {
@@ -1914,7 +1916,7 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
 
     let second_restart = Arc::new(SqliteStore::open(dir.path()).unwrap());
     let authority = second_restart
-        .claim_extension_native_ownership_authority()
+        .claim_extension_service_store_authority()
         .unwrap();
     let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(cleared) =
         load_native_ownership_journal(&authority)
@@ -1950,7 +1952,7 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
     hub.save(&sample()).unwrap();
     hub.make_next_extension_native_ownership_commit_ambiguous();
     let store = Arc::new(SqliteStore::spawn(hub).unwrap());
-    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    let authority = store.claim_extension_service_store_authority().unwrap();
 
     assert_eq!(
         mutate_native_ownership_journal(
@@ -1973,35 +1975,356 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
 }
 
 #[test]
-fn native_ownership_authority_is_send_and_claimed_once_per_actor_lifetime() {
+fn extension_service_store_authority_is_send_and_claimed_once_per_actor_lifetime() {
     fn assert_send<T: Send>() {}
-    assert_send::<ExtensionNativeOwnershipStoreAuthority>();
+    assert_send::<ExtensionServiceStoreAuthority>();
 
     let store = Arc::new(SqliteStore::in_memory().unwrap());
-    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    let authority = store.claim_extension_service_store_authority().unwrap();
     drop(authority);
     assert!(matches!(
-        store.claim_extension_native_ownership_authority(),
-        Err(ExtensionNativeOwnershipStoreAuthorityClaimError::AlreadyClaimed)
+        store.claim_extension_service_store_authority(),
+        Err(ExtensionServiceStoreAuthorityClaimError::AlreadyClaimed)
     ));
+}
+
+#[test]
+fn extension_service_store_authority_has_one_closed_public_surface() {
+    fn collect_production_sources(
+        directory: &Path,
+        excluded: &Path,
+        output: &mut Vec<(std::path::PathBuf, String)>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("enumerate Store source tree") {
+            let entry = entry.expect("enumerate Store source entry");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("inspect Store source entry");
+            assert!(
+                !file_type.is_symlink(),
+                "Store source gate refuses symlinked input: {}",
+                path.display()
+            );
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::fs::MetadataExt;
+
+                const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                let metadata = std::fs::symlink_metadata(&path)
+                    .expect("inspect Store source reparse attributes");
+                assert_eq!(
+                    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
+                    0,
+                    "Store source gate refuses reparse input: {}",
+                    path.display()
+                );
+            }
+            if file_type.is_dir() {
+                collect_production_sources(&path, excluded, output);
+            } else if file_type.is_file()
+                && path != excluded
+                && path.extension().is_some_and(|extension| extension == "rs")
+            {
+                let source = std::fs::read_to_string(&path).expect("read Store production source");
+                output.push((path, source));
+            }
+        }
+    }
+
+    fn identifier_occurrences(source: &str, identifier: &str) -> usize {
+        source
+            .match_indices(identifier)
+            .filter(|(start, value)| {
+                let before = source[..*start].chars().next_back();
+                let after = source[*start + value.len()..].chars().next();
+                !before.is_some_and(|value| value == '_' || value.is_alphanumeric())
+                    && !after.is_some_and(|value| value == '_' || value.is_alphanumeric())
+            })
+            .count()
+    }
+
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let actor_path = source_root.join("actor.rs");
+    let lib_path = source_root.join("lib.rs");
+    let excluded_tests = source_root.join("actor/tests.rs");
+    let mut production_sources = Vec::new();
+    collect_production_sources(&source_root, &excluded_tests, &mut production_sources);
+    production_sources.sort_by(|left, right| left.0.cmp(&right.0));
+    let source = production_sources
+        .iter()
+        .find_map(|(path, source)| (path == &actor_path).then_some(source.as_str()))
+        .expect("actor production source");
+
+    for (path, candidate) in &production_sources {
+        if path == &actor_path {
+            continue;
+        }
+        let expected = usize::from(path == &lib_path);
+        assert_eq!(
+            identifier_occurrences(candidate, "ExtensionServiceStoreAuthority"),
+            expected,
+            "extension-service Store authority escaped its reviewed owner: {}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        source
+            .matches("pub fn claim_extension_service_store_authority(")
+            .count(),
+        1,
+        "one actor lifetime must expose exactly one claim path"
+    );
+    assert_eq!(
+        source
+            .matches("impl ExtensionServiceStoreAuthority {")
+            .count(),
+        1,
+        "the authority surface must stay in one source-gated inherent impl"
+    );
+    assert_eq!(
+        source
+            .matches("ExtensionServiceStoreAuthority {")
+            .count(),
+        3,
+        "the authority must have one declaration, one inherent impl, and one construction site; a second mint or any trait impl widens the boundary"
+    );
+    assert_eq!(
+        source
+            .matches("Ok(ExtensionServiceStoreAuthority {")
+            .count(),
+        1,
+        "one exact constructor must mint the process authority"
+    );
+    let start = source
+        .find("impl ExtensionServiceStoreAuthority {")
+        .expect("service Store authority impl");
+    let tail = &source[start..];
+    let end = tail
+        .find("\n}\n\nfn observe_extension_service_store_call")
+        .expect("service Store authority impl boundary");
+    let surface = &tail[..end];
+    for required in [
+        "pub fn load_native_ownership_until(",
+        "pub fn mutate_native_ownership_until(",
+        "pub fn load_install_catalog_until(",
+        "pub fn load_grant_cohort_until(",
+    ] {
+        assert_eq!(
+            surface.matches(required).count(),
+            1,
+            "missing or duplicated reviewed authority method: {required}"
+        );
+    }
+    let public_items = surface
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.starts_with("pub ") || line.starts_with("pub(")
+        })
+        .count();
+    assert_eq!(
+        public_items, 4,
+        "the service Store authority gained an unreviewed public item"
+    );
+    assert!(!surface.contains("mutate_extension_install"));
+    assert!(!surface.contains("mutate_extension_grant"));
+}
+
+#[test]
+fn extension_service_store_authority_releases_timed_out_work_and_closes_on_shutdown() {
+    let profile = ProfileId::from(1);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    assert!(store.try_load_extension_install_catalog(
+        profile,
+        Instant::now() + STORE_RPC_TIMEOUT,
+        Box::new(move |_| {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+        }),
+    ));
+    entered_rx
+        .recv_timeout(STORE_RPC_TIMEOUT)
+        .expect("Store actor did not enter the blocking fixture");
+
+    assert_eq!(
+        authority.load_grant_cohort_until(
+            profile,
+            ExtensionGrantManifestBindings::new(Vec::new()).unwrap(),
+            Instant::now() + Duration::from_millis(10),
+        ),
+        ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
+    );
+    {
+        let state = store
+            .extension_grant_request_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(state.count, 1, "timed-out work lost its actor-owned permit");
+    }
+
+    release_tx
+        .send(())
+        .expect("Store actor dropped the blocking fixture");
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        StoreShutdownOutcome::Clean
+    );
+    assert_eq!(
+        *store
+            .extension_grant_request_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ExtensionGrantRequestAdmission::default(),
+        "terminal drain did not release the exact cohort permit"
+    );
+
+    assert!(matches!(
+        store.claim_extension_service_store_authority(),
+        Err(ExtensionServiceStoreAuthorityClaimError::StoreUnavailable)
+    ));
+    assert_eq!(
+        authority.load_native_ownership_until(Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert_eq!(
+        authority.load_install_catalog_until(profile, Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert_eq!(
+        authority.load_grant_cohort_until(
+            profile,
+            ExtensionGrantManifestBindings::new(Vec::new()).unwrap(),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+}
+
+#[test]
+fn extension_service_store_authority_loads_exact_runtime_snapshots() {
+    let profile = ProfileId::from(1);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallCatalogLoadOutcome::Loaded(
+        catalog,
+    )) = authority.load_install_catalog_until(profile, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("service authority did not load the exact install catalog");
+    };
+    assert_eq!(catalog.revision(), ExtensionInstallCatalogRevision::INITIAL);
+    assert!(catalog.installs().is_empty());
+
+    let bindings = ExtensionGrantManifestBindings::new(Vec::new()).unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Loaded(
+        cohort,
+    )) = authority.load_grant_cohort_until(profile, bindings, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("service authority did not load the exact grant cohort");
+    };
+    assert_eq!(cohort.profile(), profile);
+    assert_eq!(cohort.install_catalog(), &catalog);
+    assert_eq!(cohort.grants().len(), 0);
+}
+
+#[test]
+fn extension_service_store_snapshot_deadlines_distinguish_admission_and_observation() {
+    let profile = ProfileId::from(1);
+    let (tx, rx) = mpsc::sync_channel(2);
+    let store = Arc::new(test_store_with_sender(tx));
+    let authority = store.claim_extension_service_store_authority().unwrap();
+
+    assert_eq!(
+        authority.load_install_catalog_until(profile, Instant::now()),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    store.tx.try_send(Cmd::SaveWake).unwrap();
+    store.tx.try_send(Cmd::SaveWake).unwrap();
+    assert_eq!(
+        authority.load_install_catalog_until(profile, Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert!(matches!(
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap(),
+        Cmd::SaveWake
+    ));
+    assert!(matches!(
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap(),
+        Cmd::SaveWake
+    ));
+    assert_eq!(
+        authority.load_install_catalog_until(profile, Instant::now() + Duration::from_millis(10),),
+        ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
+    );
+    let Cmd::LoadExtensionInstallCatalog(loaded_profile, done) =
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    else {
+        panic!("install snapshot admitted the wrong actor command");
+    };
+    assert_eq!(loaded_profile, profile);
+    done(ExtensionInstallCatalogLoadOutcome::Failed);
+
+    let bindings = ExtensionGrantManifestBindings::new(Vec::new()).unwrap();
+    assert_eq!(
+        authority.load_grant_cohort_until(profile, bindings.clone(), Instant::now()),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    assert_eq!(
+        authority.load_grant_cohort_until(
+            profile,
+            bindings,
+            Instant::now() + Duration::from_millis(10),
+        ),
+        ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
+    );
+    {
+        let state = store
+            .extension_grant_request_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(state.count, 1, "admitted cohort lost its memory permit");
+    }
+    let Cmd::LoadExtensionGrantCohort(loaded_profile, loaded_bindings, permit, done) =
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    else {
+        panic!("grant snapshot admitted the wrong actor command");
+    };
+    assert_eq!(loaded_profile, profile);
+    assert_eq!(loaded_bindings.len(), 0);
+    done(ExtensionGrantCohortLoadOutcome::Failed);
+    drop(permit);
+    let state = store
+        .extension_grant_request_admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(*state, ExtensionGrantRequestAdmission::default());
 }
 
 #[test]
 fn native_ownership_load_deadline_separates_non_admission_from_uncertainty() {
     let (tx, rx) = mpsc::sync_channel(1);
     let store = Arc::new(test_store_with_sender(tx));
-    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    let authority = store.claim_extension_service_store_authority().unwrap();
 
     assert_eq!(
-        authority.load_until(Instant::now()),
-        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+        authority.load_native_ownership_until(Instant::now()),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
     );
     assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
 
     store.tx.try_send(Cmd::SaveWake).unwrap();
     assert_eq!(
-        authority.load_until(Instant::now() + STORE_RPC_TIMEOUT),
-        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+        authority.load_native_ownership_until(Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
     );
     assert!(matches!(
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap(),
@@ -2009,8 +2332,8 @@ fn native_ownership_load_deadline_separates_non_admission_from_uncertainty() {
     ));
 
     assert_eq!(
-        authority.load_until(Instant::now() + Duration::from_millis(10)),
-        ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission
+        authority.load_native_ownership_until(Instant::now() + Duration::from_millis(10)),
+        ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
     );
     let Cmd::LoadExtensionNativeOwnershipJournal(done) =
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
@@ -2025,8 +2348,8 @@ fn native_ownership_load_deadline_separates_non_admission_from_uncertainty() {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .terminal_admitted = true;
     assert_eq!(
-        authority.load_until(Instant::now() + STORE_RPC_TIMEOUT),
-        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+        authority.load_native_ownership_until(Instant::now() + STORE_RPC_TIMEOUT),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
     );
 }
 
@@ -2034,7 +2357,7 @@ fn native_ownership_load_deadline_separates_non_admission_from_uncertainty() {
 fn native_ownership_actor_admission_is_count_and_byte_bounded() {
     let (tx, rx) = mpsc::sync_channel(MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS + 1);
     let store = Arc::new(test_store_with_sender(tx));
-    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    let authority = store.claim_extension_service_store_authority().unwrap();
     for index in 0..MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS {
         assert!(store.try_mutate_extension_native_ownership_journal(
             ExtensionNativeOwnershipJournalRevision::INITIAL,
@@ -2047,7 +2370,7 @@ fn native_ownership_actor_admission_is_count_and_byte_bounded() {
         ));
     }
     assert_eq!(
-        authority.mutate_until(
+        authority.mutate_native_ownership_until(
             ExtensionNativeOwnershipJournalRevision::INITIAL,
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 ProfileId::from(1),
@@ -2055,11 +2378,11 @@ fn native_ownership_actor_admission_is_count_and_byte_bounded() {
             )),
             Instant::now() + STORE_RPC_TIMEOUT,
         ),
-        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+        ExtensionServiceStoreCallOutcome::NotAdmitted
     );
     drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
     assert_eq!(
-        authority.mutate_until(
+        authority.mutate_native_ownership_until(
             ExtensionNativeOwnershipJournalRevision::INITIAL,
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 ProfileId::from(1),
@@ -2067,7 +2390,7 @@ fn native_ownership_actor_admission_is_count_and_byte_bounded() {
             )),
             Instant::now() + Duration::from_millis(10),
         ),
-        ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission
+        ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
     );
     drop(rx);
     assert_eq!(
@@ -2127,11 +2450,11 @@ fn native_ownership_mutation_cannot_enqueue_after_its_deadline() {
 fn native_ownership_failed_enqueue_releases_its_exact_permit() {
     let (tx, rx) = mpsc::sync_channel(1);
     let store = Arc::new(test_store_with_sender(tx));
-    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    let authority = store.claim_extension_service_store_authority().unwrap();
     store.tx.try_send(Cmd::SaveWake).unwrap();
 
     assert_eq!(
-        authority.mutate_until(
+        authority.mutate_native_ownership_until(
             ExtensionNativeOwnershipJournalRevision::INITIAL,
             ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
                 ProfileId::from(1),
@@ -2139,7 +2462,7 @@ fn native_ownership_failed_enqueue_releases_its_exact_permit() {
             )),
             Instant::now() + STORE_RPC_TIMEOUT,
         ),
-        ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted
+        ExtensionServiceStoreCallOutcome::NotAdmitted
     );
     assert_eq!(
         store
@@ -2214,7 +2537,7 @@ fn native_ownership_admission_corruption_poison_is_permanent() {
 #[test]
 fn profile_deletion_waits_for_native_ownership_release_and_clear() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
-    let authority = store.claim_extension_native_ownership_authority().unwrap();
+    let authority = store.claim_extension_service_store_authority().unwrap();
     store.save_session(two_profile_sample());
     assert!(store.flush());
     let profile = ProfileId::from(3);
@@ -3294,6 +3617,27 @@ fn extension_grant_admission_has_exact_byte_bound_and_releases_failed_enqueue() 
     ));
     assert_eq!(completions.load(Ordering::Relaxed), 0);
     let state = store
+        .extension_grant_request_admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(state.count, 0);
+    assert_eq!(state.retained_bytes, 0);
+    drop(state);
+
+    let (authority_tx, _authority_rx) = mpsc::sync_channel(0);
+    let authority_store = Arc::new(test_store_with_sender(authority_tx));
+    let authority = authority_store
+        .claim_extension_service_store_authority()
+        .unwrap();
+    assert_eq!(
+        authority.load_grant_cohort_until(
+            ProfileId::from(1),
+            ExtensionGrantManifestBindings::new(Vec::new()).unwrap(),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    let state = authority_store
         .extension_grant_request_admission
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

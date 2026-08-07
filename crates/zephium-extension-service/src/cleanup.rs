@@ -701,7 +701,7 @@ mod tests {
         ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationApplied,
         ExtensionNativeOwnershipJournalMutationOutcome,
     };
-    use zephium_store::ExtensionNativeOwnershipStoreCallOutcome;
+    use zephium_store::ExtensionServiceStoreCallOutcome;
 
     use super::*;
 
@@ -765,8 +765,7 @@ mod tests {
         fn load_until(
             &self,
             _deadline: Instant,
-        ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome>
-        {
+        ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
             self.load_count.set(self.load_count.get() + 1);
             let journal = match self.loads.borrow_mut().pop_front() {
                 None | Some(LoadAction::Current) => self.durable.borrow().clone(),
@@ -775,12 +774,12 @@ mod tests {
                     journal
                 }
                 Some(LoadAction::Failed) => {
-                    return ExtensionNativeOwnershipStoreCallOutcome::Completed(
+                    return ExtensionServiceStoreCallOutcome::Completed(
                         ExtensionNativeOwnershipJournalLoadOutcome::Failed,
                     );
                 }
             };
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal),
             )
         }
@@ -790,7 +789,7 @@ mod tests {
             journal: &ExtensionNativeOwnershipJournal,
             mutation: ExtensionNativeOwnershipJournalMutation,
             _deadline: Instant,
-        ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
+        ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
         {
             let trace = match &mutation {
                 ExtensionNativeOwnershipJournalMutation::Begin(_) => MutationTrace::Begin,
@@ -814,7 +813,7 @@ mod tests {
 
             let durable = self.durable.borrow().clone();
             if &durable != journal {
-                return ExtensionNativeOwnershipStoreCallOutcome::Completed(
+                return ExtensionServiceStoreCallOutcome::Completed(
                     ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
                         current: durable.revision(),
                     },
@@ -832,7 +831,7 @@ mod tests {
                 entry: application.entry().cloned().map(Box::new),
             };
             *self.durable.borrow_mut() = application.into_journal();
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied),
             )
         }

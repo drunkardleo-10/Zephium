@@ -888,7 +888,7 @@ mod tests {
         ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipPort,
         ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRetirementDisposition,
     };
-    use zephium_store::ExtensionNativeOwnershipStoreCallOutcome;
+    use zephium_store::ExtensionServiceStoreCallOutcome;
 
     use super::*;
     use crate::cleanup::{
@@ -948,8 +948,7 @@ mod tests {
         fn load_until(
             &self,
             _deadline: Instant,
-        ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome>
-        {
+        ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
             let journal = match self.loads.borrow_mut().pop_front() {
                 None | Some(LoadAction::Current) => self.durable.borrow().clone(),
                 Some(LoadAction::Replace(journal)) => {
@@ -957,7 +956,7 @@ mod tests {
                     journal
                 }
             };
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal),
             )
         }
@@ -967,11 +966,11 @@ mod tests {
             journal: &ExtensionNativeOwnershipJournal,
             mutation: ExtensionNativeOwnershipJournalMutation,
             _deadline: Instant,
-        ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
+        ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
         {
             let durable = self.durable.borrow().clone();
             if &durable != journal {
-                return ExtensionNativeOwnershipStoreCallOutcome::Completed(
+                return ExtensionServiceStoreCallOutcome::Completed(
                     ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
                         current: durable.revision(),
                     },
@@ -998,11 +997,11 @@ mod tests {
                 .pop_front()
                 .unwrap_or(MutationAction::Apply)
             {
-                MutationAction::Apply => ExtensionNativeOwnershipStoreCallOutcome::Completed(
+                MutationAction::Apply => ExtensionServiceStoreCallOutcome::Completed(
                     ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied),
                 ),
                 MutationAction::ApplyButReportUnknown => {
-                    ExtensionNativeOwnershipStoreCallOutcome::Completed(
+                    ExtensionServiceStoreCallOutcome::Completed(
                         ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown,
                     )
                 }

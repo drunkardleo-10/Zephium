@@ -9,30 +9,28 @@ use zephium_core::ports::store::{
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationApplied,
     ExtensionNativeOwnershipJournalMutationOutcome,
 };
-use zephium_store::{
-    ExtensionNativeOwnershipStoreAuthority, ExtensionNativeOwnershipStoreCallOutcome,
-};
+use zephium_store::{ExtensionServiceStoreAuthority, ExtensionServiceStoreCallOutcome};
 
 pub(crate) trait JournalBackend {
     fn load_until(
         &self,
         deadline: Instant,
-    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome>;
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome>;
 
     fn mutate_until(
         &self,
         journal: &ExtensionNativeOwnershipJournal,
         mutation: ExtensionNativeOwnershipJournalMutation,
         deadline: Instant,
-    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>;
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>;
 }
 
-impl JournalBackend for ExtensionNativeOwnershipStoreAuthority {
+impl JournalBackend for ExtensionServiceStoreAuthority {
     fn load_until(
         &self,
         deadline: Instant,
-    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
-        self.load_until(deadline)
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
+        self.load_native_ownership_until(deadline)
     }
 
     fn mutate_until(
@@ -40,9 +38,8 @@ impl JournalBackend for ExtensionNativeOwnershipStoreAuthority {
         journal: &ExtensionNativeOwnershipJournal,
         mutation: ExtensionNativeOwnershipJournalMutation,
         deadline: Instant,
-    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
-    {
-        self.mutate_until(journal.revision(), mutation, deadline)
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
+        self.mutate_native_ownership_until(journal.revision(), mutation, deadline)
     }
 }
 
@@ -86,19 +83,17 @@ impl JournalProjection {
     ) -> Result<&ExtensionNativeOwnershipJournal, JournalLoadFailure> {
         self.journal = None;
         match backend.load_until(deadline) {
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal),
             ) => {
                 self.journal = Some(journal);
                 Ok(self.journal.as_ref().expect("journal was just installed"))
             }
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalLoadOutcome::Failed,
             ) => Err(JournalLoadFailure::Failed),
-            ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted => {
-                Err(JournalLoadFailure::NotAdmitted)
-            }
-            ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission => {
+            ExtensionServiceStoreCallOutcome::NotAdmitted => Err(JournalLoadFailure::NotAdmitted),
+            ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => {
                 Err(JournalLoadFailure::TimedOutAfterAdmission)
             }
         }
@@ -121,27 +116,27 @@ impl JournalProjection {
             }
         };
         match backend.mutate_until(&current, mutation, deadline) {
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied),
             ) if applied_matches(&application, &applied) => {
                 self.journal = Some(application.into_journal());
                 Ok(self.journal.as_ref().expect("journal was just installed"))
             }
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalMutationOutcome::Applied(_),
             ) => Err(JournalMutationFailure::ProjectionMismatch),
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalMutationOutcome::Conflict { .. }
                 | ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown,
             )
-            | ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission => {
+            | ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => {
                 Err(JournalMutationFailure::ReloadRequired)
             }
-            ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted => {
+            ExtensionServiceStoreCallOutcome::NotAdmitted => {
                 self.journal = Some(current);
                 Err(JournalMutationFailure::NotAdmitted)
             }
-            ExtensionNativeOwnershipStoreCallOutcome::Completed(
+            ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalMutationOutcome::NotRegistered
                 | ExtensionNativeOwnershipJournalMutationOutcome::DegradedProfile
                 | ExtensionNativeOwnershipJournalMutationOutcome::SessionRecoveryRequired
@@ -182,7 +177,7 @@ mod tests {
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
-    type StoreCallOutcome<T> = ExtensionNativeOwnershipStoreCallOutcome<T>;
+    type StoreCallOutcome<T> = ExtensionServiceStoreCallOutcome<T>;
 
     struct MutationStep {
         expected_journal: ExtensionNativeOwnershipJournal,

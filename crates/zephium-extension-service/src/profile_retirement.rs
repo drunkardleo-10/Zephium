@@ -10,7 +10,7 @@ use zephium_extension_repository::{
 };
 use zephium_extension_runtime_api::ExtensionRuntimeHostProfileAbsenceDisposition;
 use zephium_private_fs::PrivateFsError;
-use zephium_store::ExtensionNativeOwnershipStoreAuthority;
+use zephium_store::ExtensionServiceStoreAuthority;
 
 use crate::cleanup::{
     reconcile_startup, CancellationCheck, CleanupAttempt, CleanupFailure, CleanupScope,
@@ -206,7 +206,7 @@ impl ProfileRetirementRegistry {
 
 /// Exact worker-owned resources joined by one profile-retirement attempt.
 pub(crate) struct ProfileRetirementResources<'worker> {
-    store: &'worker ExtensionNativeOwnershipStoreAuthority,
+    store: &'worker ExtensionServiceStoreAuthority,
     projection: &'worker mut JournalProjection,
     repository: &'worker mut ServiceRepository,
     native_recovery: &'worker mut NativeRecoveryState,
@@ -214,7 +214,7 @@ pub(crate) struct ProfileRetirementResources<'worker> {
 
 impl<'worker> ProfileRetirementResources<'worker> {
     pub(crate) fn new(
-        store: &'worker ExtensionNativeOwnershipStoreAuthority,
+        store: &'worker ExtensionServiceStoreAuthority,
         projection: &'worker mut JournalProjection,
         repository: &'worker mut ServiceRepository,
         native_recovery: &'worker mut NativeRecoveryState,

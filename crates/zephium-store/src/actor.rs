@@ -283,6 +283,26 @@ impl ExtensionGrantRequestPermit {
         let mut state = admission
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::reserve(admission, &mut state, retained_bytes)
+    }
+
+    fn try_acquire(
+        admission: &Arc<Mutex<ExtensionGrantRequestAdmission>>,
+        retained_bytes: usize,
+    ) -> Option<Self> {
+        let mut state = match admission.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        Self::reserve(admission, &mut state, retained_bytes)
+    }
+
+    fn reserve(
+        admission: &Arc<Mutex<ExtensionGrantRequestAdmission>>,
+        state: &mut ExtensionGrantRequestAdmission,
+        retained_bytes: usize,
+    ) -> Option<Self> {
         let next_count = state.count.checked_add(1)?;
         let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
         if next_count > MAX_PENDING_EXTENSION_GRANT_REQUESTS
@@ -616,35 +636,36 @@ struct ActorLifecycle {
     terminal_admitted: bool,
 }
 
-/// Definite result of trying to claim the process's sole native-ownership
+/// Definite result of trying to claim the process's sole extension-service
 /// storage capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExtensionNativeOwnershipStoreAuthorityClaimError {
+pub enum ExtensionServiceStoreAuthorityClaimError {
     /// This actor lifetime has already issued its capability. Dropping the
-    /// capability never makes the journal broadly reachable again.
+    /// capability never makes its runtime snapshots or ownership journal
+    /// broadly reachable again.
     AlreadyClaimed,
     /// Terminal actor ownership has transferred or clean shutdown completed.
     StoreUnavailable,
 }
 
-impl fmt::Display for ExtensionNativeOwnershipStoreAuthorityClaimError {
+impl fmt::Display for ExtensionServiceStoreAuthorityClaimError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::AlreadyClaimed => "extension native-ownership store authority already claimed",
-            Self::StoreUnavailable => "extension native-ownership store actor is unavailable",
+            Self::AlreadyClaimed => "extension-service store authority already claimed",
+            Self::StoreUnavailable => "extension-service store actor is unavailable",
         })
     }
 }
 
-impl std::error::Error for ExtensionNativeOwnershipStoreAuthorityClaimError {}
+impl std::error::Error for ExtensionServiceStoreAuthorityClaimError {}
 
-/// Settlement of one deadline-bounded native-ownership store operation.
+/// Settlement of one deadline-bounded extension-service store operation.
 ///
-/// Admission and observation are deliberately separate. Once a command has
-/// entered the actor, losing the caller's observation window cannot prove
-/// whether SQLite committed it; reconciliation must start with an exact load.
+/// Admission and observation are deliberately separate. A caller which loses
+/// its observation window after admission cannot tell whether a read completed
+/// or, for the ownership journal, whether SQLite committed a mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionNativeOwnershipStoreCallOutcome<T> {
+pub enum ExtensionServiceStoreCallOutcome<T> {
     Completed(T),
     /// The operation never entered the actor and cannot have changed durable
     /// state. A full mailbox, exhausted retained-memory budget, expired
@@ -656,23 +677,42 @@ pub enum ExtensionNativeOwnershipStoreCallOutcome<T> {
     TimedOutAfterAdmission,
 }
 
-/// Move-only capability for the global native-extension ownership journal.
+/// Move-only Store capability for the serialized extension service.
 ///
-/// The broad [`Store`] port intentionally cannot reach this crash-critical
-/// state. One concrete [`SqliteStore`] actor lifetime can mint this authority
-/// once, after which the extension coordinator may move it onto its single
-/// worker thread. It is `Send` but deliberately neither `Clone` nor `Sync`.
+/// In addition to the crash-critical native-ownership journal, this is the
+/// service's only path to exact install catalogs and their atomically bound
+/// grant cohorts. Install and grant access is read-only: their mutation APIs
+/// remain on separately authorized product flows. One concrete [`SqliteStore`]
+/// actor lifetime can mint this authority once, after which the coordinator
+/// may move it onto its single worker thread. It is `Send` but deliberately
+/// neither `Clone` nor `Sync`.
 ///
 /// ```compile_fail
-/// use zephium_store::ExtensionNativeOwnershipStoreAuthority;
+/// use zephium_store::ExtensionServiceStoreAuthority;
 /// fn require_clone<T: Clone>() {}
-/// require_clone::<ExtensionNativeOwnershipStoreAuthority>();
+/// require_clone::<ExtensionServiceStoreAuthority>();
 /// ```
 ///
 /// ```compile_fail
-/// use zephium_store::ExtensionNativeOwnershipStoreAuthority;
+/// use zephium_store::ExtensionServiceStoreAuthority;
 /// fn require_sync<T: Sync>() {}
-/// require_sync::<ExtensionNativeOwnershipStoreAuthority>();
+/// require_sync::<ExtensionServiceStoreAuthority>();
+/// ```
+///
+/// Install and grant mutation authority does not cross this boundary:
+///
+/// ```compile_fail
+/// use zephium_store::ExtensionServiceStoreAuthority;
+/// fn cannot_mutate_installs(authority: &ExtensionServiceStoreAuthority) {
+///     authority.mutate_extension_install_catalog();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use zephium_store::ExtensionServiceStoreAuthority;
+/// fn cannot_mutate_grants(authority: &ExtensionServiceStoreAuthority) {
+///     authority.mutate_extension_grants();
+/// }
 /// ```
 ///
 /// ```compile_fail
@@ -699,7 +739,7 @@ pub enum ExtensionNativeOwnershipStoreCallOutcome<T> {
 ///     );
 /// }
 /// ```
-pub struct ExtensionNativeOwnershipStoreAuthority {
+pub struct ExtensionServiceStoreAuthority {
     store: Arc<SqliteStore>,
     // Cell is Send + !Sync. The marker therefore preserves move-to-worker
     // support while preventing shared references from becoming cross-thread
@@ -707,16 +747,16 @@ pub struct ExtensionNativeOwnershipStoreAuthority {
     _not_sync: PhantomData<Cell<()>>,
 }
 
-impl ExtensionNativeOwnershipStoreAuthority {
+impl ExtensionServiceStoreAuthority {
     /// Loads the exact complete reconciliation journal under one caller-owned
     /// deadline. Corrupt or over-limit durable state is returned as the
     /// inner load failure; it is never confused with non-admission.
-    pub fn load_until(
+    pub fn load_native_ownership_until(
         &self,
         deadline: Instant,
-    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
         if Instant::now() >= deadline {
-            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
         let (reply, result) = mpsc::sync_channel(1);
         let done = Box::new(move |outcome| {
@@ -726,23 +766,22 @@ impl ExtensionNativeOwnershipStoreAuthority {
             .store
             .try_load_extension_native_ownership_journal(deadline, done)
         {
-            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
-        observe_extension_native_ownership_call(result, deadline)
+        observe_extension_service_store_call(result, deadline)
     }
 
     /// Applies one exact complete-journal CAS under one caller-owned deadline.
     /// A timeout after actor admission is uncertainty even when the inner
     /// mutation would normally have a definite refusal outcome.
-    pub fn mutate_until(
+    pub fn mutate_native_ownership_until(
         &self,
         expected: ExtensionNativeOwnershipJournalRevision,
         mutation: ExtensionNativeOwnershipJournalMutation,
         deadline: Instant,
-    ) -> ExtensionNativeOwnershipStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>
-    {
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
         if Instant::now() >= deadline {
-            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
         let (reply, result) = mpsc::sync_channel(1);
         let done = Box::new(move |outcome| {
@@ -752,27 +791,81 @@ impl ExtensionNativeOwnershipStoreAuthority {
             .store
             .try_mutate_extension_native_ownership_journal(expected, mutation, deadline, done)
         {
-            return ExtensionNativeOwnershipStoreCallOutcome::NotAdmitted;
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
-        observe_extension_native_ownership_call(result, deadline)
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Loads one exact, complete, bounded install catalog for `profile`.
+    ///
+    /// Durable invalidity remains an inner load failure. Expiry, actor
+    /// lifecycle, and mailbox refusal stay distinguishable from an admitted
+    /// read whose result was not observed before `deadline`.
+    pub fn load_install_catalog_until(
+        &self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_install_catalog(profile, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Loads the exact install-and-grant cohort for a prevalidated, bounded
+    /// manifest binding set.
+    ///
+    /// The request retains one Store admission permit through actor execution,
+    /// bounding both queued count and manifest bytes even if this caller's
+    /// observation deadline expires.
+    pub fn load_grant_cohort_until(
+        &self,
+        profile: ProfileId,
+        bindings: ExtensionGrantManifestBindings,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionGrantCohortLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_grant_cohort(profile, bindings, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
     }
 }
 
-fn observe_extension_native_ownership_call<T>(
+fn observe_extension_service_store_call<T>(
     result: Receiver<T>,
     deadline: Instant,
-) -> ExtensionNativeOwnershipStoreCallOutcome<T> {
+) -> ExtensionServiceStoreCallOutcome<T> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission;
+        return ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission;
     }
     match result.recv_timeout(remaining) {
-        Ok(outcome) => ExtensionNativeOwnershipStoreCallOutcome::Completed(outcome),
+        Ok(outcome) => ExtensionServiceStoreCallOutcome::Completed(outcome),
         // Once admitted, actor exit or callback loss is at least as uncertain
         // as expiry. The process-boundary policy treats either as requiring a
         // fresh-process reconciliation rather than guessing settlement.
         Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
-            ExtensionNativeOwnershipStoreCallOutcome::TimedOutAfterAdmission
+            ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
         }
     }
 }
@@ -789,7 +882,7 @@ pub struct SqliteStore {
     extension_native_ownership_mutation_admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
-    extension_native_ownership_authority_claimed: AtomicBool,
+    extension_service_store_authority_claimed: AtomicBool,
 }
 
 impl SqliteStore {
@@ -878,31 +971,29 @@ impl SqliteStore {
                 terminal_admitted: false,
             }),
             shutdown_clean: AtomicBool::new(false),
-            extension_native_ownership_authority_claimed: AtomicBool::new(false),
+            extension_service_store_authority_claimed: AtomicBool::new(false),
         })
     }
 
-    /// Mints the only public path to this actor lifetime's native-ownership
-    /// journal. The claim bit is intentionally never reset, including when
-    /// the returned capability is dropped.
-    pub fn claim_extension_native_ownership_authority(
+    /// Mints the only public extension-service path to this actor lifetime's
+    /// runtime snapshots and native-ownership journal. The claim bit is
+    /// intentionally never reset, including when the returned capability is
+    /// dropped.
+    pub fn claim_extension_service_store_authority(
         self: &Arc<Self>,
-    ) -> Result<
-        ExtensionNativeOwnershipStoreAuthority,
-        ExtensionNativeOwnershipStoreAuthorityClaimError,
-    > {
+    ) -> Result<ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError> {
         let lifecycle = self
             .lifecycle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return Err(ExtensionNativeOwnershipStoreAuthorityClaimError::StoreUnavailable);
+            return Err(ExtensionServiceStoreAuthorityClaimError::StoreUnavailable);
         }
-        self.extension_native_ownership_authority_claimed
+        self.extension_service_store_authority_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| ExtensionNativeOwnershipStoreAuthorityClaimError::AlreadyClaimed)?;
+            .map_err(|_| ExtensionServiceStoreAuthorityClaimError::AlreadyClaimed)?;
         drop(lifecycle);
-        Ok(ExtensionNativeOwnershipStoreAuthority {
+        Ok(ExtensionServiceStoreAuthority {
             store: self.clone(),
             _not_sync: PhantomData,
         })
@@ -926,6 +1017,62 @@ impl SqliteStore {
         }
         self.tx
             .try_send(Cmd::LoadExtensionNativeOwnershipJournal(done))
+            .is_ok()
+    }
+
+    fn try_load_extension_install_catalog(
+        &self,
+        profile: ProfileId,
+        deadline: Instant,
+        done: ExtensionInstallCatalogLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionInstallCatalog(profile, done))
+            .is_ok()
+    }
+
+    fn try_load_extension_grant_cohort(
+        &self,
+        profile: ProfileId,
+        bindings: ExtensionGrantManifestBindings,
+        deadline: Instant,
+        done: ExtensionGrantCohortLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(permit) = ExtensionGrantRequestPermit::try_acquire(
+            &self.extension_grant_request_admission,
+            bindings.retained_bytes(),
+        ) else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionGrantCohort(
+                profile, bindings, permit, done,
+            ))
             .is_ok()
     }
 
