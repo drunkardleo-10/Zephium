@@ -15,14 +15,14 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 use super::runtime::ExtensionRuntimeOperationAuthorityLineage;
 
 use super::{
-    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext,
-    ExtensionGrantDigest, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipEntryRevision,
-    ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
-    ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility, ExtensionRuntimeGeneration,
-    ExtensionRuntimeOperationAuthority,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
+    ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
+    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibility, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
 };
 
 const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
@@ -188,6 +188,17 @@ macro_rules! binding_identity_accessors {
             self.entry.runtime_backend()
         }
 
+        /// Catalog-authenticated native identity already persisted on the row,
+        /// when this projection represents a post-authentication frontier.
+        ///
+        /// Fresh acquisition bindings are minted from `NativeAbsentPreparing`
+        /// before repository authentication and therefore return `None` here.
+        pub const fn expected_native_identity(
+            &self,
+        ) -> Option<ExtensionExpectedNativeOwnershipIdentity> {
+            self.entry.expected_native_identity()
+        }
+
         /// Exact backend-native owner identity, when one was observed.
         pub const fn native_identity(&self) -> Option<ExtensionNativeOwnershipIdentity> {
             self.entry.native_identity()
@@ -343,6 +354,11 @@ impl fmt::Debug for ExtensionPackagePinAcquisitionBinding {
 /// This intermediate exists so a caller cannot accidentally extract one piece
 /// while fallible package-access preparation is still underway. It is
 /// move-only, process-local, and has no public fields.
+///
+/// The split deliberately predates catalog-expected native identity. That fact
+/// is authenticated later by the repository and persisted in the current
+/// `NativeMayOwn` row; it must then be joined at the host boundary rather than
+/// synthesized into this earlier operation lineage.
 ///
 /// ```compile_fail
 /// use zephium_core::extensions::ExtensionPackagePinRuntimeParts;
@@ -861,6 +877,7 @@ mod tests {
         assert_eq!(binding.store_grant_revision(), entry.store_grant_revision());
         assert_eq!(binding.grant_digest(), entry.grant_digest());
         assert_eq!(binding.runtime_backend(), entry.runtime_backend());
+        assert_eq!(binding.expected_native_identity(), None);
         assert_eq!(binding.native_identity(), None);
         assert_eq!(binding.native_incarnation(), entry.native_incarnation());
         assert_eq!(binding.journal_operation(), entry.operation());

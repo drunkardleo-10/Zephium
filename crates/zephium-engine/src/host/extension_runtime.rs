@@ -1794,24 +1794,26 @@ mod tests {
         ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
         ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
         ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
-        ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
-        ExtensionGrantDigest, ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
-        ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstall,
-        ExtensionInstallCatalog, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-        ExtensionManifestDeclarations, ExtensionManifestDescriptor, ExtensionManifestDigest,
-        ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
-        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
-        ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
-        ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipOperation,
-        ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation,
-        ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
-        ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinHeldBinding,
-        ExtensionPackageRevision, ExtensionRuntimeGeneration, ExtensionTreeDigest,
+        ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
+        ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantDigest,
+        ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantRevision,
+        ExtensionHostPermissionSet, ExtensionInstall, ExtensionInstallCatalog,
+        ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
+        ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
+        ExtensionManifestResourceDigest, ExtensionNativeOwnershipEntryRevision,
+        ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
+        ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
+        ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
+        ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackagePinAcquisitionBinding,
+        ExtensionPackagePinHeldBinding, ExtensionPackageRevision, ExtensionRuntimeGeneration,
+        ExtensionTreeDigest,
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
     use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
     use zephium_extension_runtime_api::{
-        ExtensionRuntimeHostRecoveryBinding, ExtensionRuntimeRecoverySettlement,
+        ExtensionRuntimeHostRecoveryBinding, ExtensionRuntimeNativeOwnerId,
+        ExtensionRuntimeRecoverySettlement,
     };
 
     use super::*;
@@ -1863,6 +1865,37 @@ mod tests {
             ExtensionNativeOwnershipPhase::NativeMayOwn,
         )
         .expect("valid recovery ownership row")
+    }
+
+    fn macos_recovery_entry(
+        operation: u64,
+        expected: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        observed: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> ExtensionNativeOwnershipEntry {
+        let revision = if observed.is_some() { 3 } else { 2 };
+        ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            ExtensionNativeOwnershipKey::new(
+                ProfileId::from(7),
+                ExtensionInstallId::from(11),
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionNativeOwnershipOperation::new(operation).expect("nonzero operation"),
+            ExtensionNativeOwnershipEntryRevision::new(revision).expect("nonzero revision"),
+            package(3),
+            ExtensionCatalogSetDigest::from_bytes([8; 32]),
+            ExtensionCatalogGenerationRole::Active,
+            ExtensionInstallCatalogRevision::new(13).expect("nonzero catalog revision"),
+            ExtensionInstallRevision::new(17).expect("nonzero install revision"),
+            ExtensionGrantRevision::new(19).expect("nonzero grant revision"),
+            ExtensionGrantDigest::from_bytes([23; 32]),
+            ExtensionRuntimeBackendTarget::MacosNative,
+            expected,
+            observed,
+            ExtensionNativeIncarnation::new(operation).expect("nonzero incarnation"),
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        )
+        .expect("valid macOS recovery ownership row")
     }
 
     fn owner(revision: u64, operation: u64, incarnation: u64) -> OwnerKey {
@@ -2113,6 +2146,96 @@ mod tests {
         drop(request);
         assert_eq!(dispatches.load(Ordering::Relaxed), 0);
         assert_eq!(gate.reservation_count(), Some(0));
+    }
+
+    #[test]
+    fn recovery_reservation_retains_expected_and_observed_native_identities_independently() {
+        let expected_core = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [b'a'; 32],
+        )
+        .expect("canonical expected identity");
+        let observed_core = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [b'a'; 32],
+        )
+        .expect("canonical observed identity");
+        let conflicting_core = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [b'b'; 32],
+        )
+        .expect("canonical conflicting identity");
+        let expected_runtime = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
+            .expect("canonical runtime expected identity");
+        let observed_runtime = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'b'; 32])
+            .expect("canonical runtime observed identity");
+        let cases = [
+            (
+                None,
+                None,
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected: None,
+                    adapter_observed: None,
+                },
+            ),
+            (
+                Some(expected_core),
+                None,
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected: Some(expected_runtime),
+                    adapter_observed: None,
+                },
+            ),
+            (
+                None,
+                Some(observed_core),
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected: None,
+                    adapter_observed: Some(expected_runtime),
+                },
+            ),
+            (
+                Some(expected_core),
+                Some(observed_core),
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected: Some(expected_runtime),
+                    adapter_observed: Some(expected_runtime),
+                },
+            ),
+            (
+                Some(expected_core),
+                Some(conflicting_core),
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected: Some(expected_runtime),
+                    adapter_observed: Some(observed_runtime),
+                },
+            ),
+        ];
+        let gate = ExtensionRuntimeFactoryGate::new();
+
+        for (index, (expected, observed, exact_expectation)) in cases.into_iter().enumerate() {
+            let entry = macos_recovery_entry(index as u64 + 1, expected, observed);
+            let binding =
+                ExtensionRuntimeHostRecoveryBinding::try_new(entry).expect("valid cleanup binding");
+            let context = *binding.context();
+            assert_eq!(context.expectation(), exact_expectation);
+            let reservation = gate
+                .reserve(ReservationBinding::Recovery {
+                    owner: OwnerKey::from_address(context.owner()),
+                    expectation: context.expectation(),
+                })
+                .expect("exact recovery reservation");
+            match &reservation.binding {
+                ReservationBinding::Recovery { expectation, .. } => {
+                    assert_eq!(*expectation, exact_expectation);
+                }
+                ReservationBinding::Activation { .. } => {
+                    panic!("recovery context cannot become an activation reservation");
+                }
+            }
+            drop(reservation);
+            assert_eq!(gate.reservation_count(), Some(0));
+        }
     }
 
     #[test]

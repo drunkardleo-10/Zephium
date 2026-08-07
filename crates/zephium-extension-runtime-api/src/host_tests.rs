@@ -9,9 +9,10 @@ use zephium_core::extensions::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
     ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
     ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
-    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantCohort,
-    ExtensionGrantDigest, ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
-    ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantDigest,
+    ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantRevision,
+    ExtensionHostPermissionSet, ExtensionInstall, ExtensionInstallCatalog,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
     ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
     ExtensionManifestResourceDigest, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
@@ -203,7 +204,18 @@ impl EntryTemplate {
         phase: ExtensionNativeOwnershipPhase,
         native_identity: Option<ExtensionNativeOwnershipIdentity>,
     ) -> ExtensionNativeOwnershipEntry {
-        ExtensionNativeOwnershipEntry::from_persisted_with_native_identity(
+        self.entry_with_identities(revision, intent, phase, None, native_identity)
+    }
+
+    fn entry_with_identities(
+        &self,
+        revision: u64,
+        intent: ExtensionNativeOwnershipIntent,
+        phase: ExtensionNativeOwnershipPhase,
+        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        native_identity: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> ExtensionNativeOwnershipEntry {
+        ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
             self.key,
             ExtensionNativeOwnershipOperation::INITIAL,
             ExtensionNativeOwnershipEntryRevision::new(revision).expect("nonzero entry revision"),
@@ -215,6 +227,7 @@ impl EntryTemplate {
             self.grant_revision,
             self.grant_digest,
             self.backend,
+            expected_native_identity,
             native_identity,
             ExtensionNativeIncarnation::INITIAL,
             intent,
@@ -332,6 +345,7 @@ struct ActivationFixture {
     access: ExtensionPackageAccess,
     authority: ExtensionRuntimeOperationAuthority,
     expectation: ExtensionRuntimeNativeIdentityExpectation,
+    expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
     native_identity: Option<ExtensionNativeOwnershipIdentity>,
     evidence: ExtensionRuntimeOwnershipEvidence,
     provider_identity: Arc<()>,
@@ -415,13 +429,23 @@ impl ActivationFixture {
             }),
         )
         .expect("bounded authenticated package access");
-        let initial = template.may_own();
+        let expected_native_identity = expectation
+            .durable_expected_identity()
+            .expect("runtime and Core native ID grammars agree");
+        let initial = template.entry_with_identities(
+            2,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+            expected_native_identity,
+            None,
+        );
         Self {
             template,
             initial,
             access,
             authority,
             expectation,
+            expected_native_identity,
             native_identity,
             evidence,
             provider_identity,
@@ -434,11 +458,23 @@ impl ActivationFixture {
     }
 
     fn owned(&self) -> ExtensionNativeOwnershipEntry {
-        self.template.owned(self.native_identity)
+        self.template.entry_with_identities(
+            3,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeOwned,
+            self.expected_native_identity,
+            self.native_identity,
+        )
     }
 
     fn release(&self) -> ExtensionNativeOwnershipEntry {
-        self.template.release_absent(4, self.native_identity)
+        self.template.entry_with_identities(
+            4,
+            ExtensionNativeOwnershipIntent::Release,
+            ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+            self.expected_native_identity,
+            self.native_identity,
+        )
     }
 
     fn into_binding(self) -> ExtensionRuntimeHostActivationBinding {
@@ -1178,6 +1214,68 @@ fn activation_binding_refuses_reachable_frontier_and_join_mismatches_losslessly(
         ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(mac_id),
         ExtensionRuntimeHostActivationBindingError::NativeIdentityExpectationMismatch,
     );
+
+    let fixture = ActivationFixture::macos(51);
+    let legacy_identityless_entry = fixture.template.may_own();
+    assert_refused_binding_parts(
+        Arc::clone(&fixture.provider_identity),
+        legacy_identityless_entry,
+        fixture.access,
+        fixture.authority,
+        fixture.expectation,
+        ExtensionRuntimeHostActivationBindingError::NativeIdentityExpectationMismatch,
+    );
+
+    let fixture = ActivationFixture::macos(52);
+    let different_expected = ExtensionExpectedNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("canonical different expected native ID");
+    let mismatched_entry = fixture.template.entry_with_identities(
+        2,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+        Some(different_expected),
+        None,
+    );
+    assert_refused_binding_parts(
+        Arc::clone(&fixture.provider_identity),
+        mismatched_entry,
+        fixture.access,
+        fixture.authority,
+        fixture.expectation,
+        ExtensionRuntimeHostActivationBindingError::NativeIdentityExpectationMismatch,
+    );
+}
+
+#[test]
+fn native_identity_expectations_project_exact_durable_core_identities() {
+    let owner = ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+        .expect("canonical runtime owner ID");
+    for (expectation, backend) in [
+        (
+            ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(owner),
+            ExtensionRuntimeBackendTarget::MacosNative,
+        ),
+        (
+            ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(owner),
+            ExtensionRuntimeBackendTarget::WindowsNative,
+        ),
+    ] {
+        let durable = expectation
+            .durable_expected_identity()
+            .expect("shared canonical grammar")
+            .expect("native expectation has a durable identity");
+        assert_eq!(durable.backend(), backend);
+        assert_eq!(durable.bytes(), *EXPECTED_NATIVE_ID.as_bytes());
+    }
+    assert_eq!(
+        ExtensionRuntimeNativeIdentityExpectation::Compatibility
+            .durable_expected_identity()
+            .expect("compatibility conversion is infallible"),
+        None
+    );
 }
 
 #[test]
@@ -1356,18 +1454,67 @@ fn recovery_binding_accepts_only_possible_owner_states_and_preserves_refusals() 
         .expect("identityless native may-own recovery");
     assert_eq!(
         binding.context().expectation(),
-        ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected: None }
+        ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+            catalog_expected: Some(
+                ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID).expect("native ID")
+            ),
+            adapter_observed: None,
+        }
     );
     let binding = ExtensionRuntimeHostRecoveryBinding::try_new(native.owned())
         .expect("identified native owned recovery");
     assert_eq!(
         binding.context().expectation(),
         ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
-            expected: Some(
+            catalog_expected: Some(
                 ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID).expect("native ID")
-            )
+            ),
+            adapter_observed: Some(
+                ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID).expect("native ID")
+            ),
         }
     );
+
+    let legacy_identityless = native.template.may_own();
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(legacy_identityless)
+        .expect("legacy identityless native row remains cleanup-capable");
+    assert_eq!(
+        binding.context().expectation(),
+        ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+            catalog_expected: None,
+            adapter_observed: None,
+        }
+    );
+
+    let observed = native.native_identity.expect("native identity");
+    let legacy_observed = native.template.owned(Some(observed));
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(legacy_observed)
+        .expect("legacy observed-only native row remains cleanup-capable");
+    assert_eq!(
+        binding.context().expectation(),
+        ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+            catalog_expected: None,
+            adapter_observed: Some(
+                ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID).expect("native ID")
+            ),
+        }
+    );
+
+    let different_observed = ExtensionNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("canonical different observed ID");
+    let mismatched = native.template.entry_with_identities(
+        3,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+        native.expected_native_identity,
+        Some(different_observed),
+    );
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(mismatched)
+        .expect("mismatched durable claims remain absence-cleanup capable");
+    assert!(binding.context().expectation().has_identity_conflict());
 }
 
 #[test]
@@ -1731,6 +1878,33 @@ fn publication_authorization_checks_state_lineage_and_native_identity_losslessly
     let (pending, returned_entry, _) = refusal.into_parts();
     assert_eq!(returned_entry, wrong_lineage);
 
+    let substituted_expected = ExtensionExpectedNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("canonical substituted expectation");
+    let substituted_observed = ExtensionNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("canonical substituted observation");
+    let substituted_expectation = ActivationFixture::macos(18).template.entry_with_identities(
+        3,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeOwned,
+        Some(substituted_expected),
+        Some(substituted_observed),
+    );
+    let refusal = pending
+        .authorize(substituted_expectation.clone(), evidence)
+        .expect_err("catalog expectation substitution changes owner lineage");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::OwnershipLineageMismatch
+    );
+    let (pending, returned_entry, _) = refusal.into_parts();
+    assert_eq!(returned_entry, substituted_expectation);
+
     let refusal = pending
         .authorize(
             owned.clone(),
@@ -1756,10 +1930,10 @@ fn publication_authorization_checks_state_lineage_and_native_identity_losslessly
     let wrong_identity = ActivationFixture::macos(18).template.owned(Some(other_id));
     let refusal = pending
         .authorize(wrong_identity.clone(), evidence)
-        .expect_err("persisted identity must equal evidence");
+        .expect_err("erasing the catalog expectation changes owner lineage");
     assert_eq!(
         refusal.reason(),
-        ExtensionRuntimePublicationAuthorizationError::NativeIdentityMismatch
+        ExtensionRuntimePublicationAuthorizationError::OwnershipLineageMismatch
     );
     let (pending, returned_entry, _) = refusal.into_parts();
     assert_eq!(returned_entry, wrong_identity);
@@ -1780,7 +1954,7 @@ fn native_release_frontier_accepts_expected_optional_observation_and_rejects_sub
         let (activation, _, runtime, _, _, _) = bind_activation_with(fixture, port);
         let (request, pending) = activation.into_parts();
         drop(request.cancel());
-        let template = ActivationFixture::macos(seed).template;
+        let release_fixture = ActivationFixture::macos(seed);
         let durable_identity = identity.map(|value| {
             ExtensionNativeOwnershipIdentity::parse(
                 ExtensionRuntimeBackendTarget::MacosNative,
@@ -1789,7 +1963,13 @@ fn native_release_frontier_accepts_expected_optional_observation_and_rejects_sub
             .expect("native identity")
         });
         let revision = if durable_identity.is_some() { 4 } else { 3 };
-        let release = template.release_absent(revision, durable_identity);
+        let release = release_fixture.template.entry_with_identities(
+            revision,
+            ExtensionNativeOwnershipIntent::Release,
+            ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+            release_fixture.expected_native_identity,
+            durable_identity,
+        );
         let authority = pending
             .recover_after_absence(&release)
             .expect("optional expected observation accepted");
@@ -1807,9 +1987,14 @@ fn native_release_frontier_accepts_expected_optional_observation_and_rejects_sub
         OTHER_NATIVE_ID,
     )
     .expect("wrong native identity");
-    let release = ActivationFixture::macos(21)
-        .template
-        .release_absent(4, Some(wrong_identity));
+    let release_fixture = ActivationFixture::macos(21);
+    let release = release_fixture.template.entry_with_identities(
+        4,
+        ExtensionNativeOwnershipIntent::Release,
+        ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+        release_fixture.expected_native_identity,
+        Some(wrong_identity),
+    );
     let refusal = pending
         .recover_after_absence(&release)
         .expect_err("substituted native identity rejected");
@@ -1825,6 +2010,33 @@ fn native_release_frontier_accepts_expected_optional_observation_and_rejects_sub
             .revision()
             .get(),
         2
+    );
+
+    let fixture = ActivationFixture::macos(23);
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (activation, _, _, _, _, _) = bind_activation_with(fixture, port);
+    let (request, pending) = activation.into_parts();
+    drop(request.cancel());
+    let release_fixture = ActivationFixture::macos(23);
+    let substituted_expected = ExtensionExpectedNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("canonical substituted expectation");
+    let release = release_fixture.template.entry_with_identities(
+        3,
+        ExtensionNativeOwnershipIntent::Release,
+        ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+        Some(substituted_expected),
+        None,
+    );
+    let refusal = pending
+        .recover_after_absence(&release)
+        .expect_err("catalog expectation substitution must be rejected");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimePublicationAuthorizationError::ReleaseFrontierMismatch
     );
 }
 

@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use zephium_core::extensions::{
-    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionNativeIncarnation,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionNativeIncarnation,
     ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
     ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinHeldBinding,
     ExtensionPackagePinRecombineRefusal, ExtensionRuntimeBackendTarget,
@@ -670,6 +671,22 @@ macro_rules! impl_runtime_package_access {
                 )
                 .unwrap_or(usize::MAX)
             }
+
+            /// Returns the catalog-authenticated native identity that must be
+            /// persisted before any platform ownership call.
+            ///
+            /// The value is structural and non-authorizing by itself. Native
+            /// activation must still join it to the exact Store transition and
+            /// pass that current row back through [`Self::try_into_host_activation`].
+            /// Compatibility runtimes return `None`.
+            pub fn expected_native_identity(
+                &self,
+            ) -> Result<
+                Option<ExtensionExpectedNativeOwnershipIdentity>,
+                BundledRuntimePackageAccessBuildError,
+            > {
+                durable_expected_native_identity(self.binding.native_identity)
+            }
         }
 
         impl fmt::Debug for $access {
@@ -689,9 +706,9 @@ impl_runtime_package_access!(RollbackBundledRuntimePackageAccess);
 impl ActiveBundledRuntimePackageAccess {
     /// Atomically joins this active package capability to the exact Store row
     /// and trusted engine factory without invoking a native lifecycle method.
-    /// The row is still identityless: the catalog-derived ID is an exact
-    /// expectation that the native adapter must assign/read back before Store
-    /// publication.
+    /// Native rows already contain the exact catalog-derived expected identity;
+    /// the independently adapter-observed identity remains absent until the
+    /// trusted native callback is durably joined before Store publication.
     ///
     /// Factory proxy construction is provisional and side-effect-free. Both
     /// the transient factory state and the engine's maximum future control
@@ -806,9 +823,9 @@ impl ActiveBundledRuntimePackageAccess {
 impl RollbackBundledRuntimePackageAccess {
     /// Atomically joins this rollback package capability to the exact Store row
     /// and trusted engine factory without invoking a native lifecycle method.
-    /// The row is still identityless: the catalog-derived ID is an exact
-    /// expectation that the native adapter must assign/read back before Store
-    /// publication.
+    /// Native rows already contain the exact catalog-derived expected identity;
+    /// the independently adapter-observed identity remains absent until the
+    /// trusted native callback is durably joined before Store publication.
     ///
     /// A recoverable refusal preserves the rollback nominal role. An impossible
     /// lossless-return mismatch remains captive and cannot be converted into a
@@ -1477,6 +1494,10 @@ impl RuntimePackageBinding {
             && entry.store_grant_revision() == fingerprint.grant_revision()
             && entry.grant_digest() == fingerprint.grant_digest()
             && entry.runtime_backend() == self.runtime_backend
+            && native_identity_expectation_matches_durable(
+                self.native_identity,
+                entry.expected_native_identity(),
+            )
             && entry.native_identity().is_none()
             && entry.native_incarnation() == self.native_incarnation
             && entry.operation() == self.journal_operation
@@ -2065,6 +2086,22 @@ fn runtime_native_identity(
     }
 }
 
+fn durable_expected_native_identity(
+    expectation: ExtensionRuntimeNativeIdentityExpectation,
+) -> Result<Option<ExtensionExpectedNativeOwnershipIdentity>, BundledRuntimePackageAccessBuildError>
+{
+    expectation
+        .durable_expected_identity()
+        .map_err(|_| BundledRuntimePackageAccessBuildError::InternalBindingMismatch)
+}
+
+fn native_identity_expectation_matches_durable(
+    expectation: ExtensionRuntimeNativeIdentityExpectation,
+    durable: Option<ExtensionExpectedNativeOwnershipIdentity>,
+) -> bool {
+    durable_expected_native_identity(expectation).is_ok_and(|expected| expected == durable)
+}
+
 fn pre_host_runtime_access_retained_bytes<Access>(
     access: &ExtensionPackageAccess,
     operation_authority: &ExtensionRuntimeOperationAuthority,
@@ -2563,6 +2600,54 @@ mod tests {
         for byte in encoded_id(first) {
             assert!(matches!(byte, b'a'..=b'p'));
         }
+    }
+
+    #[test]
+    fn durable_native_identity_join_is_backend_exact_and_never_inferred() {
+        let macos = runtime_native_identity(
+            ProductExtensionRuntimeTarget::MacosNative,
+            Some(&key("Xw==")),
+        )
+        .unwrap();
+        let windows = runtime_native_identity(
+            ProductExtensionRuntimeTarget::WindowsNative,
+            Some(&key("Xw==")),
+        )
+        .unwrap();
+        let macos_expected = durable_expected_native_identity(macos).unwrap().unwrap();
+        let windows_expected = durable_expected_native_identity(windows).unwrap().unwrap();
+        let different_macos = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [b'a'; EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES],
+        )
+        .unwrap();
+
+        assert!(native_identity_expectation_matches_durable(
+            macos,
+            Some(macos_expected)
+        ));
+        assert!(native_identity_expectation_matches_durable(
+            windows,
+            Some(windows_expected)
+        ));
+        assert!(!native_identity_expectation_matches_durable(macos, None));
+        assert!(!native_identity_expectation_matches_durable(windows, None));
+        assert!(!native_identity_expectation_matches_durable(
+            macos,
+            Some(windows_expected)
+        ));
+        assert!(!native_identity_expectation_matches_durable(
+            macos,
+            Some(different_macos)
+        ));
+        assert!(native_identity_expectation_matches_durable(
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+            None
+        ));
+        assert!(!native_identity_expectation_matches_durable(
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+            Some(macos_expected)
+        ));
     }
 
     #[test]

@@ -19,7 +19,8 @@ use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
-    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipIdentityError,
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipPhase,
     ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
     ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
@@ -95,6 +96,37 @@ impl ExtensionRuntimeNativeIdentityExpectation {
         }
     }
 
+    /// Projects the exact catalog-authenticated identity that must already be
+    /// bound to a fresh durable native-ownership row.
+    ///
+    /// The runtime identifier has already passed the same closed canonical
+    /// grammar. The fallible return keeps this cross-crate conversion
+    /// non-panicking if either structural boundary is tightened later.
+    pub fn durable_expected_identity(
+        self,
+    ) -> Result<
+        Option<ExtensionExpectedNativeOwnershipIdentity>,
+        ExtensionNativeOwnershipIdentityError,
+    > {
+        match self {
+            Self::MacosWebExtension(identity) => {
+                ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+                    ExtensionRuntimeBackendTarget::MacosNative,
+                    identity.encoded_bytes(),
+                )
+                .map(Some)
+            }
+            Self::WindowsWebView2Extension(identity) => {
+                ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+                    ExtensionRuntimeBackendTarget::WindowsNative,
+                    identity.encoded_bytes(),
+                )
+                .map(Some)
+            }
+            Self::Compatibility => Ok(None),
+        }
+    }
+
     fn accepts_backend(self, backend: ExtensionRuntimeBackendTarget) -> bool {
         matches!(
             (self, backend),
@@ -131,23 +163,42 @@ impl ExtensionRuntimeNativeIdentityExpectation {
         backend: ExtensionRuntimeBackendTarget,
         entry: &ExtensionNativeOwnershipEntry,
     ) -> Result<ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeHostRecoveryBindingError> {
-        let expected = entry
+        let catalog_expected = entry
+            .expected_native_identity()
+            .map(|identity| {
+                if identity.backend() != backend {
+                    return Err(ExtensionRuntimeHostRecoveryBindingError::NativeIdentityMismatch);
+                }
+                ExtensionRuntimeNativeOwnerId::from_encoded_bytes(identity.bytes())
+                    .map_err(|_| ExtensionRuntimeHostRecoveryBindingError::NativeIdentityMismatch)
+            })
+            .transpose()?;
+        let adapter_observed = entry
             .native_identity()
             .map(|identity| {
+                if identity.backend() != backend {
+                    return Err(ExtensionRuntimeHostRecoveryBindingError::NativeIdentityMismatch);
+                }
                 ExtensionRuntimeNativeOwnerId::from_encoded_bytes(identity.bytes())
                     .map_err(|_| ExtensionRuntimeHostRecoveryBindingError::NativeIdentityMismatch)
             })
             .transpose()?;
         match backend {
             ExtensionRuntimeBackendTarget::MacosNative => {
-                Ok(ExtensionRuntimeRecoveryExpectation::MacosWebExtension { expected })
+                Ok(ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected,
+                    adapter_observed,
+                })
             }
-            ExtensionRuntimeBackendTarget::WindowsNative => {
-                Ok(ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { expected })
-            }
+            ExtensionRuntimeBackendTarget::WindowsNative => Ok(
+                ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                    catalog_expected,
+                    adapter_observed,
+                },
+            ),
             ExtensionRuntimeBackendTarget::MacosCompatibility
             | ExtensionRuntimeBackendTarget::LinuxCompatibility
-                if expected.is_none() =>
+                if catalog_expected.is_none() && adapter_observed.is_none() =>
             {
                 Ok(ExtensionRuntimeRecoveryExpectation::Compatibility)
             }
@@ -473,6 +524,13 @@ fn activation_binding_error(
         return Some(Error::RuntimeTargetMismatch);
     }
     if !expectation.accepts_backend(entry.runtime_backend()) {
+        return Some(Error::NativeIdentityExpectationMismatch);
+    }
+    let durable_expected = match expectation.durable_expected_identity() {
+        Ok(durable_expected) => durable_expected,
+        Err(_) => return Some(Error::NativeIdentityExpectationMismatch),
+    };
+    if entry.expected_native_identity() != durable_expected {
         return Some(Error::NativeIdentityExpectationMismatch);
     }
     let retained = size_of::<ExtensionRuntimeHostActivationBinding>()
@@ -1906,6 +1964,7 @@ fn same_owner_lineage(
         && initial.store_grant_revision() == current.store_grant_revision()
         && initial.grant_digest() == current.grant_digest()
         && initial.runtime_backend() == current.runtime_backend()
+        && initial.expected_native_identity() == current.expected_native_identity()
 }
 
 /// Exact post-Store publication request.

@@ -280,7 +280,7 @@ impl NativeRecoveryState {
         self.native_call_panic_fence = true;
         let settlement = request.reconcile_until(deadline);
         self.native_call_panic_fence = false;
-        let (frontier, provisional_step) = match settlement {
+        let (mut frontier, provisional_step) = match settlement {
             ExtensionRuntimeRecoverySettlement::Owned(owner) => (
                 NativeRecoveryFrontier {
                     durable,
@@ -300,6 +300,20 @@ impl NativeRecoveryState {
                 classify_runtime_failure(failure),
             ),
         };
+        if let Some(step) =
+            settle_new_frontier_evidence(&mut frontier, journal_backend, projection, deadline)
+        {
+            // A successful evidence write must not erase the adapter's
+            // settlement classification. Retryable uncertainty remains
+            // retryable and an identity conflict remains terminal for this
+            // startup attempt, now with its observation durably retained.
+            let step = if step_is_progress(&step) {
+                provisional_step
+            } else {
+                step
+            };
+            return (Some(frontier), step);
+        }
         let post_step = ensure_exact_durable_row(
             &frontier.durable.entry,
             journal_backend,
@@ -342,6 +356,18 @@ impl NativeRecoveryState {
                     NativeRecoveryStep::Failed(NativeRecoveryFailure::HostInvariant),
                 );
             }
+        }
+        if !evidence_matches_durable_expectation(&durable.entry, owner.ownership_evidence()) {
+            // A trusted runtime request is required to poison positive
+            // settlement when catalog-expected and adapter-observed identities
+            // disagree. Keep the owner capability retained and fail closed if
+            // an engine implementation ever violates that contract. The
+            // durable row remains NativeMayOwn and no retirement/release work
+            // is authorized from the mismatched positive claim.
+            return (
+                Some(owner_frontier(durable, owner)),
+                NativeRecoveryStep::Failed(NativeRecoveryFailure::HostInvariant),
+            );
         }
         if durable.entry.intent() == ExtensionNativeOwnershipIntent::Acquire {
             let mutation = ExtensionNativeOwnershipJournalMutation::transition(
@@ -610,6 +636,72 @@ fn ensure_evidence_is_durable(
     }
 }
 
+fn evidence_matches_durable_expectation(
+    entry: &ExtensionNativeOwnershipEntry,
+    evidence: ExtensionRuntimeOwnershipEvidence,
+) -> bool {
+    let observed = match evidence {
+        ExtensionRuntimeOwnershipEvidence::MacosWebExtension(owner)
+            if entry.runtime_backend() == ExtensionRuntimeBackendTarget::MacosNative =>
+        {
+            ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+                ExtensionRuntimeBackendTarget::MacosNative,
+                owner.encoded_bytes(),
+            )
+            .ok()
+        }
+        ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(owner)
+            if entry.runtime_backend() == ExtensionRuntimeBackendTarget::WindowsNative =>
+        {
+            ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+                ExtensionRuntimeBackendTarget::WindowsNative,
+                owner.encoded_bytes(),
+            )
+            .ok()
+        }
+        ExtensionRuntimeOwnershipEvidence::Compatibility => {
+            return matches!(
+                entry.runtime_backend(),
+                ExtensionRuntimeBackendTarget::MacosCompatibility
+                    | ExtensionRuntimeBackendTarget::LinuxCompatibility
+            ) && entry.expected_native_identity().is_none()
+                && entry.native_identity().is_none();
+        }
+        _ => None,
+    };
+    let Some(observed) = observed else {
+        return false;
+    };
+    entry
+        .expected_native_identity()
+        .is_none_or(|expected| expected.matches_observed(observed))
+}
+
+fn settle_new_frontier_evidence(
+    frontier: &mut NativeRecoveryFrontier,
+    journal_backend: &impl JournalBackend,
+    projection: &mut JournalProjection,
+    deadline: Instant,
+) -> Option<NativeRecoveryStep> {
+    let evidence = match &frontier.control {
+        NativeRecoveryControl::Request { request, .. } => request.ownership_evidence(),
+        NativeRecoveryControl::Owner(owner) => Some(owner.ownership_evidence()),
+        NativeRecoveryControl::AbsenceFence => None,
+    }?;
+    match ensure_evidence_is_durable(&mut frontier.durable, evidence, projection) {
+        EvidenceDurability::Exact => None,
+        EvidenceDurability::TransitionScheduled => Some(settle_pending_transition(
+            &mut frontier.durable,
+            journal_backend,
+            projection,
+            deadline,
+        )),
+        EvidenceDurability::Invalid => Some(NativeRecoveryStep::Failed(
+            NativeRecoveryFailure::HostInvariant,
+        )),
+    }
+}
+
 fn schedule_and_settle_transition(
     durable: &mut DurableRecoveryLineage,
     mutation: ExtensionNativeOwnershipJournalMutation,
@@ -794,7 +886,7 @@ mod tests {
         ExtensionRuntimeHostFactoryPort, ExtensionRuntimeHostOwnershipPort,
         ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeNativeOwnerId,
         ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipPort,
-        ExtensionRuntimeRetirementDisposition,
+        ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRetirementDisposition,
     };
     use zephium_store::ExtensionNativeOwnershipStoreCallOutcome;
 
@@ -978,6 +1070,7 @@ mod tests {
         profile_absence_calls: usize,
         reconcile_calls: usize,
         retire_calls: usize,
+        recovery_expectations: Vec<ExtensionRuntimeRecoveryExpectation>,
         profile_absence: VecDeque<Result<(), ExtensionRuntimeHostProfileAbsenceDisposition>>,
         reconcile_deadlines: Vec<Instant>,
         retire_deadlines: Vec<Instant>,
@@ -993,6 +1086,7 @@ mod tests {
                 profile_absence_calls: 0,
                 reconcile_calls: 0,
                 retire_calls: 0,
+                recovery_expectations: Vec::new(),
                 profile_absence: VecDeque::new(),
                 reconcile_deadlines: Vec::new(),
                 retire_deadlines: Vec::new(),
@@ -1016,11 +1110,12 @@ mod tests {
 
         fn bind_recovery(
             &mut self,
-            _context: ExtensionRuntimeHostRecoveryContext,
+            context: ExtensionRuntimeHostRecoveryContext,
         ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError>
         {
             let mut script = self.script.lock().unwrap();
             script.bind_calls += 1;
+            script.recovery_expectations.push(context.expectation());
             if let Some(error) = script.bind_error {
                 return Err(error);
             }
@@ -1112,13 +1207,20 @@ mod tests {
         )
     }
 
+    fn native_owner_bytes(install_id: ExtensionInstallId) -> [u8; 32] {
+        let identifier_byte = b'a' + (install_id.bytes()[15] & 0x0f);
+        [identifier_byte; 32]
+    }
+
     fn expected_native_identity(
         backend: ExtensionRuntimeBackendTarget,
         install_id: ExtensionInstallId,
     ) -> ExtensionExpectedNativeOwnershipIdentity {
-        let identifier_byte = b'a' + (install_id.bytes()[15] & 0x0f);
-        ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(backend, [identifier_byte; 32])
-            .unwrap()
+        ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+            backend,
+            native_owner_bytes(install_id),
+        )
+        .unwrap()
     }
 
     fn possible_owner_transition(
@@ -1159,6 +1261,64 @@ mod tests {
             .apply(revision, possible_owner_transition(&entry))
             .unwrap()
             .into_journal()
+    }
+
+    fn possible_owner_with_observation(
+        backend: ExtensionRuntimeBackendTarget,
+        owner: ExtensionRuntimeNativeOwnerId,
+    ) -> ExtensionNativeOwnershipJournal {
+        let journal = possible_owner(backend);
+        let entry = journal.entries()[0].clone();
+        let observed =
+            ExtensionNativeOwnershipIdentity::from_encoded_bytes(backend, owner.encoded_bytes())
+                .unwrap();
+        let revision = journal.revision();
+        journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                    entry.cas(),
+                    entry.intent(),
+                    entry.phase(),
+                    observed,
+                ),
+            )
+            .unwrap()
+            .into_journal()
+    }
+
+    fn legacy_observed_only_owner(
+        backend: ExtensionRuntimeBackendTarget,
+        owner: ExtensionRuntimeNativeOwnerId,
+    ) -> ExtensionNativeOwnershipJournal {
+        let current = possible_owner_with_observation(backend, owner);
+        let entry = &current.entries()[0];
+        let legacy = ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            entry.key(),
+            entry.operation(),
+            entry.revision(),
+            entry.package().clone(),
+            entry.catalog_set_digest(),
+            entry.catalog_role(),
+            entry.store_catalog_revision(),
+            entry.store_install_revision(),
+            entry.store_grant_revision(),
+            entry.grant_digest(),
+            entry.runtime_backend(),
+            None,
+            entry.native_identity(),
+            entry.native_incarnation(),
+            entry.intent(),
+            entry.phase(),
+        )
+        .expect("legacy observed-only cleanup row must remain loadable");
+        ExtensionNativeOwnershipJournal::from_persisted(
+            current.revision(),
+            current.operation_high_water(),
+            current.native_incarnation_high_water(),
+            vec![legacy],
+        )
+        .expect("legacy observed-only cleanup journal must remain loadable")
     }
 
     fn two_possible_owners(
@@ -1338,7 +1498,174 @@ mod tests {
     }
 
     fn native_owner_id() -> ExtensionRuntimeNativeOwnerId {
-        ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32]).unwrap()
+        ExtensionRuntimeNativeOwnerId::from_encoded_bytes(native_owner_bytes(
+            ExtensionInstallId::from(1),
+        ))
+        .unwrap()
+    }
+
+    fn conflicting_native_owner_id() -> ExtensionRuntimeNativeOwnerId {
+        ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'p'; 32]).unwrap()
+    }
+
+    #[test]
+    fn catalog_expectation_is_bound_but_never_persisted_as_adapter_observation() {
+        let mut host = HostScript::new();
+        host.reconcile
+            .push_back(ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::TimedOut,
+                evidence: None,
+            });
+        let script = Arc::new(Mutex::new(host));
+        let initial = possible_owner(ExtensionRuntimeBackendTarget::MacosNative);
+        let expected = initial.entries()[0]
+            .expected_native_identity()
+            .expect("fresh native row carries the catalog expectation");
+        let backend = FakeJournalBackend::new(initial);
+        let mut projection = JournalProjection::unknown();
+        let mut repository = FakeRepository::new();
+        let mut native = NativeRecoveryState::new(factory(&script));
+
+        assert_eq!(
+            run(
+                &backend,
+                &mut projection,
+                &mut repository,
+                &mut native,
+                &NeverCancelled,
+                Instant::now() + TEST_DEADLINE,
+            ),
+            CleanupStartupOutcome::Unavailable(CleanupUnavailable::DeadlineExpired)
+        );
+
+        let durable_journal = backend.durable();
+        let durable = &durable_journal.entries()[0];
+        assert_eq!(durable.expected_native_identity(), Some(expected));
+        assert_eq!(durable.native_identity(), None);
+        assert!(backend.mutation_entries().is_empty());
+        let script = script.lock().unwrap();
+        assert_eq!(
+            script.recovery_expectations,
+            vec![ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                catalog_expected: Some(native_owner_id()),
+                adapter_observed: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn mismatched_observation_is_durable_but_only_definite_absence_releases() {
+        let mismatched = conflicting_native_owner_id();
+        let mut host = HostScript::new();
+        host.reconcile.extend([
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::TimedOut,
+                evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
+                    mismatched,
+                )),
+            },
+            ExtensionRuntimeOwnershipDisposition::Absent,
+        ]);
+        let script = Arc::new(Mutex::new(host));
+        let backend =
+            FakeJournalBackend::new(possible_owner(ExtensionRuntimeBackendTarget::MacosNative));
+        let mut projection = JournalProjection::unknown();
+        let mut repository = FakeRepository::new();
+        let mut native = NativeRecoveryState::new(factory(&script));
+
+        assert_eq!(
+            run(
+                &backend,
+                &mut projection,
+                &mut repository,
+                &mut native,
+                &NeverCancelled,
+                Instant::now() + TEST_DEADLINE,
+            ),
+            CleanupStartupOutcome::Failed(crate::cleanup::CleanupFailure::NativeHostInvariant)
+        );
+        let after_durable_attachment = backend.durable();
+        let entry = &after_durable_attachment.entries()[0];
+        assert_eq!(
+            entry.native_identity().map(|identity| identity.bytes()),
+            Some(mismatched.encoded_bytes())
+        );
+        assert_eq!(entry.intent(), ExtensionNativeOwnershipIntent::Acquire);
+        assert_eq!(entry.phase(), ExtensionNativeOwnershipPhase::NativeMayOwn);
+        assert!(entry.expected_native_identity().is_some_and(|expected| {
+            entry
+                .native_identity()
+                .is_some_and(|observed| !expected.matches_observed(observed))
+        }));
+        assert!(!evidence_matches_durable_expectation(
+            entry,
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(mismatched),
+        ));
+        assert_eq!(repository.releases, 0);
+
+        assert!(matches!(
+            run(
+                &backend,
+                &mut projection,
+                &mut repository,
+                &mut native,
+                &NeverCancelled,
+                Instant::now() + TEST_DEADLINE,
+            ),
+            CleanupStartupOutcome::Ready { .. }
+        ));
+        assert!(backend.durable().entries().is_empty());
+        assert_eq!(repository.releases, 1);
+        let script = script.lock().unwrap();
+        assert_eq!(script.bind_calls, 1);
+        assert_eq!(script.reconcile_calls, 2);
+        assert_eq!(script.retire_calls, 0);
+    }
+
+    #[test]
+    fn legacy_observed_only_native_row_remains_cleanup_capable() {
+        let evidence = ExtensionRuntimeOwnershipEvidence::MacosWebExtension(native_owner_id());
+        let mut host = HostScript::new();
+        host.reconcile
+            .push_back(ExtensionRuntimeOwnershipDisposition::Owned(evidence));
+        host.retire
+            .push_back(ExtensionRuntimeRetirementDisposition::Retired);
+        let script = Arc::new(Mutex::new(host));
+        let initial = legacy_observed_only_owner(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            native_owner_id(),
+        );
+        assert_eq!(initial.entries()[0].expected_native_identity(), None);
+        assert!(initial.entries()[0].native_identity().is_some());
+        let backend = FakeJournalBackend::new(initial);
+        let mut projection = JournalProjection::unknown();
+        let mut repository = FakeRepository::new();
+        let mut native = NativeRecoveryState::new(factory(&script));
+
+        assert!(matches!(
+            run(
+                &backend,
+                &mut projection,
+                &mut repository,
+                &mut native,
+                &NeverCancelled,
+                Instant::now() + TEST_DEADLINE,
+            ),
+            CleanupStartupOutcome::Ready { .. }
+        ));
+        assert!(backend.durable().entries().is_empty());
+        assert_eq!(repository.releases, 1);
+        let script = script.lock().unwrap();
+        assert_eq!(script.bind_calls, 1);
+        assert_eq!(script.reconcile_calls, 1);
+        assert_eq!(script.retire_calls, 1);
+        assert_eq!(
+            script.recovery_expectations,
+            vec![ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                catalog_expected: None,
+                adapter_observed: Some(native_owner_id()),
+            }]
+        );
     }
 
     #[test]
@@ -1412,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_native_runtime_attaches_identity_before_release_and_retirement() {
+    fn ambiguous_observation_attachment_reloads_exact_after_state_without_rebinding() {
         let mut host = HostScript::new();
         host.reconcile
             .push_back(ExtensionRuntimeOwnershipDisposition::Owned(
@@ -1445,8 +1772,13 @@ mod tests {
             mutations[0]
                 .native_identity()
                 .map(|identity| identity.bytes()),
-            Some([b'a'; 32])
+            Some(native_owner_id().encoded_bytes())
         );
+        assert!(mutations[0]
+            .expected_native_identity()
+            .is_some_and(|expected| mutations[0]
+                .native_identity()
+                .is_some_and(|observed| expected.matches_observed(observed))));
         assert_eq!(
             mutations[0].intent(),
             ExtensionNativeOwnershipIntent::Acquire
@@ -1498,7 +1830,12 @@ mod tests {
             CleanupStartupOutcome::Unavailable(CleanupUnavailable::DeadlineExpired)
         );
         assert!(native.has_attached_obligation());
-        assert!(backend.durable().entries()[0].native_identity().is_none());
+        assert_eq!(
+            backend.durable().entries()[0]
+                .native_identity()
+                .map(|identity| identity.bytes()),
+            Some(native_owner_id().encoded_bytes())
+        );
 
         assert_eq!(
             run(
