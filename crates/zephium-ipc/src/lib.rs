@@ -226,12 +226,18 @@ pub enum OperationStatus {
     Processed { disposition: OperationDisposition },
 }
 
-/// Process-lifetime browser-runtime state. Once `restart_required` becomes
-/// true it remains true until the whole application exits; it is not cleared
-/// by rebuilding a content WebView or profile environment.
+/// Process-local browser-runtime status. Once `restart_required` becomes true
+/// it remains true until the whole application exits; recoverable bounded
+/// user-content degradation is projected independently in the same snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// Bounded fail-closed aggregate of ownership scopes whose latest native
+    /// user-content observation was not exactly applied. An impossible
+    /// over-capacity observation contributes at most one sentinel. No script,
+    /// extension, profile, or native failure identity crosses this privileged
+    /// projection.
+    pub user_content_degraded_scope_count: u16,
     /// Canonically ordered closed-vocabulary set. Rust emits at most five
     /// entries and privileged chrome must replace, never append, projections.
     pub security_advisories: Vec<RuntimeSecurityAdvisory>,

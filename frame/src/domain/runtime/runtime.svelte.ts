@@ -3,6 +3,7 @@ import { events } from "../../shared/ipc/native-events";
 
 let state = $state.raw<RuntimeStatus>({
   restart_required: false,
+  user_content_degraded_scope_count: 0,
   security_advisories: [],
 });
 
@@ -55,6 +56,7 @@ export function dispose() {
   unlisten = null;
   state = {
     restart_required: false,
+    user_content_degraded_scope_count: 0,
     security_advisories: [],
   };
 }

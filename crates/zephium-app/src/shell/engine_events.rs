@@ -61,6 +61,23 @@ impl Shell {
                 requested,
                 settlement,
             } => {
+                if matches!(scope, ContentScope::Profile(profile) if self.profiles.get(profile).is_none())
+                {
+                    crate::diagnostic!(
+                        "engine: ignored user-content settlement for unknown profile"
+                    );
+                    return;
+                }
+                let observation = self
+                    .user_content_status
+                    .observe(scope, requested, &settlement);
+                if !matches!(
+                    observation,
+                    user_content_status::UserContentObservation::Unchanged
+                        | user_content_status::UserContentObservation::Stale
+                ) {
+                    self.project_runtime_status();
+                }
                 if !matches!(
                     settlement,
                     zephium_core::ports::engine::UserContentSettlement::Applied { generation }
@@ -69,6 +86,15 @@ impl Shell {
                     crate::diagnostic!(
                         "engine: user-content generation {} for {scope:?} was not applied: {settlement:?}",
                         requested.get()
+                    );
+                }
+                if matches!(
+                    observation,
+                    user_content_status::UserContentObservation::Contradictory
+                        | user_content_status::UserContentObservation::CapacityExceeded
+                ) {
+                    crate::diagnostic!(
+                        "engine: contradictory or over-capacity user-content settlement"
                     );
                 }
             }

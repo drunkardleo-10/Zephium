@@ -13,6 +13,7 @@ mod projections;
 mod scope;
 mod search;
 mod tabs;
+mod user_content_status;
 mod view_lifecycle;
 mod window_layout;
 mod zoom;
@@ -139,6 +140,7 @@ pub struct Shell {
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
     runtime_restart_required: bool,
+    user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
     persistence: PersistenceState,
@@ -341,6 +343,7 @@ impl Shell {
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
             runtime_restart_required: false,
+            user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
             persistence: PersistenceState::default(),

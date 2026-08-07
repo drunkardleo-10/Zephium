@@ -154,10 +154,27 @@ fn unavailable_retirement_retries_without_store_native_or_aggregate_side_effects
         setup_with_operation_log_and_lifecycle(store.clone(), extension_service, Box::new(|_| {}));
     shell.handle(Command::Bootstrap);
     let profile = add_inactive_named_profile(&mut shell, 20_100);
+    let content_generation = UserContentGeneration::new(1).unwrap();
+    let content_failure = zephium_core::ports::engine::UserContentSettlement::Unavailable {
+        failure: zephium_core::ports::engine::UserContentApplyFailure::NativeInstallation,
+    };
+    shell.handle(Command::Engine(EngineEvent::UserContentSettled {
+        scope: ContentScope::Profile(profile),
+        requested: content_generation,
+        settlement: content_failure.clone(),
+    }));
+    assert_eq!(shell.user_content_status.degraded_scope_count(), 1);
     engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
 
     shell.handle(delete_operation("delete-after-fence-retry", profile));
 
+    assert_eq!(shell.user_content_status.degraded_scope_count(), 0);
+    shell.handle(Command::Engine(EngineEvent::UserContentSettled {
+        scope: ContentScope::Profile(profile),
+        requested: content_generation,
+        settlement: content_failure,
+    }));
+    assert_eq!(shell.user_content_status.degraded_scope_count(), 0);
     assert!(shell.profiles.get(profile).is_some());
     assert!(store.authorized_sessions.lock().unwrap().is_empty());
     assert!(!engine
@@ -188,6 +205,7 @@ fn unavailable_retirement_retries_without_store_native_or_aggregate_side_effects
     });
 
     assert!(shell.profiles.get(profile).is_none());
+    assert_eq!(shell.user_content_status.degraded_scope_count(), 0);
     assert!(store.pending_deletions.lock().unwrap().is_empty());
     assert_eq!(operations.lock().unwrap().len(), 1);
     assert_eq!(

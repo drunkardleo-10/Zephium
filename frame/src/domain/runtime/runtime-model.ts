@@ -7,7 +7,8 @@ export type RuntimeNotification = {
     | "update_zephium"
     | "update_operating_system"
     | "update_browser_runtime"
-    | "unreviewed_runtime";
+    | "unreviewed_runtime"
+    | "user_content_degraded";
   title: string;
   detail: string;
   tone: "info" | "warning";
@@ -56,6 +57,19 @@ export function runtimeNotifications(status: RuntimeStatus): RuntimeNotification
       title: "Restart Zephium",
       detail: "A newer browser runtime is ready. Restart Zephium to use it.",
       tone: "info",
+    });
+  }
+
+  if (status.user_content_degraded_scope_count > 0) {
+    const count = Math.min(Math.trunc(status.user_content_degraded_scope_count), 65);
+    push({
+      id: "user_content_degraded",
+      title: "Some add-on changes weren't applied",
+      detail:
+        count === 1
+          ? "An extension or userscript change couldn't be applied. Zephium kept the previous verified version when available."
+          : "Some extension or userscript changes couldn't be applied. Zephium kept previous verified versions when available.",
+      tone: "warning",
     });
   }
 

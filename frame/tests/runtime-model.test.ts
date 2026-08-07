@@ -4,6 +4,7 @@ import { runtimeNotifications } from "../src/domain/runtime/runtime-model";
 
 const clear: RuntimeStatus = {
   restart_required: false,
+  user_content_degraded_scope_count: 0,
   security_advisories: [],
 };
 
@@ -48,6 +49,7 @@ describe("runtime notifications", () => {
     expect(
       runtimeNotifications({
         restart_required: true,
+        user_content_degraded_scope_count: 0,
         security_advisories: [
           {
             kind: "review_overdue",
@@ -70,6 +72,7 @@ describe("runtime notifications", () => {
     expect(
       runtimeNotifications({
         restart_required: false,
+        user_content_degraded_scope_count: 0,
         security_advisories: [notification, notification],
       }),
     ).toEqual([
@@ -78,5 +81,20 @@ describe("runtime notifications", () => {
         tone: "warning",
       }),
     ]);
+  });
+
+  it("surfaces bounded user-content degradation without exposing identities", () => {
+    expect(
+      runtimeNotifications({
+        ...clear,
+        user_content_degraded_scope_count: 2,
+      }),
+    ).toContainEqual({
+      id: "user_content_degraded",
+      title: "Some add-on changes weren't applied",
+      detail:
+        "Some extension or userscript changes couldn't be applied. Zephium kept previous verified versions when available.",
+      tone: "warning",
+    });
   });
 });

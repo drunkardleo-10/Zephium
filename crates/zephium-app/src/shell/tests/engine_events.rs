@@ -76,6 +76,57 @@ fn runtime_restart_requirement_is_sticky_deduplicated_and_replayed_on_bootstrap(
 }
 
 #[test]
+fn user_content_failure_is_projected_and_only_a_newer_success_clears_it() {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let sink = statuses.clone();
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RuntimeStatus(status) = projection {
+                sink.lock()
+                    .unwrap()
+                    .push(status.user_content_degraded_scope_count);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let profile = shell.profiles.iter().next().unwrap().id;
+    let first = zephium_core::ports::engine::UserContentGeneration::new(1).unwrap();
+    let second = zephium_core::ports::engine::UserContentGeneration::new(2).unwrap();
+    let failure = zephium_core::ports::engine::UserContentSettlement::Unavailable {
+        failure: zephium_core::ports::engine::UserContentApplyFailure::NativeInstallation,
+    };
+
+    shell.handle(Command::Engine(EngineEvent::UserContentSettled {
+        scope: ContentScope::Profile(ProfileId::from(u128::MAX)),
+        requested: first,
+        settlement: failure.clone(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::UserContentSettled {
+        scope: ContentScope::Profile(profile),
+        requested: first,
+        settlement: failure.clone(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::UserContentSettled {
+        scope: ContentScope::Profile(profile),
+        requested: first,
+        settlement: failure,
+    }));
+    shell.handle(Command::Engine(EngineEvent::UserContentSettled {
+        scope: ContentScope::Profile(profile),
+        requested: second,
+        settlement: zephium_core::ports::engine::UserContentSettlement::Applied {
+            generation: second,
+        },
+    }));
+
+    assert_eq!(*statuses.lock().unwrap(), vec![0, 1, 0]);
+}
+
+#[test]
 fn bootstrap_projects_every_sanitized_runtime_security_advisory() {
     let engine = Arc::new(FakeEngine::default());
     let mut advisories = zephium_core::runtime_security::RuntimeSecurityAdvisories::new();
@@ -105,6 +156,7 @@ fn bootstrap_projects_every_sanitized_runtime_security_advisory() {
         statuses.lock().unwrap().as_slice(),
         &[RuntimeStatus {
             restart_required: false,
+            user_content_degraded_scope_count: 0,
             security_advisories: vec![
                 RuntimeSecurityAdvisory {
                     kind: RuntimeSecurityAdvisoryKind::ReviewOverdue,

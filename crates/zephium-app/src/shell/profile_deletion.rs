@@ -147,6 +147,9 @@ impl Shell {
                 authorization_revision,
             ),
         );
+        if self.user_content_status.retire_profile(profile) {
+            self.project_runtime_status();
+        }
         // From this point through durable tombstoning (or process restart),
         // the state row is a process-local quarantine. A retirement attempt
         // may already have installed its permanent worker fence even when it

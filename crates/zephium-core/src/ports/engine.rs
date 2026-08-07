@@ -558,6 +558,9 @@ pub trait Engine {
     /// synchronous terminal result for malformed/over-budget candidates,
     /// reserved host scope, lifecycle retirement, or bounded in-flight
     /// backpressure; no settlement follows a rejected dispatch.
+    /// Product composition must not call this before the authoritative app
+    /// shell has completed bootstrap: pre-bootstrap native facts are rejected
+    /// and there is deliberately no inferred user-content snapshot to replay.
     fn set_user_content(
         &self,
         scope: ContentScope,
