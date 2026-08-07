@@ -1079,6 +1079,20 @@ impl ExtensionNativeOwnershipJournal {
         self.retained_bytes
     }
 
+    /// Compares the exact fields persisted as the durable journal authority.
+    ///
+    /// The retained-byte count is derived from the in-memory entries
+    /// allocation and is deliberately excluded. A journal reconstructed by a
+    /// Store reload can therefore prove the same durable frontier even when
+    /// its allocator capacity differs from the locally predicted journal.
+    #[must_use]
+    pub fn exactly_matches_durable_state(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.operation_high_water == other.operation_high_water
+            && self.native_incarnation_high_water == other.native_incarnation_high_water
+            && self.entries == other.entries
+    }
+
     pub fn get(&self, key: ExtensionNativeOwnershipKey) -> Option<&ExtensionNativeOwnershipEntry> {
         self.entries
             .binary_search_by_key(&key, ExtensionNativeOwnershipEntry::key)
@@ -1879,6 +1893,35 @@ mod tests {
                 preparation(1).key()
             ))
         );
+    }
+
+    #[test]
+    fn durable_state_comparison_excludes_only_derived_retained_accounting() {
+        let journal = begin(ExtensionNativeOwnershipJournal::empty(), 1).journal;
+        let mut accounting_variant = journal.clone();
+        // Model the same persisted fields reconstructed with different
+        // allocator accounting. This module-private mutation deliberately
+        // changes no durable authority.
+        accounting_variant.retained_bytes = accounting_variant.retained_bytes.saturating_add(1);
+
+        assert_ne!(journal, accounting_variant);
+        assert!(journal.exactly_matches_durable_state(&accounting_variant));
+
+        let mut different_revision = accounting_variant.clone();
+        different_revision.revision = ExtensionNativeOwnershipJournalRevision::INITIAL;
+        assert!(!journal.exactly_matches_durable_state(&different_revision));
+
+        let mut different_operation_high_water = accounting_variant.clone();
+        different_operation_high_water.operation_high_water = None;
+        assert!(!journal.exactly_matches_durable_state(&different_operation_high_water));
+
+        let mut different_incarnation_high_water = accounting_variant.clone();
+        different_incarnation_high_water.native_incarnation_high_water = None;
+        assert!(!journal.exactly_matches_durable_state(&different_incarnation_high_water));
+
+        let mut different_entries = accounting_variant;
+        different_entries.entries.clear();
+        assert!(!journal.exactly_matches_durable_state(&different_entries));
     }
 
     #[test]

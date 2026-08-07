@@ -11,6 +11,21 @@ use zephium_core::ports::store::{
 };
 use zephium_store::{ExtensionServiceStoreAuthority, ExtensionServiceStoreCallOutcome};
 
+mod activation;
+mod row_fence;
+
+pub(crate) use activation::MAX_JOURNAL_ACTIVATION_AMBIGUITY_ADDITIONAL_RETAINED_BYTES;
+pub(crate) use activation::{
+    JournalActivationConflict, JournalActivationDiverged,
+    JournalActivationPreparationFailureReason, JournalActivationReconciliation,
+    JournalActivationRefusalReason, JournalActivationReloadRequired, JournalActivationSettlement,
+};
+pub(crate) use row_fence::{
+    RowFenceConflict, RowFenceConflictInspection, RowFenceDiverged,
+    RowFencePreparationFailureReason, RowFenceReconciliation, RowFenceRefusalReason,
+    RowFenceReloadRequired, RowFenceSettlement, MAX_ROW_FENCE_ADDITIONAL_RETAINED_BYTES,
+};
+
 pub(crate) trait JournalBackend {
     fn load_until(
         &self,
@@ -108,6 +123,10 @@ impl JournalProjection {
         let Some(current) = self.journal.take() else {
             return Err(JournalMutationFailure::ReloadRequired);
         };
+        if row_fence::requires_fenced_activation(&current, &mutation) {
+            self.journal = Some(current);
+            return Err(JournalMutationFailure::InvalidLocalTransition);
+        }
         let application = match current.clone().apply(current.revision(), mutation.clone()) {
             Ok(application) => application,
             Err(_) => {
@@ -170,7 +189,8 @@ mod tests {
         ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
         ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
         ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-        ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+        ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournalRevision,
+        ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
         ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
         ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
         ExtensionTreeDigest,
@@ -309,6 +329,29 @@ mod tests {
         (application.into_journal(), applied)
     }
 
+    fn journal_with_preparing_rows(values: &[u128]) -> ExtensionNativeOwnershipJournal {
+        let mut journal = ExtensionNativeOwnershipJournal::empty();
+        for value in values {
+            journal = exact_applied(&journal, &begin(*value)).0;
+        }
+        journal
+    }
+
+    fn release_absent(
+        journal: &ExtensionNativeOwnershipJournal,
+        value: u128,
+    ) -> ExtensionNativeOwnershipJournalMutation {
+        let key = preparation(value).key();
+        let row = journal
+            .get(key)
+            .expect("fixture preparing row must be present");
+        ExtensionNativeOwnershipJournalMutation::transition(
+            row.cas(),
+            ExtensionNativeOwnershipIntent::Release,
+            ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+        )
+    }
+
     fn completed_load(
         journal: ExtensionNativeOwnershipJournal,
     ) -> StoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
@@ -325,9 +368,9 @@ mod tests {
         first_outcome: StoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>,
         expected_failure: JournalMutationFailure,
     ) {
-        let initial = ExtensionNativeOwnershipJournal::empty();
-        let first_mutation = begin(1);
-        let retry_mutation = begin(2);
+        let initial = journal_with_preparing_rows(&[1, 2]);
+        let first_mutation = release_absent(&initial, 1);
+        let retry_mutation = release_absent(&initial, 2);
         let (expected_after_retry, retry_applied) = exact_applied(&initial, &retry_mutation);
         let backend = ScriptedBackend::new(
             [
@@ -373,8 +416,8 @@ mod tests {
 
     #[test]
     fn exact_applied_result_installs_only_the_predicted_projection() {
-        let initial = ExtensionNativeOwnershipJournal::empty();
-        let mutation = begin(1);
+        let initial = journal_with_preparing_rows(&[1]);
+        let mutation = release_absent(&initial, 1);
         let (predicted, applied) = exact_applied(&initial, &mutation);
         let backend = ScriptedBackend::new(
             [completed_load(initial.clone())],
@@ -401,8 +444,8 @@ mod tests {
 
     #[test]
     fn every_applied_field_mismatch_invalidates_until_a_full_reload() {
-        let initial = ExtensionNativeOwnershipJournal::empty();
-        let mutation = begin(1);
+        let initial = journal_with_preparing_rows(&[1]);
+        let mutation = release_absent(&initial, 1);
         let (_, exact) = exact_applied(&initial, &mutation);
 
         let mut revision_mismatch = exact.clone();
@@ -456,8 +499,8 @@ mod tests {
 
     #[test]
     fn definite_non_admission_retains_projection_and_permits_retry_without_reload() {
-        let initial = ExtensionNativeOwnershipJournal::empty();
-        let mutation = begin(1);
+        let initial = journal_with_preparing_rows(&[1]);
+        let mutation = release_absent(&initial, 1);
         let (predicted, applied) = exact_applied(&initial, &mutation);
         let backend = ScriptedBackend::new(
             [completed_load(initial.clone())],
@@ -515,10 +558,12 @@ mod tests {
 
     #[test]
     fn invalid_local_transition_never_reaches_store_and_retains_projection() {
-        let initial = ExtensionNativeOwnershipJournal::empty();
-        let existing_mutation = begin(1);
-        let (known, _) = exact_applied(&initial, &existing_mutation);
-        let valid_mutation = begin(2);
+        let known = journal_with_preparing_rows(&[1]);
+        let preparing = known
+            .get(preparation(1).key())
+            .expect("fixture preparing row must be present");
+        let invalid_mutation = ExtensionNativeOwnershipJournalMutation::clear(preparing.cas());
+        let valid_mutation = release_absent(&known, 1);
         let (predicted, applied) = exact_applied(&known, &valid_mutation);
         let backend = ScriptedBackend::new(
             [completed_load(known.clone())],
@@ -534,7 +579,7 @@ mod tests {
 
         assert_eq!(projection.reload(&backend, Instant::now()), Ok(&known));
         assert_eq!(
-            projection.mutate(&backend, existing_mutation, Instant::now()),
+            projection.mutate(&backend, invalid_mutation, Instant::now()),
             Err(JournalMutationFailure::InvalidLocalTransition)
         );
         assert_eq!(projection.known(), Some(&known));
