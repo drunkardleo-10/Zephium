@@ -1275,6 +1275,47 @@ impl ExtensionRuntimeHostFactory {
         binding: ExtensionRuntimeHostActivationBinding,
         companion_retained_bytes: usize,
     ) -> Result<ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal> {
+        self.bind_activation_with_retained_byte_charges(binding, companion_retained_bytes, 0)
+    }
+
+    /// Binds a fresh activation while charging stable and bind-only caller state.
+    ///
+    /// `companion_retained_bytes` is retained beside every later host-control
+    /// state. `bind_transient_retained_bytes` exists only while this method is
+    /// assembling the activation and is therefore admitted at the factory
+    /// boundary but excluded from future-state capacity. Neither charge is
+    /// retained or inspected by the factory.
+    ///
+    /// A caller-charge overflow, or a caller charge which cannot fit even the
+    /// input binding, is refused before the trusted factory port is invoked.
+    /// Later proxy-dependent refusals remain pre-lifecycle and return the exact
+    /// authenticated binding after releasing the provisional reservation.
+    pub fn bind_activation_with_retained_byte_charges(
+        &mut self,
+        binding: ExtensionRuntimeHostActivationBinding,
+        companion_retained_bytes: usize,
+        bind_transient_retained_bytes: usize,
+    ) -> Result<ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal> {
+        let prebind_retained = match binding
+            .retained_bytes()
+            .checked_add(size_of::<ExtensionRuntimeHostActivation>())
+            .and_then(|value| value.checked_add(companion_retained_bytes))
+            .and_then(|value| value.checked_add(bind_transient_retained_bytes))
+        {
+            None => {
+                return Err(ExtensionRuntimeHostActivationBindRefusal {
+                    reason: ExtensionRuntimeHostBindError::RetainedBytesOverflow,
+                    binding: Box::new(binding),
+                });
+            }
+            Some(value) if value > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
+                return Err(ExtensionRuntimeHostActivationBindRefusal {
+                    reason: ExtensionRuntimeHostBindError::RetainedBytesExceeded,
+                    binding: Box::new(binding),
+                });
+            }
+            Some(value) => value,
+        };
         let native_grants = match binding
             .authority
             .native_grant_projection(binding.authority.fingerprint())
@@ -1309,9 +1350,7 @@ impl ExtensionRuntimeHostFactory {
         let host_retained = lifecycle
             .retained_bytes()
             .checked_add(publication.retained_bytes())
-            .and_then(|value| value.checked_add(binding.retained_bytes()))
-            .and_then(|value| value.checked_add(size_of::<ExtensionRuntimeHostActivation>()))
-            .and_then(|value| value.checked_add(companion_retained_bytes));
+            .and_then(|value| value.checked_add(prebind_retained));
         let reason = match host_retained {
             None => Some(ExtensionRuntimeHostBindError::RetainedBytesOverflow),
             Some(value) if value > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {

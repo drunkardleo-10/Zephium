@@ -110,6 +110,9 @@ pub enum BundledPackageLeaseError {
     /// A bounded repository or retained-memory inventory is exhausted.
     #[error("extension package lease capacity is exhausted")]
     CapacityExhausted,
+    /// Retained-memory accounting overflowed before any durable ownership began.
+    #[error("extension package lease retained-memory accounting overflowed")]
+    RetainedBytesOverflow,
 }
 
 /// Stable, path-free failure while releasing an exact owner pin.
@@ -530,6 +533,28 @@ impl fmt::Debug for RollbackBundledPackageReleaseRequest {
         )
     }
 }
+
+macro_rules! impl_release_request_accounting {
+    ($request:ident) => {
+        impl $request {
+            /// Conservative logical charge for retryable release authority.
+            ///
+            /// The request owns the per-pin presence allocation. Its repository
+            /// open epoch remains shared process state and is deliberately not
+            /// charged again here.
+            #[must_use]
+            pub const fn retained_bytes(&self) -> usize {
+                size_of::<Self>()
+                    .saturating_add(size_of::<LeasePresence>())
+                    .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+                    .saturating_add(RETAINED_ARC_COUNTER_BYTES)
+            }
+        }
+    };
+}
+
+impl_release_request_accounting!(ActiveBundledPackageReleaseRequest);
+impl_release_request_accounting!(RollbackBundledPackageReleaseRequest);
 
 fn debug_release(
     formatter: &mut fmt::Formatter<'_>,

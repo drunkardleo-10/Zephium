@@ -72,6 +72,7 @@ pub use package_lease::{
     RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
     RollbackBundledRuntimePackageRecoveryToken, RollbackBundledRuntimePackageRejoinRefusal,
     MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES,
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
 };
 pub use settlement::{BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome};
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

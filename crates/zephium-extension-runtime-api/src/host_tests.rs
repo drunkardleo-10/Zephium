@@ -1842,13 +1842,13 @@ fn companion_state_is_charged_at_the_exact_factory_boundary_losslessly() {
         .expect("the exact provider returns after a companion excess");
     assert!(Arc::ptr_eq(&provider.identity, &exceeded_provider_identity));
     drop(provider);
-    assert_eq!(exceeded_probe.activation_binds.load(Ordering::Relaxed), 1);
-    assert_eq!(exceeded_probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(exceeded_probe.activation_binds.load(Ordering::Relaxed), 0);
+    assert_eq!(exceeded_probe.reservations.load(Ordering::Relaxed), 0);
     assert_eq!(
         exceeded_probe
             .preattachment_restores
             .load(Ordering::Relaxed),
-        1
+        0
     );
     assert_eq!(exceeded_probe.lifecycle_calls.load(Ordering::Relaxed), 0);
     assert_eq!(exceeded_probe.publication_calls.load(Ordering::Relaxed), 0);
@@ -1880,17 +1880,104 @@ fn companion_state_is_charged_at_the_exact_factory_boundary_losslessly() {
         .expect("the exact provider returns after companion overflow");
     assert!(Arc::ptr_eq(&provider.identity, &overflow_provider_identity));
     drop(provider);
-    assert_eq!(overflow_probe.activation_binds.load(Ordering::Relaxed), 1);
-    assert_eq!(overflow_probe.reservations.load(Ordering::Relaxed), 1);
+    assert_eq!(overflow_probe.activation_binds.load(Ordering::Relaxed), 0);
+    assert_eq!(overflow_probe.reservations.load(Ordering::Relaxed), 0);
     assert_eq!(
         overflow_probe
             .preattachment_restores
             .load(Ordering::Relaxed),
-        1
+        0
     );
     assert_eq!(overflow_probe.lifecycle_calls.load(Ordering::Relaxed), 0);
     assert_eq!(overflow_probe.publication_calls.load(Ordering::Relaxed), 0);
     assert_eq!(overflow_probe.reclaim_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn bind_only_transient_state_is_admitted_without_reducing_future_capacity() {
+    let baseline = ActivationFixture::compatibility(54);
+    let baseline_binding = baseline.into_binding();
+    let prebind_without_transient = baseline_binding
+        .retained_bytes()
+        .checked_add(std::mem::size_of::<ExtensionRuntimeHostActivation>())
+        .unwrap();
+    let exact_bind_transient = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .checked_sub(prebind_without_transient)
+        .expect("the baseline binding fits below the owner ceiling");
+    assert_ne!(exact_bind_transient, 0);
+
+    let exact = ActivationFixture::compatibility(55);
+    let exact_probe = Arc::new(HostProbe::default());
+    let mut exact_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&exact_probe)),
+    ));
+    let activation = exact_factory
+        .bind_activation_with_retained_byte_charges(exact.into_binding(), 0, exact_bind_transient)
+        .expect("the exact bind-only transient ceiling must be accepted");
+    assert_eq!(
+        prebind_without_transient
+            .checked_add(exact_bind_transient)
+            .unwrap(),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    assert!(
+        activation.maximum_future_retained_bytes() < MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
+        "bind-only state must not consume future host capacity"
+    );
+    drop(activation.cancel_before_attempt());
+    assert_eq!(exact_probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        exact_probe.preattachment_restores.load(Ordering::Relaxed),
+        1
+    );
+
+    let exceeded = ActivationFixture::compatibility(56);
+    let exceeded_entry = exceeded.initial.clone();
+    let exceeded_runtime = exceeded.runtime();
+    let exceeded_probe = Arc::new(HostProbe::default());
+    let mut exceeded_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&exceeded_probe)),
+    ));
+    let refusal = exceeded_factory
+        .bind_activation_with_retained_byte_charges(
+            exceeded.into_binding(),
+            0,
+            exact_bind_transient.checked_add(1).unwrap(),
+        )
+        .expect_err("one bind-only byte above the ceiling must be refused");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::RetainedBytesExceeded
+    );
+    let (entry, access, authority, _) = refusal.cancel_into_parts();
+    assert_eq!(entry, exceeded_entry);
+    assert_eq!(authority.fingerprint(), &exceeded_runtime);
+    drop(access);
+    drop(authority);
+    assert_eq!(exceeded_probe.activation_binds.load(Ordering::Relaxed), 0);
+    assert_eq!(exceeded_probe.reservations.load(Ordering::Relaxed), 0);
+
+    let overflow = ActivationFixture::compatibility(57);
+    let overflow_entry = overflow.initial.clone();
+    let overflow_runtime = overflow.runtime();
+    let overflow_probe = Arc::new(HostProbe::default());
+    let mut overflow_factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&overflow_probe)),
+    ));
+    let refusal = overflow_factory
+        .bind_activation_with_retained_byte_charges(overflow.into_binding(), 1, usize::MAX)
+        .expect_err("combined stable and bind-only arithmetic must not wrap");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::RetainedBytesOverflow
+    );
+    let (entry, access, authority, _) = refusal.cancel_into_parts();
+    assert_eq!(entry, overflow_entry);
+    assert_eq!(authority.fingerprint(), &overflow_runtime);
+    drop(access);
+    drop(authority);
+    assert_eq!(overflow_probe.activation_binds.load(Ordering::Relaxed), 0);
+    assert_eq!(overflow_probe.reservations.load(Ordering::Relaxed), 0);
 }
 
 #[test]

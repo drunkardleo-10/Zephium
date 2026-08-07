@@ -37,6 +37,7 @@ pub use runtime_access::{
     RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal,
     RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
     RollbackBundledRuntimePackageRecoveryToken, RollbackBundledRuntimePackageRejoinRefusal,
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
 };
 
 #[cfg(test)]

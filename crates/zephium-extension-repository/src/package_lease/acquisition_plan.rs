@@ -19,10 +19,11 @@ use zephium_extension_authority::ProductExtensionRuntimeTarget;
 use zephium_extension_runtime_api::MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES;
 
 use super::api::{
-    BundledCatalogGenerationRole, BundledCurrentCatalogSet, BundledPackageLease,
-    BundledPackageLeaseError,
+    ActiveBundledPackageLease, BundledCatalogGenerationRole, BundledCurrentCatalogSet,
+    BundledPackageLease, BundledPackageLeaseError, RollbackBundledPackageLease,
 };
-use super::runtime::RepositoryOpenEpoch;
+use super::runtime::{LeasePresence, RepositoryOpenEpoch};
+use super::runtime_access::MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES;
 use crate::materialization::{
     load_active_package_snapshot, load_rollback_package_snapshot,
     verify_active_package_pin_admission, verify_rollback_package_pin_admission,
@@ -48,6 +49,13 @@ enum VerifiedRuntimeSnapshot {
 }
 
 impl VerifiedRuntimeSnapshot {
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Active(snapshot) => snapshot.retained_bytes(),
+            Self::Rollback(snapshot) => snapshot.retained_bytes(),
+        }
+    }
+
     fn retained_heap_bytes(&self) -> Option<usize> {
         match self {
             Self::Active(snapshot) => snapshot
@@ -123,6 +131,15 @@ impl BundledRuntimeAcquisitionPlan {
         self.retained_bytes
     }
 
+    /// Exact projected raw repository charge after this plan becomes its
+    /// role-specific lease. No pin is acquired and no authority is consumed.
+    /// Callers use the larger of this value and [`Self::retained_bytes`] when
+    /// reserving companion state before Begin.
+    pub fn projected_lease_retained_bytes(&self) -> usize {
+        Self::projected_lease_retained_bytes_for(&self.eligibility, &self.snapshot)
+            .unwrap_or(usize::MAX)
+    }
+
     fn matches_applied_preparing(&self, entry: &ExtensionNativeOwnershipEntry) -> bool {
         let expected = &self.preparation;
         entry.key() == expected.key()
@@ -154,6 +171,50 @@ impl BundledRuntimeAcquisitionPlan {
             .checked_add(snapshot.retained_heap_bytes()?)?
             .checked_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)?
             .checked_add(RETAINED_ARC_COUNTER_BYTES)
+    }
+
+    fn projected_lease_retained_bytes_for(
+        eligibility: &ExtensionRuntimeEligibility,
+        snapshot: &VerifiedRuntimeSnapshot,
+    ) -> Option<usize> {
+        let eligibility_heap = eligibility
+            .retained_bytes()
+            .checked_sub(size_of::<ExtensionRuntimeEligibility>())?;
+        let acquisition_retained =
+            size_of::<ExtensionPackagePinAcquisitionBinding>().checked_add(eligibility_heap)?;
+        let lease_size = match snapshot {
+            VerifiedRuntimeSnapshot::Active(_) => size_of::<ActiveBundledPackageLease>(),
+            VerifiedRuntimeSnapshot::Rollback(_) => size_of::<RollbackBundledPackageLease>(),
+        };
+        lease_size
+            .checked_add(acquisition_retained)?
+            .checked_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)?
+            .checked_add(snapshot.retained_bytes())?
+            .checked_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)?
+            .checked_add(RETAINED_ARC_COUNTER_BYTES)?
+            .checked_add(size_of::<LeasePresence>())?
+            .checked_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)?
+            .checked_add(RETAINED_ARC_COUNTER_BYTES)
+    }
+}
+
+fn acquisition_retained_byte_failure(
+    plan_retained_bytes: usize,
+    projected_lease_retained_bytes: usize,
+    additional_companion_retained_bytes: usize,
+) -> Option<BundledPackageLeaseError> {
+    match additional_companion_retained_bytes
+        .checked_add(MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+        .and_then(|companion| {
+            plan_retained_bytes
+                .max(projected_lease_retained_bytes)
+                .checked_add(companion)
+        }) {
+        None => Some(BundledPackageLeaseError::RetainedBytesOverflow),
+        Some(bytes) if bytes > MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES => {
+            Some(BundledPackageLeaseError::CapacityExhausted)
+        }
+        Some(_) => None,
     }
 }
 
@@ -325,6 +386,22 @@ impl ExtensionRepository {
         current: BundledCurrentCatalogSet,
         eligibility: ExtensionRuntimeEligibility,
     ) -> Result<BundledRuntimeAcquisitionPlan, BundledRuntimeAcquisitionPlanningRefusal> {
+        self.plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            current,
+            eligibility,
+            0,
+        )
+    }
+
+    /// Freshly authenticates an acquisition while reserving caller-retained
+    /// state that will remain beside both the plan and its projected lease.
+    /// Overflow and limit refusal occur before any Store Begin or durable pin.
+    pub fn plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+        &mut self,
+        current: BundledCurrentCatalogSet,
+        eligibility: ExtensionRuntimeEligibility,
+        additional_companion_retained_bytes: usize,
+    ) -> Result<BundledRuntimeAcquisitionPlan, BundledRuntimeAcquisitionPlanningRefusal> {
         let planned = self.plan_bundled_runtime_acquisition_inner(current, &eligibility);
         match planned {
             Ok((preparation, snapshot, open_epoch)) => {
@@ -332,13 +409,28 @@ impl ExtensionRepository {
                     BundledRuntimeAcquisitionPlan::retained_bytes_for(&eligibility, &snapshot)
                 else {
                     return Err(BundledRuntimeAcquisitionPlanningRefusal {
-                        reason: BundledPackageLeaseError::CapacityExhausted,
+                        reason: BundledPackageLeaseError::RetainedBytesOverflow,
                         eligibility: Box::new(eligibility),
                     });
                 };
-                if retained_bytes > MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES {
+                let Some(projected_lease_retained_bytes) =
+                    BundledRuntimeAcquisitionPlan::projected_lease_retained_bytes_for(
+                        &eligibility,
+                        &snapshot,
+                    )
+                else {
                     return Err(BundledRuntimeAcquisitionPlanningRefusal {
-                        reason: BundledPackageLeaseError::CapacityExhausted,
+                        reason: BundledPackageLeaseError::RetainedBytesOverflow,
+                        eligibility: Box::new(eligibility),
+                    });
+                };
+                if let Some(reason) = acquisition_retained_byte_failure(
+                    retained_bytes,
+                    projected_lease_retained_bytes,
+                    additional_companion_retained_bytes,
+                ) {
+                    return Err(BundledRuntimeAcquisitionPlanningRefusal {
+                        reason,
                         eligibility: Box::new(eligibility),
                     });
                 }
@@ -562,5 +654,35 @@ mod tests {
             MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES,
             16 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn companion_admission_accepts_exact_limit_and_separates_excess_from_overflow() {
+        const AUTHORITY_BYTES: usize = 4_096;
+        let exact_companion = MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES
+            .checked_sub(AUTHORITY_BYTES)
+            .and_then(|bytes| {
+                bytes.checked_sub(MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+            })
+            .unwrap();
+
+        assert!(acquisition_retained_byte_failure(
+            AUTHORITY_BYTES,
+            AUTHORITY_BYTES - 1,
+            exact_companion,
+        )
+        .is_none());
+        assert!(matches!(
+            acquisition_retained_byte_failure(
+                AUTHORITY_BYTES,
+                AUTHORITY_BYTES - 1,
+                exact_companion + 1,
+            ),
+            Some(BundledPackageLeaseError::CapacityExhausted)
+        ));
+        assert!(matches!(
+            acquisition_retained_byte_failure(AUTHORITY_BYTES, AUTHORITY_BYTES - 1, usize::MAX),
+            Some(BundledPackageLeaseError::RetainedBytesOverflow)
+        ));
     }
 }

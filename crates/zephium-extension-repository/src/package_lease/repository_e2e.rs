@@ -70,7 +70,10 @@ use super::runtime_access::{
     arm_provider_retained_bytes_override, ActiveBundledRuntimePackageAccess,
     ActiveBundledRuntimePackageRecoveryError, ActiveBundledRuntimePackageRecoveryToken,
     BundledRuntimeHostActivationBindingError, BundledRuntimePackageAccessBuildError,
-    RollbackBundledRuntimePackageRecoveryError,
+    RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageRecoveryError,
+    RollbackBundledRuntimePackageRecoveryToken, ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
 };
 use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
@@ -1028,6 +1031,33 @@ fn active_compatibility_host_transient_retained_bytes(
         .expect("bounded compatibility host transient accounting")
 }
 
+fn rollback_compatibility_host_transient_retained_bytes(
+    access: &RollbackBundledRuntimePackageAccess,
+) -> usize {
+    size_of::<ExtensionRuntimeHostActivationBinding>()
+        .checked_add(
+            access
+                .package_access_retained_bytes()
+                .checked_sub(size_of::<ExtensionPackageAccess>())
+                .unwrap(),
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                access
+                    .operation_authority_retained_bytes()
+                    .checked_sub(size_of::<ExtensionRuntimeOperationAuthority>())
+                    .unwrap(),
+            )
+        })
+        .and_then(|bytes| bytes.checked_add(size_of::<SuccessfulCompatibilityLifecycle>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<SuccessfulCompatibilityPublication>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<ExtensionRuntimeHostActivation>()))
+        .and_then(|bytes| {
+            bytes.checked_add(size_of::<RollbackBundledRuntimePackageRecoveryToken>())
+        })
+        .expect("bounded rollback compatibility host transient accounting")
+}
+
 impl ExtensionRuntimeHostFactoryPort for SuccessfulCompatibilityHostFactory {
     fn bind_activation(
         &mut self,
@@ -1648,9 +1678,49 @@ fn repository_owned_acquisition_plan_derives_begin_and_reuses_its_verified_snaps
     let owner =
         EligibilityFixture::active(&active, ProfileId::from(151), ExtensionInstallId::from(157));
 
+    let calibration = repository
+        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .unwrap();
+    let planned_or_leased = calibration
+        .retained_bytes()
+        .max(calibration.projected_lease_retained_bytes());
+    let exact_companion = MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES
+        .checked_sub(planned_or_leased)
+        .and_then(|bytes| {
+            bytes.checked_sub(MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+        })
+        .unwrap();
+    drop(calibration);
+    let over = repository
+        .plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            observed,
+            owner.eligibility(),
+            exact_companion.checked_add(1).unwrap(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        over.reason(),
+        BundledPackageLeaseError::CapacityExhausted
+    ));
+    let overflow = repository
+        .plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            observed,
+            owner.eligibility(),
+            usize::MAX,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        overflow.reason(),
+        BundledPackageLeaseError::RetainedBytesOverflow
+    ));
+
     reset_repository_package_io_count();
     let plan = repository
-        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            observed,
+            owner.eligibility(),
+            exact_companion,
+        )
         .unwrap();
     assert_eq!(repository_package_io_count(), 1);
     assert!(plan.retained_bytes() <= MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES);
@@ -1674,6 +1744,7 @@ fn repository_owned_acquisition_plan_derives_begin_and_reuses_its_verified_snaps
     assert_eq!(preparation.runtime_backend(), runtime_backend());
     assert_eq!(preparation.package(), owner.eligibility().package());
 
+    let projected_lease_retained_bytes = plan.projected_lease_retained_bytes();
     let preparing = applied_preparing_for_plan(&plan);
     arm_post_pin_reverify_hook(|| {
         assert_eq!(
@@ -1688,6 +1759,7 @@ fn repository_owned_acquisition_plan_derives_begin_and_reuses_its_verified_snaps
     };
     assert_eq!(lease.profile(), ProfileId::from(151));
     assert_eq!(lease.install_id(), ExtensionInstallId::from(157));
+    assert_eq!(lease.retained_bytes(), projected_lease_retained_bytes);
     assert_eq!(repository_package_io_count(), 2);
 }
 
@@ -1706,9 +1778,49 @@ fn rollback_acquisition_plan_derives_begin_and_reverifies_after_pin() {
         ExtensionInstallId::from(161),
     );
 
+    let calibration = repository
+        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .unwrap();
+    let planned_or_leased = calibration
+        .retained_bytes()
+        .max(calibration.projected_lease_retained_bytes());
+    let exact_companion = MAX_BUNDLED_RUNTIME_ACQUISITION_PLAN_RETAINED_BYTES
+        .checked_sub(planned_or_leased)
+        .and_then(|bytes| {
+            bytes.checked_sub(MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+        })
+        .unwrap();
+    drop(calibration);
+    let over = repository
+        .plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            observed,
+            owner.eligibility(),
+            exact_companion.checked_add(1).unwrap(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        over.reason(),
+        BundledPackageLeaseError::CapacityExhausted
+    ));
+    let overflow = repository
+        .plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            observed,
+            owner.eligibility(),
+            usize::MAX,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        overflow.reason(),
+        BundledPackageLeaseError::RetainedBytesOverflow
+    ));
+
     reset_repository_package_io_count();
     let plan = repository
-        .plan_bundled_runtime_acquisition(observed, owner.eligibility())
+        .plan_bundled_runtime_acquisition_with_additional_companion_retained_bytes(
+            observed,
+            owner.eligibility(),
+            exact_companion,
+        )
         .unwrap();
     assert_eq!(repository_package_io_count(), 1);
     let ExtensionNativeOwnershipJournalMutation::Begin(preparation) =
@@ -1723,6 +1835,7 @@ fn rollback_acquisition_plan_derives_begin_and_reverifies_after_pin() {
     assert_eq!(preparation.runtime_backend(), runtime_backend());
     assert_eq!(preparation.package(), owner.eligibility().package());
 
+    let projected_lease_retained_bytes = plan.projected_lease_retained_bytes();
     let preparing = applied_preparing_for_plan(&plan);
     arm_post_pin_reverify_hook(|| {
         assert_eq!(
@@ -1735,6 +1848,7 @@ fn rollback_acquisition_plan_derives_begin_and_reverifies_after_pin() {
         Ok(BundledPackageLease::Rollback(lease)) => lease,
         result => panic!("unexpected planned rollback acquisition: {result:?}"),
     };
+    assert_eq!(lease.retained_bytes(), projected_lease_retained_bytes);
     assert_eq!(lease.profile(), ProfileId::from(159));
     assert_eq!(lease.install_id(), ExtensionInstallId::from(161));
     assert_eq!(repository_package_io_count(), 2);
@@ -3082,10 +3196,71 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         ),
     ];
     let cleanup = release_binding(&binding);
+    let preparing_entry = native_absent_preparing_entry(&binding);
+    let preparing_base = OwnershipEntryFixture::from_entry(&preparing_entry);
     let mut access = acquire_active(&mut repository, binding)
         .unwrap()
         .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
+    assert!(access.matches_preparing_ownership_entry(&preparing_entry));
+
+    let mut preparing_mismatches = Vec::new();
+    let mut wrong_owner = preparing_base.clone();
+    wrong_owner.key = ExtensionNativeOwnershipKey::new(
+        ProfileId::from(212),
+        wrong_owner.key.install_id(),
+        wrong_owner.key.browsing_context(),
+    );
+    preparing_mismatches.push(("owner", wrong_owner.build().unwrap()));
+
+    let mut wrong_catalog_revision = preparing_base.clone();
+    wrong_catalog_revision.store_catalog_revision = wrong_catalog_revision
+        .store_catalog_revision
+        .next()
+        .unwrap();
+    preparing_mismatches.push((
+        "Store catalog revision",
+        wrong_catalog_revision.build().unwrap(),
+    ));
+    let mut wrong_install_revision = preparing_base.clone();
+    wrong_install_revision.store_install_revision = wrong_install_revision
+        .store_install_revision
+        .next()
+        .unwrap();
+    preparing_mismatches.push((
+        "Store install revision",
+        wrong_install_revision.build().unwrap(),
+    ));
+    let mut wrong_grant_revision = preparing_base.clone();
+    wrong_grant_revision.store_grant_revision =
+        wrong_grant_revision.store_grant_revision.next().unwrap();
+    preparing_mismatches.push((
+        "Store grant revision",
+        wrong_grant_revision.build().unwrap(),
+    ));
+
+    let mut wrong_operation = preparing_base.clone();
+    wrong_operation.native_incarnation = wrong_operation.native_incarnation.next().unwrap();
+    wrong_operation.operation =
+        ExtensionNativeOwnershipOperation::new(wrong_operation.native_incarnation.get()).unwrap();
+    preparing_mismatches.push(("operation/incarnation", wrong_operation.build().unwrap()));
+
+    let mut wrong_phase = preparing_base.clone();
+    wrong_phase.revision = ExtensionNativeOwnershipEntryRevision::new(2).unwrap();
+    wrong_phase.phase = ExtensionNativeOwnershipPhase::NativeMayOwn;
+    preparing_mismatches.push(("phase/revision", wrong_phase.build().unwrap()));
+
+    let mut wrong_role = preparing_base.clone();
+    wrong_role.catalog_role = ExtensionCatalogGenerationRole::Rollback;
+    preparing_mismatches.push(("catalog role", wrong_role.build().unwrap()));
+
+    for (field, mismatch) in preparing_mismatches {
+        assert!(
+            !access.matches_preparing_ownership_entry(&mismatch),
+            "preparing matcher accepted mismatched {field}"
+        );
+    }
+
     assert_eq!(
         access.fingerprint().instance().profile(),
         ProfileId::from(211)
@@ -3122,6 +3297,7 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         .unwrap();
     let provider_bytes_at_pre_host_limit = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
         .checked_sub(pre_host_fixed_bytes)
+        .and_then(|bytes| bytes.checked_sub(ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES))
         .unwrap();
     assert_ne!(provider_bytes_at_pre_host_limit, 0);
     let expected_index =
@@ -3263,7 +3439,10 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
         .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .expect("the exact aggregate retained-byte ceiling must be accepted");
     assert_eq!(
-        exact_limit_access.retained_bytes(),
+        exact_limit_access
+            .retained_bytes()
+            .checked_add(ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+            .unwrap(),
         MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
     );
     let mut exact_limit_release =
@@ -3296,6 +3475,104 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     assert_eq!(
         repository
             .release_active_bundled_package_lease(&mut over_limit_release, &over_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    const PRE_HOST_COMPANION_BYTES: usize = 113;
+    let provider_bytes_with_companion = provider_bytes_at_pre_host_limit
+        .checked_sub(PRE_HOST_COMPANION_BYTES)
+        .unwrap();
+    let companion_owner =
+        EligibilityFixture::active(&active, ProfileId::from(295), ExtensionInstallId::from(299));
+    let companion_binding =
+        companion_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let companion_cleanup = release_binding(&companion_binding);
+    arm_provider_retained_bytes_override(provider_bytes_with_companion);
+    let companion_access = acquire_active(&mut repository, companion_binding)
+        .unwrap()
+        .into_runtime_package_access_with_additional_companion_retained_bytes(
+            ExtensionRuntimeGeneration::INITIAL,
+            PRE_HOST_COMPANION_BYTES,
+        )
+        .expect("active access plus companion at the exact owner ceiling must be accepted");
+    assert_eq!(
+        companion_access
+            .retained_bytes()
+            .checked_add(ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+            .and_then(|bytes| bytes.checked_add(PRE_HOST_COMPANION_BYTES))
+            .unwrap(),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let mut companion_release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            companion_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut companion_release, &companion_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let companion_over_owner =
+        EligibilityFixture::active(&active, ProfileId::from(301), ExtensionInstallId::from(305));
+    let companion_over_binding =
+        companion_over_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let companion_over_cleanup = release_binding(&companion_over_binding);
+    arm_provider_retained_bytes_override(provider_bytes_with_companion);
+    let companion_over = acquire_active(&mut repository, companion_over_binding)
+        .unwrap()
+        .into_runtime_package_access_with_additional_companion_retained_bytes(
+            ExtensionRuntimeGeneration::INITIAL,
+            PRE_HOST_COMPANION_BYTES.checked_add(1).unwrap(),
+        )
+        .expect_err("one active companion byte above the owner ceiling must be refused");
+    assert_eq!(
+        companion_over.reason(),
+        BundledRuntimePackageAccessBuildError::RetainedBytesExceeded
+    );
+    let mut companion_over_release = companion_over
+        .try_into_lease()
+        .unwrap()
+        .into_release_request();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(
+                &mut companion_over_release,
+                &companion_over_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let companion_overflow_owner =
+        EligibilityFixture::active(&active, ProfileId::from(307), ExtensionInstallId::from(311));
+    let companion_overflow_binding = companion_overflow_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let companion_overflow_cleanup = release_binding(&companion_overflow_binding);
+    let companion_overflow = acquire_active(&mut repository, companion_overflow_binding)
+        .unwrap()
+        .into_runtime_package_access_with_additional_companion_retained_bytes(
+            ExtensionRuntimeGeneration::INITIAL,
+            usize::MAX,
+        )
+        .expect_err("active companion arithmetic overflow must be refused");
+    assert_eq!(
+        companion_overflow.reason(),
+        BundledRuntimePackageAccessBuildError::RetainedBytesOverflow
+    );
+    let mut companion_overflow_release = companion_overflow
+        .try_into_lease()
+        .unwrap()
+        .into_release_request();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(
+                &mut companion_overflow_release,
+                &companion_overflow_cleanup,
+            )
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -3413,6 +3690,267 @@ fn runtime_access_binds_inventory_reads_safely_and_retains_release_authority() {
     assert_eq!(
         repository
             .release_active_bundled_package_lease(&mut release, &complete_over_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    // Caller-owned companion state participates in the same exact host-owner
+    // ceiling, while remaining outside the repository capability itself.
+    const ADDITIONAL_COMPANION_BYTES: usize = 97;
+    let provider_bytes_with_companion = provider_bytes_at_complete_host_limit
+        .checked_sub(ADDITIONAL_COMPANION_BYTES)
+        .unwrap();
+    let companion_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(373), ExtensionInstallId::from(379));
+    let companion_limit_binding =
+        companion_limit_owner.acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let companion_limit_entry = native_may_own_entry(&companion_limit_binding);
+    let companion_limit_cleanup = release_binding(&companion_limit_binding);
+    arm_provider_retained_bytes_override(provider_bytes_with_companion);
+    let companion_limit_access = acquire_active(&mut repository, companion_limit_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let companion_limit_transient_retained_bytes =
+        active_compatibility_host_transient_retained_bytes(&companion_limit_access);
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let companion_limit_host = companion_limit_access
+        .try_into_host_activation_with_additional_companion_retained_bytes(
+            companion_limit_entry.clone(),
+            &mut host,
+            ADDITIONAL_COMPANION_BYTES,
+        )
+        .expect("the exact complete owner ceiling must include caller companion state");
+    assert_eq!(
+        companion_limit_transient_retained_bytes
+            .checked_add(ADDITIONAL_COMPANION_BYTES)
+            .unwrap()
+            .max(
+                companion_limit_host
+                    .maximum_future_retained_bytes()
+                    .checked_add(ADDITIONAL_COMPANION_BYTES)
+                    .unwrap()
+            ),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let (activation, recovery) = companion_limit_host.into_parts();
+    let (returned_entry, access, authority) = cancel_compatibility_host_activation(activation);
+    assert_eq!(returned_entry, companion_limit_entry);
+    let mut release = recovery
+        .try_into_release_request(access, authority)
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &companion_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let companion_over_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(383), ExtensionInstallId::from(389));
+    let companion_over_limit_binding = companion_over_limit_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let companion_over_limit_entry = native_may_own_entry(&companion_over_limit_binding);
+    let companion_over_limit_cleanup = release_binding(&companion_over_limit_binding);
+    arm_provider_retained_bytes_override(provider_bytes_with_companion);
+    let companion_over_limit_access = acquire_active(&mut repository, companion_over_limit_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let refusal = companion_over_limit_access
+        .try_into_host_activation_with_additional_companion_retained_bytes(
+            companion_over_limit_entry.clone(),
+            &mut host,
+            ADDITIONAL_COMPANION_BYTES.checked_add(1).unwrap(),
+        )
+        .expect_err("one caller-owned byte above the complete ceiling must be refused");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHostFactory(
+            ExtensionRuntimeHostBindError::RetainedBytesExceeded
+        )
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, companion_over_limit_entry);
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &companion_over_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let companion_overflow_owner =
+        EligibilityFixture::active(&active, ProfileId::from(409), ExtensionInstallId::from(419));
+    let companion_overflow_binding = companion_overflow_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let companion_overflow_entry = native_may_own_entry(&companion_overflow_binding);
+    let companion_overflow_cleanup = release_binding(&companion_overflow_binding);
+    let companion_overflow_access = acquire_active(&mut repository, companion_overflow_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = companion_overflow_access
+        .try_into_host_activation_with_additional_companion_retained_bytes(
+            companion_overflow_entry.clone(),
+            &mut host,
+            usize::MAX,
+        )
+        .expect_err("companion arithmetic overflow must refuse before factory binding");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RetainedBytesOverflow
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, companion_overflow_entry);
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &companion_overflow_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    // Bind-only state is charged at factory assembly, but does not permanently
+    // reduce capacity available to future host-control states.
+    const ADDITIONAL_BIND_TRANSIENT_BYTES: usize = 113;
+    let provider_bytes_with_bind_transient = provider_bytes_at_complete_host_limit
+        .checked_sub(ADDITIONAL_BIND_TRANSIENT_BYTES)
+        .unwrap();
+    let bind_transient_limit_owner =
+        EligibilityFixture::active(&active, ProfileId::from(421), ExtensionInstallId::from(431));
+    let bind_transient_limit_binding = bind_transient_limit_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let bind_transient_limit_entry = native_may_own_entry(&bind_transient_limit_binding);
+    let bind_transient_limit_cleanup = release_binding(&bind_transient_limit_binding);
+    arm_provider_retained_bytes_override(provider_bytes_with_bind_transient);
+    let bind_transient_limit_access = acquire_active(&mut repository, bind_transient_limit_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let bind_transient_limit_bytes =
+        active_compatibility_host_transient_retained_bytes(&bind_transient_limit_access);
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let bind_transient_limit_host = bind_transient_limit_access
+        .try_into_host_activation_with_additional_retained_byte_charges(
+            bind_transient_limit_entry.clone(),
+            &mut host,
+            0,
+            ADDITIONAL_BIND_TRANSIENT_BYTES,
+        )
+        .expect("the exact bind-only transient ceiling must be accepted");
+    assert_eq!(
+        bind_transient_limit_bytes
+            .checked_add(ADDITIONAL_BIND_TRANSIENT_BYTES)
+            .unwrap()
+            .max(bind_transient_limit_host.maximum_future_retained_bytes()),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let (activation, recovery) = bind_transient_limit_host.into_parts();
+    let (returned_entry, access, authority) = cancel_compatibility_host_activation(activation);
+    assert_eq!(returned_entry, bind_transient_limit_entry);
+    let mut release = recovery
+        .try_into_release_request(access, authority)
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &bind_transient_limit_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let bind_transient_over_owner =
+        EligibilityFixture::active(&active, ProfileId::from(433), ExtensionInstallId::from(439));
+    let bind_transient_over_binding = bind_transient_over_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let bind_transient_over_entry = native_may_own_entry(&bind_transient_over_binding);
+    let bind_transient_over_cleanup = release_binding(&bind_transient_over_binding);
+    arm_provider_retained_bytes_override(provider_bytes_with_bind_transient);
+    let bind_transient_over_access = acquire_active(&mut repository, bind_transient_over_binding)
+        .unwrap()
+        .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+        .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let refusal = bind_transient_over_access
+        .try_into_host_activation_with_additional_retained_byte_charges(
+            bind_transient_over_entry.clone(),
+            &mut host,
+            0,
+            ADDITIONAL_BIND_TRANSIENT_BYTES.checked_add(1).unwrap(),
+        )
+        .expect_err("one bind-only transient byte above the ceiling must be refused");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHostFactory(
+            ExtensionRuntimeHostBindError::RetainedBytesExceeded
+        )
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, bind_transient_over_entry);
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &bind_transient_over_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let bind_transient_overflow_owner =
+        EligibilityFixture::active(&active, ProfileId::from(443), ExtensionInstallId::from(449));
+    let bind_transient_overflow_binding = bind_transient_overflow_owner
+        .acquisition_binding(current, ExtensionCatalogGenerationRole::Active);
+    let bind_transient_overflow_entry = native_may_own_entry(&bind_transient_overflow_binding);
+    let bind_transient_overflow_cleanup = release_binding(&bind_transient_overflow_binding);
+    let bind_transient_overflow_access =
+        acquire_active(&mut repository, bind_transient_overflow_binding)
+            .unwrap()
+            .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+            .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = bind_transient_overflow_access
+        .try_into_host_activation_with_additional_retained_byte_charges(
+            bind_transient_overflow_entry.clone(),
+            &mut host,
+            0,
+            usize::MAX,
+        )
+        .expect_err("bind-only transient overflow must refuse before factory binding");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RetainedBytesOverflow
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, bind_transient_overflow_entry);
+    let mut release =
+        super::api::ActiveBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_active_bundled_package_lease(&mut release, &bind_transient_overflow_cleanup)
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released
     );
@@ -3628,6 +4166,7 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
         .unwrap()
         .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
+    assert!(rollback_access.matches_preparing_ownership_entry(&rollback_preparing_entry));
     let rollback_grants = Arc::new(Mutex::new(Vec::new()));
     let mut rollback_host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
         SuccessfulCompatibilityHostFactory::with_grant_observations(Arc::clone(&rollback_grants)),
@@ -3726,6 +4265,369 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
             .release_rollback_bundled_package_lease(
                 &mut rollback_refusal_release,
                 &rollback_refusal_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    // Calibrate and enforce the same bind-only accounting for the nominally
+    // distinct rollback provider and recovery token.
+    let rollback_baseline_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(457),
+        ExtensionInstallId::from(461),
+    );
+    let rollback_baseline_binding = rollback_baseline_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_baseline_entry = native_may_own_entry(&rollback_baseline_binding);
+    let rollback_baseline_cleanup = release_binding(&rollback_baseline_binding);
+    arm_provider_retained_bytes_override(1);
+    let rollback_baseline_access =
+        acquire_rollback(&mut rollback_repository, rollback_baseline_binding)
+            .unwrap()
+            .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+            .unwrap();
+    let rollback_baseline_transient =
+        rollback_compatibility_host_transient_retained_bytes(&rollback_baseline_access);
+    let rollback_pre_host_fixed_bytes = rollback_baseline_access
+        .retained_bytes()
+        .checked_sub(1)
+        .unwrap();
+    let rollback_provider_bytes_at_pre_host_limit = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .checked_sub(rollback_pre_host_fixed_bytes)
+        .and_then(|bytes| bytes.checked_sub(ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES))
+        .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let rollback_baseline_host = rollback_baseline_access
+        .try_into_host_activation(rollback_baseline_entry.clone(), &mut host)
+        .unwrap();
+    let rollback_host_fixed_bytes = rollback_baseline_transient
+        .max(rollback_baseline_host.maximum_future_retained_bytes())
+        .checked_sub(1)
+        .unwrap();
+    let rollback_provider_bytes_at_complete_limit = MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+        .checked_sub(rollback_host_fixed_bytes)
+        .unwrap();
+    let (activation, recovery) = rollback_baseline_host.into_parts();
+    let (returned_entry, access, authority) = cancel_compatibility_host_activation(activation);
+    assert_eq!(returned_entry, rollback_baseline_entry);
+    let mut release = recovery
+        .try_into_release_request(access, authority)
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(&mut release, &rollback_baseline_cleanup)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    const ROLLBACK_PRE_HOST_COMPANION_BYTES: usize = 131;
+    let rollback_provider_bytes_with_companion = rollback_provider_bytes_at_pre_host_limit
+        .checked_sub(ROLLBACK_PRE_HOST_COMPANION_BYTES)
+        .unwrap();
+    let rollback_companion_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(601),
+        ExtensionInstallId::from(607),
+    );
+    let rollback_companion_binding = rollback_companion_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_companion_cleanup = release_binding(&rollback_companion_binding);
+    arm_provider_retained_bytes_override(rollback_provider_bytes_with_companion);
+    let rollback_companion_access =
+        acquire_rollback(&mut rollback_repository, rollback_companion_binding)
+            .unwrap()
+            .into_runtime_package_access_with_additional_companion_retained_bytes(
+                ExtensionRuntimeGeneration::INITIAL,
+                ROLLBACK_PRE_HOST_COMPANION_BYTES,
+            )
+            .expect("rollback access plus companion at the exact ceiling must be accepted");
+    assert_eq!(
+        rollback_companion_access
+            .retained_bytes()
+            .checked_add(ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES)
+            .and_then(|bytes| bytes.checked_add(ROLLBACK_PRE_HOST_COMPANION_BYTES))
+            .unwrap(),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let mut rollback_companion_release =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            rollback_companion_access,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut rollback_companion_release,
+                &rollback_companion_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_companion_over_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(613),
+        ExtensionInstallId::from(617),
+    );
+    let rollback_companion_over_binding = rollback_companion_over_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_companion_over_cleanup = release_binding(&rollback_companion_over_binding);
+    arm_provider_retained_bytes_override(rollback_provider_bytes_with_companion);
+    let rollback_companion_over =
+        acquire_rollback(&mut rollback_repository, rollback_companion_over_binding)
+            .unwrap()
+            .into_runtime_package_access_with_additional_companion_retained_bytes(
+                ExtensionRuntimeGeneration::INITIAL,
+                ROLLBACK_PRE_HOST_COMPANION_BYTES.checked_add(1).unwrap(),
+            )
+            .expect_err("one rollback companion byte above the ceiling must be refused");
+    assert_eq!(
+        rollback_companion_over.reason(),
+        BundledRuntimePackageAccessBuildError::RetainedBytesExceeded
+    );
+    let mut rollback_companion_over_release = rollback_companion_over
+        .try_into_lease()
+        .unwrap()
+        .into_release_request();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut rollback_companion_over_release,
+                &rollback_companion_over_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_companion_overflow_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(619),
+        ExtensionInstallId::from(631),
+    );
+    let rollback_companion_overflow_binding = rollback_companion_overflow_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_companion_overflow_cleanup = release_binding(&rollback_companion_overflow_binding);
+    let rollback_companion_overflow = acquire_rollback(
+        &mut rollback_repository,
+        rollback_companion_overflow_binding,
+    )
+    .unwrap()
+    .into_runtime_package_access_with_additional_companion_retained_bytes(
+        ExtensionRuntimeGeneration::INITIAL,
+        usize::MAX,
+    )
+    .expect_err("rollback companion arithmetic overflow must be refused");
+    assert_eq!(
+        rollback_companion_overflow.reason(),
+        BundledRuntimePackageAccessBuildError::RetainedBytesOverflow
+    );
+    let mut rollback_companion_overflow_release = rollback_companion_overflow
+        .try_into_lease()
+        .unwrap()
+        .into_release_request();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut rollback_companion_overflow_release,
+                &rollback_companion_overflow_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    const ROLLBACK_BIND_TRANSIENT_BYTES: usize = 127;
+    let rollback_provider_bytes_with_bind_transient = rollback_provider_bytes_at_complete_limit
+        .checked_sub(ROLLBACK_BIND_TRANSIENT_BYTES)
+        .unwrap();
+    let rollback_transient_limit_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(463),
+        ExtensionInstallId::from(467),
+    );
+    let rollback_transient_limit_binding = rollback_transient_limit_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_transient_limit_entry = native_may_own_entry(&rollback_transient_limit_binding);
+    let rollback_transient_limit_cleanup = release_binding(&rollback_transient_limit_binding);
+    arm_provider_retained_bytes_override(rollback_provider_bytes_with_bind_transient);
+    let rollback_transient_limit_access =
+        acquire_rollback(&mut rollback_repository, rollback_transient_limit_binding)
+            .unwrap()
+            .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+            .unwrap();
+    let rollback_transient_limit_bytes =
+        rollback_compatibility_host_transient_retained_bytes(&rollback_transient_limit_access);
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let rollback_transient_limit_host = rollback_transient_limit_access
+        .try_into_host_activation_with_additional_retained_byte_charges(
+            rollback_transient_limit_entry.clone(),
+            &mut host,
+            0,
+            ROLLBACK_BIND_TRANSIENT_BYTES,
+        )
+        .expect("the exact rollback bind-only ceiling must be accepted");
+    assert_eq!(
+        rollback_transient_limit_bytes
+            .checked_add(ROLLBACK_BIND_TRANSIENT_BYTES)
+            .unwrap()
+            .max(rollback_transient_limit_host.maximum_future_retained_bytes()),
+        MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
+    );
+    let (activation, recovery) = rollback_transient_limit_host.into_parts();
+    let (returned_entry, access, authority) = cancel_compatibility_host_activation(activation);
+    assert_eq!(returned_entry, rollback_transient_limit_entry);
+    let mut release = recovery
+        .try_into_release_request(access, authority)
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut release,
+                &rollback_transient_limit_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_transient_over_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(479),
+        ExtensionInstallId::from(487),
+    );
+    let rollback_transient_over_binding = rollback_transient_over_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_transient_over_entry = native_may_own_entry(&rollback_transient_over_binding);
+    let rollback_transient_over_cleanup = release_binding(&rollback_transient_over_binding);
+    arm_provider_retained_bytes_override(rollback_provider_bytes_with_bind_transient);
+    let rollback_transient_over_access =
+        acquire_rollback(&mut rollback_repository, rollback_transient_over_binding)
+            .unwrap()
+            .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+            .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        SuccessfulCompatibilityHostFactory::normal(),
+    ));
+    let refusal = rollback_transient_over_access
+        .try_into_host_activation_with_additional_retained_byte_charges(
+            rollback_transient_over_entry.clone(),
+            &mut host,
+            0,
+            ROLLBACK_BIND_TRANSIENT_BYTES.checked_add(1).unwrap(),
+        )
+        .expect_err("one rollback bind-only byte above the ceiling must be refused");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RuntimeHostFactory(
+            ExtensionRuntimeHostBindError::RetainedBytesExceeded
+        )
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, rollback_transient_over_entry);
+    let mut release =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(&mut release, &rollback_transient_over_cleanup,)
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_transient_overflow_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(491),
+        ExtensionInstallId::from(499),
+    );
+    let rollback_transient_overflow_binding = rollback_transient_overflow_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_transient_overflow_entry =
+        native_may_own_entry(&rollback_transient_overflow_binding);
+    let rollback_transient_overflow_cleanup = release_binding(&rollback_transient_overflow_binding);
+    let rollback_transient_overflow_access = acquire_rollback(
+        &mut rollback_repository,
+        rollback_transient_overflow_binding,
+    )
+    .unwrap()
+    .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+    .unwrap();
+    let mut host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = rollback_transient_overflow_access
+        .try_into_host_activation_with_additional_retained_byte_charges(
+            rollback_transient_overflow_entry.clone(),
+            &mut host,
+            0,
+            usize::MAX,
+        )
+        .expect_err("rollback bind-only overflow must refuse before factory binding");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RetainedBytesOverflow
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, rollback_transient_overflow_entry);
+    let mut release =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut release,
+                &rollback_transient_overflow_cleanup,
+            )
+            .unwrap(),
+        BundledPackageLeaseReleaseOutcome::Released
+    );
+
+    let rollback_companion_overflow_owner = EligibilityFixture::rollback(
+        &rollback,
+        ProfileId::from(397),
+        ExtensionInstallId::from(401),
+    );
+    let rollback_companion_overflow_binding = rollback_companion_overflow_owner
+        .acquisition_binding(rollback_current, ExtensionCatalogGenerationRole::Rollback);
+    let rollback_companion_overflow_entry =
+        native_may_own_entry(&rollback_companion_overflow_binding);
+    let rollback_companion_overflow_cleanup = release_binding(&rollback_companion_overflow_binding);
+    let rollback_companion_overflow_access = acquire_rollback(
+        &mut rollback_repository,
+        rollback_companion_overflow_binding,
+    )
+    .unwrap()
+    .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
+    .unwrap();
+    let mut unsupported_host =
+        ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactory));
+    let refusal = rollback_companion_overflow_access
+        .try_into_host_activation_with_additional_companion_retained_bytes(
+            rollback_companion_overflow_entry.clone(),
+            &mut unsupported_host,
+            usize::MAX,
+        )
+        .expect_err("rollback companion overflow must preserve rollback authority");
+    assert_eq!(
+        refusal.reason(),
+        BundledRuntimeHostActivationBindingError::RetainedBytesOverflow
+    );
+    let (returned_access, returned_entry) = refusal.try_into_access_and_entry().unwrap();
+    assert_eq!(returned_entry, rollback_companion_overflow_entry);
+    let mut rollback_companion_overflow_release =
+        super::api::RollbackBundledPackageReleaseRequest::try_from_runtime_package_access(
+            returned_access,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback_repository
+            .release_rollback_bundled_package_lease(
+                &mut rollback_companion_overflow_release,
+                &rollback_companion_overflow_cleanup,
             )
             .unwrap(),
         BundledPackageLeaseReleaseOutcome::Released

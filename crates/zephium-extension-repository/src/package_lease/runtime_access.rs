@@ -14,11 +14,13 @@ use std::sync::Arc;
 use thiserror::Error;
 use zephium_core::extensions::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-    ExtensionExpectedNativeOwnershipIdentity, ExtensionNativeIncarnation,
-    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantDigest, ExtensionGrantRevision,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionNativeIncarnation,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey,
+    ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
     ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinHeldBinding,
-    ExtensionPackagePinRecombineRefusal, ExtensionRuntimeBackendTarget,
-    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
+    ExtensionPackagePinRecombineRefusal, ExtensionRuntimeBackendTarget, ExtensionRuntimeGeneration,
+    ExtensionRuntimeOperationAuthority,
 };
 use zephium_extension_authority::ProductExtensionRuntimeTarget;
 use zephium_extension_package::{
@@ -672,6 +674,21 @@ macro_rules! impl_runtime_package_access {
                 .unwrap_or(usize::MAX)
             }
 
+            /// Verifies that this exact package/operation capability belongs
+            /// to the supplied pre-native Store row.
+            ///
+            /// This is a structural, non-authorizing check for the serialized
+            /// service. It must pass before the service derives and persists
+            /// this capability's authenticated native-identity expectation.
+            #[must_use]
+            pub fn matches_preparing_ownership_entry(
+                &self,
+                entry: &ExtensionNativeOwnershipEntry,
+            ) -> bool {
+                self.binding
+                    .matches_preparing_ownership_entry(entry, &self.operation_authority)
+            }
+
             /// Returns the catalog-authenticated native identity that must be
             /// persisted before any platform ownership call.
             ///
@@ -703,6 +720,42 @@ macro_rules! impl_runtime_package_access {
 impl_runtime_package_access!(ActiveBundledRuntimePackageAccess);
 impl_runtime_package_access!(RollbackBundledRuntimePackageAccess);
 
+fn repository_host_retained_byte_charges<RecoveryToken>(
+    additional_companion_retained_bytes: usize,
+    additional_bind_transient_retained_bytes: usize,
+) -> Result<usize, BundledRuntimeHostActivationBindingError> {
+    let companion_retained_bytes = size_of::<RecoveryToken>()
+        .checked_add(additional_companion_retained_bytes)
+        .ok_or(BundledRuntimeHostActivationBindingError::RetainedBytesOverflow)?;
+    let complete_bind_charge = companion_retained_bytes
+        .checked_add(additional_bind_transient_retained_bytes)
+        .ok_or(BundledRuntimeHostActivationBindingError::RetainedBytesOverflow)?;
+    if complete_bind_charge > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES {
+        return Err(BundledRuntimeHostActivationBindingError::RetainedBytesExceeded);
+    }
+    Ok(companion_retained_bytes)
+}
+
+fn host_activation_row_error(
+    entry: &ExtensionNativeOwnershipEntry,
+) -> Option<ExtensionRuntimeHostActivationBindingError> {
+    use ExtensionRuntimeHostActivationBindingError as Error;
+
+    if entry.intent() != ExtensionNativeOwnershipIntent::Acquire {
+        return Some(Error::OwnershipIntentMismatch);
+    }
+    if entry.phase() != ExtensionNativeOwnershipPhase::NativeMayOwn {
+        return Some(Error::OwnershipPhaseMismatch);
+    }
+    if entry.native_identity().is_some() {
+        return Some(Error::NativeIdentityAlreadyPresent);
+    }
+    if entry.revision().get() != 2 {
+        return Some(Error::OwnershipRevisionMismatch);
+    }
+    None
+}
+
 impl ActiveBundledRuntimePackageAccess {
     /// Atomically joins this active package capability to the exact Store row
     /// and trusted engine factory without invoking a native lifecycle method.
@@ -723,6 +776,63 @@ impl ActiveBundledRuntimePackageAccess {
         factory: &mut ExtensionRuntimeHostFactory,
     ) -> Result<ActiveBundledRuntimeHostActivation, ActiveBundledRuntimeHostActivationBindingRefusal>
     {
+        self.try_into_host_activation_with_additional_companion_retained_bytes(entry, factory, 0)
+    }
+
+    /// Atomically joins active package authority while charging additional
+    /// caller-retained state that will remain beside repository recovery.
+    ///
+    /// The additional charge excludes this adapter's recovery token, which is
+    /// always included internally. Arithmetic overflow refuses before factory
+    /// binding and returns the exact package capability and ownership row.
+    pub fn try_into_host_activation_with_additional_companion_retained_bytes(
+        self,
+        entry: ExtensionNativeOwnershipEntry,
+        factory: &mut ExtensionRuntimeHostFactory,
+        additional_companion_retained_bytes: usize,
+    ) -> Result<ActiveBundledRuntimeHostActivation, ActiveBundledRuntimeHostActivationBindingRefusal>
+    {
+        self.try_into_host_activation_with_additional_retained_byte_charges(
+            entry,
+            factory,
+            additional_companion_retained_bytes,
+            0,
+        )
+    }
+
+    /// Atomically joins active package authority with separate stable and
+    /// bind-only caller charges.
+    ///
+    /// Stable companion bytes remain beside all future host states. Bind-only
+    /// transient bytes are admitted only while the factory call is in flight.
+    /// Both exclude the repository recovery token, which is added here. Input
+    /// overflow and an impossible caller-only charge refuse before factory
+    /// binding and return the exact package capability and ownership row.
+    pub fn try_into_host_activation_with_additional_retained_byte_charges(
+        self,
+        entry: ExtensionNativeOwnershipEntry,
+        factory: &mut ExtensionRuntimeHostFactory,
+        additional_companion_retained_bytes: usize,
+        additional_bind_transient_retained_bytes: usize,
+    ) -> Result<ActiveBundledRuntimeHostActivation, ActiveBundledRuntimeHostActivationBindingRefusal>
+    {
+        let companion_retained_bytes = match repository_host_retained_byte_charges::<
+            ActiveBundledRuntimePackageRecoveryToken,
+        >(
+            additional_companion_retained_bytes,
+            additional_bind_transient_retained_bytes,
+        ) {
+            Ok(companion_retained_bytes) => companion_retained_bytes,
+            Err(reason) => {
+                return Err(ActiveBundledRuntimeHostActivationBindingRefusal {
+                    reason,
+                    authority: Box::new(ActiveHostBindingRefusalAuthority::Recoverable {
+                        access: self,
+                        entry,
+                    }),
+                });
+            }
+        };
         let Self {
             access,
             operation_authority,
@@ -741,8 +851,19 @@ impl ActiveBundledRuntimePackageAccess {
                 }),
             });
         }
-        let expected_entry = entry.clone();
-        let expected_fingerprint = operation_authority.fingerprint().clone();
+        if let Some(reason) = host_activation_row_error(&entry) {
+            return Err(ActiveBundledRuntimeHostActivationBindingRefusal {
+                reason: BundledRuntimeHostActivationBindingError::RuntimeHost(reason),
+                authority: Box::new(ActiveHostBindingRefusalAuthority::Recoverable {
+                    access: Self {
+                        access,
+                        operation_authority,
+                        binding,
+                    },
+                    entry,
+                }),
+            });
+        }
         let host_binding =
             match ExtensionRuntimeHostActivationBinding::try_from_authenticated_repository(
                 entry,
@@ -758,8 +879,6 @@ impl ActiveBundledRuntimePackageAccess {
                     return Err(active_host_activation_refusal_from_parts(
                         reason,
                         binding,
-                        &expected_entry,
-                        &expected_fingerprint,
                         entry,
                         access,
                         operation_authority,
@@ -767,9 +886,10 @@ impl ActiveBundledRuntimePackageAccess {
                     ));
                 }
             };
-        let activation = match factory.bind_activation_with_companion_retained_bytes(
+        let activation = match factory.bind_activation_with_retained_byte_charges(
             host_binding,
-            size_of::<ActiveBundledRuntimePackageRecoveryToken>(),
+            companion_retained_bytes,
+            additional_bind_transient_retained_bytes,
         ) {
             Ok(activation) => activation,
             Err(refusal) => {
@@ -779,8 +899,6 @@ impl ActiveBundledRuntimePackageAccess {
                 return Err(active_host_activation_refusal_from_parts(
                     reason,
                     binding,
-                    &expected_entry,
-                    &expected_fingerprint,
                     entry,
                     access,
                     operation_authority,
@@ -791,7 +909,7 @@ impl ActiveBundledRuntimePackageAccess {
         let recovery = ActiveBundledRuntimePackageRecoveryToken { binding };
         let reason = match activation
             .maximum_future_retained_bytes()
-            .checked_add(recovery.retained_bytes())
+            .checked_add(companion_retained_bytes)
         {
             None => Some(BundledRuntimeHostActivationBindingError::RetainedBytesOverflow),
             Some(value) if value > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
@@ -805,8 +923,6 @@ impl ActiveBundledRuntimePackageAccess {
             return Err(active_host_activation_refusal_from_parts(
                 reason,
                 binding,
-                &expected_entry,
-                &expected_fingerprint,
                 entry,
                 access,
                 operation_authority,
@@ -838,6 +954,62 @@ impl RollbackBundledRuntimePackageAccess {
         RollbackBundledRuntimeHostActivation,
         RollbackBundledRuntimeHostActivationBindingRefusal,
     > {
+        self.try_into_host_activation_with_additional_companion_retained_bytes(entry, factory, 0)
+    }
+
+    /// Atomically joins rollback package authority while charging additional
+    /// caller-retained state that will remain beside repository recovery.
+    ///
+    /// The additional charge excludes this adapter's recovery token, which is
+    /// always included internally. Arithmetic overflow refuses before factory
+    /// binding and returns the exact package capability and ownership row.
+    pub fn try_into_host_activation_with_additional_companion_retained_bytes(
+        self,
+        entry: ExtensionNativeOwnershipEntry,
+        factory: &mut ExtensionRuntimeHostFactory,
+        additional_companion_retained_bytes: usize,
+    ) -> Result<
+        RollbackBundledRuntimeHostActivation,
+        RollbackBundledRuntimeHostActivationBindingRefusal,
+    > {
+        self.try_into_host_activation_with_additional_retained_byte_charges(
+            entry,
+            factory,
+            additional_companion_retained_bytes,
+            0,
+        )
+    }
+
+    /// Atomically joins rollback package authority with separate stable and
+    /// bind-only caller charges. Semantics match the active-role assembler,
+    /// while every refusal preserves nominal rollback authority.
+    pub fn try_into_host_activation_with_additional_retained_byte_charges(
+        self,
+        entry: ExtensionNativeOwnershipEntry,
+        factory: &mut ExtensionRuntimeHostFactory,
+        additional_companion_retained_bytes: usize,
+        additional_bind_transient_retained_bytes: usize,
+    ) -> Result<
+        RollbackBundledRuntimeHostActivation,
+        RollbackBundledRuntimeHostActivationBindingRefusal,
+    > {
+        let companion_retained_bytes = match repository_host_retained_byte_charges::<
+            RollbackBundledRuntimePackageRecoveryToken,
+        >(
+            additional_companion_retained_bytes,
+            additional_bind_transient_retained_bytes,
+        ) {
+            Ok(companion_retained_bytes) => companion_retained_bytes,
+            Err(reason) => {
+                return Err(RollbackBundledRuntimeHostActivationBindingRefusal {
+                    reason,
+                    authority: Box::new(RollbackHostBindingRefusalAuthority::Recoverable {
+                        access: self,
+                        entry,
+                    }),
+                });
+            }
+        };
         let Self {
             access,
             operation_authority,
@@ -856,8 +1028,19 @@ impl RollbackBundledRuntimePackageAccess {
                 }),
             });
         }
-        let expected_entry = entry.clone();
-        let expected_fingerprint = operation_authority.fingerprint().clone();
+        if let Some(reason) = host_activation_row_error(&entry) {
+            return Err(RollbackBundledRuntimeHostActivationBindingRefusal {
+                reason: BundledRuntimeHostActivationBindingError::RuntimeHost(reason),
+                authority: Box::new(RollbackHostBindingRefusalAuthority::Recoverable {
+                    access: Self {
+                        access,
+                        operation_authority,
+                        binding,
+                    },
+                    entry,
+                }),
+            });
+        }
         let host_binding =
             match ExtensionRuntimeHostActivationBinding::try_from_authenticated_repository(
                 entry,
@@ -873,8 +1056,6 @@ impl RollbackBundledRuntimePackageAccess {
                     return Err(rollback_host_activation_refusal_from_parts(
                         reason,
                         binding,
-                        &expected_entry,
-                        &expected_fingerprint,
                         entry,
                         access,
                         operation_authority,
@@ -882,9 +1063,10 @@ impl RollbackBundledRuntimePackageAccess {
                     ));
                 }
             };
-        let activation = match factory.bind_activation_with_companion_retained_bytes(
+        let activation = match factory.bind_activation_with_retained_byte_charges(
             host_binding,
-            size_of::<RollbackBundledRuntimePackageRecoveryToken>(),
+            companion_retained_bytes,
+            additional_bind_transient_retained_bytes,
         ) {
             Ok(activation) => activation,
             Err(refusal) => {
@@ -894,8 +1076,6 @@ impl RollbackBundledRuntimePackageAccess {
                 return Err(rollback_host_activation_refusal_from_parts(
                     reason,
                     binding,
-                    &expected_entry,
-                    &expected_fingerprint,
                     entry,
                     access,
                     operation_authority,
@@ -906,7 +1086,7 @@ impl RollbackBundledRuntimePackageAccess {
         let recovery = RollbackBundledRuntimePackageRecoveryToken { binding };
         let reason = match activation
             .maximum_future_retained_bytes()
-            .checked_add(recovery.retained_bytes())
+            .checked_add(companion_retained_bytes)
         {
             None => Some(BundledRuntimeHostActivationBindingError::RetainedBytesOverflow),
             Some(value) if value > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
@@ -920,8 +1100,6 @@ impl RollbackBundledRuntimePackageAccess {
             return Err(rollback_host_activation_refusal_from_parts(
                 reason,
                 binding,
-                &expected_entry,
-                &expected_fingerprint,
                 entry,
                 access,
                 operation_authority,
@@ -935,22 +1113,20 @@ impl RollbackBundledRuntimePackageAccess {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn active_host_activation_refusal_from_parts(
     reason: BundledRuntimeHostActivationBindingError,
     binding: RuntimePackageBinding,
-    expected_entry: &ExtensionNativeOwnershipEntry,
-    expected_fingerprint: &ExtensionRuntimeFingerprint,
     entry: ExtensionNativeOwnershipEntry,
     access: ExtensionPackageAccess,
     operation_authority: ExtensionRuntimeOperationAuthority,
     expectation: ExtensionRuntimeNativeIdentityExpectation,
 ) -> ActiveBundledRuntimeHostActivationBindingRefusal {
-    let returned_exactly = &entry == expected_entry
-        && expectation == binding.native_identity
-        && operation_authority.fingerprint() == expected_fingerprint
-        && operation_authority.matches_native_ownership_lineage(&entry)
-        && binding.matches_plan(access.target(), access.resources());
+    let returned_exactly = binding.matches_returned_host_activation_parts(
+        &entry,
+        &access,
+        &operation_authority,
+        expectation,
+    );
     let authority = if returned_exactly {
         ActiveHostBindingRefusalAuthority::Recoverable {
             access: ActiveBundledRuntimePackageAccess {
@@ -975,22 +1151,20 @@ fn active_host_activation_refusal_from_parts(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rollback_host_activation_refusal_from_parts(
     reason: BundledRuntimeHostActivationBindingError,
     binding: RuntimePackageBinding,
-    expected_entry: &ExtensionNativeOwnershipEntry,
-    expected_fingerprint: &ExtensionRuntimeFingerprint,
     entry: ExtensionNativeOwnershipEntry,
     access: ExtensionPackageAccess,
     operation_authority: ExtensionRuntimeOperationAuthority,
     expectation: ExtensionRuntimeNativeIdentityExpectation,
 ) -> RollbackBundledRuntimeHostActivationBindingRefusal {
-    let returned_exactly = &entry == expected_entry
-        && expectation == binding.native_identity
-        && operation_authority.fingerprint() == expected_fingerprint
-        && operation_authority.matches_native_ownership_lineage(&entry)
-        && binding.matches_plan(access.target(), access.resources());
+    let returned_exactly = binding.matches_returned_host_activation_parts(
+        &entry,
+        &access,
+        &operation_authority,
+        expectation,
+    );
     let authority = if returned_exactly {
         RollbackHostBindingRefusalAuthority::Recoverable {
             access: RollbackBundledRuntimePackageAccess {
@@ -1027,7 +1201,9 @@ macro_rules! impl_runtime_package_access_test_view {
                 self.access.target()
             }
 
-            pub(super) const fn fingerprint(&self) -> &ExtensionRuntimeFingerprint {
+            pub(super) const fn fingerprint(
+                &self,
+            ) -> &zephium_core::extensions::ExtensionRuntimeFingerprint {
                 self.operation_authority.fingerprint()
             }
 
@@ -1073,6 +1249,20 @@ macro_rules! impl_runtime_package_access_test_view {
     any(target_os = "macos", target_os = "linux")
 ))]
 impl_runtime_package_access_test_view!(ActiveBundledRuntimePackageAccess);
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+impl RollbackBundledRuntimePackageAccess {
+    pub(super) const fn package_access_retained_bytes(&self) -> usize {
+        self.access.retained_bytes()
+    }
+
+    pub(super) fn operation_authority_retained_bytes(&self) -> usize {
+        self.operation_authority.retained_bytes()
+    }
+}
 
 struct HeldPackageLeaseCore<Snapshot> {
     open_epoch: Arc<RepositoryOpenEpoch>,
@@ -1411,6 +1601,126 @@ impl fmt::Debug for RollbackBundledRuntimePackageRecoveryRefusal {
     }
 }
 
+const fn boxed_authority_additional_retained_bytes(
+    refusal_size: usize,
+    authority_size: usize,
+    nominal_authority_size: usize,
+    allocations: usize,
+) -> usize {
+    refusal_size
+        .saturating_add(authority_size.saturating_sub(nominal_authority_size))
+        .saturating_add(allocations.saturating_mul(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES))
+}
+
+const ACTIVE_BUILD_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    boxed_authority_additional_retained_bytes(
+        size_of::<ActiveBundledRuntimePackageAccessBuildRefusal>(),
+        size_of::<ActiveBuildAuthority>(),
+        size_of::<ActiveBundledPackageLease>(),
+        1,
+    );
+const ROLLBACK_BUILD_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    boxed_authority_additional_retained_bytes(
+        size_of::<RollbackBundledRuntimePackageAccessBuildRefusal>(),
+        size_of::<RollbackBuildAuthority>(),
+        size_of::<RollbackBundledPackageLease>(),
+        1,
+    );
+const ACTIVE_RECOVERY_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    size_of::<ActiveBundledRuntimePackageRecoveryRefusal>()
+        .saturating_add(size_of::<ActiveRecoveryAuthority>())
+        .saturating_add(2 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES);
+const ROLLBACK_RECOVERY_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    size_of::<RollbackBundledRuntimePackageRecoveryRefusal>()
+        .saturating_add(size_of::<RollbackRecoveryAuthority>())
+        .saturating_add(2 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES);
+const ACTIVE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    boxed_authority_additional_retained_bytes(
+        size_of::<ActiveBundledRuntimeHostActivationBindingRefusal>(),
+        size_of::<ActiveHostBindingRefusalAuthority>(),
+        size_of::<ActiveBundledRuntimePackageAccess>(),
+        1,
+    );
+const ROLLBACK_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    boxed_authority_additional_retained_bytes(
+        size_of::<RollbackBundledRuntimeHostActivationBindingRefusal>(),
+        size_of::<RollbackHostBindingRefusalAuthority>(),
+        size_of::<RollbackBundledRuntimePackageAccess>(),
+        1,
+    );
+// Planning can return the unchanged eligibility in a Box before a plan exists.
+// Its dynamic eligibility bytes remain nominally charged; this term covers the
+// refusal control and allocation itself.
+const ACQUISITION_PLANNING_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    size_of::<super::acquisition_plan::BundledRuntimeAcquisitionPlanningRefusal>()
+        .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES);
+// Acquisition can return the unchanged plan in a Box. The plan's retained
+// charge remains valid, leaving only this control/allocation increase.
+const ACQUISITION_PLAN_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
+    size_of::<super::acquisition_plan::BundledRuntimeAcquisitionPlanRefusal>()
+        .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES);
+// Include the complete transient outer result shape independently so future
+// variants cannot silently outgrow the plan-refusal term.
+const ACQUISITION_ERROR_ADDITIONAL_RETAINED_BYTES: usize =
+    size_of::<super::acquisition_plan::BundledRuntimeAcquisitionError>()
+        .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES);
+
+const fn max3(first: usize, second: usize, third: usize) -> usize {
+    let pair = if first > second { first } else { second };
+    if pair > third {
+        pair
+    } else {
+        third
+    }
+}
+
+pub(super) const ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize = max3(
+    ACTIVE_BUILD_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    ACTIVE_RECOVERY_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    ACTIVE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+);
+pub(super) const ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize = max3(
+    ROLLBACK_BUILD_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    ROLLBACK_RECOVERY_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    ROLLBACK_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+);
+
+/// Largest fixed raw-adapter wrapper/allocation increase over nominal plan,
+/// lease, or access authority before host settlement. This explicitly covers
+/// the acquisition-plan refusal returned before plan consumption as well as
+/// access-build, recovery, and host-binding refusals. Dynamic resource-plan
+/// bytes are admitted from their actual built value before lease consumption.
+pub const MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize = max3(
+    ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+    max3(
+        ACQUISITION_PLANNING_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+        ACQUISITION_PLAN_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+        ACQUISITION_ERROR_ADDITIONAL_RETAINED_BYTES,
+    ),
+);
+
+const _: () = assert!(
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+        >= ACQUISITION_PLANNING_REFUSAL_ADDITIONAL_RETAINED_BYTES
+);
+const _: () = assert!(
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+        >= ACQUISITION_PLAN_REFUSAL_ADDITIONAL_RETAINED_BYTES
+);
+const _: () = assert!(
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+        >= ACQUISITION_ERROR_ADDITIONAL_RETAINED_BYTES
+);
+const _: () = assert!(
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+        >= ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+);
+const _: () = assert!(
+    MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+        >= ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
+);
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct RuntimePackageBinding {
     target: ExtensionRuntimeTarget,
@@ -1419,7 +1729,12 @@ struct RuntimePackageBinding {
     owner: ExtensionNativeOwnershipKey,
     catalog_set_digest: ExtensionCatalogSetDigest,
     catalog_role: ExtensionCatalogGenerationRole,
+    store_catalog_revision: ExtensionInstallCatalogRevision,
+    store_install_revision: ExtensionInstallRevision,
+    store_grant_revision: ExtensionGrantRevision,
+    grant_digest: ExtensionGrantDigest,
     runtime_backend: ExtensionRuntimeBackendTarget,
+    runtime_generation: ExtensionRuntimeGeneration,
     native_incarnation: ExtensionNativeIncarnation,
     journal_operation: ExtensionNativeOwnershipOperation,
     plan_digest: [u8; 32],
@@ -1431,6 +1746,7 @@ impl RuntimePackageBinding {
         snapshot: &Snapshot,
         resources: &ExtensionRuntimeResourcePlan,
         acquisition: &ExtensionPackagePinAcquisitionBinding,
+        runtime_generation: ExtensionRuntimeGeneration,
     ) -> Result<Self, BundledRuntimePackageAccessBuildError> {
         let target = runtime_target(snapshot.runtime_target())?;
         let resource_count = u32::try_from(resources.entries().len())
@@ -1445,13 +1761,21 @@ impl RuntimePackageBinding {
             owner: acquisition.key(),
             catalog_set_digest: acquisition.catalog_set_digest(),
             catalog_role: acquisition.catalog_role(),
+            store_catalog_revision: acquisition.store_catalog_revision(),
+            store_install_revision: acquisition.store_install_revision(),
+            store_grant_revision: acquisition.store_grant_revision(),
+            grant_digest: acquisition.grant_digest(),
             runtime_backend: acquisition.runtime_backend(),
+            runtime_generation,
             native_incarnation: acquisition.native_incarnation(),
             journal_operation: acquisition.journal_operation(),
             plan_digest: resources.digest(),
             resource_count,
         };
-        if !binding.matches_snapshot(snapshot) || !binding.matches_plan(target, resources) {
+        if snapshot.package() != acquisition.package()
+            || !binding.matches_snapshot(snapshot)
+            || !binding.matches_plan(target, resources)
+        {
             return Err(BundledRuntimePackageAccessBuildError::InternalBindingMismatch);
         }
         Ok(binding)
@@ -1480,6 +1804,55 @@ impl RuntimePackageBinding {
         entry: &ExtensionNativeOwnershipEntry,
         operation_authority: &ExtensionRuntimeOperationAuthority,
     ) -> bool {
+        self.matches_ownership_entry_without_native_expectation(entry, operation_authority)
+            && native_identity_expectation_matches_durable(
+                self.native_identity,
+                entry.expected_native_identity(),
+            )
+            && entry.native_identity().is_none()
+    }
+
+    fn matches_preparing_ownership_entry(
+        &self,
+        entry: &ExtensionNativeOwnershipEntry,
+        operation_authority: &ExtensionRuntimeOperationAuthority,
+    ) -> bool {
+        self.matches_ownership_entry_without_native_expectation(entry, operation_authority)
+            && entry.intent() == ExtensionNativeOwnershipIntent::Acquire
+            && entry.phase() == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+            && entry.revision().get() == 1
+            && entry.expected_native_identity().is_none()
+            && entry.native_identity().is_none()
+    }
+
+    /// Revalidates every returned host-binding component without retaining a
+    /// duplicate ownership row or runtime fingerprint across factory binding.
+    ///
+    /// The compact binding keeps the original Store revisions, grant digest,
+    /// generation, repository lineage, and resource-plan identity. The exact
+    /// package remains committed by the original grant digest and is also
+    /// required to match between the returned row and operation fingerprint.
+    fn matches_returned_host_activation_parts(
+        &self,
+        entry: &ExtensionNativeOwnershipEntry,
+        access: &ExtensionPackageAccess,
+        operation_authority: &ExtensionRuntimeOperationAuthority,
+        expectation: ExtensionRuntimeNativeIdentityExpectation,
+    ) -> bool {
+        entry.intent() == ExtensionNativeOwnershipIntent::Acquire
+            && entry.phase() == ExtensionNativeOwnershipPhase::NativeMayOwn
+            && entry.revision().get() == 2
+            && entry.native_identity().is_none()
+            && expectation == self.native_identity
+            && self.matches_ownership_entry(entry, operation_authority)
+            && self.matches_plan(access.target(), access.resources())
+    }
+
+    fn matches_ownership_entry_without_native_expectation(
+        &self,
+        entry: &ExtensionNativeOwnershipEntry,
+        operation_authority: &ExtensionRuntimeOperationAuthority,
+    ) -> bool {
         let fingerprint = operation_authority.fingerprint();
         let instance = fingerprint.instance();
         entry.key() == self.owner
@@ -1489,18 +1862,18 @@ impl RuntimePackageBinding {
             && entry.package() == fingerprint.package()
             && entry.catalog_set_digest() == self.catalog_set_digest
             && entry.catalog_role() == self.catalog_role
+            && entry.store_catalog_revision() == self.store_catalog_revision
             && entry.store_catalog_revision() == fingerprint.catalog_revision()
+            && entry.store_install_revision() == self.store_install_revision
             && entry.store_install_revision() == fingerprint.install_revision()
+            && entry.store_grant_revision() == self.store_grant_revision
             && entry.store_grant_revision() == fingerprint.grant_revision()
+            && entry.grant_digest() == self.grant_digest
             && entry.grant_digest() == fingerprint.grant_digest()
             && entry.runtime_backend() == self.runtime_backend
-            && native_identity_expectation_matches_durable(
-                self.native_identity,
-                entry.expected_native_identity(),
-            )
-            && entry.native_identity().is_none()
             && entry.native_incarnation() == self.native_incarnation
             && entry.operation() == self.journal_operation
+            && fingerprint.instance().generation() == self.runtime_generation
             && operation_authority.matches_native_ownership_lineage(entry)
     }
 
@@ -1508,6 +1881,10 @@ impl RuntimePackageBinding {
         held.key() == self.owner
             && held.catalog_set_digest() == self.catalog_set_digest
             && held.catalog_role() == self.catalog_role
+            && held.store_catalog_revision() == self.store_catalog_revision
+            && held.store_install_revision() == self.store_install_revision
+            && held.store_grant_revision() == self.store_grant_revision
+            && held.grant_digest() == self.grant_digest
             && held.runtime_backend() == self.runtime_backend
             && held.native_incarnation() == self.native_incarnation
             && held.journal_operation() == self.journal_operation
@@ -1515,6 +1892,7 @@ impl RuntimePackageBinding {
 }
 
 trait RuntimePackageSnapshot {
+    fn package(&self) -> &ExtensionPackageIdentity;
     fn runtime_target(&self) -> ProductExtensionRuntimeTarget;
     fn chromium_key(&self) -> Option<&ChromiumManifestKey>;
     fn index(&self) -> &CanonicalExtensionTreeIndex;
@@ -1524,6 +1902,10 @@ trait RuntimePackageSnapshot {
 macro_rules! impl_runtime_snapshot {
     ($snapshot:ty) => {
         impl RuntimePackageSnapshot for $snapshot {
+            fn package(&self) -> &ExtensionPackageIdentity {
+                self.package()
+            }
+
             fn runtime_target(&self) -> ProductExtensionRuntimeTarget {
                 self.runtime_target()
             }
@@ -1723,6 +2105,19 @@ impl ActiveBundledPackageLease {
         generation: ExtensionRuntimeGeneration,
     ) -> Result<ActiveBundledRuntimePackageAccess, ActiveBundledRuntimePackageAccessBuildRefusal>
     {
+        self.into_runtime_package_access_with_additional_companion_retained_bytes(generation, 0)
+    }
+
+    /// Delegates active package authority while charging caller state retained
+    /// beside the resulting access. The charge is checked with the complete
+    /// raw access before success; every refusal reconstructs or quarantines the
+    /// exact lease authority.
+    pub fn into_runtime_package_access_with_additional_companion_retained_bytes(
+        self,
+        generation: ExtensionRuntimeGeneration,
+        additional_companion_retained_bytes: usize,
+    ) -> Result<ActiveBundledRuntimePackageAccess, ActiveBundledRuntimePackageAccessBuildRefusal>
+    {
         let resources = match build_resource_plan(self.core.snapshot.index()) {
             Ok(resources) => resources,
             Err(reason) => {
@@ -1732,10 +2127,22 @@ impl ActiveBundledPackageLease {
                 });
             }
         };
+        if let Some(reason) = pre_host_build_retained_byte_failure(
+            self.retained_bytes(),
+            resources.retained_bytes(),
+            ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+            additional_companion_retained_bytes,
+        ) {
+            return Err(ActiveBundledRuntimePackageAccessBuildRefusal {
+                reason,
+                authority: Box::new(ActiveBuildAuthority::Lease(self)),
+            });
+        }
         let binding = match RuntimePackageBinding::try_new(
             self.core.snapshot.as_ref(),
             &resources,
             self.core.acquisition.as_ref(),
+            generation,
         ) {
             Ok(binding) => binding,
             Err(reason) => {
@@ -1756,21 +2163,30 @@ impl ActiveBundledPackageLease {
                     operation_authority,
                     binding,
                 };
-                match pre_host_runtime_access_retained_bytes::<ActiveBundledRuntimePackageAccess>(
+                match pre_host_runtime_access_retained_byte_failure::<
+                    ActiveBundledRuntimePackageAccess,
+                >(
                     &access.access,
                     &access.operation_authority,
+                    additional_companion_retained_bytes
+                        .saturating_add(ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES),
                 ) {
-                    None => Err(active_pre_host_accounting_refusal(
-                        access,
-                        BundledRuntimePackageAccessBuildError::RetainedBytesOverflow,
-                    )),
-                    Some(retained) if retained > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
+                    Some(BundledRuntimePackageAccessBuildError::RetainedBytesOverflow) => {
+                        Err(active_pre_host_accounting_refusal(
+                            access,
+                            BundledRuntimePackageAccessBuildError::RetainedBytesOverflow,
+                        ))
+                    }
+                    Some(BundledRuntimePackageAccessBuildError::RetainedBytesExceeded) => {
                         Err(active_pre_host_accounting_refusal(
                             access,
                             BundledRuntimePackageAccessBuildError::RetainedBytesExceeded,
                         ))
                     }
-                    Some(_) => Ok(access),
+                    Some(_) => {
+                        unreachable!("pre-host accounting returns only retained-byte errors")
+                    }
+                    None => Ok(access),
                 }
             }
             Err(refusal) => Err(active_build_refusal(refusal, operation_authority)),
@@ -1789,6 +2205,17 @@ impl RollbackBundledPackageLease {
         generation: ExtensionRuntimeGeneration,
     ) -> Result<RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal>
     {
+        self.into_runtime_package_access_with_additional_companion_retained_bytes(generation, 0)
+    }
+
+    /// Delegates rollback authority with the same aggregate caller-companion
+    /// admission as the active role.
+    pub fn into_runtime_package_access_with_additional_companion_retained_bytes(
+        self,
+        generation: ExtensionRuntimeGeneration,
+        additional_companion_retained_bytes: usize,
+    ) -> Result<RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal>
+    {
         let resources = match build_resource_plan(self.core.snapshot.index()) {
             Ok(resources) => resources,
             Err(reason) => {
@@ -1798,10 +2225,22 @@ impl RollbackBundledPackageLease {
                 });
             }
         };
+        if let Some(reason) = pre_host_build_retained_byte_failure(
+            self.retained_bytes(),
+            resources.retained_bytes(),
+            ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+            additional_companion_retained_bytes,
+        ) {
+            return Err(RollbackBundledRuntimePackageAccessBuildRefusal {
+                reason,
+                authority: Box::new(RollbackBuildAuthority::Lease(self)),
+            });
+        }
         let binding = match RuntimePackageBinding::try_new(
             self.core.snapshot.as_ref(),
             &resources,
             self.core.acquisition.as_ref(),
+            generation,
         ) {
             Ok(binding) => binding,
             Err(reason) => {
@@ -1822,21 +2261,30 @@ impl RollbackBundledPackageLease {
                     operation_authority,
                     binding,
                 };
-                match pre_host_runtime_access_retained_bytes::<RollbackBundledRuntimePackageAccess>(
+                match pre_host_runtime_access_retained_byte_failure::<
+                    RollbackBundledRuntimePackageAccess,
+                >(
                     &access.access,
                     &access.operation_authority,
+                    additional_companion_retained_bytes
+                        .saturating_add(ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES),
                 ) {
-                    None => Err(rollback_pre_host_accounting_refusal(
-                        access,
-                        BundledRuntimePackageAccessBuildError::RetainedBytesOverflow,
-                    )),
-                    Some(retained) if retained > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
+                    Some(BundledRuntimePackageAccessBuildError::RetainedBytesOverflow) => {
+                        Err(rollback_pre_host_accounting_refusal(
+                            access,
+                            BundledRuntimePackageAccessBuildError::RetainedBytesOverflow,
+                        ))
+                    }
+                    Some(BundledRuntimePackageAccessBuildError::RetainedBytesExceeded) => {
                         Err(rollback_pre_host_accounting_refusal(
                             access,
                             BundledRuntimePackageAccessBuildError::RetainedBytesExceeded,
                         ))
                     }
-                    Some(_) => Ok(access),
+                    Some(_) => {
+                        unreachable!("pre-host accounting returns only retained-byte errors")
+                    }
+                    None => Ok(access),
                 }
             }
             Err(refusal) => Err(rollback_build_refusal(refusal, operation_authority)),
@@ -2115,6 +2563,41 @@ fn pre_host_runtime_access_retained_bytes<Access>(
     size_of::<Access>()
         .checked_add(access_exclusive)
         .and_then(|bytes| bytes.checked_add(authority_exclusive))
+}
+
+fn pre_host_runtime_access_retained_byte_failure<Access>(
+    access: &ExtensionPackageAccess,
+    operation_authority: &ExtensionRuntimeOperationAuthority,
+    additional_companion_retained_bytes: usize,
+) -> Option<BundledRuntimePackageAccessBuildError> {
+    match pre_host_runtime_access_retained_bytes::<Access>(access, operation_authority)
+        .and_then(|bytes| bytes.checked_add(additional_companion_retained_bytes))
+    {
+        None => Some(BundledRuntimePackageAccessBuildError::RetainedBytesOverflow),
+        Some(bytes) if bytes > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
+            Some(BundledRuntimePackageAccessBuildError::RetainedBytesExceeded)
+        }
+        Some(_) => None,
+    }
+}
+
+fn pre_host_build_retained_byte_failure(
+    lease_retained_bytes: usize,
+    resource_plan_retained_bytes: usize,
+    refusal_additional_retained_bytes: usize,
+    caller_companion_retained_bytes: usize,
+) -> Option<BundledRuntimePackageAccessBuildError> {
+    match lease_retained_bytes
+        .checked_add(resource_plan_retained_bytes)
+        .and_then(|bytes| bytes.checked_add(refusal_additional_retained_bytes))
+        .and_then(|bytes| bytes.checked_add(caller_companion_retained_bytes))
+    {
+        None => Some(BundledRuntimePackageAccessBuildError::RetainedBytesOverflow),
+        Some(bytes) if bytes > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES => {
+            Some(BundledRuntimePackageAccessBuildError::RetainedBytesExceeded)
+        }
+        Some(_) => None,
+    }
 }
 
 fn provider_retained_bytes<Provider, NativeRootLease>(
@@ -2686,5 +3169,18 @@ mod tests {
                 .saturating_add(size_of::<NativeRootLeaseShape>())
                 .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
         );
+    }
+
+    #[test]
+    fn pre_host_refusal_bound_explicitly_covers_acquisition_and_both_roles() {
+        for required in [
+            ACQUISITION_PLANNING_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+            ACQUISITION_PLAN_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+            ACQUISITION_ERROR_ADDITIONAL_RETAINED_BYTES,
+            ACTIVE_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+            ROLLBACK_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
+        ] {
+            assert!(MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES >= required);
+        }
     }
 }
