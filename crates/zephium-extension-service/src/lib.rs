@@ -39,6 +39,8 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+pub(crate) use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
+
 mod actor;
 mod cleanup;
 mod evidence;
@@ -50,6 +52,8 @@ mod profile_retirement;
 mod repository;
 mod startup;
 mod status;
+
+const _: () = assert!(MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES > 0);
 
 pub use actor::{
     ExtensionServiceHandle, ExtensionServiceOwner, ExtensionServiceSpawnError,

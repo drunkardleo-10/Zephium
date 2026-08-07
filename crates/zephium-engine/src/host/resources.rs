@@ -10,6 +10,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
+
 /// The process-wide hard ceiling for native webview-like resources.
 ///
 /// The current product still admits at most 32 tab views and one warm spare.
@@ -58,7 +60,7 @@ impl NativeResourceClass {
             Self::Tab => 32,
             Self::WarmSpare => 1,
             Self::TeardownDebt => MAX_NATIVE_TEARDOWN_DEBTS,
-            Self::ExtensionBackground => 3,
+            Self::ExtensionBackground => MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES,
             Self::ExtensionPopup => 1,
             Self::ReconciliationController => 1,
             Self::TransientConstruction => 2,
@@ -303,7 +305,10 @@ mod tests {
         assert_eq!(NativeResourceClass::Tab.limit(), 32);
         assert_eq!(NativeResourceClass::WarmSpare.limit(), 1);
         assert_eq!(NativeResourceClass::TeardownDebt.limit(), 8);
-        assert_eq!(NativeResourceClass::ExtensionBackground.limit(), 3);
+        assert_eq!(
+            NativeResourceClass::ExtensionBackground.limit(),
+            MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+        );
         assert_eq!(NativeResourceClass::ExtensionPopup.limit(), 1);
         assert_eq!(NativeResourceClass::ReconciliationController.limit(), 1);
         assert_eq!(NativeResourceClass::TransientConstruction.limit(), 2);

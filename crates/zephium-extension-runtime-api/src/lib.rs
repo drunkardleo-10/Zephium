@@ -19,6 +19,7 @@
 #![deny(unsafe_code)]
 
 mod access;
+mod capacity;
 mod host;
 mod lifecycle;
 mod ownership_evidence;
@@ -33,6 +34,7 @@ pub use access::{
     MAX_EXTENSION_RUNTIME_INTERRUPTED_READ_RETRIES, MAX_EXTENSION_RUNTIME_NATIVE_ROOT_BYTES,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
+pub use capacity::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 pub use host::{
     ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal,
     ExtensionRuntimeHostActivationBinding, ExtensionRuntimeHostActivationBindingError,
