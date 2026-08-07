@@ -7,7 +7,8 @@ use zephium_core::extensions::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
     ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
     ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
-    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantInitializationState,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionGrantInitializationState,
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantMutation,
     ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
@@ -486,6 +487,14 @@ fn native_ownership_preparation(
         zephium_core::extensions::ExtensionGrantDigest::from_bytes([44; 32]),
         ExtensionRuntimeBackendTarget::MacosNative,
     )
+}
+
+fn expected_native_ownership_identity() -> ExtensionExpectedNativeOwnershipIdentity {
+    ExtensionExpectedNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        "abcdefghijklmnopabcdefghijklmnop",
+    )
+    .unwrap()
 }
 
 fn load_native_ownership_journal(
@@ -1782,10 +1791,9 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
             mutate_native_ownership_journal(
                 &authority,
                 begun.journal_revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_ownership_identity(),
                 ),
             )
         else {

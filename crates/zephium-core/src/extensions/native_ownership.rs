@@ -312,6 +312,85 @@ impl fmt::Debug for ExtensionNativeOwnershipIdentity {
     }
 }
 
+/// Catalog-authenticated identity expected from one platform-native backend.
+///
+/// This value is deliberately distinct from
+/// [`ExtensionNativeOwnershipIdentity`]. An expected identity is selected from
+/// authenticated package metadata before native ownership may begin; the
+/// ordinary native identity is independent adapter-observed evidence after a
+/// native call. Keeping the types separate prevents either fact from silently
+/// standing in for the other.
+///
+/// Construction validates only the closed structural grammar. The value is
+/// non-authorizing until the serialized extension service joins it to the
+/// exact repository package binding and durable ownership row.
+///
+/// ```compile_fail
+/// use zephium_core::extensions::ExtensionExpectedNativeOwnershipIdentity;
+///
+/// let _ = ExtensionExpectedNativeOwnershipIdentity(
+///     panic!("the structural representation is private"),
+/// );
+/// ```
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExtensionExpectedNativeOwnershipIdentity(ExtensionNativeOwnershipIdentity);
+
+impl ExtensionExpectedNativeOwnershipIdentity {
+    /// Parses one exact expected identifier for the selected native backend.
+    pub fn parse(
+        backend: ExtensionRuntimeBackendTarget,
+        value: &str,
+    ) -> Result<Self, ExtensionNativeOwnershipIdentityError> {
+        ExtensionNativeOwnershipIdentity::parse(backend, value).map(Self)
+    }
+
+    /// Constructs one expected identity from its exact bounded bytes.
+    pub fn from_encoded_bytes(
+        backend: ExtensionRuntimeBackendTarget,
+        bytes: [u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+    ) -> Result<Self, ExtensionNativeOwnershipIdentityError> {
+        ExtensionNativeOwnershipIdentity::from_encoded_bytes(backend, bytes).map(Self)
+    }
+
+    /// Reconstructs only the closed durable kind vocabulary.
+    pub fn from_persisted(
+        kind: u8,
+        bytes: [u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+    ) -> Result<Self, ExtensionNativeOwnershipIdentityError> {
+        ExtensionNativeOwnershipIdentity::from_persisted(kind, bytes).map(Self)
+    }
+
+    /// Stable compact durable kind.
+    pub const fn persisted_kind(self) -> u8 {
+        self.0.persisted_kind()
+    }
+
+    /// Backend from which this identity must be observed.
+    pub const fn backend(self) -> ExtensionRuntimeBackendTarget {
+        self.0.backend()
+    }
+
+    /// Returns the exact bounded expected identifier bytes.
+    pub const fn bytes(self) -> [u8; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES] {
+        self.0.bytes()
+    }
+
+    /// Whether adapter-observed evidence is exactly the expected identity.
+    pub fn matches_observed(self, observed: ExtensionNativeOwnershipIdentity) -> bool {
+        self.backend() == observed.backend() && self.bytes() == observed.bytes()
+    }
+}
+
+impl fmt::Debug for ExtensionExpectedNativeOwnershipIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionExpectedNativeOwnershipIdentity")
+            .field("backend", &self.backend())
+            .field("identifier", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Structural native-owner identifier refusal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionNativeOwnershipIdentityError {
@@ -529,6 +608,7 @@ pub struct ExtensionNativeOwnershipEntry {
     store_grant_revision: ExtensionGrantRevision,
     grant_digest: ExtensionGrantDigest,
     runtime_backend: ExtensionRuntimeBackendTarget,
+    expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
     native_identity: Option<ExtensionNativeOwnershipIdentity>,
     native_incarnation: ExtensionNativeIncarnation,
     intent: ExtensionNativeOwnershipIntent,
@@ -591,6 +671,51 @@ impl ExtensionNativeOwnershipEntry {
         intent: ExtensionNativeOwnershipIntent,
         phase: ExtensionNativeOwnershipPhase,
     ) -> Result<Self, ExtensionNativeOwnershipJournalError> {
+        Self::from_persisted_with_native_identities(
+            key,
+            operation,
+            revision,
+            package,
+            catalog_set_digest,
+            catalog_role,
+            store_catalog_revision,
+            store_install_revision,
+            store_grant_revision,
+            grant_digest,
+            runtime_backend,
+            None,
+            native_identity,
+            native_incarnation,
+            intent,
+            phase,
+        )
+    }
+
+    /// Reconstructs a persisted row with independent expected and observed
+    /// native identities.
+    ///
+    /// An absent expectation with present observed identity is retained for
+    /// migration compatibility with the v12 cleanup journal. It is not a
+    /// fresh-activation shape and must remain cleanup-only at higher layers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persisted_with_native_identities(
+        key: ExtensionNativeOwnershipKey,
+        operation: ExtensionNativeOwnershipOperation,
+        revision: ExtensionNativeOwnershipEntryRevision,
+        package: ExtensionPackageIdentity,
+        catalog_set_digest: ExtensionCatalogSetDigest,
+        catalog_role: ExtensionCatalogGenerationRole,
+        store_catalog_revision: ExtensionInstallCatalogRevision,
+        store_install_revision: ExtensionInstallRevision,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        runtime_backend: ExtensionRuntimeBackendTarget,
+        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        native_identity: Option<ExtensionNativeOwnershipIdentity>,
+        native_incarnation: ExtensionNativeIncarnation,
+        intent: ExtensionNativeOwnershipIntent,
+        phase: ExtensionNativeOwnershipPhase,
+    ) -> Result<Self, ExtensionNativeOwnershipJournalError> {
         if operation.get() != native_incarnation.get() {
             return Err(ExtensionNativeOwnershipJournalError::OperationIncarnationMismatch);
         }
@@ -599,6 +724,15 @@ impl ExtensionNativeOwnershipEntry {
         }
         if !valid_native_identity(runtime_backend, native_identity, intent, phase) {
             return Err(ExtensionNativeOwnershipJournalError::InvalidNativeIdentity);
+        }
+        if !valid_expected_native_identity(
+            runtime_backend,
+            expected_native_identity,
+            native_identity,
+            intent,
+            phase,
+        ) {
+            return Err(ExtensionNativeOwnershipJournalError::InvalidExpectedNativeIdentity);
         }
         if !valid_entry_revision(runtime_backend, native_identity, intent, phase, revision) {
             return Err(ExtensionNativeOwnershipJournalError::InvalidEntryRevision {
@@ -619,6 +753,7 @@ impl ExtensionNativeOwnershipEntry {
             store_grant_revision,
             grant_digest,
             runtime_backend,
+            expected_native_identity,
             native_identity,
             native_incarnation,
             intent,
@@ -643,6 +778,7 @@ impl ExtensionNativeOwnershipEntry {
             store_grant_revision: preparation.store_grant_revision,
             grant_digest: preparation.grant_digest,
             runtime_backend: preparation.runtime_backend,
+            expected_native_identity: None,
             native_identity: None,
             native_incarnation,
             intent: ExtensionNativeOwnershipIntent::Acquire,
@@ -692,6 +828,13 @@ impl ExtensionNativeOwnershipEntry {
 
     pub const fn runtime_backend(&self) -> ExtensionRuntimeBackendTarget {
         self.runtime_backend
+    }
+
+    /// Exact catalog-authenticated native identity, when durably bound.
+    pub const fn expected_native_identity(
+        &self,
+    ) -> Option<ExtensionExpectedNativeOwnershipIdentity> {
+        self.expected_native_identity
     }
 
     /// Exact native owner identity, when one has been durably observed.
@@ -852,6 +995,15 @@ impl ExtensionNativeOwnershipJournal {
             ) {
                 return Err(ExtensionNativeOwnershipJournalError::InvalidNativeIdentity);
             }
+            if !valid_expected_native_identity(
+                entry.runtime_backend,
+                entry.expected_native_identity,
+                entry.native_identity,
+                entry.intent,
+                entry.phase,
+            ) {
+                return Err(ExtensionNativeOwnershipJournalError::InvalidExpectedNativeIdentity);
+            }
             if !valid_entry_revision(
                 entry.runtime_backend,
                 entry.native_identity,
@@ -989,6 +1141,7 @@ impl ExtensionNativeOwnershipJournal {
                 expected,
                 intent,
                 phase,
+                attach_expected_native_identity,
                 attach_native_identity,
             } => {
                 let index = self
@@ -1012,6 +1165,34 @@ impl ExtensionNativeOwnershipJournal {
                 {
                     return Err(ExtensionNativeOwnershipApplyError::Invalid);
                 }
+                let expected_identity_transition = attach_expected_native_identity.is_some()
+                    && current.intent == ExtensionNativeOwnershipIntent::Acquire
+                    && current.phase == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+                    && intent == ExtensionNativeOwnershipIntent::Acquire
+                    && phase == ExtensionNativeOwnershipPhase::NativeMayOwn;
+                if attach_expected_native_identity.is_some() && !expected_identity_transition {
+                    return Err(ExtensionNativeOwnershipApplyError::Invalid);
+                }
+                let fresh_native_acquisition = matches!(
+                    current.runtime_backend,
+                    ExtensionRuntimeBackendTarget::MacosNative
+                        | ExtensionRuntimeBackendTarget::WindowsNative
+                ) && current.intent
+                    == ExtensionNativeOwnershipIntent::Acquire
+                    && current.phase == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+                    && intent == ExtensionNativeOwnershipIntent::Acquire
+                    && phase == ExtensionNativeOwnershipPhase::NativeMayOwn;
+                if fresh_native_acquisition && attach_expected_native_identity.is_none() {
+                    return Err(ExtensionNativeOwnershipApplyError::Invalid);
+                }
+                if attach_expected_native_identity.is_some() && attach_native_identity.is_some() {
+                    return Err(ExtensionNativeOwnershipApplyError::Invalid);
+                }
+                if current.expected_native_identity.is_some()
+                    && attach_expected_native_identity.is_some()
+                {
+                    return Err(ExtensionNativeOwnershipApplyError::Invalid);
+                }
                 if current.native_identity.is_some() && attach_native_identity.is_some() {
                     return Err(ExtensionNativeOwnershipApplyError::Invalid);
                 }
@@ -1019,8 +1200,18 @@ impl ExtensionNativeOwnershipJournal {
                     .revision
                     .next()
                     .ok_or(ExtensionNativeOwnershipApplyError::RevisionExhausted)?;
+                let expected_native_identity = current
+                    .expected_native_identity
+                    .or(attach_expected_native_identity);
                 let native_identity = current.native_identity.or(attach_native_identity);
                 if !valid_native_identity(current.runtime_backend, native_identity, intent, phase)
+                    || !valid_expected_native_identity(
+                        current.runtime_backend,
+                        expected_native_identity,
+                        native_identity,
+                        intent,
+                        phase,
+                    )
                     || !valid_entry_revision(
                         current.runtime_backend,
                         native_identity,
@@ -1034,6 +1225,7 @@ impl ExtensionNativeOwnershipJournal {
                 self.entries[index].revision = next_entry_revision;
                 self.entries[index].intent = intent;
                 self.entries[index].phase = phase;
+                self.entries[index].expected_native_identity = expected_native_identity;
                 self.entries[index].native_identity = native_identity;
                 (
                     ExtensionNativeOwnershipMutationKind::Transition,
@@ -1096,6 +1288,9 @@ pub enum ExtensionNativeOwnershipJournalMutation {
         expected: ExtensionNativeOwnershipEntryCas,
         intent: ExtensionNativeOwnershipIntent,
         phase: ExtensionNativeOwnershipPhase,
+        /// Attach the authenticated expectation exactly once while entering
+        /// the pre-native-call `NativeMayOwn` frontier.
+        attach_expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
         /// Attach once; `None` preserves the currently persisted identity.
         attach_native_identity: Option<ExtensionNativeOwnershipIdentity>,
     },
@@ -1119,6 +1314,26 @@ impl ExtensionNativeOwnershipJournalMutation {
             expected,
             intent,
             phase,
+            attach_expected_native_identity: None,
+            attach_native_identity: None,
+        }
+    }
+
+    /// Enters one exact native `NativeMayOwn` frontier while atomically
+    /// attaching its catalog-authenticated expected identity.
+    ///
+    /// This additive constructor does not itself authorize a native call. A
+    /// higher layer must obtain the value from authenticated repository state
+    /// and settle the Store CAS before using the resulting row.
+    pub const fn transition_with_expected_native_identity(
+        expected: ExtensionNativeOwnershipEntryCas,
+        expected_native_identity: ExtensionExpectedNativeOwnershipIdentity,
+    ) -> Self {
+        Self::Transition {
+            expected,
+            intent: ExtensionNativeOwnershipIntent::Acquire,
+            phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
+            attach_expected_native_identity: Some(expected_native_identity),
             attach_native_identity: None,
         }
     }
@@ -1137,6 +1352,7 @@ impl ExtensionNativeOwnershipJournalMutation {
             expected,
             intent,
             phase,
+            attach_expected_native_identity: None,
             attach_native_identity: Some(native_identity),
         }
     }
@@ -1227,6 +1443,7 @@ pub enum ExtensionNativeOwnershipJournalError {
         revision: ExtensionNativeOwnershipEntryRevision,
     },
     InvalidNativeIdentity,
+    InvalidExpectedNativeIdentity,
     EntryAboveJournalRevision,
     RevisionHistoryInconsistent,
     RetainedBytesExceeded,
@@ -1360,6 +1577,40 @@ fn valid_native_identity(
     true
 }
 
+fn valid_expected_native_identity(
+    backend: ExtensionRuntimeBackendTarget,
+    expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+    native_identity: Option<ExtensionNativeOwnershipIdentity>,
+    intent: ExtensionNativeOwnershipIntent,
+    phase: ExtensionNativeOwnershipPhase,
+) -> bool {
+    if expected_native_identity.is_some_and(|identity| identity.backend() != backend) {
+        return false;
+    }
+    if matches!(
+        backend,
+        ExtensionRuntimeBackendTarget::MacosCompatibility
+            | ExtensionRuntimeBackendTarget::LinuxCompatibility
+    ) && expected_native_identity.is_some()
+    {
+        return false;
+    }
+    if phase == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+        && expected_native_identity.is_some()
+    {
+        return false;
+    }
+    if intent == ExtensionNativeOwnershipIntent::Acquire
+        && phase == ExtensionNativeOwnershipPhase::NativeOwned
+        && expected_native_identity.is_some_and(|expected| {
+            native_identity.is_none_or(|observed| !expected.matches_observed(observed))
+        })
+    {
+        return false;
+    }
+    true
+}
+
 fn valid_transition(
     current_intent: ExtensionNativeOwnershipIntent,
     current_phase: ExtensionNativeOwnershipPhase,
@@ -1396,6 +1647,13 @@ mod tests {
     };
 
     fn preparation(value: u128) -> ExtensionNativeOwnershipPreparation {
+        preparation_for_backend(value, ExtensionRuntimeBackendTarget::MacosNative)
+    }
+
+    fn preparation_for_backend(
+        value: u128,
+        backend: ExtensionRuntimeBackendTarget,
+    ) -> ExtensionNativeOwnershipPreparation {
         ExtensionNativeOwnershipPreparation::new(
             ExtensionNativeOwnershipKey::new(
                 ProfileId::from(1),
@@ -1416,12 +1674,19 @@ mod tests {
             ExtensionInstallRevision::INITIAL,
             ExtensionGrantRevision::INITIAL,
             ExtensionGrantDigest::from_bytes([6; 32]),
-            ExtensionRuntimeBackendTarget::MacosNative,
+            backend,
         )
     }
 
     fn native_identity(backend: ExtensionRuntimeBackendTarget) -> ExtensionNativeOwnershipIdentity {
         ExtensionNativeOwnershipIdentity::parse(backend, "abcdefghijklmnopabcdefghijklmnop")
+            .unwrap()
+    }
+
+    fn expected_native_identity(
+        backend: ExtensionRuntimeBackendTarget,
+    ) -> ExtensionExpectedNativeOwnershipIdentity {
+        ExtensionExpectedNativeOwnershipIdentity::parse(backend, "abcdefghijklmnopabcdefghijklmnop")
             .unwrap()
     }
 
@@ -1446,6 +1711,27 @@ mod tests {
         phase: ExtensionNativeOwnershipPhase,
         native_identity: Option<ExtensionNativeOwnershipIdentity>,
     ) -> Result<ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournalError> {
+        persisted_entry_for_backend(
+            operation,
+            incarnation,
+            entry_revision,
+            intent,
+            phase,
+            ExtensionRuntimeBackendTarget::MacosNative,
+            native_identity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persisted_entry_for_backend(
+        operation: u64,
+        incarnation: u64,
+        entry_revision: u64,
+        intent: ExtensionNativeOwnershipIntent,
+        phase: ExtensionNativeOwnershipPhase,
+        backend: ExtensionRuntimeBackendTarget,
+        native_identity: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> Result<ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournalError> {
         ExtensionNativeOwnershipEntry::from_persisted_with_native_identity(
             preparation(operation as u128).key(),
             ExtensionNativeOwnershipOperation::new(operation).unwrap(),
@@ -1464,7 +1750,7 @@ mod tests {
             ExtensionInstallRevision::INITIAL,
             ExtensionGrantRevision::INITIAL,
             ExtensionGrantDigest::from_bytes([6; 32]),
-            ExtensionRuntimeBackendTarget::MacosNative,
+            backend,
             native_identity,
             ExtensionNativeIncarnation::new(incarnation).unwrap(),
             intent,
@@ -1512,10 +1798,9 @@ mod tests {
         let may_own = journal
             .apply(
                 revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
                 ),
             )
             .unwrap();
@@ -1605,10 +1890,9 @@ mod tests {
         let may_own = journal
             .apply(
                 revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
                 ),
             )
             .unwrap();
@@ -1772,10 +2056,9 @@ mod tests {
             .journal
             .apply(
                 revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     current.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
                 ),
             )
             .unwrap();
@@ -1911,6 +2194,263 @@ mod tests {
             ExtensionNativeOwnershipIdentity::from_persisted(3, [b'a'; 32]),
             Err(ExtensionNativeOwnershipIdentityError::UnknownKind)
         );
+        let expected = ExtensionExpectedNativeOwnershipIdentity::parse(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            value,
+        )
+        .unwrap();
+        assert_eq!(expected.persisted_kind(), 1);
+        assert_eq!(
+            expected.backend(),
+            ExtensionRuntimeBackendTarget::MacosNative
+        );
+        assert_eq!(expected.bytes().as_slice(), value.as_bytes());
+        assert_eq!(size_of::<ExtensionExpectedNativeOwnershipIdentity>(), 33);
+        assert!(expected.matches_observed(macos));
+        assert!(!format!("{expected:?}").contains(value));
+        assert_eq!(
+            ExtensionExpectedNativeOwnershipIdentity::parse(
+                ExtensionRuntimeBackendTarget::LinuxCompatibility,
+                value,
+            ),
+            Err(ExtensionNativeOwnershipIdentityError::UnsupportedBackend)
+        );
+    }
+
+    #[test]
+    fn expected_identity_attachment_is_atomic_immutable_and_exact_cas() {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), 1);
+        let preparing = begun.entry().unwrap().clone();
+        let stale = preparing.cas();
+        let expectation = expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative);
+        let revision = begun.journal.revision();
+        let bound = begun
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expectation,
+                ),
+            )
+            .unwrap();
+        let entry = bound.entry().unwrap().clone();
+        assert_eq!(entry.expected_native_identity(), Some(expectation));
+        assert_eq!(entry.native_identity(), None);
+        assert_eq!(entry.revision().get(), 2);
+
+        assert_eq!(
+            bound.journal.clone().apply(
+                bound.journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    entry.cas(),
+                    expectation,
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Invalid)
+        );
+        assert_eq!(
+            bound.journal.clone().apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    stale,
+                    expectation,
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Conflict {
+                current: bound.journal.revision(),
+            })
+        );
+    }
+
+    #[test]
+    fn fresh_native_acquisition_requires_expectation_but_legacy_rows_remain_loadable() {
+        for backend in [
+            ExtensionRuntimeBackendTarget::MacosNative,
+            ExtensionRuntimeBackendTarget::WindowsNative,
+        ] {
+            let journal = ExtensionNativeOwnershipJournal::empty();
+            let revision = journal.revision();
+            let begun = journal
+                .apply(
+                    revision,
+                    ExtensionNativeOwnershipJournalMutation::begin(preparation_for_backend(
+                        1, backend,
+                    )),
+                )
+                .unwrap();
+            let preparing = begun.entry().unwrap().clone();
+            let revision = begun.journal.revision();
+            assert_eq!(
+                begun.journal.apply(
+                    revision,
+                    ExtensionNativeOwnershipJournalMutation::transition(
+                        preparing.cas(),
+                        ExtensionNativeOwnershipIntent::Acquire,
+                        ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    ),
+                ),
+                Err(ExtensionNativeOwnershipApplyError::Invalid),
+                "fresh {backend:?} acquisition omitted its expected identity",
+            );
+
+            let legacy = persisted_entry_for_backend(
+                1,
+                1,
+                2,
+                ExtensionNativeOwnershipIntent::Acquire,
+                ExtensionNativeOwnershipPhase::NativeMayOwn,
+                backend,
+                None,
+            )
+            .unwrap();
+            assert!(
+                ExtensionNativeOwnershipJournal::from_persisted(
+                    ExtensionNativeOwnershipJournalRevision::new(3).unwrap(),
+                    Some(ExtensionNativeOwnershipOperation::INITIAL),
+                    Some(ExtensionNativeIncarnation::INITIAL),
+                    vec![legacy],
+                )
+                .is_ok(),
+                "legacy {backend:?} cleanup frontier was rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn expected_and_observed_identity_cannot_be_attached_in_one_transition() {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), 1);
+        let preparing = begun.entry().unwrap().clone();
+        let revision = begun.journal.revision();
+        assert_eq!(
+            begun.journal.apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::Transition {
+                    expected: preparing.cas(),
+                    intent: ExtensionNativeOwnershipIntent::Acquire,
+                    phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    attach_expected_native_identity: Some(expected_native_identity(
+                        ExtensionRuntimeBackendTarget::MacosNative,
+                    )),
+                    attach_native_identity: Some(native_identity(
+                        ExtensionRuntimeBackendTarget::MacosNative,
+                    )),
+                },
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Invalid)
+        );
+    }
+
+    #[test]
+    fn expected_and_observed_mismatch_is_cleanup_loadable_but_never_owned() {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), 1);
+        let expectation = expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative);
+        let preparing = begun.entry().unwrap().clone();
+        let revision = begun.journal.revision();
+        let bound = begun
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expectation,
+                ),
+            )
+            .unwrap();
+        let bound_entry = bound.entry().unwrap().clone();
+        let observed = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [b'b'; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+        )
+        .unwrap();
+        let revision = bound.journal.revision();
+        let mismatched = bound
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                    bound_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    observed,
+                ),
+            )
+            .unwrap();
+        let mismatched_entry = mismatched.entry().unwrap().clone();
+        assert_eq!(
+            mismatched_entry.expected_native_identity(),
+            Some(expectation)
+        );
+        assert_eq!(mismatched_entry.native_identity(), Some(observed));
+        assert_eq!(
+            mismatched.journal.clone().apply(
+                mismatched.journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    mismatched_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeOwned,
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Invalid)
+        );
+        assert!(ExtensionNativeOwnershipJournal::from_persisted(
+            mismatched.journal.revision(),
+            mismatched.journal.operation_high_water(),
+            mismatched.journal.native_incarnation_high_water(),
+            mismatched.journal.entries().to_vec(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn exact_expected_and_observed_identity_can_become_owned() {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), 1);
+        let expectation = expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative);
+        let preparing = begun.entry().unwrap().clone();
+        let revision = begun.journal.revision();
+        let bound = begun
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expectation,
+                ),
+            )
+            .unwrap();
+        let bound_entry = bound.entry().unwrap().clone();
+        let observed = native_identity(ExtensionRuntimeBackendTarget::MacosNative);
+        let revision = bound.journal.revision();
+        let observed = bound
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                    bound_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    observed,
+                ),
+            )
+            .unwrap();
+        let observed_entry = observed.entry().unwrap().clone();
+        let revision = observed.journal.revision();
+        let owned = observed
+            .journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    observed_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeOwned,
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            owned.entry().unwrap().phase(),
+            ExtensionNativeOwnershipPhase::NativeOwned
+        );
+        assert_eq!(owned.entry().unwrap().revision().get(), 4);
     }
 
     #[test]
@@ -1922,10 +2462,9 @@ mod tests {
             .journal
             .apply(
                 revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
                 ),
             )
             .unwrap();
@@ -1994,10 +2533,9 @@ mod tests {
             .journal
             .apply(
                 revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
                 ),
             )
             .unwrap();
@@ -2058,10 +2596,9 @@ mod tests {
             .journal
             .apply(
                 revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
                 ),
             )
             .unwrap();

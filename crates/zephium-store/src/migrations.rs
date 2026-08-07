@@ -10,8 +10,9 @@ use rusqlite::{Connection, Transaction};
 // Core authority bound. SQL migration text cannot interpolate a Rust const.
 const _: [(); 1024] =
     [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES];
-// Keep META v12's fixed-width native identity checks tied to Core. A changed
-// native grammar must never leave SQLite accepting a different authority.
+// Keep META v12/v13's fixed-width native identity checks tied to Core. A
+// changed native grammar must never leave SQLite accepting a different
+// authority.
 const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID_BYTES];
 
 pub struct Migration {
@@ -821,6 +822,57 @@ pub static META: &[Migration] = &[
                          FROM extension_native_ownership_journal
                      );
                  END;",
+            )
+        },
+    },
+    Migration {
+        version: 13,
+        up: |tx| {
+            tx.execute_batch(
+                // The package-authenticated expectation and adapter-observed
+                // identity are independent facts. Keep every v12 expectation
+                // NULL: migration cannot infer trust from an observed owner.
+                // Legacy observed-only rows remain representable so startup
+                // recovery can conservatively clean them up.
+                "ALTER TABLE extension_native_ownership_journal
+                     ADD COLUMN expected_native_identity_kind INTEGER;
+                 ALTER TABLE extension_native_ownership_journal
+                     ADD COLUMN expected_native_identity BLOB
+                     CHECK (
+                         (expected_native_identity_kind IS NULL
+                          AND expected_native_identity IS NULL)
+                         OR
+                         (expected_native_identity_kind IS NOT NULL
+                          AND expected_native_identity IS NOT NULL
+                          AND (
+                              (expected_native_identity_kind = 1
+                               AND runtime_backend = 'macos_native'
+                               AND typeof(expected_native_identity) = 'blob'
+                               AND length(expected_native_identity) = 32
+                               AND length(CAST(expected_native_identity AS TEXT)) = 32
+                               AND CAST(expected_native_identity AS TEXT) NOT GLOB '*[^a-p]*')
+                              OR
+                              (expected_native_identity_kind = 2
+                               AND runtime_backend = 'windows_native'
+                               AND typeof(expected_native_identity) = 'blob'
+                               AND length(expected_native_identity) = 32
+                               AND length(CAST(expected_native_identity AS TEXT)) = 32
+                               AND CAST(expected_native_identity AS TEXT) NOT GLOB '*[^a-p]*')
+                          ))
+                     )
+                     CHECK (
+                         phase != 'native_absent_preparing'
+                         OR expected_native_identity IS NULL
+                     )
+                     CHECK (
+                         expected_native_identity IS NULL
+                         OR intent != 'acquire'
+                         OR phase != 'native_owned'
+                         OR (native_identity_kind IS NOT NULL
+                             AND native_identity IS NOT NULL
+                             AND native_identity_kind = expected_native_identity_kind
+                             AND native_identity = expected_native_identity)
+                     );",
             )
         },
     },
@@ -1998,7 +2050,7 @@ mod tests {
         )
         .unwrap();
 
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..12]).unwrap();
 
         let identity: (Option<i64>, Option<Vec<u8>>) = conn
             .query_row(
@@ -2030,7 +2082,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(apply(&mut conn, META).is_err());
+        assert!(apply(&mut conn, &META[..12]).is_err());
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
@@ -2059,7 +2111,7 @@ mod tests {
             )
             .unwrap();
 
-            apply(&mut conn, META).unwrap();
+            apply(&mut conn, &META[..12]).unwrap();
             let row: (i64, Option<i64>, Option<Vec<u8>>) = conn
                 .query_row(
                     "SELECT revision, native_identity_kind, native_identity
@@ -2075,7 +2127,7 @@ mod tests {
     #[test]
     fn meta_v12_schema_mirrors_native_identity_shape_and_backend() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..12]).unwrap();
         insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
         conn.execute(
             "UPDATE extension_native_ownership_journal
@@ -2139,7 +2191,7 @@ mod tests {
     #[test]
     fn meta_v12_trigger_accepts_only_extended_reachable_history_ceiling() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..12]).unwrap();
         insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
             .unwrap();
         conn.execute(
@@ -2163,6 +2215,137 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn meta_v13_adds_expected_identity_without_inferring_it_from_observation() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..12]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
+        let observed = vec![b'a'; 32];
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET revision = 3,
+                 phase = 'native_owned',
+                 native_identity_kind = 1,
+                 native_identity = ?1",
+            [&observed],
+        )
+        .unwrap();
+        insert_native_ownership_test_row(&conn, 2, 4, 2, "release", "native_may_own").unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 8,
+                 operation_high_water = 2,
+                 native_incarnation_high_water = 2",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let mut statement = conn
+            .prepare(
+                "SELECT expected_native_identity_kind, expected_native_identity,
+                        native_identity_kind, native_identity
+                 FROM extension_native_ownership_journal
+                 ORDER BY operation",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (None, None, Some(1), Some(observed)),
+                (None, None, None, None),
+            ]
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
+    }
+
+    #[test]
+    fn meta_v13_enforces_expected_identity_shape_backend_and_owned_match() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
+        let expected = vec![b'a'; 32];
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET expected_native_identity_kind = 1,
+                 expected_native_identity = ?1",
+            [&expected],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal
+                 SET revision = 3, phase = 'native_owned'",
+                [],
+            )
+            .is_err());
+
+        for update in [
+            "expected_native_identity_kind = NULL",
+            "expected_native_identity_kind = 2",
+            "expected_native_identity = zeroblob(31)",
+            "expected_native_identity = zeroblob(33)",
+            "expected_native_identity = zeroblob(32)",
+            "expected_native_identity = NULL",
+        ] {
+            assert!(
+                conn.execute(
+                    &format!("UPDATE extension_native_ownership_journal SET {update}"),
+                    [],
+                )
+                .is_err(),
+                "accepted invalid expected identity update: {update}"
+            );
+        }
+
+        let observed_mismatch = vec![b'b'; 32];
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET revision = 3,
+                 native_identity_kind = 1,
+                 native_identity = ?1",
+            [&observed_mismatch],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal
+                 SET revision = 4, phase = 'native_owned'",
+                [],
+            )
+            .is_err());
+
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET native_identity = ?1",
+            [&expected],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET revision = 4, phase = 'native_owned'",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

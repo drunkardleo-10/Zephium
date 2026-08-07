@@ -689,12 +689,12 @@ mod tests {
 
     use zephium_core::extensions::{
         ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-        ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
-        ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-        ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipKey,
-        ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-        ExtensionTreeDigest,
+        ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext,
+        ExtensionGrantDigest, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
+        ExtensionInstallRevision, ExtensionManifestDigest, ExtensionNativeOwnershipJournal,
+        ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+        ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
+        ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
     use zephium_core::ports::store::{
@@ -997,6 +997,17 @@ mod tests {
         preparation_for(ProfileId::from(1), install)
     }
 
+    fn expected_native_identity(
+        install_id: ExtensionInstallId,
+    ) -> ExtensionExpectedNativeOwnershipIdentity {
+        let identifier_byte = b'a' + (install_id.bytes()[15] & 0x0f);
+        ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [identifier_byte; 32],
+        )
+        .unwrap()
+    }
+
     fn begin_for(
         journal: ExtensionNativeOwnershipJournal,
         profile: ProfileId,
@@ -1027,8 +1038,19 @@ mod tests {
     ) -> ExtensionNativeOwnershipJournal {
         let expected = journal.revision();
         let row = journal.get(key).unwrap();
-        let mutation =
-            ExtensionNativeOwnershipJournalMutation::transition(row.cas(), intent, phase);
+        let mutation = if row.runtime_backend() == ExtensionRuntimeBackendTarget::MacosNative
+            && row.intent() == ExtensionNativeOwnershipIntent::Acquire
+            && row.phase() == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+            && intent == ExtensionNativeOwnershipIntent::Acquire
+            && phase == ExtensionNativeOwnershipPhase::NativeMayOwn
+        {
+            ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                row.cas(),
+                expected_native_identity(key.install_id()),
+            )
+        } else {
+            ExtensionNativeOwnershipJournalMutation::transition(row.cas(), intent, phase)
+        };
         journal.apply(expected, mutation).unwrap().into_journal()
     }
 

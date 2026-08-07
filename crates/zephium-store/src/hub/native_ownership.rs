@@ -4,16 +4,17 @@ use super::*;
 
 use zephium_core::extensions::{
     ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-    ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-    ExtensionNativeIncarnation, ExtensionNativeOwnershipApplyError, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
-    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipMutationKind,
-    ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-    ExtensionTreeDigest, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, EXTENSION_SHA256_BYTES,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
+    ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDigest, ExtensionNativeIncarnation, ExtensionNativeOwnershipApplyError,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryRevision,
+    ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
+    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+    ExtensionNativeOwnershipMutationKind, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
+    EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, EXTENSION_SHA256_BYTES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
 };
 use zephium_core::ids::ExtensionInstallId;
@@ -67,6 +68,20 @@ const LOAD_JOURNAL_ROWS_SQL: &str =
          store_grant_revision,
          CASE WHEN typeof(grant_sha256) = 'blob' AND length(grant_sha256) = 32 THEN grant_sha256 END,
          CASE WHEN length(CAST(runtime_backend AS BLOB)) <= 32 THEN runtime_backend END,
+         CASE
+             WHEN expected_native_identity_kind IS NULL AND expected_native_identity IS NULL THEN 0
+             WHEN typeof(expected_native_identity_kind) = 'integer'
+                  AND expected_native_identity_kind IN (1, 2)
+                  AND typeof(expected_native_identity) = 'blob'
+                  AND length(expected_native_identity) = 32
+             THEN 1
+         END AS bounded_expected_native_identity_valid,
+         CASE WHEN typeof(expected_native_identity_kind) = 'integer'
+                        AND expected_native_identity_kind IN (1, 2)
+              THEN expected_native_identity_kind END,
+         CASE WHEN typeof(expected_native_identity) = 'blob'
+                        AND length(expected_native_identity) = 32
+              THEN expected_native_identity END,
          CASE
              WHEN native_identity_kind IS NULL AND native_identity IS NULL THEN 0
              WHEN typeof(native_identity_kind) = 'integer'
@@ -369,9 +384,12 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
             row.get::<_, Option<i64>>(20)?,
             row.get::<_, Option<i64>>(21)?,
             row.get::<_, Option<Vec<u8>>>(22)?,
-            row.get::<_, i64>(23)?,
-            row.get::<_, Option<String>>(24)?,
-            row.get::<_, Option<String>>(25)?,
+            row.get::<_, Option<i64>>(23)?,
+            row.get::<_, Option<i64>>(24)?,
+            row.get::<_, Option<Vec<u8>>>(25)?,
+            row.get::<_, i64>(26)?,
+            row.get::<_, Option<String>>(27)?,
+            row.get::<_, Option<String>>(28)?,
         ))
     })?;
     let mut entries = Vec::with_capacity(count as usize);
@@ -397,6 +415,9 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
             store_grant_revision,
             grant_digest,
             runtime_backend,
+            expected_native_identity_valid,
+            expected_native_identity_kind,
+            expected_native_identity,
             native_identity_valid,
             native_identity_kind,
             native_identity,
@@ -479,6 +500,11 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
             .as_deref()
             .and_then(ExtensionRuntimeBackendTarget::from_persisted)
             .ok_or_else(|| invalid_data("native-ownership runtime backend is invalid"))?;
+        let expected_native_identity = decode_expected_native_identity(
+            expected_native_identity_valid,
+            expected_native_identity_kind,
+            expected_native_identity,
+        )?;
         let native_identity =
             decode_native_identity(native_identity_valid, native_identity_kind, native_identity)?;
         let native_incarnation = revision_u64(native_incarnation)
@@ -493,7 +519,7 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
             .and_then(ExtensionNativeOwnershipPhase::from_persisted)
             .ok_or_else(|| invalid_data("native-ownership phase is invalid"))?;
         entries.push(
-            ExtensionNativeOwnershipEntry::from_persisted_with_native_identity(
+            ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
                 ExtensionNativeOwnershipKey::new(profile, install_id, browsing_context),
                 operation,
                 entry_revision,
@@ -505,6 +531,7 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
                 store_grant_revision,
                 grant_digest,
                 runtime_backend,
+                expected_native_identity,
                 native_identity,
                 native_incarnation,
                 intent,
@@ -538,6 +565,9 @@ fn insert_entry(conn: &Connection, entry: &ExtensionNativeOwnershipEntry) -> rus
     let tree = package.tree_sha256().bytes();
     let catalog_set = entry.catalog_set_digest().bytes();
     let grant_digest = entry.grant_digest().bytes();
+    let expected_native_identity = entry
+        .expected_native_identity()
+        .map(|identity| identity.bytes());
     let native_identity = entry.native_identity().map(|identity| identity.bytes());
     let inserted = conn.execute(
         "INSERT INTO extension_native_ownership_journal(
@@ -547,12 +577,14 @@ fn insert_entry(conn: &Connection, entry: &ExtensionNativeOwnershipEntry) -> rus
              manifest_sha256, tree_sha256,
              catalog_set_sha256, catalog_role,
              store_catalog_revision, store_install_revision, store_grant_revision,
-             grant_sha256, runtime_backend, native_identity_kind, native_identity,
+             grant_sha256, runtime_backend,
+             expected_native_identity_kind, expected_native_identity,
+             native_identity_kind, native_identity,
              native_incarnation, intent, phase
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
              ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
-             ?24, ?25
+             ?24, ?25, ?26, ?27
          )",
         params![
             key.profile().to_string(),
@@ -575,6 +607,12 @@ fn insert_entry(conn: &Connection, entry: &ExtensionNativeOwnershipEntry) -> rus
             revision_i64(entry.store_grant_revision().get())?,
             &grant_digest[..],
             entry.runtime_backend().as_persisted(),
+            entry
+                .expected_native_identity()
+                .map(|identity| i64::from(identity.persisted_kind())),
+            expected_native_identity
+                .as_ref()
+                .map(|identity| &identity[..]),
             entry
                 .native_identity()
                 .map(|identity| i64::from(identity.persisted_kind())),
@@ -607,14 +645,19 @@ fn update_entry(
     }
     let key = expected.key();
     let install_id = key.install_id().bytes();
+    let expected_native_identity = entry
+        .expected_native_identity()
+        .map(|identity| identity.bytes());
     let native_identity = entry.native_identity().map(|identity| identity.bytes());
     let updated = conn.execute(
         "UPDATE extension_native_ownership_journal
          SET revision = ?6,
              intent = ?7,
              phase = ?8,
-             native_identity_kind = ?10,
-             native_identity = ?11
+             expected_native_identity_kind = ?10,
+             expected_native_identity = ?11,
+             native_identity_kind = ?12,
+             native_identity = ?13
          WHERE profile_id = ?1
            AND install_id = ?2
            AND browsing_context = ?3
@@ -631,6 +674,12 @@ fn update_entry(
             entry.intent().as_persisted(),
             entry.phase().as_persisted(),
             revision_i64(expected.native_incarnation().get())?,
+            entry
+                .expected_native_identity()
+                .map(|identity| i64::from(identity.persisted_kind())),
+            expected_native_identity
+                .as_ref()
+                .map(|identity| &identity[..]),
             entry
                 .native_identity()
                 .map(|identity| i64::from(identity.persisted_kind())),
@@ -714,6 +763,28 @@ fn decode_native_identity(
     }
 }
 
+fn decode_expected_native_identity(
+    validity: Option<i64>,
+    kind: Option<i64>,
+    value: Option<Vec<u8>>,
+) -> rusqlite::Result<Option<ExtensionExpectedNativeOwnershipIdentity>> {
+    match (validity, kind, value) {
+        (Some(0), None, None) => Ok(None),
+        (Some(1), Some(kind @ 1..=2), Some(value)) => {
+            let bytes = exact_blob::<EXTENSION_NATIVE_OWNERSHIP_ID_BYTES>(
+                Some(value),
+                "native-ownership expected native identity is invalid",
+            )?;
+            ExtensionExpectedNativeOwnershipIdentity::from_persisted(kind as u8, bytes)
+                .map(Some)
+                .map_err(|_| invalid_data("native-ownership expected native identity is invalid"))
+        }
+        _ => Err(invalid_data(
+            "native-ownership expected native identity presence is invalid",
+        )),
+    }
+}
+
 fn decode_operation_high_water(
     value: Option<i64>,
 ) -> rusqlite::Result<Option<ExtensionNativeOwnershipOperation>> {
@@ -776,6 +847,14 @@ mod tests {
 
     fn native_identity() -> ExtensionNativeOwnershipIdentity {
         ExtensionNativeOwnershipIdentity::parse(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            "abcdefghijklmnopabcdefghijklmnop",
+        )
+        .unwrap()
+    }
+
+    fn expected_native_identity() -> ExtensionExpectedNativeOwnershipIdentity {
+        ExtensionExpectedNativeOwnershipIdentity::parse(
             ExtensionRuntimeBackendTarget::MacosNative,
             "abcdefghijklmnopabcdefghijklmnop",
         )
@@ -862,6 +941,30 @@ mod tests {
             ExtensionGrantDigest::from_bytes([6; 32]),
             ExtensionRuntimeBackendTarget::MacosNative,
         )
+    }
+
+    fn expected_may_own_entry(profile: ProfileId) -> ExtensionNativeOwnershipEntry {
+        let begun = ExtensionNativeOwnershipJournal::empty()
+            .apply(
+                ExtensionNativeOwnershipJournalRevision::INITIAL,
+                ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
+            )
+            .unwrap();
+        let preparing = begun.entry().unwrap().clone();
+        let journal = begun.journal().clone();
+        let revision = journal.revision();
+        journal
+            .apply(
+                revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expected_native_identity(),
+                ),
+            )
+            .unwrap()
+            .entry()
+            .unwrap()
+            .clone()
     }
 
     #[test]
@@ -1151,6 +1254,57 @@ mod tests {
     }
 
     #[test]
+    fn load_preserves_expected_and_observed_identity_independently() {
+        let conn = database();
+        let expected = expected_native_identity();
+        let observed = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            [b'b'; EXTENSION_NATIVE_OWNERSHIP_ID_BYTES],
+        )
+        .unwrap();
+        let persisted = ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            ExtensionNativeOwnershipKey::new(
+                ProfileId::from(94),
+                ExtensionInstallId::from(1),
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionNativeOwnershipOperation::INITIAL,
+            ExtensionNativeOwnershipEntryRevision::new(3).unwrap(),
+            package(),
+            ExtensionCatalogSetDigest::from_bytes([5; 32]),
+            ExtensionCatalogGenerationRole::Active,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallRevision::INITIAL,
+            ExtensionGrantRevision::INITIAL,
+            ExtensionGrantDigest::from_bytes([6; 32]),
+            ExtensionRuntimeBackendTarget::MacosNative,
+            Some(expected),
+            Some(observed),
+            ExtensionNativeIncarnation::INITIAL,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        )
+        .unwrap();
+        insert_entry(&conn, &persisted).unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 4,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+
+        let loaded = load_journal(&conn).unwrap();
+        assert_eq!(loaded.entries(), &[persisted]);
+        assert_eq!(
+            loaded.entries()[0].expected_native_identity(),
+            Some(expected)
+        );
+        assert_eq!(loaded.entries()[0].native_identity(), Some(observed));
+    }
+
+    #[test]
     fn load_rejects_malformed_oversize_or_cross_backend_native_identity() {
         for column_update in [
             "native_identity_kind = NULL",
@@ -1187,6 +1341,174 @@ mod tests {
     }
 
     #[test]
+    fn load_rejects_malformed_oversize_or_cross_backend_expected_identity() {
+        for column_update in [
+            "expected_native_identity_kind = NULL",
+            "expected_native_identity_kind = 3",
+            "expected_native_identity = NULL",
+            "expected_native_identity = zeroblob(4096)",
+            "expected_native_identity = zeroblob(32)",
+            "runtime_backend = 'windows_native'",
+        ] {
+            let conn = database();
+            insert_entry(&conn, &expected_may_own_entry(ProfileId::from(95))).unwrap();
+            conn.execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 3,
+                     operation_high_water = 1,
+                     native_incarnation_high_water = 1",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            conn.execute(
+                &format!("UPDATE extension_native_ownership_journal SET {column_update}"),
+                [],
+            )
+            .unwrap();
+            assert!(load_journal(&conn).is_err(), "accepted {column_update}");
+        }
+    }
+
+    #[test]
+    fn bounded_loader_rejects_text_typed_expected_identity_without_schema_help() {
+        let conn = database();
+        insert_entry(&conn, &expected_may_own_entry(ProfileId::from(98))).unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 3,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER extension_native_ownership_journal_capacity;
+             DROP TRIGGER extension_native_ownership_journal_state_reachable;
+             ALTER TABLE extension_native_ownership_journal
+                 RENAME TO extension_native_ownership_journal_strict;
+             CREATE TABLE extension_native_ownership_journal AS
+                 SELECT * FROM extension_native_ownership_journal_strict;
+             DROP TABLE extension_native_ownership_journal_strict;",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET expected_native_identity = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+            [],
+        )
+        .unwrap();
+
+        assert!(load_journal(&conn).is_err());
+    }
+
+    #[test]
+    fn expected_identity_commit_ambiguity_reloads_and_stale_replay_conflicts() {
+        let mut hub = Hub::in_memory().unwrap();
+        let profile = ProfileId::from(96);
+        assert!(hub.registry.insert(profile));
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(empty) =
+            hub.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("empty native-ownership journal did not load");
+        };
+        let begun = match hub
+            .mutate_extension_native_ownership_journal(
+                empty.revision(),
+                ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
+            )
+            .unwrap()
+        {
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => applied,
+            other => panic!("begin failed: {other:?}"),
+        };
+        let preparing = *begun.entry.unwrap();
+        let expected = expected_native_identity();
+        hub.make_next_extension_native_ownership_commit_ambiguous();
+        assert_eq!(
+            hub.mutate_extension_native_ownership_journal(
+                begun.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expected,
+                ),
+            )
+            .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown
+        );
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(reloaded) =
+            hub.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("native-ownership journal did not reload");
+        };
+        assert_eq!(
+            reloaded.entries()[0].expected_native_identity(),
+            Some(expected)
+        );
+        assert_eq!(reloaded.entries()[0].native_identity(), None);
+        assert_eq!(
+            hub.mutate_extension_native_ownership_journal(
+                begun.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expected,
+                ),
+            )
+            .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
+                current: reloaded.revision(),
+            }
+        );
+    }
+
+    #[test]
+    fn store_rejects_combined_expected_and_observed_attachment_without_mutation() {
+        let mut hub = Hub::in_memory().unwrap();
+        let profile = ProfileId::from(97);
+        assert!(hub.registry.insert(profile));
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(empty) =
+            hub.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("empty native-ownership journal did not load");
+        };
+        let begun = match hub
+            .mutate_extension_native_ownership_journal(
+                empty.revision(),
+                ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
+            )
+            .unwrap()
+        {
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => applied,
+            other => panic!("begin failed: {other:?}"),
+        };
+        let preparing = *begun.entry.unwrap();
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(before) =
+            hub.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("native-ownership journal did not load before refusal");
+        };
+        assert_eq!(
+            hub.mutate_extension_native_ownership_journal(
+                begun.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::Transition {
+                    expected: preparing.cas(),
+                    intent: ExtensionNativeOwnershipIntent::Acquire,
+                    phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    attach_expected_native_identity: Some(expected_native_identity()),
+                    attach_native_identity: Some(native_identity()),
+                },
+            )
+            .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid
+        );
+        assert_eq!(
+            hub.load_extension_native_ownership_journal().unwrap(),
+            ExtensionNativeOwnershipJournalLoadOutcome::Loaded(before)
+        );
+    }
+
+    #[test]
     fn identity_commit_ambiguity_reloads_exactly_and_stale_replay_conflicts() {
         let mut hub = Hub::in_memory().unwrap();
         let profile = ProfileId::from(93);
@@ -1210,10 +1532,9 @@ mod tests {
         let may_own = match hub
             .mutate_extension_native_ownership_journal(
                 begun.journal_revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    expected_native_identity(),
                 ),
             )
             .unwrap()

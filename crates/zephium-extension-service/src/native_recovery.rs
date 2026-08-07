@@ -774,11 +774,11 @@ mod tests {
 
     use zephium_core::extensions::{
         ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-        ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
-        ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-        ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipKey,
-        ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackagePinReleaseBinding,
+        ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext,
+        ExtensionGrantDigest, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
+        ExtensionInstallRevision, ExtensionManifestDigest, ExtensionNativeOwnershipJournal,
+        ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+        ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackagePinReleaseBinding,
         ExtensionPackageRevision, ExtensionTreeDigest,
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
@@ -1112,6 +1112,37 @@ mod tests {
         )
     }
 
+    fn expected_native_identity(
+        backend: ExtensionRuntimeBackendTarget,
+        install_id: ExtensionInstallId,
+    ) -> ExtensionExpectedNativeOwnershipIdentity {
+        let identifier_byte = b'a' + (install_id.bytes()[15] & 0x0f);
+        ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(backend, [identifier_byte; 32])
+            .unwrap()
+    }
+
+    fn possible_owner_transition(
+        entry: &ExtensionNativeOwnershipEntry,
+    ) -> ExtensionNativeOwnershipJournalMutation {
+        match entry.runtime_backend() {
+            ExtensionRuntimeBackendTarget::MacosNative
+            | ExtensionRuntimeBackendTarget::WindowsNative => {
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    entry.cas(),
+                    expected_native_identity(entry.runtime_backend(), entry.key().install_id()),
+                )
+            }
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+            | ExtensionRuntimeBackendTarget::LinuxCompatibility => {
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    entry.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                )
+            }
+        }
+    }
+
     fn possible_owner(backend: ExtensionRuntimeBackendTarget) -> ExtensionNativeOwnershipJournal {
         let journal = ExtensionNativeOwnershipJournal::empty();
         let revision = journal.revision();
@@ -1125,14 +1156,7 @@ mod tests {
         let entry = journal.entries()[0].clone();
         let revision = journal.revision();
         journal
-            .apply(
-                revision,
-                ExtensionNativeOwnershipJournalMutation::transition(
-                    entry.cas(),
-                    ExtensionNativeOwnershipIntent::Acquire,
-                    ExtensionNativeOwnershipPhase::NativeMayOwn,
-                ),
-            )
+            .apply(revision, possible_owner_transition(&entry))
             .unwrap()
             .into_journal()
     }
@@ -1156,14 +1180,7 @@ mod tests {
             let entry = journal.get(key).unwrap().clone();
             let revision = journal.revision();
             journal = journal
-                .apply(
-                    revision,
-                    ExtensionNativeOwnershipJournalMutation::transition(
-                        entry.cas(),
-                        ExtensionNativeOwnershipIntent::Acquire,
-                        ExtensionNativeOwnershipPhase::NativeMayOwn,
-                    ),
-                )
+                .apply(revision, possible_owner_transition(&entry))
                 .unwrap()
                 .into_journal();
         }

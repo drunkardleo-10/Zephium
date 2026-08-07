@@ -65,7 +65,8 @@ pub use manifest::{
     MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
 };
 pub use native_ownership::{
-    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionNativeIncarnation,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionNativeIncarnation,
     ExtensionNativeOwnershipApplyError, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipEntryRevision,
     ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIdentityError,
