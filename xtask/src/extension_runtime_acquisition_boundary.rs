@@ -5,6 +5,42 @@ const PLAN_OWNER: &str =
     "crates/zephium-extension-repository/src/package_lease/acquisition_plan.rs";
 const RAW_ACQUISITION_OWNER: &str =
     "crates/zephium-extension-repository/src/package_lease/repository.rs";
+const SERVICE_RUNTIME_TRANSACTION_OWNER: &str =
+    "crates/zephium-extension-service/src/repository/runtime_transactions.rs";
+
+const SERVICE_AUTHORITY_FACADES: [(&str, &str); 10] = [
+    ("ServiceRuntimeLease", "ServiceRuntimeLeaseRole"),
+    (
+        "ServiceRuntimePackageAccessBuildRefusal",
+        "ServiceRuntimePackageAccessBuildRefusalRole",
+    ),
+    (
+        "ServiceRuntimePackageAccess",
+        "ServiceRuntimePackageAccessRole",
+    ),
+    (
+        "ServiceRuntimePackageAccessReleaseRefusal",
+        "ServiceRuntimePackageAccessReleaseRefusalRole",
+    ),
+    (
+        "ServiceRuntimeHostActivationBindingRefusal",
+        "ServiceRuntimeHostActivationBindingRefusalRole",
+    ),
+    (
+        "ServiceRuntimeHostActivation",
+        "ServiceRuntimeHostActivationRole",
+    ),
+    ("ServiceRuntimeRecovery", "ServiceRuntimeRecoveryRole"),
+    (
+        "ServiceRuntimeRejoinRefusal",
+        "ServiceRuntimeRejoinRefusalRole",
+    ),
+    ("ServiceRuntimeRelease", "ServiceRuntimeReleaseRole"),
+    (
+        "ServiceRuntimeAcquisitionError",
+        "ServiceRuntimeAcquisitionErrorKind",
+    ),
+];
 
 const PREPARATION_CONSTRUCTOR: &str = "ExtensionNativeOwnershipPreparation::new(";
 const BEGIN_CONSTRUCTOR: &str = "ExtensionNativeOwnershipJournalMutation::begin(";
@@ -32,13 +68,26 @@ fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
     let test_only_modules = cfg_test_external_modules(&sources)?;
     let mut saw_plan_owner = false;
     let mut saw_raw_owner = false;
+    let mut saw_service_runtime_transaction_owner = false;
 
     for (relative, source) in &sources {
+        let relative_text = relative.to_string_lossy();
+        if relative.starts_with("crates/zephium-extension-service/src") {
+            if relative == Path::new(SERVICE_RUNTIME_TRANSACTION_OWNER) {
+                saw_service_runtime_transaction_owner = true;
+            } else if ["ActiveBundled", "RollbackBundled"]
+                .into_iter()
+                .any(|raw_prefix| source.contains(raw_prefix))
+            {
+                return Err(format!(
+                    "{relative_text} exposes raw role-specific repository authority outside {SERVICE_RUNTIME_TRANSACTION_OWNER}"
+                ));
+            }
+        }
         if test_only_modules.contains(relative) {
             continue;
         }
         let shipping = production_prefix(source)?;
-        let relative_text = relative.to_string_lossy();
         let expected_authority_counts = if relative == Path::new(PLAN_OWNER) {
             saw_plan_owner = true;
             [1, 1, 1]
@@ -105,6 +154,24 @@ fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
                 }
             }
         }
+
+        if relative == Path::new(SERVICE_RUNTIME_TRANSACTION_OWNER) {
+            for (facade, private_role) in SERVICE_AUTHORITY_FACADES {
+                let opaque_declaration = format!("pub(crate) struct {facade} {{");
+                let exposed_enum = format!("pub(crate) enum {facade} {{");
+                let private_role_declaration = format!("enum {private_role} {{");
+                let exposed_private_role = format!("pub(crate) enum {private_role} {{");
+                if !shipping.contains(&opaque_declaration)
+                    || shipping.contains(&exposed_enum)
+                    || !shipping.contains(&private_role_declaration)
+                    || shipping.contains(&exposed_private_role)
+                {
+                    return Err(format!(
+                        "{SERVICE_RUNTIME_TRANSACTION_OWNER} must keep {facade} opaque over module-private {private_role}"
+                    ));
+                }
+            }
+        }
     }
 
     if !saw_plan_owner {
@@ -113,6 +180,11 @@ fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
     if !saw_raw_owner {
         return Err(format!(
             "missing crate-private raw acquisition owner {RAW_ACQUISITION_OWNER}"
+        ));
+    }
+    if !saw_service_runtime_transaction_owner {
+        return Err(format!(
+            "missing service runtime authority owner {SERVICE_RUNTIME_TRANSACTION_OWNER}"
         ));
     }
     Ok(())
@@ -516,7 +588,7 @@ mod tests {
     use super::*;
 
     fn valid_sources() -> Vec<(PathBuf, String)> {
-        vec![
+        let mut sources = vec![
             (
                 PathBuf::from(PLAN_OWNER),
                 format!(
@@ -545,7 +617,19 @@ mod tests {{
                 )
                 .to_owned(),
             ),
-        ]
+        ];
+        let mut service_owner =
+            "use raw::{ActiveBundledPackageLease, RollbackBundledPackageLease};\n".to_owned();
+        for (facade, private_role) in SERVICE_AUTHORITY_FACADES {
+            service_owner.push_str(&format!(
+                "pub(crate) struct {facade} {{ role: {private_role} }}\nenum {private_role} {{ Active, Rollback }}\n"
+            ));
+        }
+        sources.push((
+            PathBuf::from(SERVICE_RUNTIME_TRANSACTION_OWNER),
+            service_owner,
+        ));
+        sources
     }
 
     #[test]
@@ -570,6 +654,37 @@ mod tests {{
             "repository.acquire_bundled_package_lease(binding);".to_owned(),
         ));
         assert!(validate_sources(sources).is_err());
+    }
+
+    #[test]
+    fn service_raw_roles_and_authority_variants_are_confined_to_one_opaque_facade() {
+        for raw in [
+            "ActiveBundledRuntimePackageAccess",
+            "RollbackBundledPackageLease",
+        ] {
+            let mut sources = valid_sources();
+            sources.push((
+                PathBuf::from("crates/zephium-extension-service/src/actor/raw.rs"),
+                format!("fn bypass(value: {raw}) {{ drop(value); }}"),
+            ));
+            assert!(validate_sources(sources).is_err());
+        }
+
+        let mut exposed_facade = valid_sources();
+        exposed_facade[2].1 = exposed_facade[2].1.replacen(
+            "pub(crate) struct ServiceRuntimeLease",
+            "pub(crate) enum ServiceRuntimeLease",
+            1,
+        );
+        assert!(validate_sources(exposed_facade).is_err());
+
+        let mut exposed_role = valid_sources();
+        exposed_role[2].1 = exposed_role[2].1.replacen(
+            "enum ServiceRuntimeLeaseRole",
+            "pub(crate) enum ServiceRuntimeLeaseRole",
+            1,
+        );
+        assert!(validate_sources(exposed_role).is_err());
     }
 
     #[test]

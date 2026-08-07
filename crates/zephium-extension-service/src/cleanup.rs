@@ -556,6 +556,14 @@ fn classify_mutation_error(error: JournalMutationFailure) -> SettleEntryOutcome 
 
 fn classify_open_error(error: ServiceRepositoryOpenError) -> CleanupStartupOutcome {
     match error {
+        ServiceRepositoryOpenError::OutstandingAuthority => {
+            // Startup cannot manufacture same-open runtime authority, and the
+            // live coordinator must drain every such value before handing a
+            // reopen frontier to cleanup. Observing one here is therefore an
+            // internal lifecycle-ordering violation, not a retryable private-
+            // namespace lock held by another process.
+            CleanupStartupOutcome::Failed(CleanupFailure::ConcurrentPackageLease)
+        }
         ServiceRepositoryOpenError::Namespace(PrivateFsError::LockUnavailable) => {
             CleanupStartupOutcome::Unavailable(CleanupUnavailable::RepositoryLocked)
         }
@@ -1602,6 +1610,14 @@ mod tests {
                 CleanupStartupOutcome::Unavailable(CleanupUnavailable::RepositoryRecoveryPending)
             );
         }
+    }
+
+    #[test]
+    fn same_open_authority_at_a_cleanup_reopen_is_an_internal_ordering_failure() {
+        assert_eq!(
+            classify_open_error(ServiceRepositoryOpenError::OutstandingAuthority),
+            CleanupStartupOutcome::Failed(CleanupFailure::ConcurrentPackageLease)
+        );
     }
 
     #[test]
