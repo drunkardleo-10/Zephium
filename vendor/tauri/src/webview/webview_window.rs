@@ -1107,11 +1107,11 @@ impl<R: Runtime, M: Manager<R>> WebviewWindowBuilder<'_, R, M> {
     self
   }
 
-  /// Whether browser extensions can be installed for the webview process
+  /// Retains browser-extension enablement for API compatibility.
   ///
   /// ## Platform-specific:
   ///
-  /// - **Windows**: Enables the WebView2 environment's [`AreBrowserExtensionsEnabled`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2environmentoptions?view=webview2-winrt-1.0.2739.15#arebrowserextensionsenabled)
+  /// - **Windows**: An enabled value is forwarded to Wry, whose Zephium adapter refuses construction before native initialization until an authenticated startup inventory fence exists.
   /// - **MacOS / Linux / iOS / Android** - Unsupported.
   #[must_use]
   pub fn browser_extensions_enabled(mut self, enabled: bool) -> Self {
@@ -1119,11 +1119,15 @@ impl<R: Runtime, M: Manager<R>> WebviewWindowBuilder<'_, R, M> {
     self
   }
 
-  /// Set the path from which to load extensions from. Extensions stored in this path should be unpacked Chrome extensions on Windows, and compiled `.so` extensions on Linux.
+  /// Retains an extension path for API compatibility.
+  ///
+  /// Linux continues to use this as its compiled web-process extension
+  /// directory. Windows construction refuses a configured path as described
+  /// below.
   ///
   /// ## Platform-specific:
   ///
-  /// - **Windows**: Browser extensions must first be enabled. See [`browser_extensions_enabled`](Self::browser_extensions_enabled)
+  /// - **Windows**: The Zephium Wry adapter refuses construction with a configured extension path; installation is owned by the authenticated native extension host.
   /// - **MacOS / iOS / Android** - Unsupported.
   #[must_use]
   pub fn extensions_path(mut self, path: impl AsRef<Path>) -> Self {
@@ -1314,6 +1318,10 @@ impl<R: Runtime, M: Manager<R>> WebviewWindowBuilder<'_, R, M> {
 
   /// Set the environment for the webview.
   /// Useful if you need to share the same environment, for instance when using the [`Self::on_new_window`].
+  ///
+  /// A supplied COM environment has opaque extension-enablement state. Until
+  /// authenticated startup inventory fencing exists, Zephium may only reuse
+  /// an environment observed from an earlier closed Wry construction.
   #[cfg(all(feature = "wry", windows))]
   pub fn with_environment(
     mut self,

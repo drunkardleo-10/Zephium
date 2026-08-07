@@ -69,6 +69,16 @@ pub enum Error {
   WebView2Error(webview2_com::Error),
   #[cfg(target_os = "windows")]
   #[error(
+    "unmanaged WebView2 extension-path loading is disabled; use an authenticated native extension host"
+  )]
+  WebView2ExtensionPathUnsupported,
+  #[cfg(target_os = "windows")]
+  #[error(
+    "WebView2 browser extensions require an authenticated startup inventory fence before construction"
+  )]
+  WebView2ExtensionsStartupFenceUnavailable,
+  #[cfg(target_os = "windows")]
+  #[error(
     "WebView2 construction failed ({source}) and apartment-owned native cleanup remains pending ({incident:?})"
   )]
   WebView2ConstructionCleanup {

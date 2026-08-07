@@ -2,6 +2,7 @@
 
 mod adblock_provenance;
 mod blocker_seed;
+mod webview2_extension_boundary;
 
 use std::process::{exit, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,6 +42,7 @@ fn main() {
         Some("check-extension-runtime-host-assembler") => {
             check_extension_runtime_host_assembler_call_sites()
         }
+        Some("check-webview2-extension-boundary") => check_webview2_extension_boundary(),
         Some("check-blocker-seed") if arguments.len() == 1 => {
             let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
             if let Err(error) = blocker_seed::check(&repository) {
@@ -79,7 +81,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-webview2-extension-boundary|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -534,6 +536,7 @@ fn ci() {
     reject_ambient_internal_repository_cfg();
     share_workspace_target_dir();
     check_extension_runtime_host_assembler_call_sites();
+    check_webview2_extension_boundary();
     check_engine_floors();
     check_advisory_exceptions();
     check_blocker_security_fork();
@@ -585,6 +588,14 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+fn check_webview2_extension_boundary() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = webview2_extension_boundary::check(&repository) {
+        eprintln!("WebView2 extension boundary failed: {error}");
+        exit(1);
+    }
 }
 
 fn check_extension_runtime_host_assembler_call_sites() {

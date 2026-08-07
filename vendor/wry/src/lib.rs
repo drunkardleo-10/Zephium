@@ -2049,7 +2049,7 @@ pub trait WebViewBuilderExtWindows {
   /// Webview instances with different scroll bar styles must also have different [data directories](WebContext::new).
   fn with_scroll_bar_style(self, style: ScrollBarStyle) -> Self;
 
-  /// Determines whether the ability to install and enable extensions is enabled.
+  /// Retains the WebView2 extension-enablement setting for source compatibility.
   ///
   /// By default, extensions are disabled.
   ///
@@ -2058,16 +2058,34 @@ pub trait WebViewBuilderExtWindows {
   ///
   /// ## Warning
   ///
+  /// On Windows, construction with this setting enabled fails with
+  /// [`Error::WebView2ExtensionsStartupFenceUnavailable`] before Wry
+  /// initializes COM or creates a native child window. Persisted extensions
+  /// must not start until the embedder has authenticated and fenced the exact
+  /// startup inventory.
+  ///
   /// Webview instances with different browser extensions enabled settings must also have different [data directories](WebContext::new).
   fn with_browser_extensions_enabled(self, enabled: bool) -> Self;
 
-  /// Set the path from which to load extensions from. Extensions stored in this path should be unpacked.
+  /// Retains an unpacked-extension path for source compatibility.
   ///
-  /// Does nothing if browser extensions are disabled. See [`with_browser_extensions_enabled`](Self::with_browser_extensions_enabled)
+  /// On Windows, construction with a configured path fails with
+  /// [`Error::WebView2ExtensionPathUnsupported`] before Wry initializes COM or
+  /// creates a native child window. Extension installation must instead be
+  /// performed by an authenticated, owner-aware native host. Enabling browser
+  /// extensions does not bypass this safety boundary.
+  ///
+  /// The separate Unix builder API continues to configure WebKitGTK's web
+  /// process extension directory.
   fn with_extensions_path(self, path: impl Into<PathBuf>) -> Self;
 
   /// Set the environment for the webview.
   /// Useful if you need to share the same environment, for instance when using the [`WebViewBuilder::with_new_window_req_handler`].
+  ///
+  /// A supplied COM environment has opaque extension-enablement state and
+  /// bypasses Wry's closed environment construction. Until authenticated
+  /// startup inventory fencing exists, Zephium may only reuse an environment
+  /// observed from an earlier closed Wry construction.
   fn with_environment(self, environment: ICoreWebView2Environment) -> Self;
 
   /// Observe the exact environment selected for this construction before Wry

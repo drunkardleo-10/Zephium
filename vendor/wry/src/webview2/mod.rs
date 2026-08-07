@@ -10,7 +10,6 @@ use std::{
   cell::{Cell, RefCell},
   collections::{HashMap, HashSet},
   fmt::Write,
-  fs,
   num::NonZeroU64,
   path::PathBuf,
   ptr::NonNull,
@@ -903,6 +902,25 @@ impl Drop for InnerWebView {
   }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebView2ExtensionStartupRefusal {
+  ExtensionPath,
+  StartupFence,
+}
+
+const fn extension_startup_refusal(
+  extension_path_configured: bool,
+  browser_extensions_enabled: bool,
+) -> Option<WebView2ExtensionStartupRefusal> {
+  if extension_path_configured {
+    Some(WebView2ExtensionStartupRefusal::ExtensionPath)
+  } else if browser_extensions_enabled {
+    Some(WebView2ExtensionStartupRefusal::StartupFence)
+  } else {
+    None
+  }
+}
+
 impl InnerWebView {
   #[inline]
   pub fn new(
@@ -938,6 +956,18 @@ impl InnerWebView {
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
   ) -> Result<Self> {
+    if let Some(refusal) = extension_startup_refusal(
+      pl_attrs.extension_path.is_some(),
+      pl_attrs.browser_extensions_enabled,
+    ) {
+      return Err(match refusal {
+        WebView2ExtensionStartupRefusal::ExtensionPath => Error::WebView2ExtensionPathUnsupported,
+        WebView2ExtensionStartupRefusal::StartupFence => {
+          Error::WebView2ExtensionsStartupFenceUnavailable
+        }
+      });
+    }
+
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
 
     let hwnd = Self::create_container_hwnd(parent, &attributes, is_child)?;
@@ -1198,7 +1228,10 @@ impl InnerWebView {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
       options.set_additional_browser_arguments(additional_browser_args);
-      options.set_are_browser_extensions_enabled(pl_attrs.browser_extensions_enabled);
+      // Construction above rejects every enabled request before COM/HWND
+      // work. Keep the native environment closed as a second, independent
+      // defense against persisted extensions starting from the profile.
+      options.set_are_browser_extensions_enabled(false);
 
       // Get user's system language
       let lcid = GetUserDefaultUILanguage();
@@ -1503,15 +1536,6 @@ impl InnerWebView {
 
       if attributes.focused {
         controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)?;
-      }
-    }
-
-    // Extension loading
-    if pl_attrs.browser_extensions_enabled {
-      if let Some(extension_path) = pl_attrs.extension_path {
-        unsafe {
-          Self::load_extensions(&webview, &extension_path)?;
-        }
       }
     }
 
@@ -2653,25 +2677,6 @@ impl InnerWebView {
       )
     })
   }
-
-  #[inline]
-  unsafe fn load_extensions(webview: &ICoreWebView2, extension_path: &PathBuf) -> Result<()> {
-    let profile = webview
-      .cast::<ICoreWebView2_13>()?
-      .Profile()?
-      .cast::<ICoreWebView2Profile7>()?;
-
-    // Iterate over all folders in the extension path
-    for entry in fs::read_dir(extension_path)? {
-      let path = entry?.path();
-      let path_hs = HSTRING::from(path.as_path());
-      let handler = ProfileAddBrowserExtensionCompletedHandler::create(Box::new(|_, _| Ok(())));
-
-      profile.AddBrowserExtension(&path_hs, &handler)?;
-    }
-
-    Ok(())
-  }
 }
 
 /// Public APIs
@@ -3316,6 +3321,24 @@ mod tests {
   fn public_error_is_send_and_sync_for_tauri_runtime_propagation() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Error>();
+  }
+
+  #[test]
+  fn extension_startup_refusal_is_complete_and_path_precedes_enablement() {
+    assert_eq!(extension_startup_refusal(false, false), None);
+    assert_eq!(
+      extension_startup_refusal(false, true),
+      Some(WebView2ExtensionStartupRefusal::StartupFence)
+    );
+    assert_eq!(
+      extension_startup_refusal(true, false),
+      Some(WebView2ExtensionStartupRefusal::ExtensionPath)
+    );
+    assert_eq!(
+      extension_startup_refusal(true, true),
+      Some(WebView2ExtensionStartupRefusal::ExtensionPath),
+      "a configured unmanaged path is the first reported refusal"
+    );
   }
 
   #[test]
