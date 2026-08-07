@@ -32,14 +32,14 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeHostActivationBinding, ExtensionRuntimeHostActivationBindingError,
     ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
     ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeNativeOwnerId,
-    ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeResource, ExtensionRuntimeResourceBinding,
-    ExtensionRuntimeResourceBuildError, ExtensionRuntimeResourcePlan,
-    ExtensionRuntimeResourcePlanBuildError, ExtensionRuntimeResourceVisitor,
-    ExtensionRuntimeTarget, EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
-    MAX_EXTENSION_RUNTIME_MANIFEST_BYTES, MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
-    MAX_EXTENSION_RUNTIME_RESOURCE_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_PATH_BYTES,
-    MAX_EXTENSION_RUNTIME_RESOURCE_PATH_COMPONENT_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_PATH_DEPTH,
-    MAX_EXTENSION_RUNTIME_RESOURCE_PLAN_ENTRIES,
+    ExtensionRuntimeNativeRootLeasePort, ExtensionRuntimeNativeRootVisitor,
+    ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,
+    ExtensionRuntimeResourcePlan, ExtensionRuntimeResourcePlanBuildError,
+    ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget,
+    EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES, MAX_EXTENSION_RUNTIME_MANIFEST_BYTES,
+    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_BYTES,
+    MAX_EXTENSION_RUNTIME_RESOURCE_PATH_BYTES, MAX_EXTENSION_RUNTIME_RESOURCE_PATH_COMPONENT_BYTES,
+    MAX_EXTENSION_RUNTIME_RESOURCE_PATH_DEPTH, MAX_EXTENSION_RUNTIME_RESOURCE_PLAN_ENTRIES,
     MAX_EXTENSION_RUNTIME_RESOURCE_PLAN_RETAINED_BYTES,
 };
 use zephium_private_fs::SealedPrivateDirectory;
@@ -49,7 +49,7 @@ use super::api::{
     PackageLeaseCore, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
 };
 use super::resource;
-use super::runtime::{LeasePresence, RepositoryOpenEpoch};
+use super::runtime::{LeasePresence, LeasePresenceBinding, RepositoryOpenEpoch};
 use crate::materialization::{
     OwnerPackagePinIdentity, PackageLeaseRepositoryIdentity, VerifiedActivePackageSnapshot,
     VerifiedRollbackPackageSnapshot,
@@ -1528,18 +1528,105 @@ impl_runtime_snapshot!(VerifiedRollbackPackageSnapshot);
 struct ActiveLeasePackageAccessProvider {
     core: HeldPackageLeaseCore<VerifiedActivePackageSnapshot>,
     binding: RuntimePackageBinding,
+    native_root_lease: Option<Box<RepositoryNativeRootLease<VerifiedActivePackageSnapshot>>>,
+    retained_bytes: usize,
 }
 
 struct RollbackLeasePackageAccessProvider {
     core: HeldPackageLeaseCore<VerifiedRollbackPackageSnapshot>,
     binding: RuntimePackageBinding,
+    native_root_lease: Option<Box<RepositoryNativeRootLease<VerifiedRollbackPackageSnapshot>>>,
+    retained_bytes: usize,
+}
+
+/// Preallocated, passively dropped root authority transferred into a trusted
+/// native lifecycle adapter. Its shared allocations are charged exactly once
+/// by the originating provider's stable retained-byte bound.
+struct RepositoryNativeRootLease<Snapshot> {
+    open_epoch: Arc<RepositoryOpenEpoch>,
+    runtime: RepositoryRuntime,
+    repository: PackageLeaseRepositoryIdentity,
+    current_set: BundledCatalogSetIdentity,
+    pin: OwnerPackagePinIdentity,
+    presence: Arc<LeasePresence>,
+    snapshot: Arc<Snapshot>,
+    binding: RuntimePackageBinding,
+}
+
+impl<Snapshot: RuntimePackageSnapshot> RepositoryNativeRootLease<Snapshot> {
+    fn new(core: &HeldPackageLeaseCore<Snapshot>, binding: RuntimePackageBinding) -> Self {
+        Self {
+            open_epoch: Arc::clone(&core.open_epoch),
+            runtime: core.runtime.clone(),
+            repository: core.repository,
+            current_set: core.current_set,
+            pin: core.pin,
+            presence: Arc::clone(&core.presence),
+            snapshot: Arc::clone(&core.snapshot),
+            binding,
+        }
+    }
+
+    fn matches_core(
+        &self,
+        core: &HeldPackageLeaseCore<Snapshot>,
+        binding: &RuntimePackageBinding,
+    ) -> bool {
+        self.binding == *binding
+            && Arc::ptr_eq(&self.open_epoch, &core.open_epoch)
+            && self.repository == core.repository
+            && self.current_set == core.current_set
+            && self.pin == core.pin
+            && Arc::ptr_eq(&self.presence, &core.presence)
+            && Arc::ptr_eq(&self.snapshot, &core.snapshot)
+            && binding.matches_held_pin(&core.held)
+            && self.is_valid()
+    }
+
+    fn is_valid(&self) -> bool {
+        let (profile, install) = self.pin.lease_owner();
+        Arc::ptr_eq(&self.open_epoch, &self.presence.open_epoch)
+            && self.presence.repository == self.repository
+            && self.presence.profile == profile
+            && self.presence.install == install
+            && self.presence.binding == LeasePresenceBinding::DurablePin(self.pin)
+            && self.current_set.bytes() == self.binding.catalog_set_digest.bytes()
+            && self.binding.target == ExtensionRuntimeTarget::NativeWebExtension
+            && self.binding.owner.profile() == profile
+            && self.binding.owner.install_id() == install
+            && self.binding.matches_snapshot(self.snapshot.as_ref())
+    }
+}
+
+impl<Snapshot: RuntimePackageSnapshot + Send + Sync + 'static> ExtensionRuntimeNativeRootLeasePort
+    for RepositoryNativeRootLease<Snapshot>
+{
+    fn visit_native_root(
+        &mut self,
+        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+    ) -> Result<(), ExtensionPackageAccessError> {
+        visit_retained_native_root(self, visitor)
+    }
 }
 
 macro_rules! impl_runtime_provider {
     ($provider:ident, $lease:ident, $snapshot:ty) => {
         impl $provider {
             fn new(core: HeldPackageLeaseCore<$snapshot>, binding: RuntimePackageBinding) -> Self {
-                Self { core, binding }
+                let native_root_lease = (binding.target
+                    == ExtensionRuntimeTarget::NativeWebExtension)
+                    .then(|| Box::new(RepositoryNativeRootLease::new(&core, binding)));
+                let retained_bytes =
+                    provider_retained_bytes::<Self, RepositoryNativeRootLease<$snapshot>>(
+                        core.snapshot.retained_bytes(),
+                        native_root_lease.is_some(),
+                    );
+                Self {
+                    core,
+                    binding,
+                    native_root_lease,
+                    retained_bytes,
+                }
             }
 
             fn try_into_lease(
@@ -1564,7 +1651,7 @@ macro_rules! impl_runtime_provider {
 
         impl ExtensionPackageAccessPort for $provider {
             fn retained_bytes(&self) -> usize {
-                provider_retained_bytes::<Self>(self.core.snapshot.retained_bytes())
+                self.retained_bytes
             }
 
             fn visit_resource(
@@ -1575,12 +1662,17 @@ macro_rules! impl_runtime_provider {
                 visit_resource(&self.core, &self.binding, descriptor, visitor)
             }
 
-            fn visit_native_root(
+            fn take_native_root_lease(
                 &mut self,
                 target: ExtensionRuntimeTarget,
-                visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-            ) -> Result<(), ExtensionPackageAccessError> {
-                visit_native_root(&self.core, &self.binding, target, visitor)
+            ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+            {
+                take_native_root_lease(
+                    &self.core,
+                    &self.binding,
+                    &mut self.native_root_lease,
+                    target,
+                )
             }
         }
     };
@@ -1988,7 +2080,10 @@ fn pre_host_runtime_access_retained_bytes<Access>(
         .and_then(|bytes| bytes.checked_add(authority_exclusive))
 }
 
-fn provider_retained_bytes<Provider>(snapshot_retained_bytes: usize) -> usize {
+fn provider_retained_bytes<Provider, NativeRootLease>(
+    snapshot_retained_bytes: usize,
+    retains_native_root_lease: bool,
+) -> usize {
     #[cfg(all(
         test,
         zephium_internal_repository_e2e,
@@ -2000,18 +2095,28 @@ fn provider_retained_bytes<Provider>(snapshot_retained_bytes: usize) -> usize {
             return retained_bytes;
         }
     }
-    // Three exclusive allocations are retained by delegated access: the outer
-    // Box<Provider>, the shared snapshot Arc allocation, and the owner-presence
-    // Arc allocation. RepositoryRuntime and RepositoryOpenEpoch allocations are
-    // repository-shared and therefore deliberately excluded.
-    size_of::<Provider>()
+    // Three exclusive allocations are always retained by delegated access: the
+    // outer Box<Provider>, the shared snapshot Arc allocation, and the
+    // owner-presence Arc allocation. A native target also preallocates one
+    // root-lease Box. Its Arc handles are included in `size_of`, while the
+    // snapshot and presence allocations remain counted exactly once below.
+    // RepositoryRuntime and RepositoryOpenEpoch allocations are shared and
+    // deliberately excluded.
+    let baseline = size_of::<Provider>()
         .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
         .saturating_add(snapshot_retained_bytes)
         .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
         .saturating_add(RETAINED_ARC_COUNTER_BYTES)
         .saturating_add(size_of::<LeasePresence>())
         .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
-        .saturating_add(RETAINED_ARC_COUNTER_BYTES)
+        .saturating_add(RETAINED_ARC_COUNTER_BYTES);
+    if retains_native_root_lease {
+        baseline
+            .saturating_add(size_of::<NativeRootLease>())
+            .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+    } else {
+        baseline
+    }
 }
 
 fn visit_resource<Snapshot: RuntimePackageSnapshot>(
@@ -2070,13 +2175,16 @@ fn visit_resource<Snapshot: RuntimePackageSnapshot>(
     }
 }
 
-fn visit_native_root<Snapshot: RuntimePackageSnapshot>(
+fn take_native_root_lease<Snapshot>(
     core: &HeldPackageLeaseCore<Snapshot>,
     binding: &RuntimePackageBinding,
+    lease: &mut Option<Box<RepositoryNativeRootLease<Snapshot>>>,
     target: ExtensionRuntimeTarget,
-    visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-) -> Result<(), ExtensionPackageAccessError> {
-    let operation = core.runtime.enter().map_err(map_operation_error)?;
+) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+where
+    Snapshot: RuntimePackageSnapshot + Send + Sync + 'static,
+{
+    let _operation = core.runtime.enter().map_err(map_operation_error)?;
     if target != binding.target || !binding.matches_snapshot(core.snapshot.as_ref()) {
         core.runtime.poison();
         return Err(ExtensionPackageAccessError::NativeRootIdentityMismatch);
@@ -2084,25 +2192,53 @@ fn visit_native_root<Snapshot: RuntimePackageSnapshot>(
     if target != ExtensionRuntimeTarget::NativeWebExtension {
         return Err(ExtensionPackageAccessError::NativeRootUnavailable);
     }
+    let Some(candidate) = lease.as_ref() else {
+        return Err(ExtensionPackageAccessError::NativeRootUnavailable);
+    };
+    if !candidate.matches_core(core, binding) {
+        core.runtime.poison();
+        return Err(ExtensionPackageAccessError::NativeRootIdentityMismatch);
+    }
+    let Some(candidate) = lease.take() else {
+        core.runtime.poison();
+        return Err(ExtensionPackageAccessError::NativeRootIdentityMismatch);
+    };
+    if !candidate.matches_core(core, binding) || !core.runtime.is_healthy() {
+        *lease = Some(candidate);
+        core.runtime.poison();
+        return Err(ExtensionPackageAccessError::NativeRootIdentityMismatch);
+    }
+    Ok(candidate)
+}
 
-    let _callback_barrier = core
+fn visit_retained_native_root<Snapshot: RuntimePackageSnapshot>(
+    lease: &RepositoryNativeRootLease<Snapshot>,
+    visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+) -> Result<(), ExtensionPackageAccessError> {
+    let operation = lease.runtime.enter().map_err(map_operation_error)?;
+    if !lease.is_valid() {
+        lease.runtime.poison();
+        return Err(ExtensionPackageAccessError::NativeRootIdentityMismatch);
+    }
+
+    let _callback_barrier = lease
         .runtime
         .begin_delegated_callback()
         .map_err(map_operation_error)?;
     drop(operation);
 
-    let result = core
+    let result = lease
         .snapshot
         .root()
         .with_verified_path(|path| with_external_callback(|| visitor.visit(path)));
-    if !binding.matches_snapshot(core.snapshot.as_ref()) || !core.runtime.is_healthy() {
-        core.runtime.poison();
+    if !lease.is_valid() || !lease.runtime.is_healthy() {
+        lease.runtime.poison();
         return Err(ExtensionPackageAccessError::NativeRootIdentityMismatch);
     }
     match result {
         Ok(_visitor_result) => Ok(()),
         Err(_error) => {
-            core.runtime.poison();
+            lease.runtime.poison();
             Err(ExtensionPackageAccessError::NativeRootIdentityMismatch)
         }
     }
@@ -2430,9 +2566,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_charge_includes_its_box_and_both_arc_allocations_exactly_once() {
+    fn provider_charge_includes_preallocated_native_lease_without_double_counting_shared_arcs() {
         struct ProviderShape {
             _bytes: [u8; 3],
+        }
+        struct NativeRootLeaseShape {
+            _snapshot: Arc<()>,
+            _presence: Arc<()>,
         }
 
         let snapshot_retained_bytes = 17;
@@ -2446,8 +2586,20 @@ mod tests {
             .saturating_add(RETAINED_ARC_COUNTER_BYTES);
 
         assert_eq!(
-            provider_retained_bytes::<ProviderShape>(snapshot_retained_bytes),
+            provider_retained_bytes::<ProviderShape, NativeRootLeaseShape>(
+                snapshot_retained_bytes,
+                false,
+            ),
             expected
+        );
+        assert_eq!(
+            provider_retained_bytes::<ProviderShape, NativeRootLeaseShape>(
+                snapshot_retained_bytes,
+                true,
+            ),
+            expected
+                .saturating_add(size_of::<NativeRootLeaseShape>())
+                .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
         );
     }
 }

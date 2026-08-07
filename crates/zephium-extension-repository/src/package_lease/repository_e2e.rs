@@ -787,6 +787,14 @@ impl ExtensionRuntimeLifecyclePort for SuccessfulCompatibilityLifecycle {
                 ExtensionRuntimeFailure::UnsupportedTarget,
             );
         }
+        if !matches!(
+            access.take_native_root_lease(),
+            Err(ExtensionPackageAccessError::NativeRootUnavailable)
+        ) {
+            return ExtensionRuntimeActivationDisposition::Rejected(
+                ExtensionRuntimeFailure::PackageRejected,
+            );
+        }
         match access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())) {
             Ok(Ok(())) => ExtensionRuntimeActivationDisposition::Activated(
                 ExtensionRuntimeOwnershipEvidence::Compatibility,

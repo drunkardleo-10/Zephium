@@ -30,9 +30,10 @@ use super::*;
 use crate::{
     ExtensionPackageAccessError, ExtensionPackageAccessPort, ExtensionPackageAccessView,
     ExtensionRuntimeActivationDisposition, ExtensionRuntimeFailure,
-    ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeOwnershipDisposition,
-    ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan,
-    ExtensionRuntimeResourceVisitor, ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeNativeRootLeasePort, ExtensionRuntimeNativeRootVisitor,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeResource,
+    ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan, ExtensionRuntimeResourceVisitor,
+    ExtensionRuntimeRetirementDisposition,
 };
 
 const ALL_URLS: &str = "<all_urls>";
@@ -271,6 +272,23 @@ struct PinnedProvider {
     identity: Arc<()>,
     dropped: Arc<AtomicUsize>,
     retained_bytes: usize,
+    native_root_lease: Option<Box<PinnedNativeRootLease>>,
+}
+
+struct PinnedNativeRootLease;
+
+impl ExtensionRuntimeNativeRootLeasePort for PinnedNativeRootLease {
+    fn visit_native_root(
+        &mut self,
+        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+    ) -> Result<(), ExtensionPackageAccessError> {
+        #[cfg(unix)]
+        let root = Path::new("/private/var/zephium/extensions/runtime-host-test");
+        #[cfg(windows)]
+        let root = Path::new(r"C:\Zephium\extensions\runtime-host-test");
+        let _ = visitor.visit(root);
+        Ok(())
+    }
 }
 
 impl Drop for PinnedProvider {
@@ -294,17 +312,17 @@ impl ExtensionPackageAccessPort for PinnedProvider {
         Ok(())
     }
 
-    fn visit_native_root(
+    fn take_native_root_lease(
         &mut self,
-        _target: ExtensionRuntimeTarget,
-        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-    ) -> Result<(), ExtensionPackageAccessError> {
-        #[cfg(unix)]
-        let root = Path::new("/private/var/zephium/extensions/runtime-host-test");
-        #[cfg(windows)]
-        let root = Path::new(r"C:\Zephium\extensions\runtime-host-test");
-        let _ = visitor.visit(root);
-        Ok(())
+        target: ExtensionRuntimeTarget,
+    ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError> {
+        if target != ExtensionRuntimeTarget::NativeWebExtension {
+            return Err(ExtensionPackageAccessError::NativeRootUnavailable);
+        }
+        self.native_root_lease
+            .take()
+            .map(|lease| lease as Box<dyn ExtensionRuntimeNativeRootLeasePort>)
+            .ok_or(ExtensionPackageAccessError::NativeRootUnavailable)
     }
 }
 
@@ -393,6 +411,7 @@ impl ActivationFixture {
                 identity: Arc::clone(&provider_identity),
                 dropped: Arc::clone(&provider_dropped),
                 retained_bytes: provider_retained_bytes,
+                native_root_lease: Some(Box::new(PinnedNativeRootLease)),
             }),
         )
         .expect("bounded authenticated package access");

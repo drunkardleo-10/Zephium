@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Instant;
 
 use crate::{
-    ExtensionPackageAccess, ExtensionPackageAccessError, ExtensionRuntimeNativeRootVisitor,
+    ExtensionPackageAccess, ExtensionPackageAccessError, ExtensionRuntimeNativeRootLease,
     ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
     ExtensionRuntimeResource, ExtensionRuntimeResourcePlan, ExtensionRuntimeResourceVisitor,
     ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
@@ -150,12 +150,17 @@ impl ExtensionPackageAccessView<'_> {
         self.access.visit_resource(resource, visitor)
     }
 
-    /// Visits the native package root synchronously.
-    pub fn visit_native_root(
+    /// Transfers the preallocated native package-root lease exactly once.
+    ///
+    /// This succeeds only for [`ExtensionRuntimeTarget::NativeWebExtension`].
+    /// The lease's retained state is already charged to [`Self::retained_bytes`]
+    /// and its port-owned box contents/shared allocations must not be reported
+    /// again by the lifecycle adapter. The adapter still charges its own
+    /// predeclared inline lease destination through normal struct accounting.
+    pub fn take_native_root_lease(
         &mut self,
-        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-    ) -> Result<Result<(), ExtensionRuntimeVisitorError>, ExtensionPackageAccessError> {
-        self.access.visit_native_root(visitor)
+    ) -> Result<ExtensionRuntimeNativeRootLease, ExtensionPackageAccessError> {
+        self.access.take_native_root_lease()
     }
 }
 
@@ -1878,12 +1883,31 @@ mod tests {
 
     use super::*;
     use crate::{
-        ExtensionPackageAccessPort, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan,
+        ExtensionPackageAccessPort, ExtensionRuntimeNativeRootLeasePort,
+        ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeResourceBinding,
+        ExtensionRuntimeResourcePlan,
     };
 
     struct IdentityProvider {
         identity: u64,
         recovered: Arc<Mutex<Vec<u64>>>,
+        native_root_lease: Option<Box<IdentityNativeRootLease>>,
+    }
+
+    struct IdentityNativeRootLease;
+
+    impl ExtensionRuntimeNativeRootLeasePort for IdentityNativeRootLease {
+        fn visit_native_root(
+            &mut self,
+            visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            #[cfg(unix)]
+            let root = Path::new("/private/var/zephium/extensions/package");
+            #[cfg(windows)]
+            let root = Path::new(r"C:\Zephium\extensions\package");
+            let _ = visitor.visit(root);
+            Ok(())
+        }
     }
 
     impl Drop for IdentityProvider {
@@ -1907,17 +1931,18 @@ mod tests {
             Ok(())
         }
 
-        fn visit_native_root(
+        fn take_native_root_lease(
             &mut self,
-            _target: ExtensionRuntimeTarget,
-            visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-        ) -> Result<(), ExtensionPackageAccessError> {
-            #[cfg(unix)]
-            let root = Path::new("/private/var/zephium/extensions/package");
-            #[cfg(windows)]
-            let root = Path::new(r"C:\Zephium\extensions\package");
-            let _ = visitor.visit(root);
-            Ok(())
+            target: ExtensionRuntimeTarget,
+        ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+        {
+            if target != ExtensionRuntimeTarget::NativeWebExtension {
+                return Err(ExtensionPackageAccessError::NativeRootUnavailable);
+            }
+            self.native_root_lease
+                .take()
+                .map(|lease| lease as Box<dyn ExtensionRuntimeNativeRootLeasePort>)
+                .ok_or(ExtensionPackageAccessError::NativeRootUnavailable)
         }
     }
 
@@ -2179,6 +2204,7 @@ mod tests {
             Box::new(IdentityProvider {
                 identity,
                 recovered: Arc::clone(&recovered),
+                native_root_lease: Some(Box::new(IdentityNativeRootLease)),
             }),
         )
         .expect("access");
@@ -2211,6 +2237,7 @@ mod tests {
             Box::new(IdentityProvider {
                 identity,
                 recovered: Arc::clone(recovered),
+                native_root_lease: Some(Box::new(IdentityNativeRootLease)),
             }),
         )
     }

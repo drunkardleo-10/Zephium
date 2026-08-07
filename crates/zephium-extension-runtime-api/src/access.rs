@@ -1,9 +1,11 @@
 //! Bounded, delegated package access.
 
 use std::any::{Any, TypeId};
+use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read};
+use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 
 use crate::{ExtensionRuntimeResource, ExtensionRuntimeResourcePlan, ExtensionRuntimeTarget};
@@ -79,14 +81,39 @@ where
 ///
 /// The borrowed path must not be retained beyond [`Self::visit`]. The API does
 /// not expose a return value capable of carrying the borrow out of the callback.
-/// Trusted native adapters must also avoid copying the path into longer-lived
-/// storage. Native effects initiated inside the callback remain provisional: if
-/// provider postvalidation later fails, lifecycle code must classify ownership
-/// from observed native state (normally uncertain), never infer absence from the
-/// access error alone.
+/// Trusted native adapters must not copy the path into independent,
+/// adapter-managed storage. A platform constructor may synchronously retain its
+/// own resource URL only when the adapter keeps the corresponding
+/// [`ExtensionRuntimeNativeRootLease`] beside that native object for its complete
+/// lifetime. Native effects initiated inside the callback remain provisional:
+/// if provider postvalidation later fails, lifecycle code must classify
+/// ownership from observed native state (normally uncertain), never infer
+/// absence from the access error alone.
 pub trait ExtensionRuntimeNativeRootVisitor {
     /// Uses the native root synchronously.
     fn visit(&mut self, root: &Path) -> Result<(), ExtensionRuntimeVisitorError>;
+}
+
+/// Trusted, service-owned implementation behind a retained native-root lease.
+///
+/// Implementations must be allocated before package access crosses the runtime
+/// boundary. The allocation, every inline handle, and all exclusively retained
+/// state must already be included in the originating package provider's
+/// [`ExtensionPackageAccessPort::retained_bytes`] value. Transferring this box
+/// must therefore allocate no memory, and lifecycle adapters must not charge
+/// the transferred state a second time.
+///
+/// A successful call invokes `visitor` exactly once and synchronously. A
+/// pre-delivery failure may invoke it zero times; invoking it more than once is
+/// a contract violation. Provider/postvalidation failures take precedence over
+/// visitor failures. Destruction must be passive and must not revoke a package
+/// pin or make an ownership claim.
+pub trait ExtensionRuntimeNativeRootLeasePort: Any + Send {
+    /// Visits the authenticated package root under provider validation.
+    fn visit_native_root(
+        &mut self,
+        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+    ) -> Result<(), ExtensionPackageAccessError>;
 }
 
 impl<F> ExtensionRuntimeNativeRootVisitor for F
@@ -189,12 +216,125 @@ pub trait ExtensionPackageAccessPort: Any + Send {
         visitor: &mut dyn ExtensionRuntimeResourceVisitor,
     ) -> Result<(), ExtensionPackageAccessError>;
 
-    /// Visits an authenticated native package root for `target`.
-    fn visit_native_root(
+    /// Transfers the preallocated native-root lease for `target`.
+    ///
+    /// A successful transfer is exact-once and allocation-free. The provider's
+    /// stable retained-byte bound must continue to include the transferred
+    /// allocation and its shared handles after this method returns.
+    fn take_native_root_lease(
         &mut self,
         target: ExtensionRuntimeTarget,
+    ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>;
+}
+
+/// Move-only retained authority for one native extension package root.
+///
+/// The lease is `Send`, but deliberately not `Sync`, `Clone`, or serializable.
+/// It exposes no path getter: a trusted native adapter may synchronously borrow
+/// the validated path exactly once through [`Self::with_verified_path`], then
+/// must retain this lease beside the resulting native object as its package
+/// pin. Dropping the lease is passive and does not establish native absence.
+///
+/// The lease's allocation and shared handles were charged to the originating
+/// [`ExtensionPackageAccess`] before transfer. A lifecycle adapter that stores
+/// it must not add those port-owned bytes again to its retained-memory report.
+/// The adapter must still include its own predeclared inline destination slot
+/// (for example `Option<ExtensionRuntimeNativeRootLease>`) through its ordinary
+/// `size_of::<Self>()` accounting; only the transferred box contents and shared
+/// allocations are precharged.
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeNativeRootLease;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExtensionRuntimeNativeRootLease>();
+/// ```
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeNativeRootLease;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<ExtensionRuntimeNativeRootLease>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::Serialize;
+/// use zephium_extension_runtime_api::ExtensionRuntimeNativeRootLease;
+/// fn requires_serialize<T: Serialize>() {}
+/// requires_serialize::<ExtensionRuntimeNativeRootLease>();
+/// ```
+///
+/// ```compile_fail
+/// use serde::de::DeserializeOwned;
+/// use zephium_extension_runtime_api::ExtensionRuntimeNativeRootLease;
+/// fn requires_deserialize<T: DeserializeOwned>() {}
+/// requires_deserialize::<ExtensionRuntimeNativeRootLease>();
+/// ```
+///
+/// A root borrow cannot escape the synchronous callback:
+///
+/// ```compile_fail
+/// use std::path::Path;
+/// use zephium_extension_runtime_api::{
+///     ExtensionRuntimeNativeRootLease, ExtensionRuntimeVisitorError,
+/// };
+/// fn escape<'a>(lease: &'a mut ExtensionRuntimeNativeRootLease) -> &'a Path {
+///     let mut escaped = None;
+///     let mut visitor = |root: &Path| {
+///         escaped = Some(root);
+///         Ok::<(), ExtensionRuntimeVisitorError>(())
+///     };
+///     let _ = lease.with_verified_path(&mut visitor);
+///     escaped.expect("visitor must run")
+/// }
+/// ```
+#[must_use = "the native package-root lease must remain beside its native owner"]
+pub struct ExtensionRuntimeNativeRootLease {
+    port: Box<dyn ExtensionRuntimeNativeRootLeasePort>,
+    used: bool,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+impl ExtensionRuntimeNativeRootLease {
+    fn from_delegated_port(port: Box<dyn ExtensionRuntimeNativeRootLeasePort>) -> Self {
+        Self {
+            port,
+            used: false,
+            _not_sync: PhantomData,
+        }
+    }
+
+    /// Borrows the validated native root exactly once and synchronously.
+    ///
+    /// The root must be absolute, non-root, bounded, and lexically normalized.
+    /// Provider and postvalidation failures are returned as the outer error and
+    /// take precedence over visitor failures. Once this method begins, the
+    /// lease cannot be used again regardless of the result. Native effects
+    /// started inside the callback remain ownership-uncertain if the outer
+    /// result later fails.
+    pub fn with_verified_path(
+        &mut self,
         visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-    ) -> Result<(), ExtensionPackageAccessError>;
+    ) -> Result<Result<(), ExtensionRuntimeVisitorError>, ExtensionPackageAccessError> {
+        if self.used {
+            return Err(ExtensionPackageAccessError::Inactive);
+        }
+        self.used = true;
+        let mut guard = NativeRootVisitGuard::new(visitor);
+        let provider_result = self.port.visit_native_root(&mut guard);
+        match provider_result {
+            Ok(()) => guard.finish(),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeNativeRootLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeNativeRootLease")
+            .field("used", &self.used)
+            .field("port", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Why a delegated provider could not be accepted by the runtime API.
@@ -329,29 +469,13 @@ impl fmt::Debug for ExtensionPackageAccessBuildRefusal {
 /// requires_deserialize::<ExtensionPackageAccess>();
 /// ```
 ///
-/// A root borrow cannot be returned through the visitor result:
-///
-/// ```compile_fail
-/// use std::path::Path;
-/// use zephium_extension_runtime_api::{
-///     ExtensionPackageAccessView, ExtensionRuntimeVisitorError,
-/// };
-/// fn escape<'a>(view: &'a mut ExtensionPackageAccessView<'_>) -> &'a Path {
-///     let mut escaped = None;
-///     let mut visitor = |root: &Path| {
-///         escaped = Some(root);
-///         Ok::<(), ExtensionRuntimeVisitorError>(())
-///     };
-///     let _ = view.visit_native_root(&mut visitor);
-///     escaped.expect("visitor must run")
-/// }
-/// ```
 #[must_use = "delegated package access must be settled through the runtime ownership protocol"]
 pub struct ExtensionPackageAccess {
     target: ExtensionRuntimeTarget,
     resources: ExtensionRuntimeResourcePlan,
     retained_bytes: usize,
     usable: bool,
+    native_root_transferred: bool,
     provider: Box<dyn ExtensionPackageAccessPort>,
 }
 
@@ -395,6 +519,7 @@ impl ExtensionPackageAccess {
             resources,
             retained_bytes,
             usable: true,
+            native_root_transferred: false,
             provider,
         })
     }
@@ -454,6 +579,7 @@ impl ExtensionPackageAccess {
             resources: _,
             retained_bytes: _,
             usable: _,
+            native_root_transferred: _,
             provider,
         } = self;
         Ok(downcast_known_provider(provider))
@@ -491,26 +617,31 @@ impl ExtensionPackageAccess {
         self.finish_operation(result, observed_terminal_error)
     }
 
-    /// Visits a provider-validated native package root synchronously.
-    ///
-    /// The root must be absolute, non-root, and lexically normalized. Provider
-    /// and provider-postvalidation failures take precedence over consumer
-    /// failures.
-    pub(crate) fn visit_native_root(
+    /// Transfers the preallocated native package-root lease exactly once.
+    pub(crate) fn take_native_root_lease(
         &mut self,
-        visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-    ) -> Result<Result<(), ExtensionRuntimeVisitorError>, ExtensionPackageAccessError> {
+    ) -> Result<ExtensionRuntimeNativeRootLease, ExtensionPackageAccessError> {
         if !self.usable {
             return Err(ExtensionPackageAccessError::Inactive);
         }
-        let mut guard = NativeRootVisitGuard::new(visitor);
-        let provider_result = self.provider.visit_native_root(self.target, &mut guard);
-        let observed_terminal_error = guard.observed_terminal_error();
-        let result = match provider_result {
-            Ok(()) => guard.finish(),
-            Err(error) => Err(error),
-        };
-        self.finish_operation(result, observed_terminal_error)
+        if self.target != ExtensionRuntimeTarget::NativeWebExtension {
+            return Err(ExtensionPackageAccessError::NativeRootUnavailable);
+        }
+        if self.native_root_transferred {
+            return Err(ExtensionPackageAccessError::Inactive);
+        }
+        match self.provider.take_native_root_lease(self.target) {
+            Ok(port) => {
+                self.native_root_transferred = true;
+                Ok(ExtensionRuntimeNativeRootLease::from_delegated_port(port))
+            }
+            Err(error) => {
+                if access_error_is_terminal(error) {
+                    self.usable = false;
+                }
+                Err(error)
+            }
+        }
     }
 
     fn finish_operation(
@@ -552,6 +683,7 @@ impl fmt::Debug for ExtensionPackageAccess {
             .field("manifest", &self.manifest())
             .field("resources", &"[redacted]")
             .field("retained_bytes", &self.retained_bytes)
+            .field("native_root_transferred", &self.native_root_transferred)
             .field("provider", &"[redacted]")
             .finish()
     }
@@ -747,15 +879,6 @@ impl<'visitor> NativeRootVisitGuard<'visitor> {
         self.visitor_result
             .ok_or(ExtensionPackageAccessError::ProviderContractViolation)
     }
-
-    fn observed_terminal_error(&self) -> Option<ExtensionPackageAccessError> {
-        if self.calls > 1 {
-            Some(ExtensionPackageAccessError::ProviderContractViolation)
-        } else {
-            self.validation_error
-                .filter(|error| access_error_is_terminal(*error))
-        }
-    }
 }
 
 impl ExtensionRuntimeNativeRootVisitor for NativeRootVisitGuard<'_> {
@@ -849,11 +972,27 @@ mod tests {
         retained_bytes: usize,
         bytes: Vec<u8>,
         behavior: ResourceBehavior,
-        root: PathBuf,
-        root_calls: usize,
-        root_provider_error: Option<ExtensionPackageAccessError>,
+        native_root_lease: Option<Box<TestNativeRootLease>>,
         recovered_identity: Arc<Mutex<Option<u64>>>,
         read_calls: Arc<AtomicUsize>,
+    }
+
+    struct TestNativeRootLease {
+        root: PathBuf,
+        calls: usize,
+        provider_error: Option<ExtensionPackageAccessError>,
+    }
+
+    impl ExtensionRuntimeNativeRootLeasePort for TestNativeRootLease {
+        fn visit_native_root(
+            &mut self,
+            visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            for _ in 0..self.calls {
+                let _ = visitor.visit(&self.root);
+            }
+            self.provider_error.map_or(Ok(()), Err)
+        }
     }
 
     impl Drop for TestProvider {
@@ -947,15 +1086,18 @@ mod tests {
             }
         }
 
-        fn visit_native_root(
+        fn take_native_root_lease(
             &mut self,
-            _target: ExtensionRuntimeTarget,
-            visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-        ) -> Result<(), ExtensionPackageAccessError> {
-            for _ in 0..self.root_calls {
-                let _ = visitor.visit(&self.root);
+            target: ExtensionRuntimeTarget,
+        ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+        {
+            if target != ExtensionRuntimeTarget::NativeWebExtension {
+                return Err(ExtensionPackageAccessError::NativeRootUnavailable);
             }
-            self.root_provider_error.map_or(Ok(()), Err)
+            self.native_root_lease
+                .take()
+                .map(|lease| lease as Box<dyn ExtensionRuntimeNativeRootLeasePort>)
+                .ok_or(ExtensionPackageAccessError::NativeRootUnavailable)
         }
     }
 
@@ -975,12 +1117,41 @@ mod tests {
             Err(ExtensionPackageAccessError::Inactive)
         }
 
-        fn visit_native_root(
+        fn take_native_root_lease(
             &mut self,
             _target: ExtensionRuntimeTarget,
-            _visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
-        ) -> Result<(), ExtensionPackageAccessError> {
+        ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+        {
             Err(ExtensionPackageAccessError::Inactive)
+        }
+    }
+
+    struct TransferFailureProvider {
+        error: ExtensionPackageAccessError,
+        native_root_lease: Option<Box<TestNativeRootLease>>,
+    }
+
+    impl ExtensionPackageAccessPort for TransferFailureProvider {
+        fn retained_bytes(&self) -> usize {
+            std::mem::size_of::<TestNativeRootLease>()
+        }
+
+        fn visit_resource(
+            &mut self,
+            resource: ExtensionRuntimeResource,
+            visitor: &mut dyn ExtensionRuntimeResourceVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            let bytes = vec![0_u8; resource.declared_bytes() as usize];
+            let _ = visitor.visit(&mut Cursor::new(bytes));
+            Ok(())
+        }
+
+        fn take_native_root_lease(
+            &mut self,
+            _target: ExtensionRuntimeTarget,
+        ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+        {
+            Err(self.error)
         }
     }
 
@@ -1079,14 +1250,24 @@ mod tests {
                 retained_bytes: bytes.len(),
                 bytes,
                 behavior,
-                root,
-                root_calls: 1,
-                root_provider_error: None,
+                native_root_lease: native_root_lease(root, 1, None),
                 recovered_identity: Arc::clone(&recovered_identity),
                 read_calls: Arc::new(AtomicUsize::new(0)),
             }),
             recovered_identity,
         )
+    }
+
+    fn native_root_lease(
+        root: PathBuf,
+        calls: usize,
+        provider_error: Option<ExtensionPackageAccessError>,
+    ) -> Option<Box<TestNativeRootLease>> {
+        Some(Box::new(TestNativeRootLease {
+            root,
+            calls,
+            provider_error,
+        }))
     }
 
     fn access_with(behavior: ResourceBehavior, bytes: Vec<u8>) -> ExtensionPackageAccess {
@@ -1110,9 +1291,7 @@ mod tests {
             retained_bytes: bytes.len(),
             bytes: bytes.clone(),
             behavior,
-            root: absolute_test_root(),
-            root_calls: 1,
-            root_provider_error: None,
+            native_root_lease: native_root_lease(absolute_test_root(), 1, None),
             recovered_identity: Arc::new(Mutex::new(None)),
             read_calls: Arc::clone(&read_calls),
         });
@@ -1131,9 +1310,7 @@ mod tests {
             retained_bytes: 0,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls,
-            root_provider_error: None,
+            native_root_lease: native_root_lease(absolute_test_root(), root_calls, None),
             recovered_identity: Arc::new(Mutex::new(None)),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1179,9 +1356,7 @@ mod tests {
             retained_bytes: MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls: 1,
-            root_provider_error: None,
+            native_root_lease: native_root_lease(absolute_test_root(), 1, None),
             recovered_identity: Arc::clone(&recovered_identity),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1211,9 +1386,7 @@ mod tests {
             retained_bytes: MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES - wrapper_bytes,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls: 1,
-            root_provider_error: None,
+            native_root_lease: native_root_lease(absolute_test_root(), 1, None),
             recovered_identity: Arc::clone(&recovered_identity),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1236,9 +1409,7 @@ mod tests {
             retained_bytes: usize::MAX,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls: 1,
-            root_provider_error: None,
+            native_root_lease: native_root_lease(absolute_test_root(), 1, None),
             recovered_identity: Arc::clone(&recovered_identity),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1316,9 +1487,7 @@ mod tests {
             retained_bytes: usize::MAX,
             bytes: b"x".to_vec(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls: 1,
-            root_provider_error: None,
+            native_root_lease: native_root_lease(absolute_test_root(), 1, None),
             recovered_identity: Arc::clone(&recovered_identity),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1557,8 +1726,9 @@ mod tests {
     fn native_root_callback_contract_is_enforced() {
         for root_calls in [0, 2] {
             let mut access = access_with_root_calls(root_calls);
+            let mut lease = access.take_native_root_lease().expect("root lease");
             let mut consumer_calls = 0;
-            let result = access.visit_native_root(&mut |_root: &Path| {
+            let result = lease.with_verified_path(&mut |_root: &Path| {
                 consumer_calls += 1;
                 Ok(())
             });
@@ -1568,10 +1738,50 @@ mod tests {
             );
             assert_eq!(consumer_calls, usize::from(root_calls == 2));
             assert_eq!(
-                access.visit_native_root(&mut |_root: &Path| Ok(())),
+                lease.with_verified_path(&mut |_root: &Path| Ok(())),
                 Err(ExtensionPackageAccessError::Inactive)
             );
+            assert_eq!(
+                access.take_native_root_lease().err(),
+                Some(ExtensionPackageAccessError::Inactive)
+            );
         }
+    }
+
+    #[test]
+    fn native_root_transfer_is_target_exact_and_terminal_refusals_deactivate_access() {
+        let mut compatibility = access_with(ResourceBehavior::Exact, b"x".to_vec());
+        assert_eq!(
+            compatibility.take_native_root_lease().err(),
+            Some(ExtensionPackageAccessError::NativeRootUnavailable)
+        );
+        assert_eq!(
+            compatibility.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())),
+            Ok(Ok(()))
+        );
+
+        let provider: Box<dyn ExtensionPackageAccessPort> = Box::new(TransferFailureProvider {
+            error: ExtensionPackageAccessError::NativeRootIdentityMismatch,
+            native_root_lease: native_root_lease(absolute_test_root(), 1, None),
+        });
+        let mut native = ExtensionPackageAccess::from_delegated_provider(
+            ExtensionRuntimeTarget::NativeWebExtension,
+            resource_plan(0),
+            provider,
+        )
+        .expect("native access");
+        assert_eq!(
+            native.take_native_root_lease().err(),
+            Some(ExtensionPackageAccessError::NativeRootIdentityMismatch)
+        );
+        assert_eq!(
+            native.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())),
+            Err(ExtensionPackageAccessError::Inactive)
+        );
+        let provider = native
+            .try_into_delegated_provider::<TransferFailureProvider>()
+            .expect("exact provider");
+        assert!(provider.native_root_lease.is_some());
     }
 
     #[test]
@@ -1598,12 +1808,13 @@ mod tests {
             provider,
         )
         .expect("access");
+        let mut root_lease = root_access.take_native_root_lease().expect("root lease");
         assert_eq!(
-            root_access.visit_native_root(&mut |_root: &Path| Ok(())),
+            root_lease.with_verified_path(&mut |_root: &Path| Ok(())),
             Err(ExtensionPackageAccessError::NativeRootIdentityMismatch)
         );
         assert_eq!(
-            root_access.visit_native_root(&mut |_root: &Path| Ok(())),
+            root_lease.with_verified_path(&mut |_root: &Path| Ok(())),
             Err(ExtensionPackageAccessError::Inactive)
         );
     }
@@ -1628,9 +1839,11 @@ mod tests {
             retained_bytes: 0,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: PathBuf::from("relative"),
-            root_calls: 1,
-            root_provider_error: Some(ExtensionPackageAccessError::NativeRootUnavailable),
+            native_root_lease: native_root_lease(
+                PathBuf::from("relative"),
+                1,
+                Some(ExtensionPackageAccessError::NativeRootUnavailable),
+            ),
             recovered_identity: Arc::new(Mutex::new(None)),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1640,13 +1853,10 @@ mod tests {
             provider,
         )
         .expect("access");
+        let mut root_lease = root_access.take_native_root_lease().expect("root lease");
         assert_eq!(
-            root_access.visit_native_root(&mut |_root: &Path| Ok(())),
+            root_lease.with_verified_path(&mut |_root: &Path| Ok(())),
             Err(ExtensionPackageAccessError::NativeRootUnavailable)
-        );
-        assert_eq!(
-            root_access.visit_native_root(&mut |_root: &Path| Ok(())),
-            Err(ExtensionPackageAccessError::Inactive)
         );
     }
 
@@ -1668,9 +1878,7 @@ mod tests {
             retained_bytes: 0,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls: 0,
-            root_provider_error: Some(ExtensionPackageAccessError::NativeRootUnavailable),
+            native_root_lease: None,
             recovered_identity: Arc::new(Mutex::new(None)),
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1682,8 +1890,8 @@ mod tests {
         .expect("access");
         for _ in 0..2 {
             assert_eq!(
-                root_access.visit_native_root(&mut |_root: &Path| Ok(())),
-                Err(ExtensionPackageAccessError::NativeRootUnavailable)
+                root_access.take_native_root_lease().err(),
+                Some(ExtensionPackageAccessError::NativeRootUnavailable)
             );
         }
     }
@@ -1707,10 +1915,16 @@ mod tests {
 
     #[test]
     fn native_root_is_borrowed_once_and_validated() {
-        let mut access = access_with(ResourceBehavior::Exact, Vec::new());
+        let mut access = access_with_root_calls(1);
+        let retained_bytes = access.retained_bytes();
+        let mut lease = access.take_native_root_lease().expect("root lease");
+        assert_eq!(access.retained_bytes(), retained_bytes);
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("TestNativeRootLease"));
         let expected = absolute_test_root();
         let mut calls = 0;
-        let result = access.visit_native_root(&mut |root: &Path| {
+        let result = lease.with_verified_path(&mut |root: &Path| {
             calls += 1;
             assert_eq!(root, expected);
             Ok(())
@@ -1733,8 +1947,9 @@ mod tests {
             provider,
         )
         .expect("access");
+        let mut lease = access.take_native_root_lease().expect("root lease");
         let mut calls = 0;
-        let result = access.visit_native_root(&mut |_root: &Path| {
+        let result = lease.with_verified_path(&mut |_root: &Path| {
             calls += 1;
             Ok(())
         });
@@ -1769,8 +1984,9 @@ mod tests {
                 provider,
             )
             .expect("access");
+            let mut lease = access.take_native_root_lease().expect("root lease");
             let mut calls = 0;
-            let result = access.visit_native_root(&mut |_root: &Path| {
+            let result = lease.with_verified_path(&mut |_root: &Path| {
                 calls += 1;
                 Ok(())
             });
@@ -1802,8 +2018,9 @@ mod tests {
             provider,
         )
         .expect("access");
+        let mut lease = access.take_native_root_lease().expect("root lease");
         let mut calls = 0;
-        let result = access.visit_native_root(&mut |_root: &Path| {
+        let result = lease.with_verified_path(&mut |_root: &Path| {
             calls += 1;
             Ok(())
         });
@@ -1823,9 +2040,11 @@ mod tests {
             retained_bytes: 0,
             bytes: Vec::new(),
             behavior: ResourceBehavior::Exact,
-            root: absolute_test_root(),
-            root_calls: 1,
-            root_provider_error: Some(ExtensionPackageAccessError::Inactive),
+            native_root_lease: native_root_lease(
+                absolute_test_root(),
+                1,
+                Some(ExtensionPackageAccessError::Inactive),
+            ),
             recovered_identity,
             read_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -1835,7 +2054,8 @@ mod tests {
             provider,
         )
         .expect("access");
-        let result = access.visit_native_root(&mut |_root: &Path| {
+        let mut lease = access.take_native_root_lease().expect("root lease");
+        let result = lease.with_verified_path(&mut |_root: &Path| {
             Err(ExtensionRuntimeVisitorError::ConsumerUnavailable)
         });
         assert_eq!(result, Err(ExtensionPackageAccessError::Inactive));
@@ -1872,8 +2092,10 @@ mod tests {
     fn capability_and_ports_are_send_and_object_safe() {
         fn assert_send<T: Send>() {}
         assert_send::<ExtensionPackageAccess>();
+        assert_send::<ExtensionRuntimeNativeRootLease>();
         let _: Option<Box<dyn ExtensionPackageAccessPort>> = None;
         let _: Option<Box<dyn ExtensionRuntimeResourceVisitor>> = None;
+        let _: Option<Box<dyn ExtensionRuntimeNativeRootLeasePort>> = None;
         let _: Option<Box<dyn ExtensionRuntimeNativeRootVisitor>> = None;
     }
 }

@@ -27,7 +27,8 @@ mod target;
 
 pub use access::{
     ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessBuildRefusal,
-    ExtensionPackageAccessError, ExtensionPackageAccessPort, ExtensionRuntimeNativeRootVisitor,
+    ExtensionPackageAccessError, ExtensionPackageAccessPort, ExtensionRuntimeNativeRootLease,
+    ExtensionRuntimeNativeRootLeasePort, ExtensionRuntimeNativeRootVisitor,
     ExtensionRuntimeResourceVisitor, ExtensionRuntimeVisitorError,
     MAX_EXTENSION_RUNTIME_INTERRUPTED_READ_RETRIES, MAX_EXTENSION_RUNTIME_NATIVE_ROOT_BYTES,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
