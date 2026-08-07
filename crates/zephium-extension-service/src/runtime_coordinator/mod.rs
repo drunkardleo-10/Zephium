@@ -237,3 +237,10 @@ fn run_after_projection_readiness<T>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(
+    test,
+    zephium_internal_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+mod e2e;

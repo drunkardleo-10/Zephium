@@ -6310,8 +6310,11 @@ dependencies = [
 name = "zephium-extension-service"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "tempfile",
  "zephium-core",
+ "zephium-extension-authority",
+ "zephium-extension-package",
  "zephium-extension-repository",
  "zephium-extension-runtime-api",
  "zephium-private-fs",

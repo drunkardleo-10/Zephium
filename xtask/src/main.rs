@@ -584,7 +584,7 @@ fn ci() {
     // The desktop test suite regenerates frame/src/shared/ipc/bindings.ts, so the
     // frontend typecheck after it doubles as a Rust/TS drift check.
     run("cargo", &["test", "--workspace"]);
-    run_internal_extension_repository_gates();
+    run_internal_extension_authority_gates();
     for (manifest, features) in NATIVE_ADAPTERS {
         run_native_adapter_tests(manifest, features);
     }
@@ -683,7 +683,7 @@ fn collect_rust_sources(directory: &std::path::Path, output: &mut Vec<std::path:
     }
 }
 
-fn run_internal_extension_repository_gates() {
+fn run_internal_extension_authority_gates() {
     verify_internal_authority_cannot_link_into_shipping_code();
     for target in ["--all-targets", "--lib"] {
         run_with_internal_repository_cfg(&[
@@ -693,6 +693,8 @@ fn run_internal_extension_repository_gates() {
             "zephium-extension-authority",
             "-p",
             "zephium-extension-repository",
+            "-p",
+            "zephium-extension-service",
             target,
             "--",
             "-D",
@@ -707,10 +709,13 @@ fn run_internal_extension_repository_gates() {
         "--lib",
     ]);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    run_internal_repository_e2e_tests();
+    {
+        run_internal_repository_e2e_tests();
+        run_internal_extension_service_e2e_tests();
+    }
     #[cfg(target_os = "windows")]
     eprintln!(
-        "internal repository writer E2E is unavailable on Windows until the private namespace primitive is implemented; custom authority lint/tests remain mandatory"
+        "internal repository writer and service coordinator E2E are unavailable on Windows until the private namespace primitive is implemented; custom authority lint/tests remain mandatory"
     );
 }
 
@@ -914,6 +919,83 @@ fn list_extension_repository_tests(internal: bool) -> std::collections::BTreeSet
     .unwrap_or_else(|error| panic!("failed to list extension repository tests: {error}"));
     if !output.status.success() {
         eprintln!("extension repository test inventory failed to compile");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        exit(output.status.code().unwrap_or(1));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_internal_extension_service_e2e_tests() {
+    const FILTER: &str = "runtime_coordinator::e2e::";
+    const EXPECTED_TESTS: usize = 6;
+
+    let regular_inventory = list_extension_service_tests(false);
+    let internal_inventory = list_extension_service_tests(true);
+    let internal_only = internal_inventory
+        .difference(&regular_inventory)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected = internal_inventory
+        .iter()
+        .filter(|name| name.starts_with(FILTER))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if selected.len() != EXPECTED_TESTS {
+        eprintln!(
+            "internal extension-service authority E2E selection contains {} tests, expected {EXPECTED_TESTS}",
+            selected.len()
+        );
+        exit(1);
+    }
+    if selected != internal_only {
+        eprintln!(
+            "internal extension-service E2E selection must cover every cfg-only test exactly once"
+        );
+        for name in internal_only.difference(&selected) {
+            eprintln!("unselected internal-only service test: {name}");
+        }
+        for name in selected.difference(&internal_only) {
+            eprintln!("redundant regular-build service test selection: {name}");
+        }
+        exit(1);
+    }
+    run_with_internal_repository_cfg(&[
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-service",
+        "--lib",
+        FILTER,
+        "--",
+        "--test-threads=1",
+    ]);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn list_extension_service_tests(internal: bool) -> std::collections::BTreeSet<String> {
+    let args = [
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-service",
+        "--lib",
+        "--",
+        "--list",
+    ];
+    let output = if internal {
+        internal_repository_command(&args).output()
+    } else {
+        Command::new("cargo").args(args).output()
+    }
+    .unwrap_or_else(|error| panic!("failed to list extension-service tests: {error}"));
+    if !output.status.success() {
+        eprintln!("extension-service test inventory failed to compile");
         eprintln!("{}", String::from_utf8_lossy(&output.stdout));
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         exit(output.status.code().unwrap_or(1));

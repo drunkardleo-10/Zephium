@@ -12,4 +12,12 @@ zephium-private-fs.workspace = true
 zephium-store.workspace = true
 
 [dev-dependencies]
+sha2 = "=0.10.9"
 tempfile.workspace = true
+zephium-extension-authority.workspace = true
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = [
+    "cfg(zephium_internal_repository_e2e)",
+] }
