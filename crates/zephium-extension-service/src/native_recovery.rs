@@ -108,6 +108,21 @@ impl NativeRecoveryState {
         self.frontier.is_some()
     }
 
+    /// Borrows the unique host factory only while crash-recovery owns no
+    /// frontier and no recovery call is crossing the native panic fence.
+    ///
+    /// Fresh runtime admission and persisted-owner recovery share one engine
+    /// registry factory. Returning `None` keeps those two protocols serialized
+    /// without exposing or moving the factory out of this worker-owned state.
+    #[allow(dead_code)] // Consumed by the worker-private runtime coordinator before actor ingress is wired.
+    pub(crate) fn idle_factory(&mut self) -> Option<&mut ExtensionRuntimeHostFactory> {
+        if self.frontier.is_some() || self.native_call_panic_fence {
+            None
+        } else {
+            Some(&mut self.factory)
+        }
+    }
+
     /// Returns the exact profile owned by the current cleanup frontier.
     ///
     /// Pending durable transitions must preserve the complete ownership key;

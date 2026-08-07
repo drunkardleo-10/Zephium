@@ -50,6 +50,8 @@ mod native_recovery;
 mod ports;
 mod profile_retirement;
 mod repository;
+#[allow(dead_code)] // Worker ingress wiring lands after the private coordinator is validated.
+mod runtime_coordinator;
 mod startup;
 mod status;
 
