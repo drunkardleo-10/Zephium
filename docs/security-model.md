@@ -1,9 +1,10 @@
 # Zephium security model
 
 Zephium renders hostile, attacker-controlled code by design. This document describes
-the guarantees implemented in the current tree, not planned product features. If code
-and this document disagree, the code is the evidence and the mismatch is a release
-blocker.
+the guarantees implemented in the current tree, not planned product features. Clearly
+labelled product-disabled contracts define additional gates that must hold before their
+feature can be enabled; they are not current guarantees. If code and this document
+disagree, the code is the evidence and the mismatch is a release blocker.
 
 Zephium is a browser shell over OS WebViews. The application can harden its own
 boundaries, data lifecycle, and native API surface, but it cannot turn WKWebView,
@@ -28,6 +29,16 @@ Chromium's full site-isolation model.
    page-world bootstraps for discard-safety observation, bounded HTML extraction, and
    scripted-print denial. Those scripts expose no native bridge or application
    authority; all injected page-world code has exactly the page's trust level.
+4. **Extension execution (unprivileged; product-disabled).** The architecture reserves
+   one non-reusable native principal per installed extension. Content scripts may run
+   only in engine-provided isolated worlds scoped to that principal. Extension-owned
+   background and UI surfaces do not inherit application-WebView privilege and receive
+   neither generic Tauri/Wry IPC nor a generic custom protocol. Any enabled native
+   registration must bind the profile, install, principal, and generation and never
+   accept identity from a JavaScript payload; only capability-specific,
+   permission-checked brokers may cross into zone 1. This is the required enablement
+   contract, not a current product claim: production adapters remain disabled until
+   platform-native hostile tests enforce it.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.
@@ -406,10 +417,15 @@ exact CAS, is immutable for that native incarnation, and is mandatory before a n
 row can claim `NativeOwned`; an identityless `NativeMayOwn` remains possible ownership
 and must be reconciled conservatively. Its rows are profile-independent shared-meta state, so unresolved or
 unreadable ownership blocks both profile deletion authorization and local purge. The
-coordinator and product native backend remain disabled release work.
-`StoreShutdownOutcome::Clean` proves storage durability and actor/resource shutdown only;
-it does not prove these rows or their possible native owners absent. A future extension
-coordinator owns bounded drain attempts and higher-level shutdown health.
+bounded extension coordinator now owns the Store projection, authenticated repository,
+native-host authority, and bounded profile-retirement/shutdown drains. It refuses clean
+extension-service evidence while a worker-owned runtime or attached authority remains
+unresolved or the accepted/completed command counters differ. Production native
+backends and product activation remain disabled and are release-blocking work.
+`StoreShutdownOutcome::Clean` proves storage durability and actor/resource shutdown
+only. Extension-service shutdown evidence proves its worker/resource drain and command
+settlement; neither evidence proves durable rows or possible native owners absent.
+Journal reconciliation must establish that native-absence claim separately.
 
 The subordinate repository package pin is representation-exact as well. Its
 durable identity includes browsing context, exact catalog-set record, historical
@@ -458,11 +474,14 @@ The Core acquisition and release bindings prove only a complete structural
 join; they are not Store freshness capabilities. Acquisition is linear at the
 repository boundary: the move-only binding is consumed into the live lease and
 cannot be replayed after conversion to cleanup-only release. The extension
-service must exclusively own the Store journal and repository, freshly
-revalidate the exact row and CAS in the same serialized actor turn before each
-repository call, and expose neither bindings nor raw repository mutation over
-its mailbox. Until that service boundary and its stale/forged-row denial tests
-exist, these low-level APIs are not a release-enablement claim.
+service exclusively owns the Store journal and repository, freshly revalidates
+the exact row and CAS in the same serialized actor turn before each repository
+call, and exposes neither bindings nor raw repository mutation over its
+mailbox. Internal-only authenticated tests exercise that boundary through
+activation, exact retirement, profile retirement, shutdown, and post-drain
+Store/repository reopen while denying stale authority. They use a bounded
+native fake; production adapters remain disabled, so the low-level and service
+APIs are still not a release-enablement claim.
 
 Logical content views have three explicit watermarks. Twelve is the warm soft target;
 above it, hidden idle pages become discard candidates. Above the pressure watermark of

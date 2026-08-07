@@ -74,7 +74,8 @@ using a multi-process WebView is not itself a site-isolation guarantee. Rust
 requests page-world scripts for tightly bounded observations, but never treats
 their results as trusted code or data.
 
-Three webview classes, mapping to the trust zones in security-model.md:
+The current three webview classes map to trust zones 1-3 in
+security-model.md:
 
 ```
 +- OS-sandboxed content processes (UNTRUSTED, zone 3) ----------------+
@@ -97,6 +98,19 @@ Attack surface we own: the IPC/bridge boundary, parsers of semi-trusted input
 (filter lists, URLs, themes, config, extension manifests), FFI to the webview,
 and any purpose-built application downloaders added for trusted browser data
 such as filter lists or signed updates.
+
+Extension execution does not inherit the application-WebView trust zone. Each
+installed extension has one non-reusable native principal. Content scripts may
+execute only in engine-provided isolated worlds scoped to that principal.
+Extension-owned background and UI surfaces form a separate unprivileged trust
+zone: they receive no generic Tauri/Wry IPC bridge and no generic custom
+protocol. Any enabled native registration must bind the profile, install,
+principal, and generation; JavaScript payloads can never select or assert that
+identity. Only capability-specific, permission-checked brokers may cross into
+the trusted process. Raw page worlds remain bridge-free. This contract is
+ratified for the extension architecture, but ordinary product builds keep
+extension execution disabled until every platform adapter and hostile native
+gate enforces it.
 
 v1 is a single main process with async tasks; the untrusted code is already
 process-isolated by the engine.
@@ -601,10 +615,16 @@ duplicate, or over-limit state fails the complete load. The journal survives
 profile ancillary degradation/removal and blocks profile deletion until its
 rows settle. Session recovery rejects new `Begin` operations and every
 acquire-directed `Transition`, while exact release-directed `Transition` and
-`Clear` operations remain available to retire existing native owners. This is
-persistence and ordering infrastructure only: no service coordinator or
-product native-extension activation is implemented yet. Reconstruction also
-rejects unreachable clock histories: operation and incarnation high-water
+`Clear` operations remain available to retire existing native owners. The
+bounded extension service now owns this persistence and ordering seam. Its
+serialized actor joins the Store projection, authenticated repository lease,
+native-host authority, profile retirement, and shutdown drain. It refuses clean
+worker evidence while a worker-owned runtime or attached authority remains
+unresolved or accepted/completed command counts differ. That evidence proves
+only worker/resource drain, not durable-journal or native-owner absence.
+Production native adapters and product activation remain disabled, so this
+coordinator is not a release-enablement claim. Reconstruction also rejects
+unreachable clock histories: operation and incarnation high-water
 marks are equal, every row binds the same operation/incarnation, phase and row
 revision agree, and with `C = high_water - live_rows` plus
 `S = sum(live_row_revisions)`, the global revision is within
@@ -667,12 +687,15 @@ Core package-pin bindings are structural joins, not proof that a Store row is
 still current. Fresh acquisition consumes its move-only binding into the live
 repository lease; the lease exposes eligibility only by borrow and destroys
 the acquisition authority when converted to cleanup-only release. The runtime
-service is therefore the exclusive owner of both the Store journal projection
-and `ExtensionRepository`: immediately before every repository mutation it
-must revalidate the exact current row and CAS in its serialized actor turn.
-Neither raw bindings nor repository methods may cross its bounded mailbox.
-Service tests must prove stale or caller-synthesized rows cannot reach a
-repository transition before extension execution is enabled.
+service is the exclusive owner of both the Store journal projection and
+`ExtensionRepository`: immediately before every repository mutation it
+revalidates the exact current row and CAS in its serialized actor turn. Neither
+raw bindings nor repository methods cross its bounded mailbox. Internal-only
+authenticated authority tests exercise real Store and repository state through
+activation, exact retirement, profile retirement, shutdown, and post-drain
+Store/repository reopen; stale or caller-synthesized rows cannot reach a
+repository transition. These tests use a bounded native fake and do not
+substitute for a live platform adapter.
 
 Durable package identity is representation-exact. A bundled authenticated tree
 is tagged `BundledTree` and carries no synthetic archive evidence; a future
@@ -905,8 +928,10 @@ FTS5; a test guards it).
   durable input only: they do not prove native activation, package
   authentication, or live permission enforcement. The conservative native
   reconciliation journal is separate shared-meta ordering state. It does not
-  itself authenticate a package or prove native activation, and the service
-  coordinator that joins it to those authorities is not implemented yet.
+  itself authenticate a package or prove native activation. The implemented
+  bounded service coordinator joins that journal to authenticated repository
+  authority and lifecycle drains, while production native adapters and product
+  activation remain disabled.
 
 ---
 
