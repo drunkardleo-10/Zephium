@@ -3,7 +3,7 @@ use std::io::{Cursor, Read};
 use std::mem::{size_of, size_of_val};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -15,14 +15,14 @@ use zephium_core::extensions::{
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantRevision,
     ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
     ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionManifestDigest,
-    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
-    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
-    ExtensionOperationAuthorityDenial, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinAcquisitionDenial,
-    ExtensionPackagePinReleaseBinding, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
-    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
-    ExtensionUserInvocationKind,
+    ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement, ExtensionNativeIncarnation,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryRevision,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionOperationAuthorityDenial, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackagePinAcquisitionBinding,
+    ExtensionPackagePinAcquisitionDenial, ExtensionPackagePinReleaseBinding,
+    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint,
+    ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
@@ -888,15 +888,40 @@ impl ExtensionRuntimeHostPublicationPort for SuccessfulCompatibilityPublication 
 struct SuccessfulCompatibilityHostFactory {
     lifecycle_retained_bytes: usize,
     publication_retained_bytes: usize,
+    grant_observations: Arc<Mutex<Vec<HostNativeGrantObservation>>>,
 }
 
 impl SuccessfulCompatibilityHostFactory {
     fn normal() -> Self {
+        Self::with_grant_observations(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    fn with_grant_observations(
+        grant_observations: Arc<Mutex<Vec<HostNativeGrantObservation>>>,
+    ) -> Self {
         Self {
             lifecycle_retained_bytes: size_of::<SuccessfulCompatibilityLifecycle>(),
             publication_retained_bytes: size_of::<SuccessfulCompatibilityPublication>(),
+            grant_observations,
         }
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct HostNativeGrantObservation {
+    runtime: ExtensionRuntimeFingerprint,
+    api: Vec<(
+        String,
+        ExtensionNativeGrantRequirement,
+        ExtensionNativeGrantDecision,
+    )>,
+    hosts: Vec<(
+        String,
+        ExtensionNativeGrantRequirement,
+        ExtensionNativeGrantDecision,
+    )>,
+    file_scheme_access: bool,
+    private_context_access: bool,
 }
 
 fn active_compatibility_host_transient_retained_bytes(
@@ -927,7 +952,7 @@ fn active_compatibility_host_transient_retained_bytes(
 impl ExtensionRuntimeHostFactoryPort for SuccessfulCompatibilityHostFactory {
     fn bind_activation(
         &mut self,
-        context: &ExtensionRuntimeHostActivationContext<'_>,
+        context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
         if context.target() != ExtensionRuntimeTarget::Compatibility
             || context.identity_expectation()
@@ -935,6 +960,49 @@ impl ExtensionRuntimeHostFactoryPort for SuccessfulCompatibilityHostFactory {
         {
             return Err(ExtensionRuntimeHostBindError::UnsupportedBackend);
         }
+        let grants = context.native_grants();
+        let api = grants
+            .api_grants()
+            .map(|grant| {
+                (
+                    grant.name().as_str().to_owned(),
+                    grant.requirement(),
+                    grant.decision(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let hosts = grants
+            .host_grants()
+            .map(|grant| {
+                (
+                    grant.pattern().as_str().to_owned(),
+                    grant.requirement(),
+                    grant.decision(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let invalid_required = api.iter().any(|(_, requirement, decision)| {
+            *requirement == ExtensionNativeGrantRequirement::Required && !decision.is_granted()
+        }) || hosts.iter().any(|(_, requirement, decision)| {
+            *requirement == ExtensionNativeGrantRequirement::Required && !decision.is_granted()
+        });
+        if grants.runtime() != context.fingerprint()
+            || api.len() != grants.api_grant_count()
+            || hosts.len() != grants.host_grant_count()
+            || invalid_required
+        {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        self.grant_observations
+            .lock()
+            .expect("grant observation lock")
+            .push(HostNativeGrantObservation {
+                runtime: grants.runtime().clone(),
+                api,
+                hosts,
+                file_scheme_access: grants.file_scheme_access_granted(),
+                private_context_access: grants.private_context_access_granted(),
+            });
         let generation = ExtensionRuntimeHostRegistryGeneration::new(1)
             .ok_or(ExtensionRuntimeHostBindError::IdentityExhausted)?;
         Ok(ExtensionRuntimeHostActivationPorts::new(
@@ -964,7 +1032,7 @@ struct UnsupportedHostFactory;
 impl ExtensionRuntimeHostFactoryPort for UnsupportedHostFactory {
     fn bind_activation(
         &mut self,
-        _context: &ExtensionRuntimeHostActivationContext<'_>,
+        _context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
         Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
     }
@@ -2924,8 +2992,9 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
         .unwrap()
         .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
+    let active_grants = Arc::new(Mutex::new(Vec::new()));
     let mut active_host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
-        SuccessfulCompatibilityHostFactory::normal(),
+        SuccessfulCompatibilityHostFactory::with_grant_observations(Arc::clone(&active_grants)),
     ));
     let active_host_activation = active_access
         .try_into_host_activation(active_host_entry.clone(), &mut active_host)
@@ -2935,6 +3004,19 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
             <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
     );
     let (active_activation, active_recovery) = active_host_activation.into_parts();
+    {
+        let observations = active_grants.lock().expect("active grant observations");
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        assert_eq!(
+            observation.runtime.instance().install_id(),
+            ExtensionInstallId::from(263)
+        );
+        assert!(observation.api.is_empty());
+        assert!(observation.hosts.is_empty());
+        assert!(!observation.file_scheme_access);
+        assert!(!observation.private_context_access);
+    }
     assert_ne!(active_recovery.retained_bytes(), 0);
     let (active_access, active_operation_authority) = settle_compatibility_host_activation(
         active_activation,
@@ -3018,8 +3100,9 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
         .unwrap()
         .into_runtime_package_access(ExtensionRuntimeGeneration::INITIAL)
         .unwrap();
+    let rollback_grants = Arc::new(Mutex::new(Vec::new()));
     let mut rollback_host = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
-        SuccessfulCompatibilityHostFactory::normal(),
+        SuccessfulCompatibilityHostFactory::with_grant_observations(Arc::clone(&rollback_grants)),
     ));
     let refusal = rollback_access
         .try_into_host_activation(rollback_preparing_entry.clone(), &mut rollback_host)
@@ -3040,6 +3123,19 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
             <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES
     );
     let (rollback_activation, rollback_recovery) = rollback_host_activation.into_parts();
+    {
+        let observations = rollback_grants.lock().expect("rollback grant observations");
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        assert_eq!(
+            observation.runtime.instance().install_id(),
+            ExtensionInstallId::from(271)
+        );
+        assert!(observation.api.is_empty());
+        assert!(observation.hosts.is_empty());
+        assert!(!observation.file_scheme_access);
+        assert!(!observation.private_context_access);
+    }
     assert_ne!(rollback_recovery.retained_bytes(), 0);
     let (rollback_access, rollback_operation_authority) = settle_compatibility_host_activation(
         rollback_activation,

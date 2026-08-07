@@ -1103,7 +1103,7 @@ mod tests {
     impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactoryPort {
         fn bind_activation(
             &mut self,
-            _context: &ExtensionRuntimeHostActivationContext<'_>,
+            _context: ExtensionRuntimeHostActivationContext<'_>,
         ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
             Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
         }

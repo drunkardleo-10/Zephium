@@ -19,11 +19,12 @@ use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
-    ExtensionExpectedNativeOwnershipIdentity, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipIdentityError,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipPhase,
-    ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
-    ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionNativeGrantProjection,
+    ExtensionNativeGrantSnapshot, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
+    ExtensionNativeOwnershipIdentityError, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipPhase, ExtensionOperationAuthorityDenial,
+    ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint, ExtensionRuntimeOperationAuthority,
+    ExtensionUserInvocationKind,
 };
 use zephium_core::ids::ProfileId;
 
@@ -573,12 +574,12 @@ fn entry_matches_fingerprint(
 /// Borrowed, non-authorizing activation description passed to the engine.
 pub struct ExtensionRuntimeHostActivationContext<'binding> {
     owner: ExtensionRuntimeOwnerAddress,
-    fingerprint: &'binding ExtensionRuntimeFingerprint,
     expectation: ExtensionRuntimeNativeIdentityExpectation,
     target: ExtensionRuntimeTarget,
+    native_grants: ExtensionNativeGrantProjection<'binding>,
 }
 
-impl ExtensionRuntimeHostActivationContext<'_> {
+impl<'binding> ExtensionRuntimeHostActivationContext<'binding> {
     /// Exact durable owner address.
     #[must_use]
     pub const fn owner(&self) -> ExtensionRuntimeOwnerAddress {
@@ -588,7 +589,7 @@ impl ExtensionRuntimeHostActivationContext<'_> {
     /// Complete non-authorizing runtime fingerprint.
     #[must_use]
     pub const fn fingerprint(&self) -> &ExtensionRuntimeFingerprint {
-        self.fingerprint
+        self.native_grants.runtime()
     }
 
     /// Authenticated expected native identity.
@@ -601,6 +602,25 @@ impl ExtensionRuntimeHostActivationContext<'_> {
     #[must_use]
     pub const fn target(&self) -> ExtensionRuntimeTarget {
         self.target
+    }
+
+    /// Complete exact structural grants for this activation.
+    ///
+    /// This borrowed projection is non-authorizing. It remains joined to the
+    /// authenticated binding held by the factory wrapper and cannot be cloned
+    /// or serialized.
+    pub const fn native_grants(&self) -> &ExtensionNativeGrantProjection<'binding> {
+        &self.native_grants
+    }
+
+    /// Retains the exact structural grants for a trusted host reservation.
+    ///
+    /// One context yields one transport snapshot across the host boundary. The
+    /// host must continuously retain or conservatively charge the matching
+    /// operation authority and drop this snapshot no later than that authority
+    /// state.
+    pub fn into_native_grant_snapshot(self) -> ExtensionNativeGrantSnapshot {
+        self.native_grants.into_owned_snapshot()
     }
 }
 
@@ -1094,10 +1114,15 @@ pub trait ExtensionRuntimeHostFactoryPort: Send {
     /// Binds one fresh provisional activation reservation and its exact proxy pair.
     ///
     /// Both proxies must share the reservation lifecycle specified by
-    /// [`ExtensionRuntimeHostLifecyclePort`]. Returning `Err` reserves nothing.
+    /// [`ExtensionRuntimeHostLifecyclePort`]. The consumed context's structural
+    /// grant snapshot may be retained only inside that shared reservation. Its
+    /// shared payload remains charged by the matching operation-authority
+    /// control state; each proxy must charge all new snapshot/Box storage in
+    /// its own stable bound. Returning `Err` retains no snapshot and reserves
+    /// nothing.
     fn bind_activation(
         &mut self,
-        context: &ExtensionRuntimeHostActivationContext<'_>,
+        context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError>;
 
     /// Binds one cleanup-only provisional possible-owner reservation.
@@ -1250,17 +1275,29 @@ impl ExtensionRuntimeHostFactory {
         binding: ExtensionRuntimeHostActivationBinding,
         companion_retained_bytes: usize,
     ) -> Result<ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal> {
+        let native_grants = match binding
+            .authority
+            .native_grant_projection(binding.authority.fingerprint())
+        {
+            Ok(native_grants) => native_grants,
+            Err(_) => {
+                return Err(ExtensionRuntimeHostActivationBindRefusal {
+                    reason: ExtensionRuntimeHostBindError::InternalInvariant,
+                    binding: Box::new(binding),
+                });
+            }
+        };
         let context = ExtensionRuntimeHostActivationContext {
             owner: ExtensionRuntimeOwnerAddress::from_entry(&binding.entry),
-            fingerprint: binding.authority.fingerprint(),
             expectation: binding.expectation,
             target: binding.access.target(),
+            native_grants,
         };
         let ExtensionRuntimeHostActivationPorts {
             generation,
             lifecycle,
             publication,
-        } = match self.port.bind_activation(&context) {
+        } = match self.port.bind_activation(context) {
             Ok(parts) => parts,
             Err(reason) => {
                 return Err(ExtensionRuntimeHostActivationBindRefusal {

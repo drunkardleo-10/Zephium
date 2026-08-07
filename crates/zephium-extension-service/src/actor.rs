@@ -1259,7 +1259,7 @@ mod tests {
     impl ExtensionRuntimeHostFactoryPort for UnsupportedHostFactoryPort {
         fn bind_activation(
             &mut self,
-            _context: &ExtensionRuntimeHostActivationContext<'_>,
+            _context: ExtensionRuntimeHostActivationContext<'_>,
         ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
             Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
         }
@@ -1285,7 +1285,7 @@ mod tests {
     impl ExtensionRuntimeHostFactoryPort for ProfileAbsenceHostFactoryPort {
         fn bind_activation(
             &mut self,
-            _context: &ExtensionRuntimeHostActivationContext<'_>,
+            _context: ExtensionRuntimeHostActivationContext<'_>,
         ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
             Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
         }

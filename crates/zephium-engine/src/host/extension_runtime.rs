@@ -7,6 +7,8 @@
 //! to [`ExtensionRuntimeRegistry`] on the UI thread; passive destruction can
 //! release only a reservation that never attached.
 
+mod native_grants;
+
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -37,6 +39,8 @@ use crate::MainThreadDispatch;
 
 use super::resources::NativeResourceClass;
 use super::EngineHost;
+
+use self::native_grants::EngineNativeGrantSnapshot;
 
 const MAX_ACTIVATION_RESERVATIONS: usize = NativeResourceClass::ExtensionBackground.limit();
 const MAX_RECOVERY_RESERVATIONS: usize = NativeResourceClass::ReconciliationController.limit();
@@ -392,7 +396,7 @@ impl ExtensionRuntimeFactoryGate {
 enum ReservationBinding {
     Activation {
         owner: OwnerKey,
-        fingerprint: Box<ExtensionRuntimeFingerprint>,
+        grants: Box<EngineNativeGrantSnapshot>,
         expectation: ExtensionRuntimeNativeIdentityExpectation,
     },
     Recovery {
@@ -412,6 +416,15 @@ impl ReservationBinding {
         match self {
             Self::Activation { .. } => ReservationKind::Activation,
             Self::Recovery { .. } => ReservationKind::Recovery,
+        }
+    }
+
+    fn operation_authority_companion_retained_bytes(&self) -> usize {
+        match self {
+            Self::Activation { grants, .. } => grants
+                .operation_authority_companion_retained_bytes()
+                .saturating_add(2 * size_of::<usize>()),
+            Self::Recovery { .. } => 0,
         }
     }
 }
@@ -511,13 +524,56 @@ struct RegistryEntry {
     owner: OwnerKey,
     generation: ExtensionRuntimeHostRegistryGeneration,
     #[cfg_attr(not(test), allow(dead_code))]
-    fingerprint: Option<ExtensionRuntimeFingerprint>,
-    #[cfg_attr(not(test), allow(dead_code))]
     expectation: RegistryExpectation,
     #[cfg_attr(not(test), allow(dead_code))]
     phase: RegistryPhase,
     operation_authority: Option<ExtensionRuntimeOperationAuthority>,
     reservation: Arc<ReservationControl>,
+}
+
+impl RegistryEntry {
+    fn binding_is_consistent(&self) -> bool {
+        match &self.reservation.binding {
+            ReservationBinding::Activation {
+                owner,
+                grants,
+                expectation,
+            } => {
+                if *owner != self.owner
+                    || !matches!(
+                        self.expectation,
+                        RegistryExpectation::Activation(actual) if actual == *expectation
+                    )
+                {
+                    return false;
+                }
+                match self.phase {
+                    RegistryPhase::ActivationPending => self.operation_authority.is_none(),
+                    #[cfg(test)]
+                    RegistryPhase::Activated(evidence) => {
+                        self.operation_authority.is_none()
+                            && activation_expectation_accepts(*expectation, evidence)
+                    }
+                    RegistryPhase::Published(evidence) => {
+                        activation_expectation_accepts(*expectation, evidence)
+                            && self.operation_authority.as_ref().is_some_and(|authority| {
+                                authority.fingerprint() == grants.runtime()
+                            })
+                    }
+                    RegistryPhase::RecoveryUncertain => false,
+                }
+            }
+            ReservationBinding::Recovery { owner, expectation } => {
+                *owner == self.owner
+                    && matches!(
+                        self.expectation,
+                        RegistryExpectation::Recovery(actual) if actual == *expectation
+                    )
+                    && matches!(self.phase, RegistryPhase::RecoveryUncertain)
+                    && self.operation_authority.is_none()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -613,18 +669,12 @@ impl ExtensionRuntimeRegistry {
             return Err(ExtensionRuntimeHostBindError::OwnerConflict);
         }
         reservation.mark_attached()?;
-        let (fingerprint, expectation, phase) = match &reservation.binding {
-            ReservationBinding::Activation {
-                fingerprint,
-                expectation,
-                ..
-            } => (
-                Some(fingerprint.as_ref().clone()),
+        let (expectation, phase) = match &reservation.binding {
+            ReservationBinding::Activation { expectation, .. } => (
                 RegistryExpectation::Activation(*expectation),
                 RegistryPhase::ActivationPending,
             ),
             ReservationBinding::Recovery { expectation, .. } => (
-                None,
                 RegistryExpectation::Recovery(*expectation),
                 RegistryPhase::RecoveryUncertain,
             ),
@@ -632,7 +682,6 @@ impl ExtensionRuntimeRegistry {
         self.entries.push(RegistryEntry {
             owner,
             generation,
-            fingerprint,
             expectation,
             phase,
             operation_authority: None,
@@ -744,9 +793,14 @@ impl ExtensionRuntimeRegistry {
             RegistryPhase::Activated(actual) => actual == evidence,
             _ => false,
         };
+        let exact_runtime = matches!(
+            &entry.reservation.binding,
+            ReservationBinding::Activation { grants, .. }
+                if grants.runtime() == authority.fingerprint()
+        );
         if !definite_activation
             || !owner.continues_in(owned_entry)
-            || entry.fingerprint.as_ref() != Some(authority.fingerprint())
+            || !exact_runtime
             || entry.operation_authority.is_some()
         {
             return Err(Box::new((
@@ -808,7 +862,11 @@ impl ExtensionRuntimeRegistry {
                         RegistryPhase::Published(evidence)
                             if entry.expectation.accepts_publication(evidence)
                     )
-                    && entry.fingerprint.as_ref() == Some(runtime)
+                    && matches!(
+                        &entry.reservation.binding,
+                        ReservationBinding::Activation { grants, .. }
+                            if grants.runtime() == runtime
+                    )
             })
             .ok_or(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
     }
@@ -878,6 +936,7 @@ impl ExtensionRuntimeRegistry {
             entry.owner == entry.reservation.owner()
                 && entry.generation == entry.reservation.generation
                 && entry.reservation.phase() == RESERVATION_ATTACHED
+                && entry.binding_is_consistent()
                 && Arc::ptr_eq(&entry.reservation.gate.inner, &self.gate.inner)
                 && state
                     .reservations
@@ -1265,16 +1324,19 @@ struct EngineFactoryPort {
 impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
     fn bind_activation(
         &mut self,
-        context: &ExtensionRuntimeHostActivationContext<'_>,
+        context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
         self.gate.preflight()?;
         if matches!(self.adapters, AdapterAvailability::Unsupported) {
             return Err(ExtensionRuntimeHostBindError::UnsupportedBackend);
         }
+        let owner = OwnerKey::from_address(context.owner());
+        let expectation = context.identity_expectation();
+        let grants = Box::new(EngineNativeGrantSnapshot::try_from_context(context)?);
         let reservation = self.gate.reserve(ReservationBinding::Activation {
-            owner: OwnerKey::from_address(context.owner()),
-            fingerprint: Box::new(context.fingerprint().clone()),
-            expectation: context.identity_expectation(),
+            owner,
+            grants,
+            expectation,
         })?;
         Ok(ExtensionRuntimeHostActivationPorts::new(
             reservation.generation,
@@ -1367,24 +1429,29 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
     }
 }
 
-fn proxy_retained_bytes<Proxy>() -> usize {
+fn proxy_retained_bytes<Proxy>(reservation: &ReservationControl) -> usize {
     // `size_of::<Proxy>()` is the concrete boxed-adapter payload (the API
     // explicitly excludes only its trait-object pointer). The first allocator
     // term charges that Box allocation. Each proxy then charges the complete
     // shared Arc allocation conservatively: control payload, a distinct Arc
     // allocator term, and strong/weak counters. Activation bindings also own
-    // a boxed fingerprint outside that control payload, so charge its payload
-    // and allocator term even for recovery proxies. The bounded logical record
-    // is charged too even though the host contract permits excluding
-    // separately hard-counted reservations. Double-charging shared state keeps
-    // the bound stable when either split proxy outlives the other.
+    // a boxed structural grant snapshot outside that control payload. Its
+    // manifest/grant allocations remain charged through the exact operation-
+    // authority control chain, so only the snapshot's companion storage and
+    // Box allocation are added here. The bounded logical record is charged too
+    // even though the host contract permits excluding separately hard-counted
+    // reservations. Double-charging shared state keeps the bound stable when
+    // either split proxy outlives the other.
     size_of::<Proxy>()
         .saturating_add(2 * size_of::<usize>())
         .saturating_add(size_of::<ReservationControl>())
         .saturating_add(2 * size_of::<usize>())
         .saturating_add(2 * size_of::<usize>())
-        .saturating_add(size_of::<ExtensionRuntimeFingerprint>())
-        .saturating_add(2 * size_of::<usize>())
+        .saturating_add(
+            reservation
+                .binding
+                .operation_authority_companion_retained_bytes(),
+        )
         .saturating_add(size_of::<ReservationRecord>())
 }
 
@@ -1395,7 +1462,7 @@ struct EngineLifecyclePort {
 
 impl zephium_extension_runtime_api::ExtensionRuntimeOwnershipPort for EngineLifecyclePort {
     fn retained_bytes(&self) -> usize {
-        proxy_retained_bytes::<Self>()
+        proxy_retained_bytes::<Self>(&self.reservation)
     }
 
     fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
@@ -1458,7 +1525,7 @@ struct EngineOwnershipPort {
 
 impl zephium_extension_runtime_api::ExtensionRuntimeOwnershipPort for EngineOwnershipPort {
     fn retained_bytes(&self) -> usize {
-        proxy_retained_bytes::<Self>()
+        proxy_retained_bytes::<Self>(&self.reservation)
     }
 
     fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
@@ -1619,7 +1686,7 @@ struct EnginePublicationPort {
 
 impl ExtensionRuntimeHostPublicationPort for EnginePublicationPort {
     fn retained_bytes(&self) -> usize {
-        proxy_retained_bytes::<Self>()
+        proxy_retained_bytes::<Self>(&self.reservation)
     }
 
     fn publish_operation_authority(
@@ -1675,8 +1742,8 @@ impl ExtensionRuntimeHostPublicationPort for EnginePublicationPort {
             || generation != self.reservation.generation
             || !matches!(
                 &self.reservation.binding,
-                ReservationBinding::Activation { fingerprint, .. }
-                    if fingerprint.as_ref() == runtime
+                ReservationBinding::Activation { grants, .. }
+                    if grants.runtime() == runtime
             )
         {
             return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
@@ -1700,8 +1767,8 @@ impl ExtensionRuntimeHostPublicationPort for EnginePublicationPort {
             || generation != self.reservation.generation
             || !matches!(
                 &self.reservation.binding,
-                ReservationBinding::Activation { fingerprint, .. }
-                    if fingerprint.as_ref() == runtime
+                ReservationBinding::Activation { grants, .. }
+                    if grants.runtime() == runtime
             )
         {
             return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
@@ -2054,6 +2121,10 @@ mod tests {
             .into_runtime_parts(ExtensionRuntimeGeneration::new(61).expect("runtime generation"))
             .into_held_binding_and_operation_authority();
         let fingerprint = authority.fingerprint().clone();
+        let grants = authority
+            .native_grant_projection(&fingerprint)
+            .expect("exact operation-authority projection")
+            .into_owned_snapshot();
         let entry = |revision, phase| {
             ExtensionNativeOwnershipEntry::from_persisted_with_native_identity(
                 preparing.key(),
@@ -2088,7 +2159,9 @@ mod tests {
             _held_pin: held_pin,
             binding: ReservationBinding::Activation {
                 owner,
-                fingerprint: Box::new(fingerprint.clone()),
+                grants: Box::new(
+                    EngineNativeGrantSnapshot::from_valid_core_snapshot_for_test(grants),
+                ),
                 expectation: ExtensionRuntimeNativeIdentityExpectation::Compatibility,
             },
             owner,
@@ -2408,6 +2481,33 @@ mod tests {
     }
 
     #[test]
+    fn profile_audit_rejects_registry_and_reservation_expectation_divergence() {
+        let fixture = activation_registry_fixture();
+        let profile = fixture.owner.key.profile();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(fixture.binding)
+            .expect("activation reservation");
+        registry
+            .attach(reservation)
+            .expect("activation registry attachment");
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::Present
+        );
+
+        registry.entries[0].expectation =
+            RegistryExpectation::Recovery(ExtensionRuntimeRecoveryExpectation::Compatibility);
+        assert_eq!(
+            registry.profile_obligation_status(profile),
+            ProfileObligationStatus::InvariantFailed
+        );
+        assert!(registry.invariant_failed);
+        assert!(gate.inner.invariant_failed.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn profile_barrier_includes_unattached_factory_reservations() {
         let profile = ProfileId::from(7);
         let other_profile = ProfileId::from(8);
@@ -2426,22 +2526,58 @@ mod tests {
     #[test]
     fn proxy_accounting_charges_concrete_box_and_complete_shared_control_allocation() {
         let box_allocator_overhead = 2 * size_of::<usize>();
-        let shared_lower_bound = size_of::<ReservationControl>()
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let activation = gate
+            .reserve(activation_registry_fixture().binding)
+            .expect("activation reservation");
+        let recovery = gate
+            .reserve(recovery_binding(owner(2, 71, 71)))
+            .expect("recovery reservation");
+        let ReservationBinding::Activation { grants, .. } = &activation.binding else {
+            panic!("activation reservation must retain native grants");
+        };
+        assert_eq!(grants.grants().api_grant_count(), 2);
+        assert_eq!(grants.grants().host_grant_count(), 1);
+        let activation_companion = activation
+            .binding
+            .operation_authority_companion_retained_bytes();
+        assert!(activation_companion > box_allocator_overhead);
+        assert_eq!(
+            recovery
+                .binding
+                .operation_authority_companion_retained_bytes(),
+            0
+        );
+        let activation_shared_charge = size_of::<ReservationControl>()
             + (2 * size_of::<usize>())
             + (2 * size_of::<usize>())
-            + size_of::<ExtensionRuntimeFingerprint>()
-            + box_allocator_overhead;
-        assert!(
-            proxy_retained_bytes::<EngineLifecyclePort>()
-                >= size_of::<EngineLifecyclePort>() + box_allocator_overhead + shared_lower_bound
+            + activation_companion
+            + size_of::<ReservationRecord>();
+        let recovery_shared_charge = size_of::<ReservationControl>()
+            + (2 * size_of::<usize>())
+            + (2 * size_of::<usize>())
+            + size_of::<ReservationRecord>();
+        let activation_lifecycle = proxy_retained_bytes::<EngineLifecyclePort>(&activation);
+        let recovery_lifecycle = proxy_retained_bytes::<EngineLifecyclePort>(&recovery);
+        assert_eq!(
+            activation_lifecycle,
+            size_of::<EngineLifecyclePort>() + box_allocator_overhead + activation_shared_charge
         );
-        assert!(
-            proxy_retained_bytes::<EngineOwnershipPort>()
-                >= size_of::<EngineOwnershipPort>() + box_allocator_overhead + shared_lower_bound
+        assert_eq!(
+            recovery_lifecycle,
+            size_of::<EngineLifecyclePort>() + box_allocator_overhead + recovery_shared_charge
         );
-        assert!(
-            proxy_retained_bytes::<EnginePublicationPort>()
-                >= size_of::<EnginePublicationPort>() + box_allocator_overhead + shared_lower_bound
+        assert_eq!(
+            activation_lifecycle - recovery_lifecycle,
+            activation_companion
+        );
+        assert_eq!(
+            proxy_retained_bytes::<EngineOwnershipPort>(&recovery),
+            size_of::<EngineOwnershipPort>() + box_allocator_overhead + recovery_shared_charge
+        );
+        assert_eq!(
+            proxy_retained_bytes::<EnginePublicationPort>(&activation),
+            size_of::<EnginePublicationPort>() + box_allocator_overhead + activation_shared_charge
         );
     }
 
@@ -2688,9 +2824,18 @@ mod tests {
         let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
         let reservation = gate.reserve(binding).expect("activation reservation");
         let generation = reservation.generation;
+        let ReservationBinding::Activation { grants, .. } = &reservation.binding else {
+            panic!("activation reservation must retain native grants");
+        };
+        assert_eq!(grants.runtime(), &fingerprint);
+        assert_eq!(grants.grants().api_grant_count(), 2);
+        assert_eq!(grants.grants().host_grant_count(), 1);
+        assert!(!grants.grants().file_scheme_access_granted());
+        assert!(!grants.grants().private_context_access_granted());
         registry
             .attach(Arc::clone(&reservation))
             .expect("activation attachment");
+        assert!(registry.entries[0].binding_is_consistent());
 
         let stale_generation = ExtensionRuntimeHostRegistryGeneration::new(
             generation.get().checked_add(1).expect("test generation"),
@@ -2738,6 +2883,7 @@ mod tests {
                 authority,
             )
             .expect("exact definite activation publishes");
+        assert!(registry.entries[0].binding_is_consistent());
         assert!(registry
             .mint_active_tab_grant_witness(
                 owner,
@@ -2757,6 +2903,7 @@ mod tests {
         assert!(registry
             .prove_absence(owner, generation)
             .expect("definite absence removes exact published generation"));
+        assert_eq!(grants.runtime(), &fingerprint);
         let reclaimed = reservation
             .reclaim_authority()
             .expect("authority returns only after registry absence");

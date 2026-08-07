@@ -15,7 +15,8 @@ use zephium_core::extensions::{
     ExtensionHostPermissionSet, ExtensionInstall, ExtensionInstallCatalog,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
     ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
-    ExtensionManifestResourceDigest, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+    ExtensionManifestResourceDigest, ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement,
+    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
     ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
@@ -513,6 +514,7 @@ fn same_fingerprint_different_lineage_authority(
 #[derive(Default)]
 struct HostProbe {
     activation_binds: AtomicUsize,
+    consumed_activation_snapshots: AtomicUsize,
     recovery_binds: AtomicUsize,
     reservations: AtomicUsize,
     preattachment_restores: AtomicUsize,
@@ -522,8 +524,26 @@ struct HostProbe {
     active_witness_calls: AtomicUsize,
     document_witness_calls: AtomicUsize,
     publication_drops: AtomicUsize,
+    last_activation_grants: Mutex<Option<ActivationGrantObservation>>,
     last_publication: Mutex<Option<PublicationObservation>>,
     last_witness: Mutex<Option<WitnessObservation>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActivationGrantObservation {
+    runtime: ExtensionRuntimeFingerprint,
+    api: Vec<(
+        String,
+        ExtensionNativeGrantRequirement,
+        ExtensionNativeGrantDecision,
+    )>,
+    hosts: Vec<(
+        String,
+        ExtensionNativeGrantRequirement,
+        ExtensionNativeGrantDecision,
+    )>,
+    file_scheme_access: bool,
+    private_context_access: bool,
 }
 
 #[derive(Clone)]
@@ -798,6 +818,7 @@ impl ExtensionRuntimeHostPublicationPort for FakePublication {
 struct FakeFactoryPort {
     probe: Arc<HostProbe>,
     activation_error: Option<ExtensionRuntimeHostBindError>,
+    consume_grants_before_activation_error: bool,
     recovery_error: Option<ExtensionRuntimeHostBindError>,
     lifecycle_retained_bytes: usize,
     publication_retained_bytes: usize,
@@ -812,6 +833,7 @@ impl FakeFactoryPort {
         Self {
             probe,
             activation_error: None,
+            consume_grants_before_activation_error: false,
             recovery_error: None,
             lifecycle_retained_bytes: 0,
             publication_retained_bytes: 0,
@@ -826,9 +848,58 @@ impl FakeFactoryPort {
 impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
     fn bind_activation(
         &mut self,
-        _context: &ExtensionRuntimeHostActivationContext<'_>,
+        context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+        let grants = context.native_grants();
+        *self
+            .probe
+            .last_activation_grants
+            .lock()
+            .expect("activation grant observation lock") = Some(ActivationGrantObservation {
+            runtime: grants.runtime().clone(),
+            api: grants
+                .api_grants()
+                .map(|grant| {
+                    (
+                        grant.name().as_str().to_owned(),
+                        grant.requirement(),
+                        grant.decision(),
+                    )
+                })
+                .collect(),
+            hosts: grants
+                .host_grants()
+                .map(|grant| {
+                    (
+                        grant.pattern().as_str().to_owned(),
+                        grant.requirement(),
+                        grant.decision(),
+                    )
+                })
+                .collect(),
+            file_scheme_access: grants.file_scheme_access_granted(),
+            private_context_access: grants.private_context_access_granted(),
+        });
+        debug_assert_eq!(grants.runtime(), context.fingerprint());
         self.probe.activation_binds.fetch_add(1, Ordering::Relaxed);
+        if self.consume_grants_before_activation_error {
+            let snapshot = context.into_native_grant_snapshot();
+            debug_assert_eq!(
+                snapshot.runtime(),
+                &self
+                    .probe
+                    .last_activation_grants
+                    .lock()
+                    .expect("activation grant observation lock")
+                    .as_ref()
+                    .expect("activation observation precedes snapshot retention")
+                    .runtime
+            );
+            self.probe
+                .consumed_activation_snapshots
+                .fetch_add(1, Ordering::Relaxed);
+            drop(snapshot);
+        }
         if let Some(reason) = self.activation_error {
             return Err(reason);
         }
@@ -883,7 +954,7 @@ struct ProfileAbsencePort {
 impl ExtensionRuntimeHostFactoryPort for ProfileAbsencePort {
     fn bind_activation(
         &mut self,
-        _context: &ExtensionRuntimeHostActivationContext<'_>,
+        _context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
         Err(ExtensionRuntimeHostBindError::Unavailable)
     }
@@ -1527,6 +1598,7 @@ fn factory_refusals_are_lossless_and_do_not_reserve_or_call_native_code() {
     let probe = Arc::new(HostProbe::default());
     let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
     port.activation_error = Some(ExtensionRuntimeHostBindError::UnsupportedBackend);
+    port.consume_grants_before_activation_error = true;
     let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(port));
     let refusal = factory
         .bind_activation(fixture.into_binding())
@@ -1546,6 +1618,10 @@ fn factory_refusals_are_lossless_and_do_not_reserve_or_call_native_code() {
         .expect("exact provider returned from bind cancellation");
     assert!(Arc::ptr_eq(&returned_provider.identity, &provider_identity));
     assert_eq!(probe.activation_binds.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        probe.consumed_activation_snapshots.load(Ordering::Relaxed),
+        1
+    );
     assert_eq!(probe.reservations.load(Ordering::Relaxed), 0);
     assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
     assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
@@ -1569,6 +1645,58 @@ fn factory_refusals_are_lossless_and_do_not_reserve_or_call_native_code() {
     assert_eq!(probe.recovery_binds.load(Ordering::Relaxed), 1);
     assert_eq!(probe.reservations.load(Ordering::Relaxed), 0);
     assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn activation_context_transports_exact_grants_without_native_or_lifecycle_work() {
+    let fixture = ActivationFixture::compatibility(54);
+    let runtime = fixture.runtime();
+    let probe = Arc::new(HostProbe::default());
+    let mut factory = ExtensionRuntimeHostFactory::from_trusted_port(Box::new(
+        FakeFactoryPort::normal(Arc::clone(&probe)),
+    ));
+
+    let activation = factory
+        .bind_activation(fixture.into_binding())
+        .expect("trusted host accepts exact activation context");
+    let observation = probe
+        .last_activation_grants
+        .lock()
+        .expect("activation grant observation lock")
+        .clone()
+        .expect("host observed native grants");
+
+    assert_eq!(observation.runtime, runtime);
+    assert_eq!(
+        observation.api,
+        vec![
+            (
+                "activeTab".to_owned(),
+                ExtensionNativeGrantRequirement::Optional,
+                ExtensionNativeGrantDecision::Granted,
+            ),
+            (
+                "scripting".to_owned(),
+                ExtensionNativeGrantRequirement::Optional,
+                ExtensionNativeGrantDecision::Granted,
+            ),
+        ]
+    );
+    assert_eq!(
+        observation.hosts,
+        vec![(
+            ALL_URLS.to_owned(),
+            ExtensionNativeGrantRequirement::Optional,
+            ExtensionNativeGrantDecision::Granted,
+        )]
+    );
+    assert!(!observation.file_scheme_access);
+    assert!(!observation.private_context_access);
+    assert_eq!(probe.lifecycle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.publication_calls.load(Ordering::Relaxed), 0);
+
+    drop(activation.cancel_before_attempt());
+    assert_eq!(probe.preattachment_restores.load(Ordering::Relaxed), 1);
 }
 
 #[test]
