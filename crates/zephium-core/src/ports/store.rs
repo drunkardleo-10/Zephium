@@ -5,7 +5,8 @@ use crate::extensions::{
     ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionManifestDescriptor, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipOperation, MAX_EXTENSION_GRANT_RETAINED_BYTES,
+    ExtensionNativeOwnershipOperation, ExtensionRuntimeEligibilityDenial,
+    MAX_EXTENSION_GRANT_RETAINED_BYTES,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 use crate::permissions::{
@@ -266,6 +267,10 @@ pub enum ExtensionInstallCatalogMutationOutcome {
     Invalid,
     LimitReached,
     RevisionExhausted,
+    /// A changed disable or deletion would invalidate an unresolved native
+    /// owner. Exact semantic no-ops remain admissible; callers must retire and
+    /// clear every context row for the install before retrying a real change.
+    RuntimeOwnershipConflict,
     OutcomeUnknown,
     Failed,
 }
@@ -376,6 +381,51 @@ pub enum ExtensionGrantMutationOutcome {
     DegradedProfile,
     Uninitialized,
     Invalid,
+    RevisionExhausted,
+    /// A changed grant write would invalidate an unresolved native owner.
+    /// The conflict begins at `NativeAbsentPreparing` and remains until the
+    /// exact profile/install/context journal row is durably cleared.
+    RuntimeOwnershipConflict,
+    OutcomeUnknown,
+    Failed,
+}
+
+/// Which compact Store cohort fact no longer matches an authenticated native
+/// activation attempt.
+///
+/// These reasons intentionally carry no package, digest, path, profile, or
+/// install payload. A caller must obtain a fresh complete cohort rather than
+/// trying to repair or retry from partial diagnostic state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExtensionNativeOwnershipActivationStale {
+    CatalogRevision,
+    InstallMissing,
+    InstallRevision,
+    Package,
+    GrantRevision,
+    GrantDigest,
+}
+
+/// Durable settlement of one Store-fenced fresh native activation step.
+///
+/// Both fresh Begin and the final Preparing-to-MayOwn transition validate the
+/// exact install/grant cohort in the same Store actor turn as the journal CAS.
+/// Ordinary cohort drift is explicit and is never reported as corruption.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionNativeOwnershipActivationOutcome {
+    Applied(ExtensionNativeOwnershipJournalMutationApplied),
+    Conflict {
+        current: ExtensionNativeOwnershipJournalRevision,
+    },
+    NotRegistered,
+    DegradedProfile,
+    /// Session recovery forbids creating or advancing native ownership.
+    SessionRecoveryRequired,
+    Stale(ExtensionNativeOwnershipActivationStale),
+    EligibilityChanged(ExtensionRuntimeEligibilityDenial),
+    Invalid,
+    LimitReached,
     RevisionExhausted,
     OutcomeUnknown,
     Failed,

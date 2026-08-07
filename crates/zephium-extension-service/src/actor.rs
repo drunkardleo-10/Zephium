@@ -1226,10 +1226,15 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use zephium_core::{
         extensions::{
-            ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-            ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantManifestBindings,
-            ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-            ExtensionManifestDigest, ExtensionNativeOwnershipJournalMutation,
+            ApiPermissionName, ExtensionApiPermissionSet, ExtensionAuthorityId,
+            ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+            ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
+            ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
+            ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantManifestBindings,
+            ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
+            ExtensionInstallRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
+            ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
+            ExtensionManifestResourceDigest, ExtensionNativeOwnershipJournalMutation,
             ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
             ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation,
             ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
@@ -1238,8 +1243,9 @@ mod tests {
         },
         ids::{ExtensionInstallId, ProfileId},
         ports::store::{
-            ExtensionGrantCohortLoadOutcome, ExtensionInstallCatalogLoadOutcome,
-            ExtensionNativeOwnershipJournalLoadOutcome,
+            ExtensionGrantCohortLoadOutcome, ExtensionGrantMutationOutcome, ExtensionGrantWrite,
+            ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationOutcome,
+            ExtensionNativeOwnershipActivationOutcome, ExtensionNativeOwnershipJournalLoadOutcome,
             ExtensionNativeOwnershipJournalMutationApplied,
             ExtensionNativeOwnershipJournalMutationOutcome, Store,
         },
@@ -1893,6 +1899,98 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn production_startup_reconciles_a_real_release_pending_row_before_ready() {
+        fn install_mutation(
+            store: &SqliteStore,
+            profile: ProfileId,
+            expected: ExtensionInstallCatalogRevision,
+            mutation: ExtensionInstallCatalogMutation,
+        ) -> ExtensionInstallCatalogMutationOutcome {
+            let (done, outcome) = mpsc::sync_channel(1);
+            assert!(store.mutate_extension_install_catalog(
+                profile,
+                expected,
+                mutation,
+                Box::new(move |result| {
+                    let _ = done.send(result);
+                }),
+            ));
+            outcome.recv_timeout(Duration::from_secs(5)).unwrap()
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn grant_mutation(
+            store: &SqliteStore,
+            profile: ProfileId,
+            expected_catalog: ExtensionInstallCatalogRevision,
+            expected_install: ExtensionInstallRevision,
+            install: ExtensionInstallId,
+            manifest: Arc<ExtensionManifestDescriptor>,
+            write: ExtensionGrantWrite,
+        ) -> ExtensionGrantMutationOutcome {
+            let (done, outcome) = mpsc::sync_channel(1);
+            assert!(store.mutate_extension_grants(
+                profile,
+                expected_catalog,
+                expected_install,
+                install,
+                manifest,
+                write,
+                Box::new(move |result| {
+                    let _ = done.send(result);
+                }),
+            ));
+            outcome.recv_timeout(Duration::from_secs(5)).unwrap()
+        }
+
+        fn manifest(package: ExtensionPackageIdentity) -> Arc<ExtensionManifestDescriptor> {
+            let declarations = ExtensionManifestDeclarations::new(
+                ExtensionApiPermissionSet::new(vec![
+                    ApiPermissionName::parse_exact("storage").unwrap()
+                ])
+                .unwrap(),
+                ExtensionApiPermissionSet::new(Vec::new()).unwrap(),
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                ExtensionManifestExecutionSurfaces::new(
+                    Vec::new(),
+                    ExtensionContentSecurityPolicyDeclaration::new(
+                        ExtensionManifestResourceDigest::from_bytes([7; 32]),
+                    ),
+                    None,
+                    Vec::new(),
+                )
+                .unwrap(),
+                Vec::new(),
+            )
+            .unwrap();
+            let compatibility = declarations
+                .declaration_keys()
+                .into_iter()
+                .map(|declaration| {
+                    ExtensionCompatibilityClassification::new(
+                        declaration,
+                        ExtensionCompatibilityLevel::Compatible,
+                    )
+                })
+                .collect();
+            Arc::new(
+                ExtensionManifestDescriptor::new(
+                    package,
+                    3,
+                    declarations,
+                    ExtensionCompatibilityTargetId::parse_exact(
+                        "test.extension-service.recovery.v1",
+                    )
+                    .unwrap(),
+                    compatibility,
+                )
+                .unwrap(),
+            )
+        }
+
         fn mutation_applied(
             authority: &ExtensionServiceStoreAuthority,
             expected: ExtensionNativeOwnershipJournalRevision,
@@ -1910,6 +2008,25 @@ mod tests {
             }
         }
 
+        fn begin_applied(
+            authority: &ExtensionServiceStoreAuthority,
+            expected: ExtensionNativeOwnershipJournalRevision,
+            preparation: ExtensionNativeOwnershipPreparation,
+            manifest: Arc<ExtensionManifestDescriptor>,
+        ) -> ExtensionNativeOwnershipJournalMutationApplied {
+            match authority.begin_native_ownership_until(
+                expected,
+                ExtensionNativeOwnershipJournalMutation::begin(preparation),
+                manifest,
+                Instant::now() + Duration::from_secs(5),
+            ) {
+                ExtensionServiceStoreCallOutcome::Completed(
+                    ExtensionNativeOwnershipActivationOutcome::Applied(applied),
+                ) => applied,
+                outcome => panic!("native-ownership fenced Begin failed: {outcome:?}"),
+            }
+        }
+
         let app_data = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let profile = ProfileId::from(1);
         let install = ExtensionInstallId::from(1);
@@ -1924,38 +2041,88 @@ mod tests {
         });
         assert!(store.flush_until(Instant::now() + Duration::from_secs(5)));
 
-        let authority = store.claim_extension_service_store_authority().unwrap();
         let runtime_backend = if cfg!(target_os = "macos") {
             ExtensionRuntimeBackendTarget::MacosNative
         } else {
             ExtensionRuntimeBackendTarget::LinuxCompatibility
         };
+        let package = ExtensionPackageIdentity::new(
+            ExtensionAuthorityId::from_bytes([1; 32]),
+            ExtensionPackageKey::from_bytes([2; 32]),
+            ExtensionPackageRevision::INITIAL,
+            ExtensionPackagePayloadIdentity::BundledTree,
+            ExtensionManifestDigest::from_bytes([3; 32]),
+            ExtensionTreeDigest::from_bytes([4; 32]),
+        );
+        let manifest = manifest(package.clone());
+        let ExtensionInstallCatalogMutationOutcome::Applied(installed) = install_mutation(
+            store.as_ref(),
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: install,
+                package: package.clone(),
+            },
+        ) else {
+            panic!("release-pending fixture install failed");
+        };
+        let installed_row = installed.install.as_deref().unwrap();
+        let grants = ExtensionGrantAuthority::initialize(
+            installed_row,
+            vec![ApiPermissionName::parse_exact("storage").unwrap()],
+            Vec::new(),
+            false,
+            false,
+            &manifest,
+        )
+        .unwrap();
+        let ExtensionGrantMutationOutcome::Applied(initialized) = grant_mutation(
+            store.as_ref(),
+            profile,
+            installed.catalog_revision,
+            installed_row.revision(),
+            install,
+            manifest.clone(),
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(grants),
+            },
+        ) else {
+            panic!("release-pending fixture grant initialization failed");
+        };
+        let ExtensionInstallCatalogMutationOutcome::Applied(enabled) = install_mutation(
+            store.as_ref(),
+            profile,
+            installed.catalog_revision,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id: install,
+                expected: installed_row.revision(),
+                desired_enabled: true,
+            },
+        ) else {
+            panic!("release-pending fixture enablement failed");
+        };
+        let enabled_row = enabled.install.as_deref().unwrap();
         let preparation = ExtensionNativeOwnershipPreparation::new(
             ExtensionNativeOwnershipKey::new(
                 profile,
                 install,
                 ExtensionGrantBrowsingContext::Regular,
             ),
-            ExtensionPackageIdentity::new(
-                ExtensionAuthorityId::from_bytes([1; 32]),
-                ExtensionPackageKey::from_bytes([2; 32]),
-                ExtensionPackageRevision::INITIAL,
-                ExtensionPackagePayloadIdentity::BundledTree,
-                ExtensionManifestDigest::from_bytes([3; 32]),
-                ExtensionTreeDigest::from_bytes([4; 32]),
-            ),
+            package,
             ExtensionCatalogSetDigest::from_bytes([5; 32]),
             ExtensionCatalogGenerationRole::Active,
-            ExtensionInstallCatalogRevision::INITIAL,
-            ExtensionInstallRevision::INITIAL,
-            ExtensionGrantRevision::INITIAL,
-            ExtensionGrantDigest::from_bytes([6; 32]),
+            enabled.catalog_revision,
+            enabled_row.revision(),
+            initialized.authority.revision(),
+            initialized.authority.digest(),
             runtime_backend,
         );
-        let begun = mutation_applied(
+        let authority = store.claim_extension_service_store_authority().unwrap();
+        let begun = begin_applied(
             &authority,
             ExtensionNativeOwnershipJournalRevision::INITIAL,
-            ExtensionNativeOwnershipJournalMutation::begin(preparation),
+            preparation,
+            manifest,
         );
         let preparing = begun
             .entry

@@ -14,11 +14,12 @@ use zephium_core::extensions::{
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
     ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
     ExtensionManifestResourceDigest, ExtensionNativeOwnershipIdentity,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournalMutation,
-    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
-    ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
-    ExtensionRuntimeBackendTarget, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
+    ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
     MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
@@ -28,7 +29,7 @@ use zephium_core::permissions::{
     PageOrigin, PagePermissionCatalogRevision, PagePermissionChange, PagePermissionGrantRevision,
     PagePermissionKind, PagePermissionPatch, RememberedPagePermission,
 };
-use zephium_core::ports::store::ExtensionGrantConflict;
+use zephium_core::ports::store::{ExtensionGrantConflict, ExtensionNativeOwnershipActivationStale};
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
 use zephium_core::split::{Axis, Pane};
@@ -487,6 +488,166 @@ fn native_ownership_preparation(
         zephium_core::extensions::ExtensionGrantDigest::from_bytes([44; 32]),
         ExtensionRuntimeBackendTarget::MacosNative,
     )
+}
+
+struct NativeOwnershipActivationFixture {
+    manifest: Arc<ExtensionManifestDescriptor>,
+    preparation: ExtensionNativeOwnershipPreparation,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_ownership_preparation_with(
+    fixture: &NativeOwnershipActivationFixture,
+    key: ExtensionNativeOwnershipKey,
+    package: ExtensionPackageIdentity,
+    catalog_revision: ExtensionInstallCatalogRevision,
+    install_revision: ExtensionInstallRevision,
+    grant_revision: ExtensionGrantRevision,
+    grant_digest: zephium_core::extensions::ExtensionGrantDigest,
+    runtime_backend: ExtensionRuntimeBackendTarget,
+) -> ExtensionNativeOwnershipPreparation {
+    ExtensionNativeOwnershipPreparation::new(
+        key,
+        package,
+        fixture.preparation.catalog_set_digest(),
+        fixture.preparation.catalog_role(),
+        catalog_revision,
+        install_revision,
+        grant_revision,
+        grant_digest,
+        runtime_backend,
+    )
+}
+
+fn prepare_native_ownership_activation(
+    store: &impl Store,
+    profile: ProfileId,
+    install_id: ExtensionInstallId,
+    package_seed: u8,
+    runtime_backend: ExtensionRuntimeBackendTarget,
+) -> NativeOwnershipActivationFixture {
+    let package = bundled_extension_package(package_seed, package_seed.checked_add(1).unwrap(), 1);
+    let manifest = extension_manifest(package.clone());
+    let ExtensionInstallCatalogLoadOutcome::Loaded(initial) =
+        load_extension_installs(store, profile)
+    else {
+        panic!("native-ownership fixture profile catalog did not load");
+    };
+    let ExtensionInstallCatalogMutationOutcome::Applied(installed) = mutate_extension_installs(
+        store,
+        profile,
+        initial.revision(),
+        ExtensionInstallCatalogMutation::Install {
+            id: install_id,
+            package,
+        },
+    ) else {
+        panic!("native-ownership fixture install was not applied");
+    };
+    let install = installed.install.as_deref().unwrap();
+    let grant = ExtensionGrantAuthority::initialize(
+        install,
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &manifest,
+    )
+    .unwrap();
+    let ExtensionGrantMutationOutcome::Applied(initialized) = mutate_extension_grants(
+        store,
+        profile,
+        installed.catalog_revision,
+        install.revision(),
+        install_id,
+        manifest.clone(),
+        ExtensionGrantWrite::Initialize {
+            authority: Box::new(grant),
+        },
+    ) else {
+        panic!("native-ownership fixture grants were not initialized");
+    };
+    let ExtensionInstallCatalogMutationOutcome::Applied(enabled) = mutate_extension_installs(
+        store,
+        profile,
+        installed.catalog_revision,
+        ExtensionInstallCatalogMutation::SetDesiredEnabled {
+            id: install_id,
+            expected: install.revision(),
+            desired_enabled: true,
+        },
+    ) else {
+        panic!("native-ownership fixture install was not enabled");
+    };
+    let enabled_install = enabled.install.as_deref().unwrap();
+    let preparation = ExtensionNativeOwnershipPreparation::new(
+        ExtensionNativeOwnershipKey::new(
+            profile,
+            install_id,
+            ExtensionGrantBrowsingContext::Regular,
+        ),
+        manifest.package().clone(),
+        ExtensionCatalogSetDigest::from_bytes([package_seed.wrapping_add(2); 32]),
+        ExtensionCatalogGenerationRole::Active,
+        enabled.catalog_revision,
+        enabled_install.revision(),
+        initialized.authority.revision(),
+        initialized.authority.digest(),
+        runtime_backend,
+    );
+    NativeOwnershipActivationFixture {
+        manifest,
+        preparation,
+    }
+}
+
+fn begin_native_ownership(
+    authority: &ExtensionServiceStoreAuthority,
+    expected: ExtensionNativeOwnershipJournalRevision,
+    fixture: &NativeOwnershipActivationFixture,
+) -> ExtensionNativeOwnershipActivationOutcome {
+    begin_native_ownership_with(
+        authority,
+        expected,
+        fixture.preparation.clone(),
+        fixture.manifest.clone(),
+    )
+}
+
+fn begin_native_ownership_with(
+    authority: &ExtensionServiceStoreAuthority,
+    expected: ExtensionNativeOwnershipJournalRevision,
+    preparation: ExtensionNativeOwnershipPreparation,
+    manifest: Arc<ExtensionManifestDescriptor>,
+) -> ExtensionNativeOwnershipActivationOutcome {
+    match authority.begin_native_ownership_until(
+        expected,
+        ExtensionNativeOwnershipJournalMutation::begin(preparation),
+        manifest,
+        Instant::now() + STORE_RPC_TIMEOUT,
+    ) {
+        ExtensionServiceStoreCallOutcome::Completed(outcome) => outcome,
+        other => panic!("native-ownership fenced begin did not settle: {other:?}"),
+    }
+}
+
+fn transition_native_ownership_to_may_own(
+    authority: &ExtensionServiceStoreAuthority,
+    expected: ExtensionNativeOwnershipJournalRevision,
+    preparing: zephium_core::extensions::ExtensionNativeOwnershipEntryCas,
+    expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+    fixture: &NativeOwnershipActivationFixture,
+) -> ExtensionNativeOwnershipActivationOutcome {
+    match authority.transition_native_ownership_to_may_own_until(
+        expected,
+        preparing,
+        expected_native_identity,
+        fixture.manifest.clone(),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    ) {
+        ExtensionServiceStoreCallOutcome::Completed(outcome) => outcome,
+        other => panic!("native-ownership fenced MayOwn transition did not settle: {other:?}"),
+    }
 }
 
 fn expected_native_ownership_identity() -> ExtensionExpectedNativeOwnershipIdentity {
@@ -1731,6 +1892,13 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
         let authority = store.claim_extension_service_store_authority().unwrap();
         store.save_session(sample());
         assert!(store.flush());
+        let activation = prepare_native_ownership_activation(
+            store.as_ref(),
+            profile,
+            install,
+            41,
+            ExtensionRuntimeBackendTarget::MacosNative,
+        );
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(initial) =
             load_native_ownership_journal(&authority)
         else {
@@ -1740,14 +1908,8 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
             initial.revision(),
             ExtensionNativeOwnershipJournalRevision::INITIAL
         );
-        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(begun) =
-            mutate_native_ownership_journal(
-                &authority,
-                initial.revision(),
-                ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-                    profile, install,
-                )),
-            )
+        let ExtensionNativeOwnershipActivationOutcome::Applied(begun) =
+            begin_native_ownership(&authority, initial.revision(), &activation)
         else {
             panic!("native-ownership begin was not applied");
         };
@@ -1759,14 +1921,10 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
             ExtensionNativeOwnershipPhase::NativeAbsentPreparing
         );
         assert_eq!(
-            mutate_native_ownership_journal(
-                &authority,
-                begun.journal_revision,
-                ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-                    profile, install
-                ),),
-            ),
-            ExtensionNativeOwnershipJournalMutationOutcome::Invalid,
+            begin_native_ownership(&authority, begun.journal_revision, &activation),
+            ExtensionNativeOwnershipActivationOutcome::Conflict {
+                current: begun.journal_revision,
+            },
             "begin replaced an unresolved owner row"
         );
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(after_duplicate) =
@@ -1791,14 +1949,13 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
                 current: begun.journal_revision,
             }
         );
-        let ExtensionNativeOwnershipJournalMutationOutcome::Applied(may_own) =
-            mutate_native_ownership_journal(
+        let ExtensionNativeOwnershipActivationOutcome::Applied(may_own) =
+            transition_native_ownership_to_may_own(
                 &authority,
                 begun.journal_revision,
-                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
-                    preparing.cas(),
-                    expected_native_ownership_identity(),
-                ),
+                preparing.cas(),
+                Some(expected_native_ownership_identity()),
+                &activation,
             )
         else {
             panic!("native-ownership may-own transition was not applied");
@@ -1925,15 +2082,15 @@ fn native_ownership_journal_cas_survives_restart_exactly() {
     };
     assert!(cleared.entries().is_empty());
     assert_eq!(cleared.operation_high_water().unwrap().get(), 1);
-    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(second) =
-        mutate_native_ownership_journal(
-            &authority,
-            cleared.revision(),
-            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-                profile,
-                ExtensionInstallId::from(904),
-            )),
-        )
+    let second_activation = prepare_native_ownership_activation(
+        second_restart.as_ref(),
+        profile,
+        ExtensionInstallId::from(904),
+        44,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
+    let ExtensionNativeOwnershipActivationOutcome::Applied(second) =
+        begin_native_ownership(&authority, cleared.revision(), &second_activation)
     else {
         panic!("second native-ownership operation was not applied");
     };
@@ -1953,16 +2110,21 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
     hub.make_next_extension_native_ownership_commit_ambiguous();
     let store = Arc::new(SqliteStore::spawn(hub).unwrap());
     let authority = store.claim_extension_service_store_authority().unwrap();
+    let activation = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        install,
+        51,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
 
     assert_eq!(
-        mutate_native_ownership_journal(
+        begin_native_ownership(
             &authority,
             ExtensionNativeOwnershipJournalRevision::INITIAL,
-            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-                profile, install,
-            )),
+            &activation,
         ),
-        ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown
+        ExtensionNativeOwnershipActivationOutcome::OutcomeUnknown
     );
     let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(reconciled) =
         load_native_ownership_journal(&authority)
@@ -1972,6 +2134,797 @@ fn native_ownership_commit_ambiguity_requires_complete_reload() {
     assert_eq!(reconciled.revision().get(), 2);
     assert_eq!(reconciled.entries().len(), 1);
     assert_eq!(reconciled.entries()[0].key().install_id(), install);
+}
+
+#[test]
+fn native_ownership_activation_fences_revalidate_authority_and_backend_identity() {
+    let profile = ProfileId::from(1);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+    let native = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        ExtensionInstallId::from(905),
+        71,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
+    let base = &native.preparation;
+
+    let stale_catalog = native_ownership_preparation_with(
+        &native,
+        base.key(),
+        base.package().clone(),
+        ExtensionInstallCatalogRevision::INITIAL,
+        base.store_install_revision(),
+        base.store_grant_revision(),
+        base.grant_digest(),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            stale_catalog,
+            native.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::CatalogRevision
+        )
+    );
+
+    let missing_install = native_ownership_preparation_with(
+        &native,
+        ExtensionNativeOwnershipKey::new(
+            profile,
+            ExtensionInstallId::from(999),
+            ExtensionGrantBrowsingContext::Regular,
+        ),
+        base.package().clone(),
+        base.store_catalog_revision(),
+        base.store_install_revision(),
+        base.store_grant_revision(),
+        base.grant_digest(),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            missing_install,
+            native.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::InstallMissing
+        )
+    );
+
+    let stale_install = native_ownership_preparation_with(
+        &native,
+        base.key(),
+        base.package().clone(),
+        base.store_catalog_revision(),
+        ExtensionInstallRevision::INITIAL,
+        base.store_grant_revision(),
+        base.grant_digest(),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            stale_install,
+            native.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::InstallRevision
+        )
+    );
+
+    let other_manifest = extension_manifest(bundled_extension_package(73, 74, 1));
+    let stale_package = native_ownership_preparation_with(
+        &native,
+        base.key(),
+        other_manifest.package().clone(),
+        base.store_catalog_revision(),
+        base.store_install_revision(),
+        base.store_grant_revision(),
+        base.grant_digest(),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            stale_package,
+            other_manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::Package
+        )
+    );
+
+    let stale_grant_revision = native_ownership_preparation_with(
+        &native,
+        base.key(),
+        base.package().clone(),
+        base.store_catalog_revision(),
+        base.store_install_revision(),
+        ExtensionGrantRevision::new(base.store_grant_revision().get() + 1).unwrap(),
+        base.grant_digest(),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            stale_grant_revision,
+            native.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::GrantRevision
+        )
+    );
+
+    let stale_grant_digest = native_ownership_preparation_with(
+        &native,
+        base.key(),
+        base.package().clone(),
+        base.store_catalog_revision(),
+        base.store_install_revision(),
+        base.store_grant_revision(),
+        zephium_core::extensions::ExtensionGrantDigest::from_bytes([0xA5; 32]),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            stale_grant_digest,
+            native.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::GrantDigest
+        )
+    );
+
+    let private = native_ownership_preparation_with(
+        &native,
+        ExtensionNativeOwnershipKey::new(
+            profile,
+            base.key().install_id(),
+            ExtensionGrantBrowsingContext::Private,
+        ),
+        base.package().clone(),
+        base.store_catalog_revision(),
+        base.store_install_revision(),
+        base.store_grant_revision(),
+        base.grant_digest(),
+        base.runtime_backend(),
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            private,
+            native.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::PrivateBrowsingUnsupported
+        )
+    );
+
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            base.clone(),
+            other_manifest,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Invalid,
+        "a caller-supplied manifest cannot be rebound to another preparation"
+    );
+
+    let ExtensionNativeOwnershipActivationOutcome::Applied(native_begun) = begin_native_ownership(
+        &authority,
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        &native,
+    ) else {
+        panic!("validated native begin did not apply");
+    };
+    let native_preparing = native_begun.entry.as_deref().unwrap().clone();
+    let before_native_identity_refusal = load_native_ownership_journal(&authority);
+    assert_eq!(
+        transition_native_ownership_to_may_own(
+            &authority,
+            native_begun.journal_revision,
+            native_preparing.cas(),
+            None,
+            &native,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Invalid
+    );
+    assert_eq!(
+        load_native_ownership_journal(&authority),
+        before_native_identity_refusal
+    );
+    let ExtensionNativeOwnershipActivationOutcome::Applied(native_may_own) =
+        transition_native_ownership_to_may_own(
+            &authority,
+            native_begun.journal_revision,
+            native_preparing.cas(),
+            Some(expected_native_ownership_identity()),
+            &native,
+        )
+    else {
+        panic!("validated native MayOwn transition did not apply");
+    };
+
+    let compatibility = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        ExtensionInstallId::from(906),
+        75,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+    );
+    let ExtensionNativeOwnershipActivationOutcome::Applied(compatibility_begun) =
+        begin_native_ownership(&authority, native_may_own.journal_revision, &compatibility)
+    else {
+        panic!("validated compatibility begin did not apply");
+    };
+    let compatibility_preparing = compatibility_begun.entry.as_deref().unwrap().clone();
+    let before_compatibility_identity_refusal = load_native_ownership_journal(&authority);
+    assert_eq!(
+        transition_native_ownership_to_may_own(
+            &authority,
+            compatibility_begun.journal_revision,
+            compatibility_preparing.cas(),
+            Some(expected_native_ownership_identity()),
+            &compatibility,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Invalid
+    );
+    assert_eq!(
+        load_native_ownership_journal(&authority),
+        before_compatibility_identity_refusal
+    );
+    assert!(matches!(
+        transition_native_ownership_to_may_own(
+            &authority,
+            compatibility_begun.journal_revision,
+            compatibility_preparing.cas(),
+            None,
+            &compatibility,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Applied(_)
+    ));
+
+    let missing_authority = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        ExtensionInstallId::from(907),
+        77,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+    );
+    let ExtensionGrantMutationOutcome::Applied(revoked) = mutate_extension_grants(
+        store.as_ref(),
+        profile,
+        missing_authority.preparation.store_catalog_revision(),
+        missing_authority.preparation.store_install_revision(),
+        missing_authority.preparation.key().install_id(),
+        missing_authority.manifest.clone(),
+        ExtensionGrantWrite::Apply {
+            expected: missing_authority.preparation.store_grant_revision(),
+            mutation: ExtensionGrantMutation::SetApi {
+                name: ApiPermissionName::parse_exact("storage").unwrap(),
+                granted: false,
+            },
+        },
+    ) else {
+        panic!("required-authority test revocation did not apply");
+    };
+    let missing_authority_preparation = native_ownership_preparation_with(
+        &missing_authority,
+        missing_authority.preparation.key(),
+        missing_authority.preparation.package().clone(),
+        revoked.catalog_revision,
+        revoked.install.revision(),
+        revoked.authority.revision(),
+        revoked.authority.digest(),
+        missing_authority.preparation.runtime_backend(),
+    );
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(before_missing_authority) =
+        load_native_ownership_journal(&authority)
+    else {
+        panic!("journal did not load before required-authority refusal");
+    };
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            before_missing_authority.revision(),
+            missing_authority_preparation,
+            missing_authority.manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::RequiredAuthorityMissing
+        )
+    );
+
+    let disabled = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        ExtensionInstallId::from(908),
+        79,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+    );
+    let ExtensionInstallCatalogMutationOutcome::Applied(disabled_install) =
+        mutate_extension_installs(
+            store.as_ref(),
+            profile,
+            disabled.preparation.store_catalog_revision(),
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id: disabled.preparation.key().install_id(),
+                expected: disabled.preparation.store_install_revision(),
+                desired_enabled: false,
+            },
+        )
+    else {
+        panic!("disabled-eligibility test mutation did not apply");
+    };
+    let disabled_preparation = native_ownership_preparation_with(
+        &disabled,
+        disabled.preparation.key(),
+        disabled.preparation.package().clone(),
+        disabled_install.catalog_revision,
+        disabled_install.install.as_deref().unwrap().revision(),
+        disabled.preparation.store_grant_revision(),
+        disabled.preparation.grant_digest(),
+        disabled.preparation.runtime_backend(),
+    );
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(before_disabled) =
+        load_native_ownership_journal(&authority)
+    else {
+        panic!("journal did not load before disabled refusal");
+    };
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            before_disabled.revision(),
+            disabled_preparation,
+            disabled.manifest,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::Disabled
+        )
+    );
+}
+
+#[test]
+fn native_ownership_compound_begin_reports_missing_profile_and_uninitialized_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(913);
+    let manifest = extension_manifest(bundled_extension_package(93, 94, 1));
+    let installed_catalog_revision;
+    let installed_revision;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        assert!(store.flush());
+        let ExtensionInstallCatalogMutationOutcome::Applied(installed) = mutate_extension_installs(
+            &store,
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: install_id,
+                package: manifest.package().clone(),
+            },
+        ) else {
+            panic!("uninitialized-grant fixture install failed");
+        };
+        installed_catalog_revision = installed.catalog_revision;
+        installed_revision = installed.install.as_deref().unwrap().revision();
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    // This models a structurally valid legacy/external row whose enabled bit
+    // predates grant-root enforcement. Activation must classify the ordinary
+    // missing authority explicitly and must not treat it as corruption.
+    let profile_db =
+        Connection::open(dir.path().join(format!("profile-{profile}.sqlite"))).unwrap();
+    assert_eq!(
+        profile_db
+            .execute(
+                "UPDATE extension_installs SET desired_enabled = 1 WHERE id = ?1",
+                [&install_id.bytes()[..]],
+            )
+            .unwrap(),
+        1
+    );
+    drop(profile_db);
+
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+    let preparation_for = |profile| {
+        ExtensionNativeOwnershipPreparation::new(
+            ExtensionNativeOwnershipKey::new(
+                profile,
+                install_id,
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            manifest.package().clone(),
+            ExtensionCatalogSetDigest::from_bytes([95; 32]),
+            ExtensionCatalogGenerationRole::Active,
+            installed_catalog_revision,
+            installed_revision,
+            ExtensionGrantRevision::INITIAL,
+            zephium_core::extensions::ExtensionGrantDigest::from_bytes([96; 32]),
+            ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        )
+    };
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            preparation_for(ProfileId::from(999)),
+            manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::NotRegistered
+    );
+    assert_eq!(
+        begin_native_ownership_with(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            preparation_for(profile),
+            manifest,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::GrantsUninitialized
+        )
+    );
+    assert_eq!(
+        load_native_ownership_journal(&authority),
+        ExtensionNativeOwnershipJournalLoadOutcome::Loaded(ExtensionNativeOwnershipJournal::empty())
+    );
+}
+
+#[test]
+fn unresolved_native_ownership_interlocks_changed_install_and_grant_writes_until_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(909);
+    let activation;
+
+    {
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        store.save_session(sample());
+        assert!(store.flush());
+        let authority = store.claim_extension_service_store_authority().unwrap();
+        activation = prepare_native_ownership_activation(
+            store.as_ref(),
+            profile,
+            install_id,
+            81,
+            ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        );
+        assert!(matches!(
+            begin_native_ownership(
+                &authority,
+                ExtensionNativeOwnershipJournalRevision::INITIAL,
+                &activation,
+            ),
+            ExtensionNativeOwnershipActivationOutcome::Applied(_)
+        ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) =
+        load_native_ownership_journal(&authority)
+    else {
+        panic!("restarted native-ownership interlock journal did not load");
+    };
+    let preparing = journal.entries()[0].clone();
+    assert_eq!(
+        preparing.phase(),
+        ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+    );
+
+    let no_op_grant = mutate_extension_grants(
+        store.as_ref(),
+        profile,
+        activation.preparation.store_catalog_revision(),
+        activation.preparation.store_install_revision(),
+        install_id,
+        activation.manifest.clone(),
+        ExtensionGrantWrite::Apply {
+            expected: activation.preparation.store_grant_revision(),
+            mutation: ExtensionGrantMutation::SetPrivateAccess { granted: false },
+        },
+    );
+    let ExtensionGrantMutationOutcome::Applied(no_op_grant) = no_op_grant else {
+        panic!("exact grant no-op was blocked by native ownership");
+    };
+    assert_eq!(
+        no_op_grant.authority.revision(),
+        activation.preparation.store_grant_revision()
+    );
+    assert_eq!(
+        mutate_extension_grants(
+            store.as_ref(),
+            profile,
+            activation.preparation.store_catalog_revision(),
+            activation.preparation.store_install_revision(),
+            install_id,
+            activation.manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: activation.preparation.store_grant_revision(),
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        ),
+        ExtensionGrantMutationOutcome::RuntimeOwnershipConflict
+    );
+
+    let enabled_no_op = mutate_extension_installs(
+        store.as_ref(),
+        profile,
+        activation.preparation.store_catalog_revision(),
+        ExtensionInstallCatalogMutation::SetDesiredEnabled {
+            id: install_id,
+            expected: activation.preparation.store_install_revision(),
+            desired_enabled: true,
+        },
+    );
+    let ExtensionInstallCatalogMutationOutcome::Applied(enabled_no_op) = enabled_no_op else {
+        panic!("exact enabled-intent no-op was blocked by native ownership");
+    };
+    assert_eq!(
+        enabled_no_op.catalog_revision,
+        activation.preparation.store_catalog_revision()
+    );
+    assert_eq!(
+        mutate_extension_installs(
+            store.as_ref(),
+            profile,
+            activation.preparation.store_catalog_revision(),
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id: install_id,
+                expected: activation.preparation.store_install_revision(),
+                desired_enabled: false,
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::RuntimeOwnershipConflict
+    );
+    assert_eq!(
+        mutate_extension_installs(
+            store.as_ref(),
+            profile,
+            activation.preparation.store_catalog_revision(),
+            ExtensionInstallCatalogMutation::Delete {
+                id: install_id,
+                expected: activation.preparation.store_install_revision(),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::RuntimeOwnershipConflict
+    );
+
+    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(release_pending) =
+        mutate_native_ownership_journal(
+            &authority,
+            journal.revision(),
+            ExtensionNativeOwnershipJournalMutation::transition(
+                preparing.cas(),
+                ExtensionNativeOwnershipIntent::Release,
+                ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+            ),
+        )
+    else {
+        panic!("Preparing owner did not enter exact release-pending state");
+    };
+    assert_eq!(
+        mutate_extension_grants(
+            store.as_ref(),
+            profile,
+            activation.preparation.store_catalog_revision(),
+            activation.preparation.store_install_revision(),
+            install_id,
+            activation.manifest.clone(),
+            ExtensionGrantWrite::Apply {
+                expected: activation.preparation.store_grant_revision(),
+                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+        ),
+        ExtensionGrantMutationOutcome::RuntimeOwnershipConflict,
+        "release-pending is still unresolved ownership"
+    );
+    let release_entry = release_pending.entry.as_deref().unwrap();
+    assert!(matches!(
+        mutate_native_ownership_journal(
+            &authority,
+            release_pending.journal_revision,
+            ExtensionNativeOwnershipJournalMutation::clear(release_entry.cas()),
+        ),
+        ExtensionNativeOwnershipJournalMutationOutcome::Applied(_)
+    ));
+
+    let ExtensionGrantMutationOutcome::Applied(changed_grant) = mutate_extension_grants(
+        store.as_ref(),
+        profile,
+        activation.preparation.store_catalog_revision(),
+        activation.preparation.store_install_revision(),
+        install_id,
+        activation.manifest,
+        ExtensionGrantWrite::Apply {
+            expected: activation.preparation.store_grant_revision(),
+            mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+        },
+    ) else {
+        panic!("changed grant remained blocked after exact ownership clear");
+    };
+    assert!(changed_grant
+        .authority
+        .persistence_projection()
+        .persisted_private_access());
+    let ExtensionInstallCatalogMutationOutcome::Applied(disabled) = mutate_extension_installs(
+        store.as_ref(),
+        profile,
+        activation.preparation.store_catalog_revision(),
+        ExtensionInstallCatalogMutation::SetDesiredEnabled {
+            id: install_id,
+            expected: activation.preparation.store_install_revision(),
+            desired_enabled: false,
+        },
+    ) else {
+        panic!("disable remained blocked after exact ownership clear");
+    };
+    let disabled_install = disabled.install.as_deref().unwrap();
+    assert!(matches!(
+        mutate_extension_installs(
+            store.as_ref(),
+            profile,
+            disabled.catalog_revision,
+            ExtensionInstallCatalogMutation::Delete {
+                id: install_id,
+                expected: disabled_install.revision(),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Applied(_)
+    ));
+}
+
+#[test]
+fn native_ownership_may_own_fence_revalidates_after_catalog_drift() {
+    let profile = ProfileId::from(1);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+    let activation = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        ExtensionInstallId::from(911),
+        87,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
+    let ExtensionNativeOwnershipActivationOutcome::Applied(begun) = begin_native_ownership(
+        &authority,
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        &activation,
+    ) else {
+        panic!("MayOwn drift fixture begin did not apply");
+    };
+    let preparing = begun.entry.as_deref().unwrap().clone();
+    let before_drift_refusal = load_native_ownership_journal(&authority);
+
+    // A sibling install does not invalidate this row's package or grants, but
+    // it does advance the profile catalog snapshot recorded by the runtime
+    // plan. The second fence must refuse it before native ownership may change.
+    let _sibling = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        ExtensionInstallId::from(912),
+        89,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+    );
+    assert_eq!(
+        transition_native_ownership_to_may_own(
+            &authority,
+            begun.journal_revision,
+            preparing.cas(),
+            Some(expected_native_ownership_identity()),
+            &activation,
+        ),
+        ExtensionNativeOwnershipActivationOutcome::Stale(
+            ExtensionNativeOwnershipActivationStale::CatalogRevision
+        )
+    );
+    assert_eq!(
+        load_native_ownership_journal(&authority),
+        before_drift_refusal
+    );
+}
+
+#[test]
+fn unresolved_native_ownership_interlocks_initial_grant_write() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(910);
+    let package = bundled_extension_package(83, 84, 1);
+    let manifest = extension_manifest(package.clone());
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let ExtensionInstallCatalogMutationOutcome::Applied(installed) = hub
+        .mutate_extension_install_catalog(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallCatalogMutation::Install {
+                id: install_id,
+                package: package.clone(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!("initial-grant interlock fixture install failed");
+    };
+    let install = installed.install.as_deref().unwrap();
+    let preparing = ExtensionNativeOwnershipJournal::empty()
+        .apply(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(
+                ExtensionNativeOwnershipPreparation::new(
+                    ExtensionNativeOwnershipKey::new(
+                        profile,
+                        install_id,
+                        ExtensionGrantBrowsingContext::Regular,
+                    ),
+                    package,
+                    ExtensionCatalogSetDigest::from_bytes([85; 32]),
+                    ExtensionCatalogGenerationRole::Active,
+                    installed.catalog_revision,
+                    install.revision(),
+                    ExtensionGrantRevision::INITIAL,
+                    zephium_core::extensions::ExtensionGrantDigest::from_bytes([86; 32]),
+                    ExtensionRuntimeBackendTarget::LinuxCompatibility,
+                ),
+            ),
+        )
+        .unwrap()
+        .entry()
+        .unwrap()
+        .clone();
+    hub.inject_extension_native_ownership_entry_for_interlock_test(&preparing)
+        .unwrap();
+    let store = SqliteStore::spawn(hub).unwrap();
+    let initial_authority = ExtensionGrantAuthority::initialize(
+        install,
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &manifest,
+    )
+    .unwrap();
+    assert_eq!(
+        mutate_extension_grants(
+            &store,
+            profile,
+            installed.catalog_revision,
+            install.revision(),
+            install_id,
+            manifest,
+            ExtensionGrantWrite::Initialize {
+                authority: Box::new(initial_authority),
+            },
+        ),
+        ExtensionGrantMutationOutcome::RuntimeOwnershipConflict
+    );
 }
 
 #[test]
@@ -2105,6 +3058,8 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
     for required in [
         "pub fn load_native_ownership_until(",
         "pub fn mutate_native_ownership_until(",
+        "pub fn begin_native_ownership_until(",
+        "pub fn transition_native_ownership_to_may_own_until(",
         "pub fn load_install_catalog_until(",
         "pub fn load_grant_cohort_until(",
     ] {
@@ -2122,7 +3077,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 4,
+        public_items, 6,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("mutate_extension_install"));
@@ -2477,6 +3432,81 @@ fn native_ownership_failed_enqueue_releases_its_exact_permit() {
 }
 
 #[test]
+fn fenced_native_activation_deadlines_and_failed_enqueue_release_both_permits() {
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let store = Arc::new(test_store_with_sender(tx));
+    let authority = store.claim_extension_service_store_authority().unwrap();
+    let manifest = extension_manifest(bundled_extension_package(91, 92, 1));
+    let preparation = native_ownership_preparation(ProfileId::from(1), ExtensionInstallId::from(1));
+    let preparing = ExtensionNativeOwnershipJournal::empty()
+        .apply(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(preparation.clone()),
+        )
+        .unwrap()
+        .entry()
+        .unwrap()
+        .clone();
+
+    assert_eq!(
+        authority.begin_native_ownership_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(preparation.clone()),
+            manifest.clone(),
+            Instant::now(),
+        ),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert_eq!(
+        authority.begin_native_ownership_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::transition(
+                preparing.cas(),
+                ExtensionNativeOwnershipIntent::Release,
+                ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+            ),
+            manifest.clone(),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionNativeOwnershipActivationOutcome::Invalid
+        )
+    );
+    assert_eq!(
+        authority.begin_native_ownership_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(preparation),
+            manifest.clone(),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert_eq!(
+        authority.transition_native_ownership_to_may_own_until(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            preparing.cas(),
+            Some(expected_native_ownership_identity()),
+            manifest,
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    assert_eq!(
+        *store
+            .extension_grant_request_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ExtensionGrantRequestAdmission::default()
+    );
+    assert_eq!(
+        store
+            .extension_native_ownership_mutation_admission
+            .snapshot(),
+        Some((0, 0))
+    );
+}
+
+#[test]
 fn native_ownership_atomic_admission_cannot_oversubscribe() {
     const RACERS: usize = 64;
 
@@ -2542,15 +3572,18 @@ fn profile_deletion_waits_for_native_ownership_release_and_clear() {
     assert!(store.flush());
     let profile = ProfileId::from(3);
     let install = ExtensionInstallId::from(903);
-    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(begun) =
-        mutate_native_ownership_journal(
-            &authority,
-            ExtensionNativeOwnershipJournalRevision::INITIAL,
-            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
-                profile, install,
-            )),
-        )
-    else {
+    let activation = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        install,
+        61,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
+    let ExtensionNativeOwnershipActivationOutcome::Applied(begun) = begin_native_ownership(
+        &authority,
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        &activation,
+    ) else {
         panic!("native-ownership begin was not applied");
     };
     assert_eq!(
@@ -4047,7 +5080,7 @@ fn debounce_coalesces_latest_wins() {
 #[test]
 fn explicit_flush_is_an_ordered_durability_barrier() {
     let dir = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(dir.path()).unwrap();
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
     let mut latest = sample();
     latest.active_item = Some(ItemId::from(10));
     store.save_session(sample());
@@ -4064,7 +5097,7 @@ fn explicit_flush_is_an_ordered_durability_barrier() {
 #[test]
 fn terminal_shutdown_flushes_drops_sqlite_and_joins_the_actor() {
     let dir = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(dir.path()).unwrap();
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
     let latest = sample();
     store.save_session(latest.clone());
 
@@ -4910,18 +5943,28 @@ fn semantic_session_corruption_is_quarantined_exactly_and_store_becomes_read_onl
     .unwrap();
     drop(meta);
 
-    let store = SqliteStore::open(dir.path()).unwrap();
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
     let SessionLoad::RecoveryRequired { reason } = store.load_session() else {
         panic!("semantic corruption did not enter explicit recovery mode")
     };
     assert!(reason.contains("canonical"), "{reason}");
+    let extension_authority = store.claim_extension_service_store_authority().unwrap();
     assert_eq!(
-        load_page_permissions(&store, ProfileId::from(1)),
+        begin_native_ownership_with(
+            &extension_authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            native_ownership_preparation(ProfileId::from(1), ExtensionInstallId::from(812)),
+            extension_manifest(bundled_extension_package(49, 50, 1)),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::SessionRecoveryRequired
+    );
+    assert_eq!(
+        load_page_permissions(store.as_ref(), ProfileId::from(1)),
         PagePermissionCatalogLoadOutcome::Failed
     );
     assert_eq!(
         mutate_page_permissions(
-            &store,
+            store.as_ref(),
             ProfileId::from(1),
             PagePermissionCatalogRevision::INITIAL,
             page_patch(vec![PagePermissionChange::Create {
@@ -4934,12 +5977,12 @@ fn semantic_session_corruption_is_quarantined_exactly_and_store_becomes_read_onl
         PagePermissionCatalogMutationOutcome::Failed
     );
     assert_eq!(
-        load_extension_installs(&store, ProfileId::from(1)),
+        load_extension_installs(store.as_ref(), ProfileId::from(1)),
         ExtensionInstallCatalogLoadOutcome::Failed
     );
     assert_eq!(
         mutate_extension_installs(
-            &store,
+            store.as_ref(),
             ProfileId::from(1),
             ExtensionInstallCatalogRevision::INITIAL,
             ExtensionInstallCatalogMutation::Install {
@@ -5006,7 +6049,8 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
     let orphan_path = dir.path().join(format!("profile-{orphan}.sqlite"));
     std::fs::write(&orphan_path, b"not a database").unwrap();
 
-    let store = SqliteStore::open(dir.path()).unwrap();
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+    let extension_authority = store.claim_extension_service_store_authority().unwrap();
     assert_eq!(
         store.load_session(),
         SessionLoad::LoadedWithDegradedProfiles {
@@ -5016,12 +6060,12 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
         }
     );
     assert_eq!(
-        load_page_permissions(&store, degraded),
+        load_page_permissions(store.as_ref(), degraded),
         PagePermissionCatalogLoadOutcome::DegradedProfile
     );
     assert_eq!(
         mutate_page_permissions(
-            &store,
+            store.as_ref(),
             degraded,
             PagePermissionCatalogRevision::INITIAL,
             page_patch(vec![PagePermissionChange::Create {
@@ -5034,12 +6078,12 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
         PagePermissionCatalogMutationOutcome::DegradedProfile
     );
     assert_eq!(
-        load_extension_installs(&store, degraded),
+        load_extension_installs(store.as_ref(), degraded),
         ExtensionInstallCatalogLoadOutcome::DegradedProfile
     );
     assert_eq!(
         mutate_extension_installs(
-            &store,
+            store.as_ref(),
             degraded,
             ExtensionInstallCatalogRevision::INITIAL,
             ExtensionInstallCatalogMutation::Install {
@@ -5052,8 +6096,17 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
     let degraded_id = ExtensionInstallId::from(815);
     let degraded_manifest = extension_manifest(extension_package(63, 64, 1));
     assert_eq!(
+        begin_native_ownership_with(
+            &extension_authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            native_ownership_preparation(degraded, degraded_id),
+            degraded_manifest.clone(),
+        ),
+        ExtensionNativeOwnershipActivationOutcome::DegradedProfile
+    );
+    assert_eq!(
         load_extension_grants(
-            &store,
+            store.as_ref(),
             degraded,
             extension_grant_bindings(&[(degraded_id, degraded_manifest.clone())]),
         ),
@@ -5067,7 +6120,7 @@ fn registered_future_profile_schema_is_preserved_and_explicitly_degraded() {
         ExtensionGrantAuthority::new(&degraded_install, &degraded_manifest).unwrap();
     assert_eq!(
         mutate_extension_grants(
-            &store,
+            store.as_ref(),
             degraded,
             ExtensionInstallCatalogRevision::INITIAL,
             ExtensionInstallRevision::INITIAL,

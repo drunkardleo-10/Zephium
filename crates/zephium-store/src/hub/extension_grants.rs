@@ -31,6 +31,15 @@ use super::*;
 const _: () = assert!(MAX_EXTENSION_API_PERMISSION_NAME_BYTES == 96);
 const _: () = assert!(MAX_MATCH_PATTERN_BYTES == 2048);
 
+enum GrantPersistence {
+    None,
+    Initialize,
+    Apply {
+        expected: ExtensionGrantRevision,
+        mutation: ExtensionGrantMutation,
+    },
+}
+
 pub(super) fn ensure_install_id_has_no_grant_rows(
     conn: &Connection,
     install_id: ExtensionInstallId,
@@ -152,7 +161,13 @@ impl Hub {
         #[cfg(test)]
         let ambiguous_commit = std::mem::take(&mut self.ambiguous_extension_grant_commit_once);
 
-        let tx = self.profile_conn(profile)?.transaction()?;
+        self.profile_conn(profile)?;
+        let meta = &self.meta;
+        let conn = self
+            .profiles
+            .get_mut(&profile)
+            .ok_or_else(|| invalid_data("registered extension profile connection is absent"))?;
+        let tx = conn.transaction()?;
         let catalog = super::extensions::load_catalog(&tx)?;
         validate_global_grant_integrity(&tx)?;
         let current_install = catalog.get(install_id);
@@ -174,7 +189,7 @@ impl Hub {
             return Ok(ExtensionGrantMutationOutcome::Invalid);
         }
 
-        let (authority, changed) = match write {
+        let (authority, persistence) = match write {
             ExtensionGrantWrite::Initialize { authority } => {
                 if current_grant_revision.is_some() {
                     return Ok(ExtensionGrantMutationOutcome::Conflict(
@@ -209,9 +224,7 @@ impl Hub {
                     Ok(verified) if verified == *authority => verified,
                     _ => return Ok(ExtensionGrantMutationOutcome::Invalid),
                 };
-                let authority = verified;
-                insert_authority(&tx, &authority)?;
-                (authority, true)
+                (verified, GrantPersistence::Initialize)
             }
             ExtensionGrantWrite::Apply { expected, mutation } => {
                 let Some(current) = load_authority(&tx, install, &manifest)? else {
@@ -234,23 +247,48 @@ impl Hub {
                     }
                     Err(_) => return Ok(ExtensionGrantMutationOutcome::Invalid),
                 };
-                let changed = application.changed();
+                let persistence = if application.changed() {
+                    GrantPersistence::Apply {
+                        expected,
+                        mutation: mutation_for_storage,
+                    }
+                } else {
+                    GrantPersistence::None
+                };
                 let authority = application.into_authority();
-                if changed {
-                    persist_authority_mutation(&tx, expected, &authority, &mutation_for_storage)?;
-                }
-                (authority, changed)
+                (authority, persistence)
             }
         };
+
+        if matches!(persistence, GrantPersistence::None) {
+            return Ok(ExtensionGrantMutationOutcome::Applied(
+                ExtensionGrantMutationApplied::new(
+                    catalog.revision(),
+                    Box::new(install.clone()),
+                    Box::new(authority),
+                ),
+            ));
+        }
+
+        if super::native_ownership::has_unresolved_native_ownership_for_install(
+            meta, profile, install_id,
+        )? {
+            return Ok(ExtensionGrantMutationOutcome::RuntimeOwnershipConflict);
+        }
+
+        match persistence {
+            GrantPersistence::None => unreachable!("grant no-op returned before persistence"),
+            GrantPersistence::Initialize => insert_authority(&tx, &authority)?,
+            GrantPersistence::Apply { expected, mutation } => {
+                persist_authority_mutation(&tx, expected, &authority, &mutation)?;
+            }
+        }
 
         let applied = ExtensionGrantMutationApplied::new(
             catalog.revision(),
             Box::new(install.clone()),
             Box::new(authority),
         );
-        if !changed {
-            return Ok(ExtensionGrantMutationOutcome::Applied(applied));
-        }
 
         let committed = tx.commit();
         #[cfg(test)]
@@ -410,6 +448,19 @@ fn load_grant_revision(
             .ok_or_else(|| invalid_data("extension grant revision is invalid"))
     })
     .transpose()
+}
+
+/// Loads one complete package-bound grant authority after validating the
+/// profile-wide root/child-table envelope. Fresh activation uses this narrow
+/// helper so Begin and MayOwn share the same durable codec and integrity
+/// checks as ordinary cohort loads.
+pub(super) fn load_validated_runtime_authority(
+    conn: &Connection,
+    install: &ExtensionInstall,
+    manifest: &ExtensionManifestDescriptor,
+) -> rusqlite::Result<Option<ExtensionGrantAuthority>> {
+    validate_global_grant_integrity(conn)?;
+    load_authority(conn, install, manifest)
 }
 
 fn load_authority(

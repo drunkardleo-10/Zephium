@@ -1,24 +1,28 @@
 //! Global durable native-extension ownership reconciliation journal.
 
+use std::sync::Arc;
+
 use super::*;
 
 use zephium_core::extensions::{
     ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
     ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDigest, ExtensionNativeIncarnation, ExtensionNativeOwnershipApplyError,
-    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryRevision,
+    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionNativeIncarnation,
+    ExtensionNativeOwnershipApplyError, ExtensionNativeOwnershipEntry,
+    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipEntryRevision,
     ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
     ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
     ExtensionNativeOwnershipMutationKind, ExtensionNativeOwnershipOperation,
-    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
-    EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, EXTENSION_SHA256_BYTES,
-    MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
+    ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES,
+    EXTENSION_SHA256_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
 };
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
+    ExtensionNativeOwnershipActivationOutcome, ExtensionNativeOwnershipActivationStale,
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationApplied,
     ExtensionNativeOwnershipJournalMutationOutcome,
 };
@@ -109,6 +113,127 @@ const LOAD_JOURNAL_ROWS_SQL: &str =
      FROM extension_native_ownership_journal
      ORDER BY bounded_profile_id, bounded_install_id, bounded_context_rank";
 
+#[derive(Clone, Copy)]
+struct ActivationCohortFacts<'a> {
+    key: ExtensionNativeOwnershipKey,
+    package: &'a ExtensionPackageIdentity,
+    catalog_revision: ExtensionInstallCatalogRevision,
+    install_revision: ExtensionInstallRevision,
+    grant_revision: ExtensionGrantRevision,
+    grant_digest: ExtensionGrantDigest,
+}
+
+impl<'a> From<&'a ExtensionNativeOwnershipPreparation> for ActivationCohortFacts<'a> {
+    fn from(preparation: &'a ExtensionNativeOwnershipPreparation) -> Self {
+        Self {
+            key: preparation.key(),
+            package: preparation.package(),
+            catalog_revision: preparation.store_catalog_revision(),
+            install_revision: preparation.store_install_revision(),
+            grant_revision: preparation.store_grant_revision(),
+            grant_digest: preparation.grant_digest(),
+        }
+    }
+}
+
+impl<'a> From<&'a ExtensionNativeOwnershipEntry> for ActivationCohortFacts<'a> {
+    fn from(entry: &'a ExtensionNativeOwnershipEntry) -> Self {
+        Self {
+            key: entry.key(),
+            package: entry.package(),
+            catalog_revision: entry.store_catalog_revision(),
+            install_revision: entry.store_install_revision(),
+            grant_revision: entry.store_grant_revision(),
+            grant_digest: entry.grant_digest(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationValidationRefusal {
+    Stale(ExtensionNativeOwnershipActivationStale),
+    EligibilityChanged(ExtensionRuntimeEligibilityDenial),
+    Invalid,
+}
+
+impl ActivationValidationRefusal {
+    const fn into_outcome(self) -> ExtensionNativeOwnershipActivationOutcome {
+        match self {
+            Self::Stale(reason) => ExtensionNativeOwnershipActivationOutcome::Stale(reason),
+            Self::EligibilityChanged(reason) => {
+                ExtensionNativeOwnershipActivationOutcome::EligibilityChanged(reason)
+            }
+            Self::Invalid => ExtensionNativeOwnershipActivationOutcome::Invalid,
+        }
+    }
+}
+
+fn validate_activation_cohort(
+    conn: &Connection,
+    facts: ActivationCohortFacts<'_>,
+    manifest: &ExtensionManifestDescriptor,
+) -> rusqlite::Result<Result<(), ActivationValidationRefusal>> {
+    if manifest.package() != facts.package {
+        return Ok(Err(ActivationValidationRefusal::Invalid));
+    }
+
+    let catalog = super::extensions::load_catalog(conn)?;
+    if catalog.revision() != facts.catalog_revision {
+        return Ok(Err(ActivationValidationRefusal::Stale(
+            ExtensionNativeOwnershipActivationStale::CatalogRevision,
+        )));
+    }
+    let Some(install) = catalog.get(facts.key.install_id()) else {
+        return Ok(Err(ActivationValidationRefusal::Stale(
+            ExtensionNativeOwnershipActivationStale::InstallMissing,
+        )));
+    };
+    if install.revision() != facts.install_revision {
+        return Ok(Err(ActivationValidationRefusal::Stale(
+            ExtensionNativeOwnershipActivationStale::InstallRevision,
+        )));
+    }
+    if install.package() != facts.package {
+        return Ok(Err(ActivationValidationRefusal::Stale(
+            ExtensionNativeOwnershipActivationStale::Package,
+        )));
+    }
+    if !install.desired_enabled() {
+        return Ok(Err(ActivationValidationRefusal::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::Disabled,
+        )));
+    }
+
+    let Some(grants) =
+        super::extension_grants::load_validated_runtime_authority(conn, install, manifest)?
+    else {
+        return Ok(Err(ActivationValidationRefusal::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::GrantsUninitialized,
+        )));
+    };
+    if grants.revision() != facts.grant_revision {
+        return Ok(Err(ActivationValidationRefusal::Stale(
+            ExtensionNativeOwnershipActivationStale::GrantRevision,
+        )));
+    }
+    if grants.digest() != facts.grant_digest {
+        return Ok(Err(ActivationValidationRefusal::Stale(
+            ExtensionNativeOwnershipActivationStale::GrantDigest,
+        )));
+    }
+    if !grants.has_required_api_and_host_grants_for(manifest) {
+        return Ok(Err(ActivationValidationRefusal::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::RequiredAuthorityMissing,
+        )));
+    }
+    if facts.key.browsing_context() == ExtensionGrantBrowsingContext::Private {
+        return Ok(Err(ActivationValidationRefusal::EligibilityChanged(
+            ExtensionRuntimeEligibilityDenial::PrivateBrowsingUnsupported,
+        )));
+    }
+    Ok(Ok(()))
+}
+
 impl Hub {
     pub(crate) fn load_extension_native_ownership_journal(
         &mut self,
@@ -124,6 +249,150 @@ impl Hub {
         expected: ExtensionNativeOwnershipJournalRevision,
         mutation: ExtensionNativeOwnershipJournalMutation,
     ) -> rusqlite::Result<ExtensionNativeOwnershipJournalMutationOutcome> {
+        self.persist_extension_native_ownership_journal(expected, mutation, false)
+    }
+
+    pub(crate) fn begin_extension_native_ownership(
+        &mut self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        manifest: Arc<ExtensionManifestDescriptor>,
+    ) -> rusqlite::Result<ExtensionNativeOwnershipActivationOutcome> {
+        let preparation = match &mutation {
+            ExtensionNativeOwnershipJournalMutation::Begin(preparation) => preparation.as_ref(),
+            ExtensionNativeOwnershipJournalMutation::Transition { .. }
+            | ExtensionNativeOwnershipJournalMutation::Clear { .. } => {
+                return Ok(ExtensionNativeOwnershipActivationOutcome::Invalid)
+            }
+        };
+        if self.recovery_required.is_some() {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::SessionRecoveryRequired);
+        }
+        let profile = preparation.profile();
+        if !self.registry.contains(&profile) {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::DegradedProfile);
+        }
+
+        let journal = load_journal(&self.meta)?;
+        if journal.revision() != expected || journal.get(preparation.key()).is_some() {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        }
+        if let Some(refusal) = self.validate_extension_native_activation_profile(
+            ActivationCohortFacts::from(preparation),
+            &manifest,
+        )? {
+            return Ok(refusal);
+        }
+
+        self.persist_extension_native_ownership_journal(expected, mutation, true)
+            .map(map_activation_persistence_outcome)
+    }
+
+    pub(crate) fn transition_extension_native_ownership_to_may_own(
+        &mut self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        preparing: ExtensionNativeOwnershipEntryCas,
+        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        manifest: Arc<ExtensionManifestDescriptor>,
+    ) -> rusqlite::Result<ExtensionNativeOwnershipActivationOutcome> {
+        if self.recovery_required.is_some() {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::SessionRecoveryRequired);
+        }
+        let journal = load_journal(&self.meta)?;
+        if journal.revision() != expected {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        }
+        let Some(entry) = journal.get(preparing.key()) else {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        };
+        if entry.cas() != preparing {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        }
+        if entry.intent() != ExtensionNativeOwnershipIntent::Acquire
+            || entry.phase() != ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+            || entry.expected_native_identity().is_some()
+            || entry.native_identity().is_some()
+        {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::Invalid);
+        }
+
+        let native_backend = matches!(
+            entry.runtime_backend(),
+            ExtensionRuntimeBackendTarget::MacosNative
+                | ExtensionRuntimeBackendTarget::WindowsNative
+        );
+        if native_backend != expected_native_identity.is_some()
+            || expected_native_identity
+                .is_some_and(|identity| identity.backend() != entry.runtime_backend())
+        {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::Invalid);
+        }
+
+        let profile = entry.key().profile();
+        if !self.registry.contains(&profile) {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(ExtensionNativeOwnershipActivationOutcome::DegradedProfile);
+        }
+        if let Some(refusal) = self.validate_extension_native_activation_profile(
+            ActivationCohortFacts::from(entry),
+            &manifest,
+        )? {
+            return Ok(refusal);
+        }
+
+        let mutation = match expected_native_identity {
+            Some(identity) => {
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing, identity,
+                )
+            }
+            None => ExtensionNativeOwnershipJournalMutation::transition(
+                preparing,
+                ExtensionNativeOwnershipIntent::Acquire,
+                ExtensionNativeOwnershipPhase::NativeMayOwn,
+            ),
+        };
+        self.persist_extension_native_ownership_journal(expected, mutation, true)
+            .map(map_activation_persistence_outcome)
+    }
+
+    fn validate_extension_native_activation_profile(
+        &mut self,
+        facts: ActivationCohortFacts<'_>,
+        manifest: &ExtensionManifestDescriptor,
+    ) -> rusqlite::Result<Option<ExtensionNativeOwnershipActivationOutcome>> {
+        let tx = self.profile_conn(facts.key.profile())?.transaction()?;
+        let validation = validate_activation_cohort(&tx, facts, manifest)?;
+        tx.commit()?;
+        Ok(validation
+            .err()
+            .map(ActivationValidationRefusal::into_outcome))
+    }
+
+    fn persist_extension_native_ownership_journal(
+        &mut self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        fresh_activation_validated: bool,
+    ) -> rusqlite::Result<ExtensionNativeOwnershipJournalMutationOutcome> {
+        if !fresh_activation_validated
+            && matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_))
+        {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Invalid);
+        }
         if self.recovery_required.is_some()
             && !matches!(
                 &mutation,
@@ -154,6 +423,12 @@ impl Hub {
         let current_revision = current.revision();
         let current_operation_high_water = current.operation_high_water();
         let current_incarnation_high_water = current.native_incarnation_high_water();
+        if !fresh_activation_validated
+            && current.revision() == expected
+            && raw_mutation_crosses_fresh_may_own_fence(&current, &mutation)
+        {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Invalid);
+        }
         let application = match current.apply(expected, mutation) {
             Ok(application) => application,
             Err(ExtensionNativeOwnershipApplyError::Conflict { current }) => {
@@ -277,6 +552,18 @@ impl Hub {
         self.ambiguous_extension_native_ownership_commit_once = true;
     }
 
+    /// Persistence-codec tests seed otherwise valid state without weakening
+    /// the production boundary, where only the compound activation commands
+    /// may cross the fresh Begin and Preparing-to-MayOwn fences.
+    #[cfg(test)]
+    fn persist_extension_native_ownership_fixture(
+        &mut self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+    ) -> rusqlite::Result<ExtensionNativeOwnershipJournalMutationOutcome> {
+        self.persist_extension_native_ownership_journal(expected, mutation, true)
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_extension_native_ownership_entry_for_interlock_test(
         &mut self,
@@ -316,6 +603,75 @@ impl Hub {
         )?;
         tx.commit()
     }
+}
+
+fn map_activation_persistence_outcome(
+    outcome: ExtensionNativeOwnershipJournalMutationOutcome,
+) -> ExtensionNativeOwnershipActivationOutcome {
+    match outcome {
+        ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => {
+            ExtensionNativeOwnershipActivationOutcome::Applied(applied)
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::Conflict { current } => {
+            ExtensionNativeOwnershipActivationOutcome::Conflict { current }
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::NotRegistered => {
+            ExtensionNativeOwnershipActivationOutcome::NotRegistered
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::DegradedProfile => {
+            ExtensionNativeOwnershipActivationOutcome::DegradedProfile
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::SessionRecoveryRequired => {
+            ExtensionNativeOwnershipActivationOutcome::SessionRecoveryRequired
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::Invalid => {
+            ExtensionNativeOwnershipActivationOutcome::Invalid
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::LimitReached => {
+            ExtensionNativeOwnershipActivationOutcome::LimitReached
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::RevisionExhausted => {
+            ExtensionNativeOwnershipActivationOutcome::RevisionExhausted
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown => {
+            ExtensionNativeOwnershipActivationOutcome::OutcomeUnknown
+        }
+        ExtensionNativeOwnershipJournalMutationOutcome::Failed => {
+            ExtensionNativeOwnershipActivationOutcome::Failed
+        }
+    }
+}
+
+fn raw_mutation_crosses_fresh_may_own_fence(
+    journal: &ExtensionNativeOwnershipJournal,
+    mutation: &ExtensionNativeOwnershipJournalMutation,
+) -> bool {
+    let ExtensionNativeOwnershipJournalMutation::Transition {
+        expected,
+        intent: ExtensionNativeOwnershipIntent::Acquire,
+        phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
+        ..
+    } = mutation
+    else {
+        return false;
+    };
+    journal.get(expected.key()).is_some_and(|entry| {
+        entry.cas() == *expected
+            && entry.intent() == ExtensionNativeOwnershipIntent::Acquire
+            && entry.phase() == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+    })
+}
+
+pub(super) fn has_unresolved_native_ownership_for_install(
+    meta: &Connection,
+    profile: ProfileId,
+    install_id: ExtensionInstallId,
+) -> rusqlite::Result<bool> {
+    let journal = load_journal(meta)?;
+    Ok(journal.entries().iter().any(|entry| {
+        let key = entry.key();
+        key.profile() == profile && key.install_id() == install_id
+    }))
 }
 
 fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJournal> {
@@ -926,6 +1282,14 @@ mod tests {
     }
 
     fn preparation(profile: ProfileId, install: u128) -> ExtensionNativeOwnershipPreparation {
+        preparation_with_backend(profile, install, ExtensionRuntimeBackendTarget::MacosNative)
+    }
+
+    fn preparation_with_backend(
+        profile: ProfileId,
+        install: u128,
+        runtime_backend: ExtensionRuntimeBackendTarget,
+    ) -> ExtensionNativeOwnershipPreparation {
         ExtensionNativeOwnershipPreparation::new(
             ExtensionNativeOwnershipKey::new(
                 profile,
@@ -939,8 +1303,28 @@ mod tests {
             ExtensionInstallRevision::INITIAL,
             ExtensionGrantRevision::INITIAL,
             ExtensionGrantDigest::from_bytes([6; 32]),
-            ExtensionRuntimeBackendTarget::MacosNative,
+            runtime_backend,
         )
+    }
+
+    fn preparing_entry_with_backend(
+        profile: ProfileId,
+        install: u128,
+        runtime_backend: ExtensionRuntimeBackendTarget,
+    ) -> ExtensionNativeOwnershipEntry {
+        ExtensionNativeOwnershipJournal::empty()
+            .apply(
+                ExtensionNativeOwnershipJournalRevision::INITIAL,
+                ExtensionNativeOwnershipJournalMutation::begin(preparation_with_backend(
+                    profile,
+                    install,
+                    runtime_backend,
+                )),
+            )
+            .unwrap()
+            .entry()
+            .unwrap()
+            .clone()
     }
 
     fn expected_may_own_entry(profile: ProfileId) -> ExtensionNativeOwnershipEntry {
@@ -1102,6 +1486,90 @@ mod tests {
     }
 
     #[test]
+    fn raw_journal_mutation_cannot_bypass_either_fresh_activation_fence() {
+        let profile = ProfileId::from(80);
+        let mut fresh = Hub::in_memory().unwrap();
+        assert_eq!(
+            fresh
+                .mutate_extension_native_ownership_journal(
+                    ExtensionNativeOwnershipJournalRevision::INITIAL,
+                    ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
+                )
+                .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid
+        );
+        assert_eq!(
+            fresh.load_extension_native_ownership_journal().unwrap(),
+            ExtensionNativeOwnershipJournalLoadOutcome::Loaded(
+                ExtensionNativeOwnershipJournal::empty()
+            )
+        );
+
+        let native_preparing =
+            preparing_entry_with_backend(profile, 1, ExtensionRuntimeBackendTarget::MacosNative);
+        fresh
+            .inject_extension_native_ownership_entry_for_interlock_test(&native_preparing)
+            .unwrap();
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(native_journal) =
+            fresh.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("native Preparing fixture did not load");
+        };
+        assert_eq!(
+            fresh
+                .mutate_extension_native_ownership_journal(
+                    native_journal.revision(),
+                    ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                        native_preparing.cas(),
+                        expected_native_identity(),
+                    ),
+                )
+                .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid
+        );
+        assert_eq!(
+            fresh.load_extension_native_ownership_journal().unwrap(),
+            ExtensionNativeOwnershipJournalLoadOutcome::Loaded(native_journal)
+        );
+
+        let compatibility_preparing = preparing_entry_with_backend(
+            ProfileId::from(81),
+            1,
+            ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        );
+        let mut compatibility = Hub::in_memory().unwrap();
+        compatibility
+            .inject_extension_native_ownership_entry_for_interlock_test(&compatibility_preparing)
+            .unwrap();
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(compatibility_journal) =
+            compatibility
+                .load_extension_native_ownership_journal()
+                .unwrap()
+        else {
+            panic!("compatibility Preparing fixture did not load");
+        };
+        assert_eq!(
+            compatibility
+                .mutate_extension_native_ownership_journal(
+                    compatibility_journal.revision(),
+                    ExtensionNativeOwnershipJournalMutation::transition(
+                        compatibility_preparing.cas(),
+                        ExtensionNativeOwnershipIntent::Acquire,
+                        ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    ),
+                )
+                .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid
+        );
+        assert_eq!(
+            compatibility
+                .load_extension_native_ownership_journal()
+                .unwrap(),
+            ExtensionNativeOwnershipJournalLoadOutcome::Loaded(compatibility_journal)
+        );
+    }
+
+    #[test]
     fn session_recovery_blocks_begin_but_preserves_exact_cleanup_path() {
         let mut hub = Hub::in_memory().unwrap();
         let profile = ProfileId::from(81);
@@ -1170,7 +1638,8 @@ mod tests {
                 ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 2)),
             )
             .unwrap(),
-            ExtensionNativeOwnershipJournalMutationOutcome::SessionRecoveryRequired
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid,
+            "the raw journal path must reject fresh Begin before recovery policy"
         );
         let loaded = hub.load_extension_native_ownership_journal().unwrap();
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) = loaded else {
@@ -1414,7 +1883,7 @@ mod tests {
             panic!("empty native-ownership journal did not load");
         };
         let begun = match hub
-            .mutate_extension_native_ownership_journal(
+            .persist_extension_native_ownership_fixture(
                 empty.revision(),
                 ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
             )
@@ -1427,7 +1896,7 @@ mod tests {
         let expected = expected_native_identity();
         hub.make_next_extension_native_ownership_commit_ambiguous();
         assert_eq!(
-            hub.mutate_extension_native_ownership_journal(
+            hub.persist_extension_native_ownership_fixture(
                 begun.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),
@@ -1473,7 +1942,7 @@ mod tests {
             panic!("empty native-ownership journal did not load");
         };
         let begun = match hub
-            .mutate_extension_native_ownership_journal(
+            .persist_extension_native_ownership_fixture(
                 empty.revision(),
                 ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
             )
@@ -1519,7 +1988,7 @@ mod tests {
             panic!("empty native-ownership journal did not load");
         };
         let begun = match hub
-            .mutate_extension_native_ownership_journal(
+            .persist_extension_native_ownership_fixture(
                 empty.revision(),
                 ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
             )
@@ -1530,7 +1999,7 @@ mod tests {
         };
         let preparing = *begun.entry.unwrap();
         let may_own = match hub
-            .mutate_extension_native_ownership_journal(
+            .persist_extension_native_ownership_fixture(
                 begun.journal_revision,
                 ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
                     preparing.cas(),

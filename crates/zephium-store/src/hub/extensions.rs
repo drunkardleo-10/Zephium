@@ -113,7 +113,12 @@ impl Hub {
         #[cfg(test)]
         let ambiguous_commit = std::mem::take(&mut self.ambiguous_extension_install_commit_once);
 
-        let conn = self.profile_conn(profile)?;
+        self.profile_conn(profile)?;
+        let meta = &self.meta;
+        let conn = self
+            .profiles
+            .get_mut(&profile)
+            .ok_or_else(|| invalid_data("registered extension profile connection is absent"))?;
         let tx = conn.transaction()?;
         let current = load_catalog(&tx)?;
         let current_revision = current.revision();
@@ -168,6 +173,23 @@ impl Hub {
         }
         if !application.changed() {
             return Ok(ExtensionInstallCatalogMutationOutcome::Applied(applied));
+        }
+
+        let invalidates_runtime = matches!(
+            &mutation,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                desired_enabled: false,
+                ..
+            } | ExtensionInstallCatalogMutation::Delete { .. }
+        );
+        if invalidates_runtime
+            && super::native_ownership::has_unresolved_native_ownership_for_install(
+                meta,
+                profile,
+                mutation.id(),
+            )?
+        {
+            return Ok(ExtensionInstallCatalogMutationOutcome::RuntimeOwnershipConflict);
         }
 
         match &mutation {

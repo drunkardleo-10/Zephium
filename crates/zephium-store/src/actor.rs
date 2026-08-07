@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
-    ExtensionGrantManifestBindings, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantManifestBindings,
+    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
     MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
@@ -31,12 +32,13 @@ use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPat
 use zephium_core::ports::store::{
     BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionGrantCohortLoadOutcome,
     ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
-    ExtensionInstallCatalogMutationOutcome, ExtensionNativeOwnershipJournalLoadOutcome,
-    ExtensionNativeOwnershipJournalMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
-    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
-    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
-    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome,
-    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES, MAX_FAVICON_BATCH_ORIGINS,
+    ExtensionInstallCatalogMutationOutcome, ExtensionNativeOwnershipActivationOutcome,
+    ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
+    HistoryHit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
+    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
+    UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
+    MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -126,6 +128,8 @@ type ExtensionNativeOwnershipJournalLoadDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
 type ExtensionNativeOwnershipJournalMutationDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalMutationOutcome) + Send>;
+type ExtensionNativeOwnershipActivationDone =
+    Box<dyn FnOnce(ExtensionNativeOwnershipActivationOutcome) + Send>;
 
 #[derive(Default)]
 struct UserscriptMutationAdmission {
@@ -612,6 +616,23 @@ enum Cmd {
         ExtensionNativeOwnershipMutationPermit,
         ExtensionNativeOwnershipJournalMutationDone,
     ),
+    BeginExtensionNativeOwnership(
+        ExtensionNativeOwnershipJournalRevision,
+        ExtensionNativeOwnershipJournalMutation,
+        Arc<ExtensionManifestDescriptor>,
+        ExtensionGrantRequestPermit,
+        ExtensionNativeOwnershipMutationPermit,
+        ExtensionNativeOwnershipActivationDone,
+    ),
+    TransitionExtensionNativeOwnershipToMayOwn(
+        ExtensionNativeOwnershipJournalRevision,
+        ExtensionNativeOwnershipEntryCas,
+        Option<ExtensionExpectedNativeOwnershipIdentity>,
+        Arc<ExtensionManifestDescriptor>,
+        ExtensionGrantRequestPermit,
+        ExtensionNativeOwnershipMutationPermit,
+        ExtensionNativeOwnershipActivationDone,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -790,6 +811,78 @@ impl ExtensionServiceStoreAuthority {
         if !self
             .store
             .try_mutate_extension_native_ownership_journal(expected, mutation, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Begins one fresh ownership operation only after the Store actor proves
+    /// the repository-produced preparation still matches the exact enabled
+    /// install and complete required grant authority.
+    ///
+    /// `mutation` must be a Begin value. The retained plan remains outside the
+    /// actor, so definite non-admission is safely retryable while an admitted
+    /// timeout still requires full journal reconciliation.
+    pub fn begin_native_ownership_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipActivationOutcome> {
+        if !matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_)) {
+            return ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionNativeOwnershipActivationOutcome::Invalid,
+            );
+        }
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_begin_extension_native_ownership(expected, mutation, manifest, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Revalidates the exact cohort recorded by one Preparing row and commits
+    /// `NativeMayOwn` before any ownership-changing native call.
+    ///
+    /// Native backends require `Some` exact catalog-authenticated identity;
+    /// compatibility backends require `None`. Store derives that rule from the
+    /// durable row and rejects either caller-direction mismatch.
+    pub fn transition_native_ownership_to_may_own_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        preparing: ExtensionNativeOwnershipEntryCas,
+        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipActivationOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_transition_extension_native_ownership_to_may_own(
+                expected,
+                preparing,
+                expected_native_identity,
+                manifest,
+                deadline,
+                done,
+            )
         {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1128,6 +1221,125 @@ impl SqliteStore {
                 expected, mutation, permit, done,
             ))
             .is_ok()
+    }
+
+    fn try_begin_extension_native_ownership(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        mutation: ExtensionNativeOwnershipJournalMutation,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+        done: ExtensionNativeOwnershipActivationDone,
+    ) -> bool {
+        if !matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_)) {
+            return false;
+        }
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some((grant_permit, ownership_permit)) =
+            self.try_acquire_extension_activation_permits(&manifest, mutation.retained_bytes())
+        else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::BeginExtensionNativeOwnership(
+                expected,
+                mutation,
+                manifest,
+                grant_permit,
+                ownership_permit,
+                done,
+            ))
+            .is_ok()
+    }
+
+    fn try_transition_extension_native_ownership_to_may_own(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        preparing: ExtensionNativeOwnershipEntryCas,
+        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+        done: ExtensionNativeOwnershipActivationDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let mutation = match expected_native_identity {
+            Some(identity) => {
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing, identity,
+                )
+            }
+            None => ExtensionNativeOwnershipJournalMutation::transition(
+                preparing,
+                zephium_core::extensions::ExtensionNativeOwnershipIntent::Acquire,
+                zephium_core::extensions::ExtensionNativeOwnershipPhase::NativeMayOwn,
+            ),
+        };
+        let Some((grant_permit, ownership_permit)) =
+            self.try_acquire_extension_activation_permits(&manifest, mutation.retained_bytes())
+        else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::TransitionExtensionNativeOwnershipToMayOwn(
+                expected,
+                preparing,
+                expected_native_identity,
+                manifest,
+                grant_permit,
+                ownership_permit,
+                done,
+            ))
+            .is_ok()
+    }
+
+    fn try_acquire_extension_activation_permits(
+        &self,
+        manifest: &ExtensionManifestDescriptor,
+        ownership_retained_bytes: usize,
+    ) -> Option<(
+        ExtensionGrantRequestPermit,
+        ExtensionNativeOwnershipMutationPermit,
+    )> {
+        if manifest.retained_bytes() > MAX_EXTENSION_MANIFEST_RETAINED_BYTES
+            || ownership_retained_bytes > MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES
+        {
+            return None;
+        }
+        let grant_permit = ExtensionGrantRequestPermit::try_acquire(
+            &self.extension_grant_request_admission,
+            manifest.retained_bytes(),
+        )?;
+        let ownership_permit = ExtensionNativeOwnershipMutationPermit::acquire(
+            &self.extension_native_ownership_mutation_admission,
+            ownership_retained_bytes,
+        )?;
+        Some((grant_permit, ownership_permit))
     }
 
     /// Waits for the latest queued session snapshot to commit, but never past
@@ -2094,6 +2306,50 @@ fn actor(
                             ExtensionNativeOwnershipJournalMutationOutcome::Failed
                         }
                     };
+                done(outcome);
+            }
+            Some(Cmd::BeginExtensionNativeOwnership(
+                expected,
+                mutation,
+                manifest,
+                _grant_permit,
+                _ownership_permit,
+                done,
+            )) => {
+                let outcome = match hub
+                    .begin_extension_native_ownership(expected, mutation, manifest)
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("store: extension native-ownership fenced begin failed: {error}");
+                        ExtensionNativeOwnershipActivationOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::TransitionExtensionNativeOwnershipToMayOwn(
+                expected,
+                preparing,
+                expected_native_identity,
+                manifest,
+                _grant_permit,
+                _ownership_permit,
+                done,
+            )) => {
+                let outcome = match hub.transition_extension_native_ownership_to_may_own(
+                    expected,
+                    preparing,
+                    expected_native_identity,
+                    manifest,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: extension native-ownership fenced MayOwn transition failed: {error}"
+                        );
+                        ExtensionNativeOwnershipActivationOutcome::Failed
+                    }
+                };
                 done(outcome);
             }
             Some(Cmd::GetSetting(key, reply)) => {
