@@ -5,6 +5,8 @@
 //! point: passing the probe is evidence for a future platform backend, not an
 //! extension-support enablement decision.
 
+mod persistent_runtime;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -53,6 +55,8 @@ const HTTP_RESPONSE_LIMIT: usize = 256 * 1024;
 const MAX_HTTP_REQUESTS: usize = 128;
 const MAX_EXTENSION_SCRIPT_DELTA: usize = 16;
 const MAX_WEBVIEW_CALLBACKS: usize = 1_024;
+const EXPECTED_NATIVE_CONTROLLERS: usize = 2;
+const EXPECTED_NATIVE_CONTEXTS: usize = 3;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
 const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const EXCLUDED_MATCH_PATTERN: &str = "http://127.0.0.1/excluded/*";
@@ -306,6 +310,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     primary_path: std::path::PathBuf,
     peer_path: std::path::PathBuf,
+    runtime_paths: persistent_runtime::RuntimeFixturePaths,
 }
 
 impl Fixture {
@@ -323,10 +328,12 @@ impl Fixture {
 
         write_primary_extension(&primary_path)?;
         write_peer_extension(&peer_path)?;
+        let runtime_paths = persistent_runtime::write_runtime_extensions(temp.path())?;
         Ok(Self {
             _temp: temp,
             primary_path,
             peer_path,
+            runtime_paths,
         })
     }
 }
@@ -383,13 +390,15 @@ struct ControllerBundle {
 
 struct ProbeTeardown {
     view: Weak<WKWebView>,
-    primary_controller: Weak<WKWebExtensionController>,
-    secondary_controller: Weak<WKWebExtensionController>,
+    controllers: Vec<Weak<WKWebExtensionController>>,
     contexts: Vec<Weak<WKWebExtensionContext>>,
     lifecycle_drops: Arc<AtomicUsize>,
     baseline_script_count: usize,
     peak_extension_script_delta: usize,
     webview_request_count: usize,
+    persistent_all_type_removal_callbacks: usize,
+    persistent_controllers_released: usize,
+    persistent_contexts_released: usize,
     operating_system: String,
 }
 
@@ -404,11 +413,16 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; storage_separation=not-tested; background_runtime=not-tested",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}",
             teardown.operating_system,
+            teardown.persistent_all_type_removal_callbacks,
             teardown.baseline_script_count,
             teardown.peak_extension_script_delta,
             teardown.webview_request_count,
+            teardown.controllers.len(),
+            teardown.contexts.len(),
+            teardown.persistent_controllers_released,
+            teardown.persistent_contexts_released,
         );
         Ok(true)
     })();
@@ -492,14 +506,39 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     let primary_extension = load_extension(&fixture.primary_path, &run_loop, mtm)?;
     set_phase("peer-extension-parse");
     let peer_extension = load_extension(&fixture.peer_path, &run_loop, mtm)?;
+    set_phase("runtime-extension-parse");
+    let runtime_writer = load_extension(&fixture.runtime_paths.writer, &run_loop, mtm)?;
+    let runtime_verifier_one = load_extension(&fixture.runtime_paths.verifier_one, &run_loop, mtm)?;
+    let runtime_verifier_two = load_extension(&fixture.runtime_paths.verifier_two, &run_loop, mtm)?;
+    let runtime_empty = load_extension(&fixture.runtime_paths.empty, &run_loop, mtm)?;
     validate_extension(&primary_extension, "primary")?;
     validate_extension(&peer_extension, "peer")?;
+    for runtime_extension in [
+        &runtime_writer,
+        &runtime_verifier_one,
+        &runtime_verifier_two,
+        &runtime_empty,
+    ] {
+        persistent_runtime::validate_runtime_extension(runtime_extension)?;
+    }
+
+    set_phase("persistent-runtime-gates");
+    let persistent_evidence = persistent_runtime::validate_persistent_runtime_gates(
+        &runtime_writer,
+        &runtime_verifier_one,
+        &runtime_verifier_two,
+        &runtime_empty,
+        &run_loop,
+        mtm,
+    )?;
 
     set_phase("controller-construction");
     let primary_bundle = new_nonpersistent_controller(mtm)?;
     let secondary_bundle = new_nonpersistent_controller(mtm)?;
-    let primary_controller_weak = Weak::from_retained(&primary_bundle.controller);
-    let secondary_controller_weak = Weak::from_retained(&secondary_bundle.controller);
+    let controller_weaks = vec![
+        Weak::from_retained(&primary_bundle.controller),
+        Weak::from_retained(&secondary_bundle.controller),
+    ];
 
     // SAFETY: the controller and configuration are main-thread-only retained
     // objects. The controller is attached before Wry constructs WKWebView.
@@ -530,8 +569,7 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     assert_private_data_access(&secondary_context, false, "secondary separation")?;
     let context_weaks = [&primary_context, &peer_context, &secondary_context]
         .map(Weak::from_retained)
-        .into_iter()
-        .collect::<Vec<_>>();
+        .into();
 
     // A WKWebView receives extension content wiring from the controller in
     // its immutable construction configuration. Load contexts before Wry
@@ -854,6 +892,10 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     drop(secondary_context);
     drop(primary_extension);
     drop(peer_extension);
+    drop(runtime_writer);
+    drop(runtime_verifier_one);
+    drop(runtime_verifier_two);
+    drop(runtime_empty);
     drop(primary_bundle);
     drop(secondary_bundle);
     drop(primary_server);
@@ -863,13 +905,15 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     set_phase("native-drop-complete");
     Ok(ProbeTeardown {
         view: view_weak,
-        primary_controller: primary_controller_weak,
-        secondary_controller: secondary_controller_weak,
+        controllers: controller_weaks,
         contexts: context_weaks,
         lifecycle_drops,
         baseline_script_count: baseline_inventory.len(),
         peak_extension_script_delta: script_multiset_len(&both_delta),
         webview_request_count,
+        persistent_all_type_removal_callbacks: persistent_evidence.all_type_removal_callbacks,
+        persistent_controllers_released: persistent_evidence.controllers_released,
+        persistent_contexts_released: persistent_evidence.contexts_released,
         operating_system,
     })
 }
@@ -1470,16 +1514,28 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
 }
 
 fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
+    if teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
+        || teardown.contexts.len() != EXPECTED_NATIVE_CONTEXTS
+    {
+        return Err(format!(
+            "native teardown inventory mismatch: controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{EXPECTED_NATIVE_CONTEXTS}",
+            teardown.controllers.len(),
+            teardown.contexts.len(),
+        ));
+    }
     let run_loop = NSRunLoop::mainRunLoop();
     let deadline = Instant::now() + TEARDOWN_TIMEOUT;
     loop {
+        let controllers_released = teardown
+            .controllers
+            .iter()
+            .all(|controller| controller.load().is_none());
         let contexts_released = teardown
             .contexts
             .iter()
             .all(|context| context.load().is_none());
         if teardown.view.load().is_none()
-            && teardown.primary_controller.load().is_none()
-            && teardown.secondary_controller.load().is_none()
+            && controllers_released
             && contexts_released
             && teardown.lifecycle_drops.load(Ordering::Acquire) == 3
         {
@@ -1487,10 +1543,10 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, primary_controller={}, secondary_controller={}, contexts_released={}/{}, lifecycle_drops={}/3",
+                "native teardown did not converge: view={}, controllers_released={}/{}, contexts_released={}/{}, lifecycle_drops={}/3",
                 teardown.view.load().is_none(),
-                teardown.primary_controller.load().is_none(),
-                teardown.secondary_controller.load().is_none(),
+                teardown.controllers.iter().filter(|controller| controller.load().is_none()).count(),
+                teardown.controllers.len(),
                 teardown.contexts.iter().filter(|context| context.load().is_none()).count(),
                 teardown.contexts.len(),
                 teardown.lifecycle_drops.load(Ordering::Acquire),
