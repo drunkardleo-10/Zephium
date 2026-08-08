@@ -8,6 +8,8 @@ mod stage;
 #[cfg(feature = "native-web-extension-probes")]
 mod web_extensions;
 
+pub(crate) use extensions::PersistentControllerRegistry;
+
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
     install_on_view as install_content_policy_on_view, remove_content_policy_cache_identifier,

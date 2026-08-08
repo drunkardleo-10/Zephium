@@ -618,6 +618,18 @@ impl EngineHost {
             // later erasure retry.
             return;
         }
+        #[cfg(target_os = "macos")]
+        if self
+            .macos_extension_controllers
+            .blocks_profile_erasure(profile)
+        {
+            // The dormant slice intentionally has no data-record cleanup
+            // authority. Keep the process-lifetime tombstone and every native
+            // object intact until that later join can retire this exact
+            // controller namespace rather than falsely reporting absence.
+            completion.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+            return;
+        }
 
         #[cfg(target_os = "macos")]
         let ephemeral_stores = self

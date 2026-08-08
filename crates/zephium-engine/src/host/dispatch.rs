@@ -382,6 +382,9 @@ pub(crate) fn install(
             shutdown_completion: None,
             #[cfg(target_os = "macos")]
             macos_ephemeral_data_stores: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            macos_extension_controllers:
+                crate::platform::imp::PersistentControllerRegistry::new(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]

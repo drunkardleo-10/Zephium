@@ -183,12 +183,21 @@ impl EngineHost {
         // Shutdown is a terminal authority barrier, including runtimes that
         // currently have no tab-scoped grant rows.
         self.extension_runtime_registry.seal();
+        #[cfg(target_os = "macos")]
+        self.macos_extension_controllers.seal();
         self.extension_document_authority.revoke_all();
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {
             self.close(id);
         }
         self.spare = None;
+        #[cfg(target_os = "macos")]
+        if !self.macos_extension_controllers.release_all_after_views() {
+            // Reuse the host's existing sticky clean-shutdown barrier. A
+            // loaded context, ownership contradiction, or out-of-order
+            // release must never be normalized by clearing the native map.
+            self.native_resource_accounting_failed = true;
+        }
         self.begin_content_policy_shutdown();
         self.navigation_snapshots.clear();
         self.partitions.clear();

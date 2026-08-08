@@ -676,7 +676,7 @@ impl EngineHost {
             (builder, path)
         };
         #[cfg(target_os = "macos")]
-        let (builder, expected_ephemeral_data_store) = {
+        let (builder, expected_ephemeral_data_store, prepared_extension_controller) = {
             let builder = WebViewBuilder::new();
             match partition {
                 Partition::Ephemeral(profile) => {
@@ -749,9 +749,38 @@ impl EngineHost {
                     (
                         builder.with_webview_configuration(configuration),
                         Some(store),
+                        None,
                     )
                 }
-                Partition::Default(_) | Partition::Persistent(_) => (builder, None),
+                Partition::Default(profile) | Partition::Persistent(profile) => {
+                    match self
+                        .macos_extension_controllers
+                        .configuration_for_durable_profile(profile)
+                    {
+                        Ok(Some(prepared)) => {
+                            use wry::WebViewBuilderExtMacos;
+                            let (configuration, proof) = prepared.into_parts();
+                            (
+                                builder.with_webview_configuration(configuration),
+                                None,
+                                Some(proof),
+                            )
+                        }
+                        Ok(None) => (builder, None, None),
+                        Err(error) => {
+                            eprintln!(
+                                "security: cannot prepare dormant macOS extension controller: {error}"
+                            );
+                            if report_failure {
+                                event_permit.emit(
+                                    &self.sink,
+                                    EngineEvent::ViewCreationFailed { id: id.get() },
+                                );
+                            }
+                            return None;
+                        }
+                    }
+                }
             }
         };
 
@@ -905,8 +934,17 @@ impl EngineHost {
             Partition::Default(profile) | Partition::Persistent(profile) => {
                 #[cfg(target_os = "macos")]
                 {
-                    use wry::WebViewBuilderExtDarwin;
-                    builder.with_data_store_identifier(profile.bytes())
+                    if prepared_extension_controller.is_some() {
+                        // Wry deliberately ignores `data_store_identifier`
+                        // when a custom configuration is supplied. The
+                        // registry already installed and pre-attested the
+                        // exact named store in that configuration.
+                        let _ = profile;
+                        builder
+                    } else {
+                        use wry::WebViewBuilderExtDarwin;
+                        builder.with_data_store_identifier(profile.bytes())
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -1080,6 +1118,17 @@ impl EngineHost {
                 return None;
             }
         };
+        #[cfg(target_os = "macos")]
+        if let Err(error) = self
+            .macos_extension_controllers
+            .attest_built_view(&view, prepared_extension_controller)
+        {
+            eprintln!("security: macOS extension-controller readback failed: {error}");
+            if report_failure {
+                event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+            }
+            return None;
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             // Capture before every fallible post-build step. In particular,
