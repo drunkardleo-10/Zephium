@@ -3,6 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use zephium_core::extensions::{
+    ExtensionNativeNamespaceScope, MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS,
+};
 use zephium_core::ports::store::{
     ExtensionNativeOwnershipJournalLoadOutcome, PendingProfileDeletion,
     ProfileDeletionAuthorizeOutcome,
@@ -18,6 +21,7 @@ pub(super) struct ProfileDeletionJournalEntry {
     pub(super) profile: ProfileId,
     native_erasure_verified: bool,
     local_unlink_process: Option<ProfileId>,
+    extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
 }
 
 impl ProfileDeletionJournalEntry {
@@ -25,6 +29,7 @@ impl ProfileDeletionJournalEntry {
         PendingProfileDeletion {
             profile: self.profile,
             native_erasure_verified: self.native_erasure_verified,
+            extension_native_namespace: self.extension_native_namespace,
         }
     }
 }
@@ -171,6 +176,7 @@ impl Hub {
                 profile,
                 native_erasure_verified,
                 local_unlink_process,
+                extension_native_namespace: None,
             });
         }
         if profiles.len() != count as usize {
@@ -178,7 +184,85 @@ impl Hub {
                 "profile deletion journal changed while loading",
             ));
         }
+        self.attach_native_namespace_obligations(&mut profiles)?;
         Ok(profiles)
+    }
+
+    fn attach_native_namespace_obligations(
+        &self,
+        deletions: &mut [ProfileDeletionJournalEntry],
+    ) -> rusqlite::Result<()> {
+        let count = self.meta.query_row(
+            "SELECT count(*) FROM extension_native_namespace_obligations",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if !(0..=MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS as i64).contains(&count) {
+            return Err(invalid_data(
+                "native extension namespace obligation cohort exceeds limit",
+            ));
+        }
+        let mut statement = self.meta.prepare(
+            "SELECT CASE
+                        WHEN length(CAST(profile_id AS BLOB)) <= 26 THEN profile_id
+                    END,
+                    namespace_version
+             FROM extension_native_namespace_obligations
+             ORDER BY profile_id, namespace_version",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut observed = 0_usize;
+        for row in rows {
+            observed = observed
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("native namespace obligation count overflow"))?;
+            let (raw_profile, raw_version) = row?;
+            let raw_profile = raw_profile
+                .ok_or_else(|| invalid_data("native namespace profile id exceeds limit"))?;
+            let profile = ProfileId::parse(&raw_profile)
+                .filter(|profile| profile.to_string() == raw_profile)
+                .ok_or_else(|| invalid_data("native namespace profile id is not canonical"))?;
+            let version = u8::try_from(raw_version)
+                .ok()
+                .and_then(ExtensionNativeNamespaceScope::from_persisted_version)
+                .ok_or_else(|| invalid_data("native namespace version is unsupported"))?;
+            if self.registry.contains(&profile) {
+                if deletions.iter().any(|deletion| deletion.profile == profile) {
+                    return Err(invalid_data(
+                        "native namespace obligation has ambiguous durable anchors",
+                    ));
+                }
+                continue;
+            }
+            let deletion = deletions
+                .iter_mut()
+                .find(|deletion| deletion.profile == profile)
+                .ok_or_else(|| {
+                    invalid_data("native namespace obligation has no durable profile anchor")
+                })?;
+            if deletion.native_erasure_verified {
+                return Err(invalid_data(
+                    "native namespace obligation survives native-erasure proof",
+                ));
+            }
+            if deletion
+                .extension_native_namespace
+                .replace(version)
+                .is_some()
+            {
+                return Err(invalid_data(
+                    "profile has multiple native namespace obligations",
+                ));
+            }
+        }
+        if observed != count as usize {
+            return Err(invalid_data(
+                "native namespace obligation cohort changed while loading",
+            ));
+        }
+        Ok(())
     }
 
     fn pending_profile_deletion_entries(
@@ -400,17 +484,48 @@ impl Hub {
         // this commit resumes only the local file phase; a crash before it
         // safely repeats the idempotent native verification.
         if !deletion.native_erasure_verified {
-            let changed = self.meta.execute(
-                "UPDATE profile_deletion_journal
-                 SET native_erasure_verified = 1
-                 WHERE profile_id = ?1 AND native_erasure_verified = 0",
-                [profile.to_string()],
-            )?;
+            let tx = self.meta.transaction()?;
+            let profile_text = profile.to_string();
+            let changed = match deletion.extension_native_namespace {
+                Some(ExtensionNativeNamespaceScope::MacosControllerV1) => tx.execute(
+                    "DELETE FROM extension_native_namespace_obligations
+                     WHERE profile_id = ?1 AND namespace_version = 1",
+                    [&profile_text],
+                )?,
+                Some(_) => {
+                    return Err(invalid_data(
+                        "profile deletion carries an unsupported native namespace",
+                    ))
+                }
+                None => tx.execute(
+                    "UPDATE profile_deletion_journal
+                     SET native_erasure_verified = 1
+                     WHERE profile_id = ?1 AND native_erasure_verified = 0",
+                    [&profile_text],
+                )?,
+            };
             if changed != 1 {
                 return Err(invalid_data(
-                    "profile deletion journal changed during native proof commit",
+                    "profile deletion native proof changed no exact durable obligation",
                 ));
             }
+            let settled = tx.query_row(
+                "SELECT native_erasure_verified,
+                        NOT EXISTS(
+                            SELECT 1 FROM extension_native_namespace_obligations
+                            WHERE profile_id = ?1
+                        )
+                 FROM profile_deletion_journal
+                 WHERE profile_id = ?1",
+                [&profile_text],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+            )?;
+            if settled != (1, true) {
+                return Err(invalid_data(
+                    "profile deletion native proof did not settle namespace obligation",
+                ));
+            }
+            tx.commit()?;
         }
 
         self.profiles.remove(&profile);
@@ -910,7 +1025,7 @@ mod tests {
             hub.authorize_profile_deletion(profile, &filtered).unwrap(),
             ProfileDeletionAuthorizeOutcome::Authorized
         );
-        let unrelated = native_entry(ProfileId::from(99), ExtensionInstallId::from(84));
+        let unrelated = native_entry(ProfileId::from(1), ExtensionInstallId::from(84));
         hub.inject_extension_native_ownership_entry_for_interlock_test(&unrelated)
             .unwrap();
 
@@ -919,8 +1034,66 @@ mod tests {
             vec![PendingProfileDeletion {
                 profile,
                 native_erasure_verified: false,
+                extension_native_namespace: None,
             }]
         );
+    }
+
+    #[test]
+    fn deletion_projects_and_atomically_settles_exact_native_namespace_scope() {
+        let mut hub = Hub::in_memory().unwrap();
+        let (full, filtered) = deletion_sessions();
+        let profile = ProfileId::from(2);
+        hub.save(&full).unwrap();
+        hub.meta
+            .execute(
+                "INSERT INTO extension_native_namespace_obligations(
+                     profile_id, namespace_version
+                 ) VALUES (?1, 1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        // An ordinary authoritative save updates rows in place and must not
+        // transiently orphan the retained native namespace.
+        hub.save(&full).unwrap();
+
+        assert_eq!(
+            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
+            ProfileDeletionAuthorizeOutcome::Authorized
+        );
+        assert_eq!(
+            hub.pending_profile_deletions().unwrap(),
+            vec![PendingProfileDeletion {
+                profile,
+                native_erasure_verified: false,
+                extension_native_namespace: Some(ExtensionNativeNamespaceScope::MacosControllerV1),
+            }]
+        );
+
+        hub.fail_next_profile_deletion_after_local_purge();
+        assert!(hub.finalize_profile_deletion(profile).is_err());
+        assert_eq!(
+            hub.pending_profile_deletions().unwrap(),
+            vec![PendingProfileDeletion {
+                profile,
+                native_erasure_verified: true,
+                extension_native_namespace: None,
+            }],
+            "a crash after proof must retain only the settled deletion tombstone"
+        );
+        assert_eq!(
+            hub.meta
+                .query_row(
+                    "SELECT count(*) FROM extension_native_namespace_obligations
+                     WHERE profile_id = ?1",
+                    [profile.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert!(hub.finalize_profile_deletion(profile).unwrap());
+        assert!(hub.pending_profile_deletions().unwrap().is_empty());
     }
 
     #[test]
@@ -929,7 +1102,7 @@ mod tests {
         let (full, filtered) = deletion_sessions();
         hub.save(&full).unwrap();
         let target = ProfileId::from(2);
-        let sibling = native_entry(ProfileId::from(99), ExtensionInstallId::from(1));
+        let sibling = native_entry(ProfileId::from(1), ExtensionInstallId::from(1));
         hub.inject_extension_native_ownership_entry_for_interlock_test(&sibling)
             .unwrap();
         hub.meta

@@ -9,16 +9,17 @@ use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
     ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionNativeIncarnation,
-    ExtensionNativeOwnershipApplyError, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipEntryRevision,
-    ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
-    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
-    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
-    ExtensionNativeOwnershipMutationKind, ExtensionNativeOwnershipOperation,
-    ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-    ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES,
-    EXTENSION_SHA256_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
+    ExtensionNativeNamespaceScope, ExtensionNativeOwnershipApplyError,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
+    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipMutationKind,
+    ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
+    ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibilityDenial,
+    ExtensionTreeDigest, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, EXTENSION_SHA256_BYTES,
+    MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
 };
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
@@ -475,6 +476,17 @@ impl Hub {
                 ))
             }
         }
+        if application
+            .entry()
+            .is_some_and(entry_enters_macos_controller_namespace)
+        {
+            retain_macos_controller_namespace_obligation(
+                &tx,
+                application
+                    .entry()
+                    .ok_or_else(|| invalid_data("namespace transition lost resulting row"))?,
+            )?;
+        }
 
         let state_updated = tx.execute(
             "UPDATE extension_native_ownership_journal_state
@@ -577,6 +589,9 @@ impl Hub {
             ));
         }
         insert_entry(&tx, entry)?;
+        if entry_requires_macos_controller_namespace(entry) {
+            retain_macos_controller_namespace_obligation(&tx, entry)?;
+        }
         if entry.operation().get() != entry.native_incarnation().get() {
             return Err(invalid_data(
                 "native-ownership test injection has mismatched clocks",
@@ -901,13 +916,180 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
             "native-ownership journal changed while loading",
         ));
     }
-    ExtensionNativeOwnershipJournal::from_persisted(
+    let journal = ExtensionNativeOwnershipJournal::from_persisted(
         revision,
         operation_high_water,
         incarnation_high_water,
         entries,
     )
-    .map_err(|_| invalid_data("native-ownership journal cohort is invalid"))
+    .map_err(|_| invalid_data("native-ownership journal cohort is invalid"))?;
+    validate_macos_controller_namespace_join(conn)?;
+    Ok(journal)
+}
+
+fn entry_enters_macos_controller_namespace(entry: &ExtensionNativeOwnershipEntry) -> bool {
+    entry.runtime_backend() == ExtensionRuntimeBackendTarget::MacosNative
+        && entry.key().browsing_context() == ExtensionGrantBrowsingContext::Regular
+        && entry.phase() == ExtensionNativeOwnershipPhase::NativeMayOwn
+}
+
+fn entry_requires_macos_controller_namespace(entry: &ExtensionNativeOwnershipEntry) -> bool {
+    entry.runtime_backend() == ExtensionRuntimeBackendTarget::MacosNative
+        && entry.key().browsing_context() == ExtensionGrantBrowsingContext::Regular
+        && match entry.phase() {
+            ExtensionNativeOwnershipPhase::NativeMayOwn
+            | ExtensionNativeOwnershipPhase::NativeOwned => true,
+            // Revision two is the direct Preparing-to-release cancellation:
+            // no native call was authorized, so no namespace could be born.
+            ExtensionNativeOwnershipPhase::NativeAbsentReleasePending => entry.revision().get() > 2,
+            ExtensionNativeOwnershipPhase::NativeAbsentPreparing => false,
+        }
+}
+
+fn retain_macos_controller_namespace_obligation(
+    conn: &Connection,
+    entry: &ExtensionNativeOwnershipEntry,
+) -> rusqlite::Result<()> {
+    if !entry_requires_macos_controller_namespace(entry) {
+        return Err(invalid_data(
+            "native namespace obligation requested outside macOS regular ownership frontier",
+        ));
+    }
+    let profile = entry.key().profile().to_string();
+    conn.execute(
+        "INSERT INTO extension_native_namespace_obligations(
+             profile_id, namespace_version
+         )
+         SELECT ?1, 1
+         WHERE NOT EXISTS (
+             SELECT 1 FROM extension_native_namespace_obligations
+             WHERE profile_id = ?1 AND namespace_version = 1
+         )",
+        [&profile],
+    )?;
+    let exact = conn.query_row(
+        "SELECT count(*)
+         FROM extension_native_namespace_obligations
+         WHERE profile_id = ?1 AND namespace_version = 1",
+        [&profile],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if exact != 1 {
+        return Err(invalid_data(
+            "macOS native namespace obligation was not retained exactly once",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_macos_controller_namespace_join(conn: &Connection) -> rusqlite::Result<()> {
+    let obligation_count = conn.query_row(
+        "SELECT count(*) FROM extension_native_namespace_obligations",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if !(0..=MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS as i64).contains(&obligation_count) {
+        return Err(invalid_data(
+            "native extension namespace obligation cohort exceeds limit",
+        ));
+    }
+    let mut statement = conn.prepare(
+        "SELECT CASE
+                    WHEN length(CAST(profile_id AS BLOB)) <= 26 THEN profile_id
+                END,
+                namespace_version
+         FROM extension_native_namespace_obligations
+         ORDER BY profile_id, namespace_version",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut observed = 0_i64;
+    for row in rows {
+        observed = observed
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("native namespace obligation count overflow"))?;
+        let (profile, version) = row?;
+        canonical_profile(profile)?;
+        let version = u8::try_from(version)
+            .ok()
+            .and_then(ExtensionNativeNamespaceScope::from_persisted_version)
+            .ok_or_else(|| invalid_data("native namespace obligation version is unsupported"))?;
+        if version != ExtensionNativeNamespaceScope::MacosControllerV1 {
+            return Err(invalid_data(
+                "native namespace obligation version has no Store erasure contract",
+            ));
+        }
+    }
+    if observed != obligation_count {
+        return Err(invalid_data(
+            "native namespace obligation cohort changed while validating",
+        ));
+    }
+    let invalid_anchor = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM extension_native_namespace_obligations AS obligation
+             WHERE NOT EXISTS (
+                       SELECT 1 FROM profiles
+                       WHERE profiles.id = obligation.profile_id
+                   )
+               AND NOT EXISTS (
+                       SELECT 1 FROM profile_deletion_journal AS deletion
+                       WHERE deletion.profile_id = obligation.profile_id
+                   )
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if invalid_anchor {
+        return Err(invalid_data(
+            "native namespace obligation has no durable profile anchor",
+        ));
+    }
+    let contradicts_proof = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM extension_native_namespace_obligations AS obligation
+             JOIN profile_deletion_journal AS deletion
+               ON deletion.profile_id = obligation.profile_id
+             WHERE deletion.native_erasure_verified = 1
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if contradicts_proof {
+        return Err(invalid_data(
+            "native namespace obligation contradicts native-erasure proof",
+        ));
+    }
+    let missing = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM extension_native_ownership_journal AS ownership
+             WHERE ownership.runtime_backend = 'macos_native'
+               AND ownership.browsing_context = 'regular'
+               AND (
+                   ownership.phase IN ('native_may_own', 'native_owned')
+                   OR (ownership.phase = 'native_absent_release_pending'
+                       AND ownership.revision > 2)
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM extension_native_namespace_obligations AS obligation
+                   WHERE obligation.profile_id = ownership.profile_id
+                     AND obligation.namespace_version = 1
+               )
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if missing {
+        return Err(invalid_data(
+            "macOS native ownership lacks durable namespace obligation",
+        ));
+    }
+    Ok(())
 }
 
 fn insert_entry(conn: &Connection, entry: &ExtensionNativeOwnershipEntry) -> rusqlite::Result<()> {
@@ -1188,6 +1370,20 @@ mod tests {
         configure(&conn).unwrap();
         migrations::apply(&mut conn, migrations::META).unwrap();
         conn
+    }
+
+    fn register_profile_fixture(conn: &Connection, profile: ProfileId) {
+        conn.execute(
+            "INSERT OR IGNORE INTO profiles(id, name, kind, position)
+             VALUES (?1, 'Fixture', 'named', 0)",
+            [profile.to_string()],
+        )
+        .unwrap();
+    }
+
+    fn retain_namespace_fixture(conn: &Connection, entry: &ExtensionNativeOwnershipEntry) {
+        register_profile_fixture(conn, entry.key().profile());
+        retain_macos_controller_namespace_obligation(conn, entry).unwrap();
     }
 
     fn package() -> ExtensionPackageIdentity {
@@ -1579,6 +1775,8 @@ mod tests {
             ExtensionNativeOwnershipIntent::Acquire,
             ExtensionNativeOwnershipPhase::NativeOwned,
         );
+        register_profile_fixture(&hub.meta, profile);
+        assert!(hub.registry.insert(profile));
         hub.inject_extension_native_ownership_entry_for_interlock_test(&owned)
             .unwrap();
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(seeded) =
@@ -1705,6 +1903,7 @@ mod tests {
         );
         insert_entry(&conn, &may_own_without_identity).unwrap();
         insert_entry(&conn, &owned).unwrap();
+        retain_namespace_fixture(&conn, &may_own_without_identity);
         conn.execute(
             "UPDATE extension_native_ownership_journal_state
              SET revision = 6,
@@ -1755,6 +1954,7 @@ mod tests {
         )
         .unwrap();
         insert_entry(&conn, &persisted).unwrap();
+        retain_namespace_fixture(&conn, &persisted);
         conn.execute(
             "UPDATE extension_native_ownership_journal_state
              SET revision = 4,
@@ -1774,6 +1974,57 @@ mod tests {
     }
 
     #[test]
+    fn load_rejects_macos_possible_owner_without_namespace_obligation() {
+        let conn = database();
+        let entry = expected_may_own_entry(ProfileId::from(90));
+        insert_entry(&conn, &entry).unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 3,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+
+        let error = load_journal(&conn).unwrap_err().to_string();
+        assert!(
+            error.contains("lacks durable namespace obligation"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_malformed_namespace_sibling_as_a_complete_cohort() {
+        let conn = database();
+        let profile = ProfileId::from(89);
+        register_profile_fixture(&conn, profile);
+        conn.execute(
+            "INSERT INTO extension_native_namespace_obligations(
+                 profile_id, namespace_version
+             ) VALUES (?1, 1)",
+            [profile.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "DROP TRIGGER extension_native_namespace_obligation_immutable",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        conn.execute(
+            "UPDATE extension_native_namespace_obligations
+             SET namespace_version = 2",
+            [],
+        )
+        .unwrap();
+
+        let error = load_journal(&conn).unwrap_err().to_string();
+        assert!(error.contains("version is unsupported"), "{error}");
+    }
+
+    #[test]
     fn load_rejects_malformed_oversize_or_cross_backend_native_identity() {
         for column_update in [
             "native_identity_kind = NULL",
@@ -1790,6 +2041,7 @@ mod tests {
                 ExtensionNativeOwnershipPhase::NativeOwned,
             );
             insert_entry(&conn, &owned).unwrap();
+            retain_namespace_fixture(&conn, &owned);
             conn.execute(
                 "UPDATE extension_native_ownership_journal_state
                  SET revision = 4,
@@ -1821,6 +2073,7 @@ mod tests {
         ] {
             let conn = database();
             insert_entry(&conn, &expected_may_own_entry(ProfileId::from(95))).unwrap();
+            retain_namespace_fixture(&conn, &expected_may_own_entry(ProfileId::from(95)));
             conn.execute(
                 "UPDATE extension_native_ownership_journal_state
                  SET revision = 3,
@@ -1844,6 +2097,7 @@ mod tests {
     fn bounded_loader_rejects_text_typed_expected_identity_without_schema_help() {
         let conn = database();
         insert_entry(&conn, &expected_may_own_entry(ProfileId::from(98))).unwrap();
+        retain_namespace_fixture(&conn, &expected_may_own_entry(ProfileId::from(98)));
         conn.execute(
             "UPDATE extension_native_ownership_journal_state
              SET revision = 3,
@@ -1876,6 +2130,7 @@ mod tests {
     fn expected_identity_commit_ambiguity_reloads_and_stale_replay_conflicts() {
         let mut hub = Hub::in_memory().unwrap();
         let profile = ProfileId::from(96);
+        register_profile_fixture(&hub.meta, profile);
         assert!(hub.registry.insert(profile));
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(empty) =
             hub.load_extension_native_ownership_journal().unwrap()
@@ -1981,6 +2236,7 @@ mod tests {
     fn identity_commit_ambiguity_reloads_exactly_and_stale_replay_conflicts() {
         let mut hub = Hub::in_memory().unwrap();
         let profile = ProfileId::from(93);
+        register_profile_fixture(&hub.meta, profile);
         assert!(hub.registry.insert(profile));
         let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(empty) =
             hub.load_extension_native_ownership_journal().unwrap()
@@ -2057,6 +2313,150 @@ mod tests {
             ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
                 current: reloaded.revision(),
             }
+        );
+    }
+
+    #[test]
+    fn macos_namespace_obligation_is_atomic_and_survives_runtime_row_clear() {
+        let mut hub = Hub::in_memory().unwrap();
+        let profile = ProfileId::from(99);
+        register_profile_fixture(&hub.meta, profile);
+        assert!(hub.registry.insert(profile));
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(empty) =
+            hub.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("empty journal did not load");
+        };
+        let begun = match hub
+            .persist_extension_native_ownership_fixture(
+                empty.revision(),
+                ExtensionNativeOwnershipJournalMutation::begin(preparation(profile, 1)),
+            )
+            .unwrap()
+        {
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => applied,
+            other => panic!("begin failed: {other:?}"),
+        };
+        assert_eq!(
+            hub.meta
+                .query_row(
+                    "SELECT count(*) FROM extension_native_namespace_obligations",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        hub.make_next_extension_native_ownership_commit_ambiguous();
+        let preparing = *begun.entry.unwrap();
+        assert_eq!(
+            hub.persist_extension_native_ownership_fixture(
+                begun.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expected_native_identity(),
+                ),
+            )
+            .unwrap(),
+            ExtensionNativeOwnershipJournalMutationOutcome::OutcomeUnknown
+        );
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(may_own) =
+            hub.load_extension_native_ownership_journal().unwrap()
+        else {
+            panic!("MayOwn journal did not reconcile");
+        };
+        assert_eq!(
+            hub.meta
+                .query_row(
+                    "SELECT namespace_version
+                     FROM extension_native_namespace_obligations
+                     WHERE profile_id = ?1",
+                    [profile.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let unresolved = may_own.entries()[0].clone();
+        let owned = match hub
+            .mutate_extension_native_ownership_journal(
+                may_own.revision(),
+                ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                    unresolved.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeOwned,
+                    native_identity(),
+                ),
+            )
+            .unwrap()
+        {
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => applied,
+            other => panic!("owned transition failed: {other:?}"),
+        };
+        let owned_entry = *owned.entry.unwrap();
+        let releasing = match hub
+            .mutate_extension_native_ownership_journal(
+                owned.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    owned_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Release,
+                    ExtensionNativeOwnershipPhase::NativeMayOwn,
+                ),
+            )
+            .unwrap()
+        {
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => applied,
+            other => panic!("release fence failed: {other:?}"),
+        };
+        let releasing_entry = *releasing.entry.unwrap();
+        let absent = match hub
+            .mutate_extension_native_ownership_journal(
+                releasing.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::transition(
+                    releasing_entry.cas(),
+                    ExtensionNativeOwnershipIntent::Release,
+                    ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+                ),
+            )
+            .unwrap()
+        {
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied) => applied,
+            other => panic!("absence transition failed: {other:?}"),
+        };
+        let absent_entry = *absent.entry.unwrap();
+        let cleared = hub
+            .mutate_extension_native_ownership_journal(
+                absent.journal_revision,
+                ExtensionNativeOwnershipJournalMutation::clear(absent_entry.cas()),
+            )
+            .unwrap();
+        assert!(matches!(
+            cleared,
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(_)
+        ));
+        assert_eq!(
+            hub.meta
+                .query_row(
+                    "SELECT count(*) FROM extension_native_ownership_journal",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            hub.meta
+                .query_row(
+                    "SELECT count(*) FROM extension_native_namespace_obligations
+                     WHERE profile_id = ?1 AND namespace_version = 1",
+                    [profile.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "runtime settlement must not erase the profile namespace obligation"
         );
     }
 }

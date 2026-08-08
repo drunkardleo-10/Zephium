@@ -27,6 +27,8 @@ fn insert_inactive_profile_tab(
 #[test]
 fn profile_deletion_completes_once_only_after_native_and_store_phases() {
     let store = Arc::new(FakeStore::default());
+    *store.authorized_native_namespace.lock().unwrap() =
+        Some(ExtensionNativeNamespaceScope::MacosControllerV1);
     store
         .authorize_outcomes
         .lock()
@@ -92,6 +94,13 @@ fn profile_deletion_completes_once_only_after_native_and_store_phases() {
             .unwrap()
             .as_slice(),
         &[profile, profile, profile]
+    );
+    assert_eq!(
+        engine.erasure_requests(),
+        vec![(
+            profile,
+            Some(ExtensionNativeNamespaceScope::MacosControllerV1)
+        )]
     );
 }
 
@@ -942,6 +951,7 @@ fn restart_with_native_proof_skips_engine_and_finishes_local_purge() {
         .push(PendingProfileDeletion {
             profile: removed,
             native_erasure_verified: true,
+            extension_native_namespace: None,
         });
     store
         .finalize_outcomes
@@ -1004,6 +1014,7 @@ fn recovered_native_ready_waits_for_retirement_without_engine_or_finalize_side_e
         .push(PendingProfileDeletion {
             profile: removed,
             native_erasure_verified: false,
+            extension_native_namespace: Some(ExtensionNativeNamespaceScope::MacosControllerV1),
         });
     store
         .finalize_outcomes
@@ -1046,6 +1057,13 @@ fn recovered_native_ready_waits_for_retirement_without_engine_or_finalize_side_e
         .calls()
         .iter()
         .any(|call| call == &format!("erase-profile {removed}")));
+    assert_eq!(
+        engine.erasure_requests(),
+        vec![(
+            removed,
+            Some(ExtensionNativeNamespaceScope::MacosControllerV1)
+        )]
+    );
     assert!(store.pending_deletions.lock().unwrap().is_empty());
     assert!(shell.profile_deletion.states.is_empty());
     assert_eq!(
@@ -1089,6 +1107,7 @@ fn recovered_finalize_ready_waits_for_retirement_before_store_finalization() {
         .push(PendingProfileDeletion {
             profile: removed,
             native_erasure_verified: true,
+            extension_native_namespace: None,
         });
     store
         .finalize_outcomes
@@ -1160,6 +1179,7 @@ fn recovered_finalize_not_authorized_is_a_terminal_post_fence_invariant() {
         .push(PendingProfileDeletion {
             profile: removed,
             native_erasure_verified: true,
+            extension_native_namespace: None,
         });
     store
         .finalize_outcomes

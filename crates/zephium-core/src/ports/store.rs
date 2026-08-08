@@ -3,10 +3,10 @@ use crate::extensions::{
     ExtensionGrantAuthority, ExtensionGrantCohort, ExtensionGrantManifestBindings,
     ExtensionGrantMutation, ExtensionGrantRevision, ExtensionInstall, ExtensionInstallCatalog,
     ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipOperation, ExtensionRuntimeEligibilityDenial,
-    MAX_EXTENSION_GRANT_RETAINED_BYTES,
+    ExtensionManifestDescriptor, ExtensionNativeIncarnation, ExtensionNativeNamespaceScope,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournal,
+    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipOperation,
+    ExtensionRuntimeEligibilityDenial, MAX_EXTENSION_GRANT_RETAINED_BYTES,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 use crate::permissions::{
@@ -46,6 +46,10 @@ pub const MAX_FAVICON_BATCH_ORIGINS: usize = 512;
 pub struct PendingProfileDeletion {
     pub profile: ProfileId,
     pub native_erasure_verified: bool,
+    /// Exact durable platform namespace whose absence must be included in the
+    /// engine proof. `None` means Store retains no native namespace erasure
+    /// obligation for this profile.
+    pub extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

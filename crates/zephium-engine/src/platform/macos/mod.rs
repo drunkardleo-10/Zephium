@@ -8,7 +8,10 @@ mod stage;
 #[cfg(feature = "native-web-extension-probes")]
 mod web_extensions;
 
-pub(crate) use extensions::PersistentControllerRegistry;
+pub(crate) use extensions::{
+    ControllerErasureSettlement, ControllerErasureTicket, PersistentControllerRegistry,
+    ProfileControllerErasure,
+};
 
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
@@ -20,6 +23,7 @@ pub(crate) use content_filter::{
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 use dispatch2::DispatchObject as _;
 
@@ -169,6 +173,7 @@ struct ProfileErasure {
     profile: zephium_core::ids::ProfileId,
     completion: Arc<crate::erasure::Completion>,
     attempt: Arc<AtomicBool>,
+    controller_ticket: Option<ControllerErasureTicket>,
 }
 
 impl ProfileErasure {
@@ -180,6 +185,16 @@ impl ProfileErasure {
             profile,
             attempt: completion.attempt_flag(),
             completion,
+            controller_ticket: None,
+        }
+    }
+
+    fn with_controller_ticket(&self, ticket: ControllerErasureTicket) -> Self {
+        Self {
+            profile: self.profile,
+            completion: self.completion.clone(),
+            attempt: self.attempt.clone(),
+            controller_ticket: Some(ticket),
         }
     }
 
@@ -189,12 +204,89 @@ impl ProfileErasure {
             // `finish` first marks this exact attempt inactive. The host then
             // generation-checks the Arc before releasing its last strong
             // store handle, so a late callback cannot erase a retry's proof.
-            crate::host::release_macos_erasure_obligation(self.profile, self.attempt.clone());
+            crate::host::release_macos_erasure_obligation(
+                self.profile,
+                self.attempt.clone(),
+                self.controller_ticket,
+            );
         }
     }
 
     fn report_unsettled(&self, outcome: zephium_core::ports::engine::ProfileDataErasureOutcome) {
         self.completion.report_unsettled(outcome);
+    }
+}
+
+#[derive(Default)]
+struct EphemeralStoreCallbackGate {
+    removal_seen: Cell<bool>,
+    terminal_seen: Cell<bool>,
+}
+
+impl EphemeralStoreCallbackGate {
+    fn admit_removal(&self) -> bool {
+        !self.removal_seen.replace(true)
+    }
+
+    fn admit_terminal(&self) -> bool {
+        !self.terminal_seen.replace(true)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EphemeralCohortProgress {
+    Duplicate,
+    Pending,
+    LastVerified,
+    LastFailed,
+    CounterInvalid,
+}
+
+fn settle_ephemeral_obligation(
+    gate: &EphemeralStoreCallbackGate,
+    remaining: &AtomicUsize,
+    failed: &AtomicBool,
+    verified_empty: bool,
+) -> EphemeralCohortProgress {
+    if !gate.admit_terminal() {
+        return EphemeralCohortProgress::Duplicate;
+    }
+    if !verified_empty {
+        failed.store(true, Ordering::Release);
+    }
+    match remaining.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        current.checked_sub(1)
+    }) {
+        Ok(previous) if previous > 1 => EphemeralCohortProgress::Pending,
+        Ok(1) if failed.load(Ordering::Acquire) => EphemeralCohortProgress::LastFailed,
+        Ok(1) => EphemeralCohortProgress::LastVerified,
+        // `checked_sub` refuses zero, so `Ok(0)` is not expected even under
+        // an implementation change. Treat every impossible counter result as
+        // a permanent proof failure without wrapping the counter.
+        Ok(_) | Err(_) => {
+            failed.store(true, Ordering::Release);
+            EphemeralCohortProgress::CounterInvalid
+        }
+    }
+}
+
+fn apply_ephemeral_cohort_progress(
+    progress: EphemeralCohortProgress,
+    erasure: ProfileErasure,
+    controller_erasure: Rc<RefCell<Option<ProfileControllerErasure>>>,
+) {
+    match progress {
+        EphemeralCohortProgress::Duplicate | EphemeralCohortProgress::Pending => {}
+        EphemeralCohortProgress::LastVerified => {
+            erase_extension_controller_data(erasure, controller_erasure);
+        }
+        EphemeralCohortProgress::LastFailed | EphemeralCohortProgress::CounterInvalid => {
+            // An ephemeral store has no durable identifier that a later
+            // attempt can rediscover. Keep process-lifetime debt occupied;
+            // restart is the only safe recovery without positive readback.
+            erasure
+                .report_unsettled(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+        }
     }
 }
 
@@ -205,20 +297,28 @@ impl ProfileErasure {
 pub(crate) fn erase_profile_data(
     profile: zephium_core::ids::ProfileId,
     mut ephemeral_stores: Vec<WebsiteDataStore>,
+    controller_erasure: ProfileControllerErasure,
     completion: Arc<crate::erasure::Completion>,
 ) {
     let erasure = ProfileErasure::new(profile, completion);
+    let controller_erasure = Rc::new(RefCell::new(Some(controller_erasure)));
     let mut seen = std::collections::HashSet::new();
     ephemeral_stores.retain(|store| seen.insert(Retained::as_ptr(store) as usize));
     if ephemeral_stores.is_empty() {
-        erase_named_profile_data(erasure);
+        erase_extension_controller_data(erasure, controller_erasure);
         return;
     }
 
     let remaining = Arc::new(AtomicUsize::new(ephemeral_stores.len()));
     let failed = Arc::new(AtomicBool::new(false));
     for store in ephemeral_stores {
-        clear_and_verify_ephemeral_store(store, remaining.clone(), failed.clone(), erasure.clone());
+        clear_and_verify_ephemeral_store(
+            store,
+            remaining.clone(),
+            failed.clone(),
+            erasure.clone(),
+            controller_erasure.clone(),
+        );
     }
 }
 
@@ -227,36 +327,47 @@ fn clear_and_verify_ephemeral_store(
     remaining: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
     erasure: ProfileErasure,
+    controller_erasure: Rc<RefCell<Option<ProfileControllerErasure>>>,
 ) {
     use objc2_foundation::{MainThreadMarker, NSDate};
 
+    let gate = Rc::new(EphemeralStoreCallbackGate::default());
     let Some(mtm) = MainThreadMarker::new() else {
-        failed.store(true, Ordering::Release);
-        complete_ephemeral_store(remaining, failed, erasure);
+        let progress = settle_ephemeral_obligation(&gate, &remaining, &failed, false);
+        apply_ephemeral_cohort_progress(progress, erasure, controller_erasure);
         return;
     };
     let data_types = unsafe { WKWebsiteDataStore::allWebsiteDataTypes(mtm) };
     let epoch = NSDate::dateWithTimeIntervalSince1970(0.0);
     let verify_store = store.clone();
     let verify_types = data_types.clone();
+    let removal_gate = gate.clone();
     let removed = block2::RcBlock::new(move || {
         use objc2_foundation::NSArray;
         use objc2_web_kit::WKWebsiteDataRecord;
 
+        if !removal_gate.admit_removal() {
+            return;
+        }
         let retained_store = verify_store.clone();
         let remaining = remaining.clone();
         let failed = failed.clone();
         let erasure = erasure.clone();
+        let controller_erasure = controller_erasure.clone();
+        let terminal_gate = removal_gate.clone();
         let fetched = block2::RcBlock::new(
             move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
                 let empty = unsafe { records.as_ref().count() == 0 };
                 // A borrow is enough to keep the captured strong reference
                 // alive while preserving the Fn (not FnOnce) block ABI.
                 let _ = &retained_store;
-                if !empty {
-                    failed.store(true, Ordering::Release);
-                }
-                complete_ephemeral_store(remaining.clone(), failed.clone(), erasure.clone());
+                let progress =
+                    settle_ephemeral_obligation(&terminal_gate, &remaining, &failed, empty);
+                apply_ephemeral_cohort_progress(
+                    progress,
+                    erasure.clone(),
+                    controller_erasure.clone(),
+                );
             },
         );
         unsafe {
@@ -268,24 +379,31 @@ fn clear_and_verify_ephemeral_store(
     }
 }
 
-fn complete_ephemeral_store(
-    remaining: Arc<AtomicUsize>,
-    failed: Arc<AtomicBool>,
+fn erase_extension_controller_data(
     erasure: ProfileErasure,
+    controller_erasure: Rc<RefCell<Option<ProfileControllerErasure>>>,
 ) {
-    if remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
-        return;
-    }
-    if failed.load(Ordering::Acquire) {
-        // An ephemeral store has no durable identifier that a later attempt
-        // can rediscover. Dropping its last handle and releasing admission
-        // would let an empty retry forget this failed native obligation and
-        // falsely report Verified. Report the failure once but keep the
-        // process-lifetime attempt debt occupied; restart is the only safe
-        // recovery until WebKit has provided a positive clear/fetch proof.
+    let controller_erasure = controller_erasure
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut controller_erasure| controller_erasure.take());
+    let Some(controller_erasure) = controller_erasure else {
+        // Losing the move-only controller plan would let a duplicate callback
+        // skip native cleanup. Keep this attempt occupied for process life.
         erasure.report_unsettled(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-    } else {
-        erase_named_profile_data(erasure);
+        return;
+    };
+    match controller_erasure {
+        ProfileControllerErasure::NamespaceNotRequired => erase_named_profile_data(erasure),
+        ProfileControllerErasure::ControllerAlreadyReleased(ticket) => {
+            erase_named_profile_data(erasure.with_controller_ticket(ticket));
+        }
+        ProfileControllerErasure::Pending(controller) => {
+            let completion = erasure.completion.clone();
+            controller.start(completion, move |ticket| {
+                erase_named_profile_data(erasure.with_controller_ticket(ticket));
+            });
+        }
     }
 }
 
@@ -348,10 +466,20 @@ mod tests {
             attempt.clone(),
         );
 
-        complete_ephemeral_store(
-            Arc::new(AtomicUsize::new(1)),
-            Arc::new(AtomicBool::new(true)),
+        let remaining = AtomicUsize::new(1);
+        let failed = AtomicBool::new(false);
+        let progress = settle_ephemeral_obligation(
+            &EphemeralStoreCallbackGate::default(),
+            &remaining,
+            &failed,
+            false,
+        );
+        apply_ephemeral_cohort_progress(
+            progress,
             ProfileErasure::new(zephium_core::ids::ProfileId::from(7), completion),
+            Rc::new(RefCell::new(Some(
+                ProfileControllerErasure::NamespaceNotRequired,
+            ))),
         );
 
         assert_eq!(
@@ -359,5 +487,68 @@ mod tests {
             zephium_core::ports::engine::ProfileDataErasureOutcome::Failed
         );
         assert!(attempt.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn duplicate_callbacks_cannot_settle_a_two_store_cohort_twice() {
+        let remaining = AtomicUsize::new(2);
+        let failed = AtomicBool::new(false);
+        let first = EphemeralStoreCallbackGate::default();
+        let second = EphemeralStoreCallbackGate::default();
+        let mut controller_starts = 0;
+
+        assert!(first.admit_removal());
+        assert!(!first.admit_removal());
+        assert_eq!(
+            settle_ephemeral_obligation(&first, &remaining, &failed, true),
+            EphemeralCohortProgress::Pending
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 1);
+        assert_eq!(
+            settle_ephemeral_obligation(&first, &remaining, &failed, false),
+            EphemeralCohortProgress::Duplicate
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 1);
+        assert!(!failed.load(Ordering::Acquire));
+
+        assert!(second.admit_removal());
+        let last = settle_ephemeral_obligation(&second, &remaining, &failed, true);
+        if last == EphemeralCohortProgress::LastVerified {
+            controller_starts += 1;
+        }
+        assert_eq!(last, EphemeralCohortProgress::LastVerified);
+        assert_eq!(controller_starts, 1);
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+
+        // A late failing callback from either native store is a duplicate. It
+        // cannot underflow the cohort, alter the aggregate proof, or trigger a
+        // second terminal action after verification.
+        for gate in [&first, &second] {
+            let duplicate = settle_ephemeral_obligation(gate, &remaining, &failed, false);
+            if duplicate == EphemeralCohortProgress::LastVerified {
+                controller_starts += 1;
+            }
+            assert_eq!(duplicate, EphemeralCohortProgress::Duplicate);
+        }
+        assert_eq!(controller_starts, 1);
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+        assert!(!failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unused_gate_cannot_wrap_an_exhausted_cohort_counter() {
+        let remaining = AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        assert_eq!(
+            settle_ephemeral_obligation(
+                &EphemeralStoreCallbackGate::default(),
+                &remaining,
+                &failed,
+                true,
+            ),
+            EphemeralCohortProgress::CounterInvalid
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+        assert!(failed.load(Ordering::Acquire));
     }
 }

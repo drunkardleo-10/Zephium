@@ -255,10 +255,30 @@ impl Hub {
         } = prepared;
         let tx = self.meta.transaction()?;
         Self::validate_blocker_cohort_before_session_commit(&tx, &self.registry)?;
-        tx.execute("DELETE FROM profiles", [])?;
+        if let Some(profile) = authorize_deletion {
+            // Establish the deletion anchor before removing the active-profile
+            // anchor. Native namespace obligations are allowed to belong to
+            // either set, but never to an unanchored intermediate durable
+            // state. The surrounding transaction keeps the temporary overlap
+            // invisible and rolls both changes back together.
+            let inserted = tx.execute(
+                "INSERT INTO profile_deletion_journal(profile_id, authorized_at)
+                 VALUES (?1, ?2)",
+                params![profile.to_string(), now_secs()],
+            )?;
+            if inserted != 1 {
+                return Err(invalid_data(
+                    "profile deletion authorization was not inserted exactly once",
+                ));
+            }
+        }
         {
             let mut ins = tx.prepare_cached(
-                "INSERT INTO profiles(id, name, kind, position) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO profiles(id, name, kind, position) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET
+                     name = excluded.name,
+                     kind = excluded.kind,
+                     position = excluded.position",
             )?;
             for (i, p) in state.profiles.iter().enumerate() {
                 ins.execute(params![
@@ -269,6 +289,15 @@ impl Hub {
                     })?,
                     i as i64
                 ])?;
+            }
+        }
+        for removed in self.registry.difference(&registry) {
+            let deleted =
+                tx.execute("DELETE FROM profiles WHERE id = ?1", [removed.to_string()])?;
+            if deleted != 1 {
+                return Err(invalid_data(
+                    "profile registry changed during authoritative session commit",
+                ));
             }
         }
         Self::reconcile_blocker_cohort_for_session_commit(&tx, &registry)?;
@@ -290,18 +319,6 @@ impl Hub {
              ON CONFLICT(id) DO UPDATE SET schema_version = ?1, data = ?2",
             params![SESSION_SCHEMA_VERSION, snapshot],
         )?;
-        if let Some(profile) = authorize_deletion {
-            let inserted = tx.execute(
-                "INSERT INTO profile_deletion_journal(profile_id, authorized_at)
-                 VALUES (?1, ?2)",
-                params![profile.to_string(), now_secs()],
-            )?;
-            if inserted != 1 {
-                return Err(invalid_data(
-                    "profile deletion authorization was not inserted exactly once",
-                ));
-            }
-        }
         tx.commit()?;
         #[cfg(test)]
         if authorize_deletion.is_some()

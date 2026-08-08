@@ -6468,6 +6468,7 @@ fn deletion_authorization_atomically_publishes_filtered_session_and_journal() {
         vec![zephium_core::ports::store::PendingProfileDeletion {
             profile,
             native_erasure_verified: false,
+            extension_native_namespace: None,
         }]
     );
 
@@ -6542,6 +6543,7 @@ fn ambiguous_committed_deletion_reloads_durable_truth_before_pending_snapshot_re
         ProfileDeletionLoad::Loaded(vec![zephium_core::ports::store::PendingProfileDeletion {
             profile,
             native_erasure_verified: false,
+            extension_native_namespace: None,
         },])
     );
     assert!(
@@ -6573,6 +6575,7 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
         vec![zephium_core::ports::store::PendingProfileDeletion {
             profile,
             native_erasure_verified: false,
+            extension_native_namespace: None,
         }]
     );
     assert!(hub.finalize_profile_deletion(profile).unwrap());
@@ -6893,6 +6896,7 @@ fn actor_exposes_exact_profile_deletion_phases() {
         ProfileDeletionLoad::Loaded(vec![PendingProfileDeletion {
             profile: ProfileId::from(1),
             native_erasure_verified: false,
+            extension_native_namespace: None,
         }])
     );
     assert_eq!(

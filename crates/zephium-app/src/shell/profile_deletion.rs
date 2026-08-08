@@ -37,6 +37,9 @@ pub(super) enum ProfileDeletionPhase {
 pub(super) struct ProfileDeletionState {
     pub(super) phase: ProfileDeletionPhase,
     pub(super) operation_id: Option<String>,
+    /// Exact durable namespace obligation loaded from the Store deletion
+    /// journal. This value must survive every native retry unchanged.
+    pub(super) extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
     /// Session revision represented by the snapshot used for the latest
     /// authorization attempt. If journal proof arrives after this changes, the
     /// authorization barrier is still valid but the newer survivor state needs
@@ -52,10 +55,12 @@ impl ProfileDeletionState {
         phase: ProfileDeletionPhase,
         operation_id: Option<String>,
         authorization_revision: u128,
+        extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
     ) -> Self {
         Self {
             phase,
             operation_id,
+            extension_native_namespace,
             authorization_revision,
             attempt_generation: 0,
             retry_generation: 0,
@@ -145,6 +150,7 @@ impl Shell {
                 ProfileDeletionPhase::ExtensionFenceForAuthorization,
                 operation_id,
                 authorization_revision,
+                None,
             ),
         );
         if self.user_content_status.retire_profile(profile) {
@@ -582,7 +588,7 @@ impl Shell {
                     .into_iter()
                     .find(|deletion| deletion.profile == profile)
                 {
-                    self.authorization_is_durable(profile, deletion.native_erasure_verified);
+                    self.authorization_is_durable(profile, deletion);
                     self.drive_profile_deletion(profile);
                     return;
                 }
@@ -621,15 +627,19 @@ impl Shell {
         outcome: ProfileDeletionAuthorizeOutcome,
     ) {
         match outcome {
-            ProfileDeletionAuthorizeOutcome::Authorized => {
-                self.authorization_is_durable(profile, false)
-            }
-            ProfileDeletionAuthorizeOutcome::AlreadyAuthorized => {
+            ProfileDeletionAuthorizeOutcome::Authorized
+            | ProfileDeletionAuthorizeOutcome::AlreadyAuthorized => {
+                // The authorization result proves the session/journal
+                // transaction, but it does not carry the durable native
+                // namespace marker. Resolve the exact journal row before any
+                // Engine erasure call; guessing `None` would lose authority.
                 self.apply_profile_tombstone(profile);
-                if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
-                    state.phase = ProfileDeletionPhase::ResolveAuthorizedJournal;
-                    state.retry_exponent = 0;
-                }
+                let Some(state) = self.profile_deletion.states.get_mut(&profile) else {
+                    self.fail_profile_deletion_invariant(profile);
+                    return;
+                };
+                state.phase = ProfileDeletionPhase::ResolveAuthorizedJournal;
+                state.retry_exponent = 0;
             }
             ProfileDeletionAuthorizeOutcome::OutcomeUnknown => {
                 // The ordered journal query is the only legal arbiter after a
@@ -673,7 +683,7 @@ impl Shell {
                     .into_iter()
                     .find(|deletion| deletion.profile == profile)
                 {
-                    self.authorization_is_durable(profile, deletion.native_erasure_verified);
+                    self.authorization_is_durable(profile, deletion);
                     self.drive_profile_deletion(profile);
                 } else {
                     // `AlreadyAuthorized` and a missing journal row conflict.
@@ -687,7 +697,13 @@ impl Shell {
         }
     }
 
-    fn authorization_is_durable(&mut self, profile: ProfileId, native_verified: bool) {
+    fn authorization_is_durable(&mut self, profile: ProfileId, deletion: PendingProfileDeletion) {
+        if deletion.profile != profile
+            || (deletion.native_erasure_verified && deletion.extension_native_namespace.is_some())
+        {
+            self.fail_profile_deletion_invariant(profile);
+            return;
+        }
         let survivor_state_changed = self
             .profile_deletion
             .states
@@ -695,7 +711,8 @@ impl Shell {
             .is_some_and(|state| state.authorization_revision != self.persistence.session_revision);
         self.apply_profile_tombstone(profile);
         if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
-            state.phase = if native_verified {
+            state.extension_native_namespace = deletion.extension_native_namespace;
+            state.phase = if deletion.native_erasure_verified {
                 ProfileDeletionPhase::FinalizeReady
             } else {
                 ProfileDeletionPhase::NativeReady
@@ -722,7 +739,7 @@ impl Shell {
             self.fail_profile_deletion_invariant(profile);
             return;
         }
-        let attempt = {
+        let (attempt, extension_native_namespace) = {
             let state = self
                 .profile_deletion
                 .states
@@ -735,7 +752,7 @@ impl Shell {
             let attempt = state.attempt_generation;
             state.phase = ProfileDeletionPhase::NativeInFlight { attempt };
             state.retry_exponent = 0;
-            attempt
+            (attempt, state.extension_native_namespace)
         };
         let inbox = self.profile_deletion.inbox.clone();
         let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
@@ -743,6 +760,7 @@ impl Shell {
         });
         self.engine.erase_profile_data(
             profile,
+            extension_native_namespace,
             Box::new(move |outcome| {
                 let mut pending = inbox
                     .lock()

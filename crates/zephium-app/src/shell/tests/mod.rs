@@ -336,6 +336,7 @@ pub(crate) struct FakeEngine {
     runtime_restart_required: std::sync::atomic::AtomicBool,
     runtime_security_advisories: Mutex<zephium_core::runtime_security::RuntimeSecurityAdvisories>,
     erasure_outcomes: Mutex<VecDeque<ProfileDataErasureOutcome>>,
+    erasure_requests: Mutex<Vec<(ProfileId, Option<ExtensionNativeNamespaceScope>)>>,
     held_erasures: Mutex<Vec<HeldErasure>>,
     hold_erasures: std::sync::atomic::AtomicBool,
 }
@@ -402,6 +403,10 @@ impl FakeEngine {
 
     fn push_erasure_outcomes(&self, outcomes: impl IntoIterator<Item = ProfileDataErasureOutcome>) {
         self.erasure_outcomes.lock().unwrap().extend(outcomes);
+    }
+
+    fn erasure_requests(&self) -> Vec<(ProfileId, Option<ExtensionNativeNamespaceScope>)> {
+        self.erasure_requests.lock().unwrap().clone()
     }
 
     fn complete_held_erasure(&self, outcome: ProfileDataErasureOutcome) {
@@ -567,9 +572,14 @@ impl Engine for FakeEngine {
     fn erase_profile_data(
         &self,
         profile: ProfileId,
+        extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(zephium_core::ports::engine::ProfileDataErasureOutcome) + Send>,
     ) {
         self.log(format!("erase-profile {profile}"));
+        self.erasure_requests
+            .lock()
+            .unwrap()
+            .push((profile, extension_native_namespace));
         if self
             .hold_erasures
             .load(std::sync::atomic::Ordering::Acquire)
@@ -648,6 +658,7 @@ pub(crate) struct FakeStore {
     pending_load_failures: std::sync::atomic::AtomicUsize,
     authorize_outcomes: Mutex<VecDeque<ProfileDeletionAuthorizeOutcome>>,
     authorize_unknown_commits: std::sync::atomic::AtomicBool,
+    authorized_native_namespace: Mutex<Option<ExtensionNativeNamespaceScope>>,
     authorized_sessions: Mutex<Vec<(ProfileId, SessionState)>>,
     finalize_outcomes: Mutex<VecDeque<ProfileDeletionFinalizeOutcome>>,
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
@@ -973,6 +984,7 @@ impl Store for FakeStore {
                 pending.push(PendingProfileDeletion {
                     profile,
                     native_erasure_verified: false,
+                    extension_native_namespace: *self.authorized_native_namespace.lock().unwrap(),
                 });
             }
         }

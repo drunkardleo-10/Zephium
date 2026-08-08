@@ -61,6 +61,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 
+use zephium_core::extensions::ExtensionNativeNamespaceScope;
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::item::{ItemKind, Lifecycle, Placement, SpaceSection, TabState};

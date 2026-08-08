@@ -13,6 +13,7 @@ mod identity;
 mod install;
 mod manifest;
 mod native_grants;
+mod native_namespace;
 mod native_ownership;
 mod package_pin;
 mod runtime;
@@ -69,6 +70,9 @@ pub use native_grants::{
     ExtensionNativeApiGrant, ExtensionNativeApiGrantIter, ExtensionNativeGrantDecision,
     ExtensionNativeGrantProjection, ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot,
     ExtensionNativeHostGrant, ExtensionNativeHostGrantIter,
+};
+pub use native_namespace::{
+    ExtensionNativeNamespaceScope, MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS,
 };
 pub use native_ownership::{
     ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,

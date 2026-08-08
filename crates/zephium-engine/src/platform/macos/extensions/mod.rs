@@ -5,6 +5,8 @@
 //! code has no preparation authority and the runtime adapter remains disabled.
 
 mod controller_registry;
+mod erasure;
 mod grants;
 
-pub(crate) use controller_registry::PersistentControllerRegistry;
+pub(crate) use controller_registry::{ControllerErasureSettlement, PersistentControllerRegistry};
+pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};

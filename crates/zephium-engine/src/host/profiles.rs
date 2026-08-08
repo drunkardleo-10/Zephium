@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use zephium_core::extensions::ExtensionNativeNamespaceScope;
 use zephium_core::ids::{ItemId, ProfileId};
 #[cfg(target_os = "windows")]
 use zephium_core::ports::engine::EngineEvent;
@@ -10,8 +11,10 @@ use zephium_core::ports::engine::Partition;
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use super::dispatch::try_with;
+#[cfg(target_os = "macos")]
+use super::dispatch::try_with_profile_erasure;
 #[cfg(target_os = "windows")]
 use super::dispatch::{
     drain_windows_cleanup_debts, windows_cleanup_invariant_failed, with_profile_exit,
@@ -248,10 +251,32 @@ pub(crate) fn release_linux_erasure_obligations(profile: ProfileId, attempt: Arc
 /// timed-out, or superseded callback must retain the handle so a retry cannot
 /// mistake forgotten in-memory state for verified deletion.
 #[cfg(target_os = "macos")]
-pub(crate) fn release_macos_erasure_obligation(profile: ProfileId, attempt: Arc<AtomicBool>) {
-    let _ = try_with(move |host| {
+pub(crate) fn release_macos_erasure_obligation(
+    profile: ProfileId,
+    attempt: Arc<AtomicBool>,
+    controller_ticket: Option<crate::platform::imp::ControllerErasureTicket>,
+) {
+    let _ = try_with_profile_erasure(move |host| {
         if macos_erasure_release_matches(host.erasure_attempts.get(&profile), &attempt) {
-            host.macos_ephemeral_data_stores.remove(&profile);
+            match controller_ticket.map(|ticket| {
+                host.macos_extension_controllers
+                    .settle_verified_profile_erasure(profile, ticket, &attempt)
+            }) {
+                None | Some(crate::platform::imp::ControllerErasureSettlement::Settled) => {
+                    host.macos_ephemeral_data_stores.remove(&profile);
+                }
+                Some(crate::platform::imp::ControllerErasureSettlement::Stale) => {
+                    // A duplicate native terminal for an already-settled exact
+                    // attempt is an idempotent no-op. An ABA retry has a
+                    // different Arc attempt and never enters this branch.
+                }
+                Some(crate::platform::imp::ControllerErasureSettlement::IntegrityFailed) => {
+                    // The named store is gone, but losing the matching
+                    // controller generation settlement would make
+                    // shutdown/reuse claims stronger than retained evidence.
+                    host.native_resource_accounting_failed = true;
+                }
+            }
         }
     });
 }
@@ -582,6 +607,7 @@ impl EngineHost {
     pub(crate) fn erase_profile_data(
         &mut self,
         profile: ProfileId,
+        extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         completion: Arc<crate::erasure::Completion>,
     ) {
         if !admit_profile_erasure(
@@ -618,19 +644,6 @@ impl EngineHost {
             // later erasure retry.
             return;
         }
-        #[cfg(target_os = "macos")]
-        if self
-            .macos_extension_controllers
-            .blocks_profile_erasure(profile)
-        {
-            // The dormant slice intentionally has no data-record cleanup
-            // authority. Keep the process-lifetime tombstone and every native
-            // object intact until that later join can retire this exact
-            // controller namespace rather than falsely reporting absence.
-            completion.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-            return;
-        }
-
         #[cfg(target_os = "macos")]
         let ephemeral_stores = self
             .macos_ephemeral_data_stores
@@ -733,8 +746,45 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         self.environments.remove(&profile);
 
+        #[cfg(not(target_os = "macos"))]
+        if extension_native_namespace.is_some() {
+            // A platform-specific durable namespace is authority to prove its
+            // exact absence, never permission to silently ignore it on a
+            // backend that cannot perform that proof.
+            eprintln!("privacy: profile erasure carries an unsupported native extension namespace");
+            completion
+                .report_unsettled(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+            return;
+        }
+
         #[cfg(target_os = "macos")]
-        crate::platform::imp::erase_profile_data(profile, ephemeral_stores, completion);
+        {
+            // The service-runtime fence above proves there is no process-local
+            // extension owner. Move a process-retained controller only after
+            // every profile view and warm spare has been dropped. Join the
+            // exact Store-owned durable scope; process-local map absence is
+            // never promoted into cross-restart namespace absence.
+            let controller_erasure = match self.macos_extension_controllers.begin_profile_erasure(
+                profile,
+                completion.attempt_flag(),
+                extension_native_namespace,
+            ) {
+                Ok(controller_erasure) => controller_erasure,
+                Err(error) => {
+                    eprintln!("privacy: cannot begin macOS extension-controller erasure: {error}");
+                    completion.report_unsettled(
+                        zephium_core::ports::engine::ProfileDataErasureOutcome::Failed,
+                    );
+                    return;
+                }
+            };
+            crate::platform::imp::erase_profile_data(
+                profile,
+                ephemeral_stores,
+                controller_erasure,
+                completion,
+            );
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
         crate::platform::imp::erase_profile_data(
             managers,

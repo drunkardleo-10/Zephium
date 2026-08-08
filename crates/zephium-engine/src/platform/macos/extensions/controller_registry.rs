@@ -11,6 +11,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use objc2::rc::Retained;
 #[cfg(any(test, feature = "native-web-extension-probes"))]
@@ -25,7 +28,13 @@ use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUUID};
 #[cfg(any(test, feature = "native-web-extension-probes"))]
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
 use objc2_web_kit::{WKWebExtensionController, WKWebViewConfiguration, WKWebsiteDataStore};
+use zephium_core::extensions::ExtensionNativeNamespaceScope;
 use zephium_core::ids::ProfileId;
+
+use super::erasure::{
+    ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
+    ProfileControllerErasure,
+};
 
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
 const _: () = assert!(MAX_PERSISTENT_CONTROLLERS == 64);
@@ -51,10 +60,16 @@ pub(crate) enum ControllerRegistryError {
     #[cfg(any(test, feature = "native-web-extension-probes"))]
     StoreAlias,
     UnexpectedLoadedContext,
+    UnexpectedLoadedExtension,
     EntryChanged,
     ViewStoreMismatch,
     ViewControllerMismatch,
     UnexpectedViewController,
+    ErasureInFlight,
+    ErasureGenerationExhausted,
+    NamespaceScopeRequired,
+    NamespaceReopenUnavailable,
+    UnsupportedNamespaceScope,
 }
 
 impl fmt::Display for ControllerRegistryError {
@@ -95,6 +110,9 @@ impl fmt::Display for ControllerRegistryError {
             Self::UnexpectedLoadedContext => {
                 "a dormant extension controller unexpectedly contains a loaded context"
             }
+            Self::UnexpectedLoadedExtension => {
+                "a dormant extension controller unexpectedly contains a loaded extension"
+            }
             Self::EntryChanged => {
                 "the prepared extension-controller entry changed during view construction"
             }
@@ -106,6 +124,19 @@ impl fmt::Display for ControllerRegistryError {
             }
             Self::UnexpectedViewController => {
                 "a view without prepared extension authority received a controller"
+            }
+            Self::ErasureInFlight => "macOS extension-controller erasure is already in flight",
+            Self::ErasureGenerationExhausted => {
+                "macOS extension-controller erasure generation was exhausted"
+            }
+            Self::NamespaceScopeRequired => {
+                "a retained macOS extension controller has no durable namespace scope"
+            }
+            Self::NamespaceReopenUnavailable => {
+                "the durable macOS extension namespace requires restart cleanup that is not implemented"
+            }
+            Self::UnsupportedNamespaceScope => {
+                "the extension namespace scope is not supported by this macOS erasure adapter"
             }
         })
     }
@@ -203,10 +234,16 @@ enum RuntimeAvailability {
     Broken,
 }
 
-struct PersistentControllerEntry {
-    profile: ProfileId,
-    store: Retained<WKWebsiteDataStore>,
-    controller: Retained<WKWebExtensionController>,
+pub(super) struct PersistentControllerEntry {
+    pub(super) profile: ProfileId,
+    pub(super) store: Retained<WKWebsiteDataStore>,
+    pub(super) controller: Retained<WKWebExtensionController>,
+}
+
+enum PersistentControllerSlot {
+    #[allow(dead_code)] // Constructed only by the cfg-gated native probe seam.
+    Prepared(PersistentControllerEntry),
+    Erasing(Rc<ControllerErasureWitness>),
 }
 
 /// Proof retained across Wry construction and consumed by exact post-build
@@ -247,8 +284,16 @@ pub(crate) enum ProbeControllerPreparation {
 /// `new` performs no runtime lookup and allocates neither Rust nor native
 /// storage. Ordinary product code has no operation that inserts an entry.
 pub(crate) struct PersistentControllerRegistry {
-    slots: RegistrySlots<PersistentControllerEntry>,
+    slots: RegistrySlots<PersistentControllerSlot>,
     runtime: RuntimeAvailability,
+    next_erasure_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerErasureSettlement {
+    Settled,
+    Stale,
+    IntegrityFailed,
 }
 
 impl PersistentControllerRegistry {
@@ -256,6 +301,7 @@ impl PersistentControllerRegistry {
         Self {
             slots: RegistrySlots::new(),
             runtime: RuntimeAvailability::Unprobed,
+            next_erasure_generation: 0,
         }
     }
 
@@ -267,8 +313,11 @@ impl PersistentControllerRegistry {
         profile: ProfileId,
     ) -> Result<Option<PreparedDurableViewConfiguration>, ControllerRegistryError> {
         self.slots.admission(profile)?;
-        let Some(entry) = self.slots.entries.get(&profile) else {
+        let Some(slot) = self.slots.entries.get(&profile) else {
             return Ok(None);
+        };
+        let PersistentControllerSlot::Prepared(entry) = slot else {
+            return Err(ControllerRegistryError::ErasureInFlight);
         };
         let prepared = catch_native(|| {
             validate_entry(entry)?;
@@ -322,7 +371,9 @@ impl PersistentControllerRegistry {
             let configuration = unsafe { wk.configuration() };
             match proof {
                 Some(proof) => {
-                    let Some(entry) = self.slots.entries.get(&proof.profile) else {
+                    let Some(PersistentControllerSlot::Prepared(entry)) =
+                        self.slots.entries.get(&proof.profile)
+                    else {
                         return Err(ControllerRegistryError::EntryChanged);
                     };
                     if Retained::as_ptr(&entry.store) != Retained::as_ptr(&proof.store)
@@ -349,11 +400,124 @@ impl PersistentControllerRegistry {
         result
     }
 
-    /// Until native extension-data cleanup is joined to profile erasure, an
-    /// exact prepared entry (or any lost registry invariant) is a persistent
-    /// deletion obligation, never evidence of absence.
-    pub(crate) fn blocks_profile_erasure(&self, profile: ProfileId) -> bool {
-        self.slots.integrity_failed || self.slots.entries.contains_key(&profile)
+    /// Transfer an exact, already-prepared controller only after the caller
+    /// has fenced extension runtimes and dropped every profile view.
+    ///
+    /// Scope and process state must agree exactly. `None` is admitted only
+    /// with no entry; `MacosControllerV1` is admitted only with a retained
+    /// entry. A durable V1 scope after restart fails closed until deterministic
+    /// reopen is implemented, while a retained entry without the Store marker
+    /// is an equally terminal composition mismatch.
+    pub(crate) fn begin_profile_erasure(
+        &mut self,
+        profile: ProfileId,
+        attempt: Arc<AtomicBool>,
+        namespace_scope: Option<ExtensionNativeNamespaceScope>,
+    ) -> Result<ProfileControllerErasure, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let slot = self.slots.entries.get(&profile);
+        match (namespace_scope, slot) {
+            (None, None) => return Ok(ProfileControllerErasure::NamespaceNotRequired),
+            (None, Some(_)) => return Err(ControllerRegistryError::NamespaceScopeRequired),
+            (Some(ExtensionNativeNamespaceScope::MacosControllerV1), None) => {
+                // V1 is deterministic, but this slice deliberately has no
+                // durable reopen authority yet. Never turn a process restart
+                // into fabricated absence or create a namespace for an
+                // ordinary marker-free profile.
+                return Err(ControllerRegistryError::NamespaceReopenUnavailable);
+            }
+            (Some(ExtensionNativeNamespaceScope::MacosControllerV1), Some(_)) => {}
+            (Some(_), _) => return Err(ControllerRegistryError::UnsupportedNamespaceScope),
+        };
+        let slot = slot.ok_or(ControllerRegistryError::EntryChanged)?;
+
+        match slot {
+            PersistentControllerSlot::Prepared(entry) => {
+                if let Err(error) = catch_native(|| validate_entry(entry)) {
+                    self.slots.poison();
+                    return Err(error);
+                }
+            }
+            PersistentControllerSlot::Erasing(witness) => {
+                if !witness.controller_release_is_proven() || witness.attempt_is_active() {
+                    return Err(ControllerRegistryError::ErasureInFlight);
+                }
+            }
+        }
+
+        let generation = self.mint_erasure_generation()?;
+        let slot = self
+            .slots
+            .entries
+            .remove(&profile)
+            .ok_or(ControllerRegistryError::EntryChanged)?;
+        match slot {
+            PersistentControllerSlot::Prepared(entry) => {
+                let witness = Rc::new(ControllerErasureWitness::new(
+                    profile,
+                    generation,
+                    attempt,
+                    Some(entry),
+                ));
+                self.slots
+                    .entries
+                    .insert(profile, PersistentControllerSlot::Erasing(witness.clone()));
+                Ok(ProfileControllerErasure::Pending(
+                    PersistentControllerErasure::new(witness),
+                ))
+            }
+            PersistentControllerSlot::Erasing(previous) => {
+                debug_assert!(previous.controller_release_is_proven());
+                debug_assert!(!previous.attempt_is_active());
+                let witness = Rc::new(ControllerErasureWitness::new(
+                    profile, generation, attempt, None,
+                ));
+                witness.mark_controller_released_for_retry();
+                let ticket = witness.ticket();
+                self.slots
+                    .entries
+                    .insert(profile, PersistentControllerSlot::Erasing(witness));
+                Ok(ProfileControllerErasure::ControllerAlreadyReleased(ticket))
+            }
+        }
+    }
+
+    fn mint_erasure_generation(&mut self) -> Result<u64, ControllerRegistryError> {
+        let Some(generation) = self.next_erasure_generation.checked_add(1) else {
+            self.slots.poison();
+            return Err(ControllerRegistryError::ErasureGenerationExhausted);
+        };
+        self.next_erasure_generation = generation;
+        Ok(generation)
+    }
+
+    pub(crate) fn settle_verified_profile_erasure(
+        &mut self,
+        profile: ProfileId,
+        ticket: ControllerErasureTicket,
+        attempt: &Arc<AtomicBool>,
+    ) -> ControllerErasureSettlement {
+        let Some(slot) = self.slots.entries.get(&profile) else {
+            return ControllerErasureSettlement::Stale;
+        };
+        let PersistentControllerSlot::Erasing(witness) = slot else {
+            self.slots.poison();
+            return ControllerErasureSettlement::IntegrityFailed;
+        };
+        if witness.generation() != ticket.generation() {
+            return ControllerErasureSettlement::Stale;
+        }
+        if ticket.profile() != profile
+            || !witness.matches_attempt(attempt)
+            || attempt.load(Ordering::Acquire)
+            || !witness.controller_release_is_proven()
+            || witness.retains_native_owner()
+        {
+            self.slots.poison();
+            return ControllerErasureSettlement::IntegrityFailed;
+        }
+        self.slots.entries.remove(&profile);
+        ControllerErasureSettlement::Settled
     }
 
     pub(crate) fn seal(&mut self) {
@@ -368,11 +532,12 @@ impl PersistentControllerRegistry {
         if !self.slots.sealed {
             self.slots.poison();
         }
-        let entries_are_inert = self
-            .slots
-            .entries
-            .values()
-            .all(|entry| catch_native(|| validate_entry(entry)).is_ok());
+        let entries_are_inert = self.slots.entries.values().all(|slot| match slot {
+            PersistentControllerSlot::Prepared(entry) => {
+                catch_native(|| validate_entry(entry)).is_ok()
+            }
+            PersistentControllerSlot::Erasing(_) => false,
+        });
         if !entries_are_inert {
             self.slots.poison();
         }
@@ -395,11 +560,11 @@ impl PersistentControllerRegistry {
         match self.slots.admission(profile)? {
             SlotAdmission::Existing => {
                 let result = catch_native(|| {
-                    let entry = self
-                        .slots
-                        .entries
-                        .get(&profile)
-                        .ok_or(ControllerRegistryError::EntryChanged)?;
+                    let Some(PersistentControllerSlot::Prepared(entry)) =
+                        self.slots.entries.get(&profile)
+                    else {
+                        return Err(ControllerRegistryError::ErasureInFlight);
+                    };
                     validate_entry(entry)
                 });
                 if result.is_err() {
@@ -418,23 +583,30 @@ impl PersistentControllerRegistry {
                 return Err(error);
             }
         };
-        let aliased = self.slots.entries.values().any(|other| {
-            Retained::as_ptr(&other.controller) == Retained::as_ptr(&candidate.controller)
+        let aliased = self.slots.entries.values().any(|other| match other {
+            PersistentControllerSlot::Prepared(other) => {
+                Retained::as_ptr(&other.controller) == Retained::as_ptr(&candidate.controller)
+            }
+            PersistentControllerSlot::Erasing(_) => false,
         });
         if aliased {
             self.slots.poison();
             return Err(ControllerRegistryError::ControllerAlias);
         }
-        let store_aliased = self
-            .slots
-            .entries
-            .values()
-            .any(|other| Retained::as_ptr(&other.store) == Retained::as_ptr(&candidate.store));
+        let store_aliased = self.slots.entries.values().any(|other| match other {
+            PersistentControllerSlot::Prepared(other) => {
+                Retained::as_ptr(&other.store) == Retained::as_ptr(&candidate.store)
+            }
+            PersistentControllerSlot::Erasing(_) => false,
+        });
         if store_aliased {
             self.slots.poison();
             return Err(ControllerRegistryError::StoreAlias);
         }
-        if let Err(error) = self.slots.insert_vacant(profile, candidate) {
+        if let Err(error) = self
+            .slots
+            .insert_vacant(profile, PersistentControllerSlot::Prepared(candidate))
+        {
             self.slots.poison();
             return Err(error);
         }
@@ -476,7 +648,7 @@ impl PersistentControllerRegistry {
     }
 }
 
-fn catch_native<T>(
+pub(super) fn catch_native<T>(
     operation: impl FnOnce() -> Result<T, ControllerRegistryError>,
 ) -> Result<T, ControllerRegistryError> {
     objc2::exception::catch(AssertUnwindSafe(operation))
@@ -498,7 +670,9 @@ fn validate_store(
     Ok(())
 }
 
-fn validate_entry(entry: &PersistentControllerEntry) -> Result<(), ControllerRegistryError> {
+pub(super) fn validate_entry(
+    entry: &PersistentControllerEntry,
+) -> Result<(), ControllerRegistryError> {
     validate_store(&entry.store, entry.profile)?;
     let configuration = unsafe { entry.controller.configuration() };
     if !unsafe { configuration.isPersistent() } {
@@ -524,6 +698,9 @@ fn validate_entry(entry: &PersistentControllerEntry) -> Result<(), ControllerReg
     if unsafe { entry.controller.extensionContexts() }.count() != 0 {
         return Err(ControllerRegistryError::UnexpectedLoadedContext);
     }
+    if unsafe { entry.controller.extensions() }.count() != 0 {
+        return Err(ControllerRegistryError::UnexpectedLoadedExtension);
+    }
     Ok(())
 }
 
@@ -543,6 +720,9 @@ fn validate_view_configuration(
     }
     if unsafe { controller.extensionContexts() }.count() != 0 {
         return Err(ControllerRegistryError::UnexpectedLoadedContext);
+    }
+    if unsafe { controller.extensions() }.count() != 0 {
+        return Err(ControllerRegistryError::UnexpectedLoadedExtension);
     }
     Ok(())
 }
@@ -591,6 +771,7 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
     let controller = required_class("WKWebExtensionController")?;
     let configuration = required_class("WKWebExtensionControllerConfiguration")?;
     required_class("WKWebExtensionContext")?;
+    let data_record = required_class("WKWebExtensionDataRecord")?;
     let webview_configuration = required_class("WKWebViewConfiguration")?;
     let website_data_store = required_class("WKWebsiteDataStore")?;
 
@@ -599,9 +780,13 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
         &[
             sel!(initWithConfiguration:),
             sel!(configuration),
+            sel!(extensions),
             sel!(extensionContexts),
+            sel!(fetchDataRecordsOfTypes:completionHandler:),
+            sel!(removeDataOfTypes:fromDataRecords:completionHandler:),
         ],
     )?;
+    require_class_selectors(controller, &[sel!(allExtensionDataTypes)])?;
     require_class_selectors(configuration, &[sel!(configurationWithIdentifier:)])?;
     require_instance_selectors(
         configuration,
@@ -625,6 +810,15 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
     )?;
     require_class_selectors(website_data_store, &[sel!(dataStoreForIdentifier:)])?;
     require_instance_selectors(website_data_store, &[sel!(isPersistent), sel!(identifier)])?;
+    require_instance_selectors(
+        data_record,
+        &[
+            sel!(uniqueIdentifier),
+            sel!(containedDataTypes),
+            sel!(errors),
+            sel!(sizeInBytesOfTypes:),
+        ],
+    )?;
     Ok(RuntimeAvailability::Supported)
 }
 
@@ -729,22 +923,229 @@ mod tests {
     }
 
     #[test]
-    fn erasure_block_is_profile_exact_until_integrity_is_lost() {
+    fn absent_process_local_entry_does_not_create_an_erasure_namespace() {
         let profile = ProfileId::from(41);
-        let other = ProfileId::from(42);
-        let mut slots = RegistrySlots::new();
-        slots.insert_vacant(profile, ()).unwrap();
-        assert!(slots.entries.contains_key(&profile));
-        assert!(!slots.entries.contains_key(&other));
-
         let mut registry = PersistentControllerRegistry::new();
-        assert!(!registry.blocks_profile_erasure(profile));
-        assert!(!registry.blocks_profile_erasure(other));
-        registry.slots.poison();
-        assert!(registry.blocks_profile_erasure(profile));
-        assert!(registry.blocks_profile_erasure(other));
+        let attempt = Arc::new(AtomicBool::new(true));
+        assert!(matches!(
+            registry.begin_profile_erasure(profile, attempt, None),
+            Ok(ProfileControllerErasure::NamespaceNotRequired)
+        ));
+        assert!(registry.slots.entries.is_empty());
+        assert_eq!(registry.next_erasure_generation, 0);
+    }
 
-        slots.poison();
-        assert!(slots.integrity_failed);
+    #[test]
+    fn erasure_generation_exhaustion_is_sticky_and_cannot_wrap() {
+        let mut registry = PersistentControllerRegistry::new();
+        registry.next_erasure_generation = u64::MAX;
+        assert_eq!(
+            registry.mint_erasure_generation(),
+            Err(ControllerRegistryError::ErasureGenerationExhausted)
+        );
+        assert!(registry.slots.integrity_failed);
+        assert_eq!(registry.next_erasure_generation, u64::MAX);
+    }
+
+    #[test]
+    fn exact_released_generation_settles_once_and_duplicate_is_stale() {
+        let profile = ProfileId::from(43);
+        let attempt = Arc::new(AtomicBool::new(false));
+        let witness = Rc::new(ControllerErasureWitness::new(
+            profile,
+            7,
+            attempt.clone(),
+            None,
+        ));
+        witness.mark_controller_released_for_retry();
+        let ticket = witness.ticket();
+        let mut registry = PersistentControllerRegistry::new();
+        registry
+            .slots
+            .entries
+            .insert(profile, PersistentControllerSlot::Erasing(witness));
+
+        assert_eq!(
+            registry.settle_verified_profile_erasure(profile, ticket, &attempt),
+            ControllerErasureSettlement::Settled
+        );
+        assert_eq!(
+            registry.settle_verified_profile_erasure(profile, ticket, &attempt),
+            ControllerErasureSettlement::Stale
+        );
+        assert!(!registry.slots.integrity_failed);
+        assert!(registry.slots.entries.is_empty());
+    }
+
+    #[test]
+    fn stale_generation_cannot_retire_a_newer_released_attempt() {
+        let profile = ProfileId::from(44);
+        let attempt = Arc::new(AtomicBool::new(false));
+        let witness = Rc::new(ControllerErasureWitness::new(
+            profile,
+            9,
+            attempt.clone(),
+            None,
+        ));
+        witness.mark_controller_released_for_retry();
+        let mut registry = PersistentControllerRegistry::new();
+        registry
+            .slots
+            .entries
+            .insert(profile, PersistentControllerSlot::Erasing(witness));
+
+        assert_eq!(
+            registry.settle_verified_profile_erasure(
+                profile,
+                ControllerErasureTicket {
+                    profile,
+                    generation: 8,
+                },
+                &attempt,
+            ),
+            ControllerErasureSettlement::Stale
+        );
+        assert!(!registry.slots.integrity_failed);
+        assert!(registry.slots.entries.contains_key(&profile));
+    }
+
+    #[test]
+    fn website_store_retry_rebinds_attempt_without_recreating_controller() {
+        let profile = ProfileId::from(45);
+        let previous_attempt = Arc::new(AtomicBool::new(false));
+        let witness = Rc::new(ControllerErasureWitness::new(
+            profile,
+            1,
+            previous_attempt,
+            None,
+        ));
+        witness.mark_controller_released_for_retry();
+        let mut registry = PersistentControllerRegistry::new();
+        registry.next_erasure_generation = 1;
+        registry
+            .slots
+            .entries
+            .insert(profile, PersistentControllerSlot::Erasing(witness));
+
+        let retry_attempt = Arc::new(AtomicBool::new(true));
+        let ticket = match registry
+            .begin_profile_erasure(
+                profile,
+                retry_attempt.clone(),
+                Some(ExtensionNativeNamespaceScope::MacosControllerV1),
+            )
+            .unwrap()
+        {
+            ProfileControllerErasure::ControllerAlreadyReleased(ticket) => ticket,
+            _ => panic!("released controller unexpectedly restarted physical erasure"),
+        };
+        assert_eq!(ticket.generation(), 2);
+        let Some(PersistentControllerSlot::Erasing(witness)) = registry.slots.entries.get(&profile)
+        else {
+            panic!("retry witness disappeared");
+        };
+        assert!(witness.matches_attempt(&retry_attempt));
+        assert!(witness.controller_release_is_proven());
+        assert!(!witness.retains_native_owner());
+    }
+
+    #[test]
+    fn active_controller_erasure_refuses_retry_without_replacing_debt() {
+        let profile = ProfileId::from(46);
+        let current_attempt = Arc::new(AtomicBool::new(true));
+        let witness = Rc::new(ControllerErasureWitness::new(
+            profile,
+            1,
+            current_attempt,
+            None,
+        ));
+        let retained = witness.clone();
+        let mut registry = PersistentControllerRegistry::new();
+        registry
+            .slots
+            .entries
+            .insert(profile, PersistentControllerSlot::Erasing(witness));
+
+        assert!(matches!(
+            registry.begin_profile_erasure(
+                profile,
+                Arc::new(AtomicBool::new(true)),
+                Some(ExtensionNativeNamespaceScope::MacosControllerV1),
+            ),
+            Err(ControllerRegistryError::ErasureInFlight)
+        ));
+        let Some(PersistentControllerSlot::Erasing(actual)) = registry.slots.entries.get(&profile)
+        else {
+            panic!("active debt disappeared");
+        };
+        assert!(Rc::ptr_eq(actual, &retained));
+        assert_eq!(registry.next_erasure_generation, 0);
+    }
+
+    #[test]
+    fn shutdown_never_claims_clean_with_controller_erasure_debt() {
+        let profile = ProfileId::from(47);
+        let witness = Rc::new(ControllerErasureWitness::new(
+            profile,
+            1,
+            Arc::new(AtomicBool::new(true)),
+            None,
+        ));
+        let mut registry = PersistentControllerRegistry::new();
+        registry
+            .slots
+            .entries
+            .insert(profile, PersistentControllerSlot::Erasing(witness));
+        registry.seal();
+        assert!(!registry.release_all_after_views());
+        assert!(registry.slots.entries.is_empty());
+        assert!(registry.slots.integrity_failed);
+    }
+
+    #[test]
+    fn durable_v1_scope_without_retained_entry_refuses_to_reopen_or_create() {
+        let profile = ProfileId::from(48);
+        let mut registry = PersistentControllerRegistry::new();
+        assert!(matches!(
+            registry.begin_profile_erasure(
+                profile,
+                Arc::new(AtomicBool::new(true)),
+                Some(ExtensionNativeNamespaceScope::MacosControllerV1),
+            ),
+            Err(ControllerRegistryError::NamespaceReopenUnavailable)
+        ));
+        assert!(registry.slots.entries.is_empty());
+        assert_eq!(registry.next_erasure_generation, 0);
+        assert!(!registry.slots.integrity_failed);
+    }
+
+    #[test]
+    fn retained_controller_without_durable_scope_is_a_marker_mismatch() {
+        let profile = ProfileId::from(49);
+        let witness = Rc::new(ControllerErasureWitness::new(
+            profile,
+            1,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        ));
+        witness.mark_controller_released_for_retry();
+        let retained = witness.clone();
+        let mut registry = PersistentControllerRegistry::new();
+        registry
+            .slots
+            .entries
+            .insert(profile, PersistentControllerSlot::Erasing(witness));
+
+        assert!(matches!(
+            registry.begin_profile_erasure(profile, Arc::new(AtomicBool::new(true)), None,),
+            Err(ControllerRegistryError::NamespaceScopeRequired)
+        ));
+        let Some(PersistentControllerSlot::Erasing(actual)) = registry.slots.entries.get(&profile)
+        else {
+            panic!("marker mismatch dropped the retained debt");
+        };
+        assert!(Rc::ptr_eq(actual, &retained));
+        assert_eq!(registry.next_erasure_generation, 0);
+        assert!(!registry.slots.integrity_failed);
     }
 }

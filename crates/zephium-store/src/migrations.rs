@@ -14,6 +14,9 @@ const _: [(); 1024] =
 // changed native grammar must never leave SQLite accepting a different
 // authority.
 const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID_BYTES];
+// Keep META v14's durable obligation capacity tied to Core's complete
+// active-profile plus deletion-tombstone union.
+const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS];
 
 pub struct Migration {
     pub version: i64,
@@ -307,6 +310,72 @@ fn normalize_schema_sql(sql: &str) -> String {
 
 fn invalid_schema(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.to_owned())
+}
+
+fn preflight_macos_native_namespace_seeds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    // The v11 schema caps this table at 1,024 rows, but migrations must not
+    // trust historical row contents merely because the schema manifest is
+    // exact. A damaged database can otherwise make DISTINCT retain arbitrary
+    // strings before any Rust-side bounded decoder sees them.
+    let journal_rows = tx.query_row(
+        "SELECT count(*) FROM extension_native_ownership_journal",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if !(0..=1024).contains(&journal_rows) {
+        return Err(invalid_schema(
+            "native-ownership journal exceeds migration capacity",
+        ));
+    }
+
+    // This query returns only a Boolean. SQLite examines byte lengths and the
+    // canonical alphabet without materializing profile_id in Rust. It must run
+    // before count(DISTINCT profile_id) or the seed INSERT below.
+    let invalid_candidate = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM extension_native_ownership_journal
+             WHERE runtime_backend = 'macos_native'
+               AND browsing_context = 'regular'
+               AND (
+                   phase IN ('native_may_own', 'native_owned')
+                   OR (phase = 'native_absent_release_pending' AND revision > 2)
+               )
+               AND (
+                   typeof(profile_id) != 'text'
+                   OR length(CAST(profile_id AS BLOB)) != 26
+                   OR instr(CAST(profile_id AS BLOB), X'00') != 0
+                   OR substr(profile_id, 1, 1) NOT BETWEEN '0' AND '7'
+                   OR profile_id GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'
+               )
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if invalid_candidate {
+        return Err(invalid_schema(
+            "macOS native namespace migration has an invalid profile identity",
+        ));
+    }
+
+    let seed_count = tx.query_row(
+        "SELECT count(DISTINCT profile_id)
+         FROM extension_native_ownership_journal
+         WHERE runtime_backend = 'macos_native'
+           AND browsing_context = 'regular'
+           AND (
+               phase IN ('native_may_own', 'native_owned')
+               OR (phase = 'native_absent_release_pending' AND revision > 2)
+           )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if !(0..=128).contains(&seed_count) {
+        return Err(invalid_schema(
+            "macOS native namespace migration exceeds obligation capacity",
+        ));
+    }
+    Ok(())
 }
 
 pub static META: &[Migration] = &[
@@ -873,6 +942,217 @@ pub static META: &[Migration] = &[
                              AND native_identity_kind = expected_native_identity_kind
                              AND native_identity = expected_native_identity)
                      );",
+            )
+        },
+    },
+    Migration {
+        version: 14,
+        up: |tx| {
+            // META v13 shipped before product code could create a native
+            // WKWebExtensionController. Consequently, a cleared historical
+            // row cannot hide a product-created namespace at this migration
+            // boundary. Extant regular macOS-native possible-owner rows are
+            // nevertheless exact backend evidence and must be seeded. This
+            // release invariant is the migration witness; do not broaden this
+            // query by guessing from unrelated profile state.
+            preflight_macos_native_namespace_seeds(tx)?;
+            let unanchored_seed = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM extension_native_ownership_journal AS ownership
+                     WHERE ownership.runtime_backend = 'macos_native'
+                       AND ownership.browsing_context = 'regular'
+                       AND (
+                           ownership.phase IN ('native_may_own', 'native_owned')
+                           OR (ownership.phase = 'native_absent_release_pending'
+                               AND ownership.revision > 2)
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM profiles
+                           WHERE profiles.id = ownership.profile_id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM profile_deletion_journal
+                           WHERE profile_deletion_journal.profile_id = ownership.profile_id
+                       )
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if unanchored_seed {
+                return Err(invalid_schema(
+                    "macOS native namespace migration has no profile or deletion anchor",
+                ));
+            }
+            let seed_after_native_proof = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM extension_native_ownership_journal AS ownership
+                     JOIN profile_deletion_journal AS deletion
+                       ON deletion.profile_id = ownership.profile_id
+                     WHERE ownership.runtime_backend = 'macos_native'
+                       AND ownership.browsing_context = 'regular'
+                       AND (
+                           ownership.phase IN ('native_may_own', 'native_owned')
+                           OR (ownership.phase = 'native_absent_release_pending'
+                               AND ownership.revision > 2)
+                       )
+                       AND deletion.native_erasure_verified = 1
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if seed_after_native_proof {
+                return Err(invalid_schema(
+                    "macOS native namespace migration contradicts native-erasure proof",
+                ));
+            }
+
+            tx.execute_batch(
+                // A row means only that the deterministic V1 namespace may
+                // exist and therefore must be included in profile erasure.
+                // It deliberately survives runtime-row retirement, disable,
+                // uninstall, and package-pin release.
+                "CREATE TABLE extension_native_namespace_obligations (
+                     profile_id TEXT NOT NULL
+                         CHECK (
+                             length(CAST(profile_id AS BLOB)) = 26
+                             AND instr(CAST(profile_id AS BLOB), X'00') = 0
+                             AND substr(profile_id, 1, 1) BETWEEN '0' AND '7'
+                             AND profile_id NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'
+                         ),
+                     namespace_version INTEGER NOT NULL
+                         CHECK (namespace_version = 1),
+                     PRIMARY KEY (profile_id, namespace_version)
+                 ) STRICT, WITHOUT ROWID;
+
+                 CREATE TRIGGER extension_native_namespace_obligation_capacity
+                 BEFORE INSERT ON extension_native_namespace_obligations
+                 WHEN (SELECT count(*)
+                       FROM extension_native_namespace_obligations) >= 128
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation capacity exceeded');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_obligation_insert_anchor
+                 BEFORE INSERT ON extension_native_namespace_obligations
+                 WHEN NOT EXISTS (
+                          SELECT 1 FROM profiles WHERE id = NEW.profile_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM profile_deletion_journal
+                          WHERE profile_id = NEW.profile_id
+                      )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation has no durable anchor');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_obligation_immutable
+                 BEFORE UPDATE ON extension_native_namespace_obligations
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation identity is immutable');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_profile_anchor_delete
+                 BEFORE DELETE ON profiles
+                 WHEN EXISTS (
+                          SELECT 1 FROM extension_native_namespace_obligations
+                          WHERE profile_id = OLD.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM profile_deletion_journal
+                          WHERE profile_id = OLD.id
+                      )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation requires deletion journal');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_profile_anchor_update
+                 BEFORE UPDATE OF id ON profiles
+                 WHEN NEW.id != OLD.id
+                      AND EXISTS (
+                          SELECT 1 FROM extension_native_namespace_obligations
+                          WHERE profile_id = OLD.id
+                      )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation blocks profile identity change');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_deletion_anchor_delete
+                 BEFORE DELETE ON profile_deletion_journal
+                 WHEN EXISTS (
+                     SELECT 1 FROM extension_native_namespace_obligations
+                     WHERE profile_id = OLD.profile_id
+                 )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation blocks deletion completion');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_deletion_anchor_update
+                 BEFORE UPDATE OF profile_id ON profile_deletion_journal
+                 WHEN NEW.profile_id != OLD.profile_id
+                      AND EXISTS (
+                          SELECT 1 FROM extension_native_namespace_obligations
+                          WHERE profile_id = OLD.profile_id
+                      )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation blocks deletion identity change');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_proof_requires_absence
+                 BEFORE UPDATE OF native_erasure_verified
+                 ON profile_deletion_journal
+                 WHEN NEW.native_erasure_verified = 1
+                      AND EXISTS (
+                          SELECT 1 FROM extension_native_namespace_obligations
+                          WHERE profile_id = NEW.profile_id
+                      )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace obligation lacks erasure settlement');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_delete_requires_pending_proof
+                 BEFORE DELETE ON extension_native_namespace_obligations
+                 WHEN NOT EXISTS (
+                     SELECT 1 FROM profile_deletion_journal
+                     WHERE profile_id = OLD.profile_id
+                       AND native_erasure_verified = 0
+                 )
+                 BEGIN
+                     SELECT RAISE(ABORT,
+                         'native extension namespace erasure has no pending deletion proof');
+                 END;
+
+                 CREATE TRIGGER extension_native_namespace_delete_records_proof
+                 AFTER DELETE ON extension_native_namespace_obligations
+                 BEGIN
+                     UPDATE profile_deletion_journal
+                     SET native_erasure_verified = 1
+                     WHERE profile_id = OLD.profile_id
+                       AND native_erasure_verified = 0;
+                     SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT,
+                         'native extension namespace proof was not recorded exactly once') END;
+                 END;
+
+                 INSERT INTO extension_native_namespace_obligations(
+                     profile_id, namespace_version
+                 )
+                 SELECT DISTINCT profile_id, 1
+                 FROM extension_native_ownership_journal
+                 WHERE runtime_backend = 'macos_native'
+                   AND browsing_context = 'regular'
+                   AND (
+                       phase IN ('native_may_own', 'native_owned')
+                       OR (phase = 'native_absent_release_pending' AND revision > 2)
+                   );",
             )
         },
     },
@@ -2242,7 +2522,7 @@ mod tests {
         )
         .unwrap();
 
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..13]).unwrap();
 
         let mut statement = conn
             .prepare(
@@ -2346,6 +2626,427 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn meta_v14_seeds_only_exact_regular_macos_possible_owner_evidence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..13]).unwrap();
+        let profiles: Vec<_> = (1_u128..=6)
+            .map(|value| zephium_core::ids::ProfileId::from(value).to_string())
+            .collect();
+        for (position, profile) in profiles.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO profiles(id, name, kind, position)
+                 VALUES (?1, 'Fixture', 'named', ?2)",
+                rusqlite::params![profile, position as i64],
+            )
+            .unwrap();
+        }
+        for (operation, revision, intent, phase) in [
+            (1_i64, 2_i64, "acquire", "native_may_own"),
+            (2, 2, "release", "native_absent_release_pending"),
+            (3, 1, "acquire", "native_absent_preparing"),
+            (4, 5, "release", "native_absent_release_pending"),
+            (5, 2, "acquire", "native_may_own"),
+            (6, 2, "acquire", "native_may_own"),
+        ] {
+            insert_native_ownership_test_row(&conn, operation, revision, operation, intent, phase)
+                .unwrap();
+            conn.execute(
+                "UPDATE extension_native_ownership_journal
+                 SET profile_id = ?2
+                 WHERE operation = ?1",
+                rusqlite::params![operation, &profiles[(operation - 1) as usize]],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET runtime_backend = 'macos_compatibility'
+             WHERE operation = 5",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET browsing_context = 'private'
+             WHERE operation = 6",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 15,
+                 operation_high_water = 6,
+                 native_incarnation_high_water = 6",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let seeded: Vec<String> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT profile_id
+                     FROM extension_native_namespace_obligations
+                     ORDER BY profile_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(seeded, vec![profiles[0].clone(), profiles[3].clone()]);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(12));
+    }
+
+    #[test]
+    fn meta_v14_preflights_seed_profile_identities_before_distinct_aggregation() {
+        let canonical = zephium_core::ids::ProfileId::from(u128::MAX).to_string();
+        let mut embedded_nul = canonical.clone();
+        embedded_nul.replace_range(13..14, "\0");
+        let invalid_profiles = [
+            "short".to_owned(),
+            canonical.to_ascii_lowercase(),
+            format!("{}I", &canonical[..25]),
+            format!("8{}", &canonical[1..]),
+            embedded_nul,
+            "A".repeat(1024 * 1024),
+        ];
+
+        for invalid_profile in invalid_profiles {
+            let mut conn = Connection::open_in_memory().unwrap();
+            apply(&mut conn, &META[..13]).unwrap();
+            insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
+            conn.pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            conn.execute(
+                "UPDATE extension_native_ownership_journal
+                 SET profile_id = ?1 WHERE operation = 1",
+                [&invalid_profile],
+            )
+            .unwrap();
+            conn.pragma_update(None, "ignore_check_constraints", false)
+                .unwrap();
+            conn.execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 3,
+                     operation_high_water = 1,
+                     native_incarnation_high_water = 1",
+                [],
+            )
+            .unwrap();
+
+            let error = apply(&mut conn, META).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid profile identity"),
+                "unexpected migration error for corrupt profile identity: {error}"
+            );
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                13
+            );
+            assert!(conn
+                .prepare("SELECT * FROM extension_native_namespace_obligations")
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn meta_v14_refuses_unanchored_contradictory_or_over_capacity_seeds_atomically() {
+        let possible_owner = |conn: &Connection, profile: &str, operation: i64| {
+            insert_native_ownership_test_row(
+                conn,
+                operation,
+                2,
+                operation,
+                "acquire",
+                "native_may_own",
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE extension_native_ownership_journal
+                 SET profile_id = ?2 WHERE operation = ?1",
+                rusqlite::params![operation, profile],
+            )
+            .unwrap();
+        };
+
+        let mut unanchored = Connection::open_in_memory().unwrap();
+        apply(&mut unanchored, &META[..13]).unwrap();
+        let profile = zephium_core::ids::ProfileId::from(1).to_string();
+        possible_owner(&unanchored, &profile, 1);
+        unanchored
+            .execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 3, operation_high_water = 1,
+                     native_incarnation_high_water = 1",
+                [],
+            )
+            .unwrap();
+        assert!(apply(&mut unanchored, META).is_err());
+        assert_eq!(
+            unanchored
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
+        assert!(unanchored
+            .prepare("SELECT * FROM extension_native_namespace_obligations")
+            .is_err());
+
+        let mut contradicted = Connection::open_in_memory().unwrap();
+        apply(&mut contradicted, &META[..13]).unwrap();
+        possible_owner(&contradicted, &profile, 1);
+        contradicted
+            .execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 3, operation_high_water = 1,
+                     native_incarnation_high_water = 1",
+                [],
+            )
+            .unwrap();
+        contradicted
+            .execute(
+                "INSERT INTO profile_deletion_journal(
+                     profile_id, authorized_at, native_erasure_verified
+                 ) VALUES (?1, 1, 1)",
+                [&profile],
+            )
+            .unwrap();
+        assert!(apply(&mut contradicted, META).is_err());
+        assert_eq!(
+            contradicted
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
+
+        let mut over_capacity = Connection::open_in_memory().unwrap();
+        apply(&mut over_capacity, &META[..13]).unwrap();
+        for operation in 1_i64..=129 {
+            let profile = zephium_core::ids::ProfileId::from(operation as u128).to_string();
+            over_capacity
+                .execute(
+                    "INSERT INTO profiles(id, name, kind, position)
+                     VALUES (?1, 'Fixture', 'named', ?2)",
+                    rusqlite::params![&profile, operation],
+                )
+                .unwrap();
+            possible_owner(&over_capacity, &profile, operation);
+        }
+        over_capacity
+            .execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 259, operation_high_water = 129,
+                     native_incarnation_high_water = 129",
+                [],
+            )
+            .unwrap();
+        assert!(apply(&mut over_capacity, META).is_err());
+        assert_eq!(
+            over_capacity
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
+    }
+
+    #[test]
+    fn meta_v14_namespace_schema_enforces_canonical_capacity_and_atomic_erasure_join() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, META).unwrap();
+        let profile = zephium_core::ids::ProfileId::from(u128::MAX).to_string();
+        conn.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES (?1, 'Fixture', 'named', 0)",
+            [&profile],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_native_namespace_obligations(
+                 profile_id, namespace_version
+             ) VALUES (?1, 1)",
+            [&profile],
+        )
+        .unwrap();
+        let unanchored = zephium_core::ids::ProfileId::from(u128::MAX - 1).to_string();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_namespace_obligations
+                 SET profile_id = ?2 WHERE profile_id = ?1",
+                rusqlite::params![&profile, &unanchored],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_namespace_obligations
+                 SET namespace_version = 1 WHERE profile_id = ?1",
+                [&profile],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE profiles SET id = ?2 WHERE id = ?1",
+                rusqlite::params![&profile, &unanchored],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO extension_native_namespace_obligations(
+                     profile_id, namespace_version
+                 ) VALUES (?1, 2)",
+                [&profile],
+            )
+            .is_err());
+
+        let lowercase = profile.to_ascii_lowercase();
+        let invalid_alphabet = format!("{}I", &profile[..25]);
+        let invalid_first = format!("8{}", &profile[1..]);
+        for (position, invalid) in [
+            "short".to_owned(),
+            lowercase,
+            invalid_alphabet,
+            invalid_first,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO profiles(id, name, kind, position)
+                 VALUES (?1, 'Invalid fixture', 'named', ?2)",
+                rusqlite::params![&invalid, position as i64 + 1],
+            )
+            .unwrap();
+            assert!(
+                conn.execute(
+                    "INSERT INTO extension_native_namespace_obligations(
+                         profile_id, namespace_version
+                     ) VALUES (?1, 1)",
+                    [&invalid],
+                )
+                .is_err(),
+                "accepted noncanonical namespace profile {invalid:?}"
+            );
+        }
+
+        assert!(conn
+            .execute("DELETE FROM profiles WHERE id = ?1", [&profile])
+            .is_err());
+        conn.execute(
+            "INSERT INTO profile_deletion_journal(profile_id, authorized_at)
+             VALUES (?1, 1)",
+            [&profile],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM profiles WHERE id = ?1", [&profile])
+            .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE profile_deletion_journal
+                 SET profile_id = ?2 WHERE profile_id = ?1",
+                rusqlite::params![&profile, &unanchored],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE profile_deletion_journal
+                 SET native_erasure_verified = 1 WHERE profile_id = ?1",
+                [&profile],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "DELETE FROM profile_deletion_journal WHERE profile_id = ?1",
+                [&profile],
+            )
+            .is_err());
+
+        {
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "DELETE FROM extension_native_namespace_obligations
+                 WHERE profile_id = ?1 AND namespace_version = 1",
+                [&profile],
+            )
+            .unwrap();
+            assert_eq!(
+                tx.query_row(
+                    "SELECT native_erasure_verified
+                     FROM profile_deletion_journal WHERE profile_id = ?1",
+                    [&profile],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1
+            );
+            tx.rollback().unwrap();
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT native_erasure_verified,
+                        (SELECT count(*)
+                         FROM extension_native_namespace_obligations
+                         WHERE profile_id = ?1)
+                 FROM profile_deletion_journal WHERE profile_id = ?1",
+                [&profile],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (0, 1)
+        );
+        conn.execute(
+            "DELETE FROM extension_native_namespace_obligations
+             WHERE profile_id = ?1 AND namespace_version = 1",
+            [&profile],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT native_erasure_verified
+                 FROM profile_deletion_journal WHERE profile_id = ?1",
+                [&profile],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute(
+            "DELETE FROM profile_deletion_journal WHERE profile_id = ?1",
+            [&profile],
+        )
+        .unwrap();
+
+        for value in 1_u128..=129 {
+            let profile = zephium_core::ids::ProfileId::from(value).to_string();
+            conn.execute(
+                "INSERT OR IGNORE INTO profiles(id, name, kind, position)
+                 VALUES (?1, 'Capacity', 'named', ?2)",
+                rusqlite::params![&profile, value as i64 + 100],
+            )
+            .unwrap();
+            let inserted = conn.execute(
+                "INSERT INTO extension_native_namespace_obligations(
+                     profile_id, namespace_version
+                 ) VALUES (?1, 1)",
+                [&profile],
+            );
+            if value <= 128 {
+                assert!(inserted.is_ok(), "rejected exact capacity row {value}");
+            } else {
+                assert!(inserted.is_err(), "accepted row beyond exact capacity");
+            }
+        }
     }
 
     #[test]

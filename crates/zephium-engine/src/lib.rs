@@ -41,6 +41,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
+use zephium_core::extensions::ExtensionNativeNamespaceScope;
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
@@ -1532,6 +1533,7 @@ impl Engine for WebviewEngine {
     fn erase_profile_data(
         &self,
         profile: ProfileId,
+        extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     ) {
         // This is the public retirement linearization point. It deliberately
@@ -1609,7 +1611,7 @@ impl Engine for WebviewEngine {
         if !self.run(move || {
             let for_host = dispatched.clone();
             if !host::try_with_profile_erasure(move |host| {
-                host.erase_profile_data(profile, for_host)
+                host.erase_profile_data(profile, extension_native_namespace, for_host)
             }) {
                 // Host unavailability or exhaustion of the dedicated erasure
                 // band is terminal for content access: native controllers may
@@ -1966,7 +1968,11 @@ mod tests {
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
+        engine.erase_profile_data(
+            profile,
+            None,
+            Box::new(move |outcome| tx.send(outcome).unwrap()),
+        );
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -2002,6 +2008,7 @@ mod tests {
 
         engine.erase_profile_data(
             ProfileId::from(89),
+            None,
             Box::new(move |_| {
                 done_entered_tx.send(()).unwrap();
                 let (lock, changed) = &*blocked_release;
@@ -2095,7 +2102,11 @@ mod tests {
 
         reject.store(true, Ordering::Release);
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
+        engine.erase_profile_data(
+            profile,
+            None,
+            Box::new(move |outcome| tx.send(outcome).unwrap()),
+        );
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -2449,7 +2460,11 @@ mod tests {
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
         };
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
+        engine.erase_profile_data(
+            profile,
+            None,
+            Box::new(move |outcome| tx.send(outcome).unwrap()),
+        );
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),

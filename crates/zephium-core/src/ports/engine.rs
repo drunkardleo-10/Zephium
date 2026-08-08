@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
+use crate::extensions::ExtensionNativeNamespaceScope;
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
@@ -621,9 +622,14 @@ pub trait Engine {
     /// `TimedOut` is only a one-shot report to the caller: retry remains denied
     /// while the old native work might still be running, and a late terminal
     /// callback releases admission without invoking `done` again.
+    /// `extension_native_namespace` is the exact durable Store obligation that
+    /// must be joined into the native absence proof. `None` is authoritative
+    /// only when Store reported no such obligation; adapters must never infer
+    /// absence from process-local controller maps.
     fn erase_profile_data(
         &self,
         _profile: ProfileId,
+        _extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     );
     /// Close every native view/context on its owning thread. Completion runs
