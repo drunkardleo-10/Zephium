@@ -8,8 +8,10 @@
 //! release only a reservation that never attached.
 
 mod native_grants;
+mod native_lifecycle;
 
 use std::mem::size_of;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
@@ -31,8 +33,9 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostPublicationPort,
     ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
     ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeNativeIdentityExpectation,
-    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
-    ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeNativeRootLease, ExtensionRuntimeOwnershipDisposition,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
+    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
 };
 
 use crate::MainThreadDispatch;
@@ -41,6 +44,11 @@ use super::resources::NativeResourceClass;
 use super::EngineHost;
 
 use self::native_grants::EngineNativeGrantSnapshot;
+use self::native_lifecycle::{
+    NativeBeginError, NativeCallChannel, NativeCallChannelError, NativeCallKind,
+    NativeCallNotification, NativeCallTicket, NativeCallWaitError, NativeLifecyclePhase,
+    NativeLifecycleSlot, NativeTerminalDisposition, NativeTerminalEffect, PlatformOwnerBundle,
+};
 
 const MAX_ACTIVATION_RESERVATIONS: usize = NativeResourceClass::ExtensionBackground.limit();
 const MAX_RECOVERY_RESERVATIONS: usize = NativeResourceClass::ReconciliationController.limit();
@@ -205,6 +213,10 @@ impl ExtensionRuntimeFactoryGate {
             generation,
             phase: AtomicU8::new(RESERVATION_UNATTACHED),
             authority_state: Mutex::new(authority_state),
+            staged_native_root: Mutex::new(None),
+            native_root_committed: AtomicBool::new(false),
+            native_call: NativeCallChannel::new(),
+            ownership_ingress_active: AtomicBool::new(false),
         }))
     }
 
@@ -250,6 +262,53 @@ impl ExtensionRuntimeFactoryGate {
             return Err(ExtensionRuntimeHostBindError::OwnerConflict);
         }
         record.attached = true;
+        Ok(())
+    }
+
+    /// Returns an activation that performed no native work to its original
+    /// passive reservation state.
+    fn return_unattempted_activation(
+        &self,
+        control: &ReservationControl,
+    ) -> Result<(), ExtensionRuntimeHostBindError> {
+        let mut state = match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.inner.invariant_failed.store(true, Ordering::Release);
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        let Some(record) = state.reservations.iter_mut().find(|record| {
+            record.owner == control.owner()
+                && record.generation == control.generation
+                && record.kind == ReservationKind::Activation
+                && record.attached
+        }) else {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        };
+        if control.phase.load(Ordering::Acquire) != RESERVATION_ATTACHED {
+            self.inner.invariant_failed.store(true, Ordering::Release);
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let authority_state = match control.authority_state.lock() {
+            Ok(authority_state) => authority_state,
+            Err(_) => {
+                self.inner.invariant_failed.store(true, Ordering::Release);
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        if !matches!(
+            *authority_state,
+            ReservationAuthorityState::ActivationPending
+        ) {
+            self.inner.invariant_failed.store(true, Ordering::Release);
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+
+        record.attached = false;
+        control
+            .phase
+            .store(RESERVATION_UNATTACHED, Ordering::Release);
         Ok(())
     }
 
@@ -316,7 +375,8 @@ impl ExtensionRuntimeFactoryGate {
                 Some(authority)
             }
             ReservationAuthorityState::AbsenceProven(_)
-            | ReservationAuthorityState::AuthorityReclaimed => {
+            | ReservationAuthorityState::AuthorityReclaimed
+            | ReservationAuthorityState::IntegrityQuarantined { .. } => {
                 self.inner.invariant_failed.store(true, Ordering::Release);
                 return Err(ExtensionRuntimeHostBindError::InternalInvariant);
             }
@@ -326,6 +386,95 @@ impl ExtensionRuntimeFactoryGate {
         control
             .phase
             .store(RESERVATION_ABSENCE_PROVEN, Ordering::Release);
+        Ok(())
+    }
+
+    /// Re-admits the same generation after an observed `Retryable` result.
+    ///
+    /// `Retryable` must first prove native absence so dropping or cancelling
+    /// the move-only request is passive and safe. If the service instead
+    /// retries that same request, its stable host binding and delegated native
+    /// root must be reusable without minting a second generation or package
+    /// capability. This transition restores only the process-local activation
+    /// reservation; it never reconstructs publication authority.
+    fn rearm_retryable_activation(
+        &self,
+        control: &ReservationControl,
+    ) -> Result<(), ExtensionRuntimeHostBindError> {
+        if self.inner.invariant_failed.load(Ordering::Acquire) {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        if self.inner.sealed.load(Ordering::Acquire) {
+            return Err(ExtensionRuntimeHostBindError::Sealed);
+        }
+        if !Arc::ptr_eq(&control.gate.inner, &self.inner)
+            || !matches!(&control.binding, ReservationBinding::Activation { .. })
+        {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        }
+
+        let mut state = match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.inner.invariant_failed.store(true, Ordering::Release);
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        if self.inner.sealed.load(Ordering::Acquire) {
+            return Err(ExtensionRuntimeHostBindError::Sealed);
+        }
+        if control.phase.load(Ordering::Acquire) != RESERVATION_ABSENCE_PROVEN {
+            self.inner.invariant_failed.store(true, Ordering::Release);
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        if state
+            .reservations
+            .iter()
+            .any(|record| record.owner.same_native_lineage(control.owner()))
+        {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        }
+        let activation_count = state
+            .reservations
+            .iter()
+            .filter(|record| record.kind == ReservationKind::Activation)
+            .count();
+        if state.reservations.len() >= MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS
+            || activation_count >= MAX_ACTIVATION_RESERVATIONS
+        {
+            return Err(ExtensionRuntimeHostBindError::CapacityExceeded);
+        }
+        if state
+            .next_generation
+            .is_some_and(|next| control.generation.get() >= next)
+        {
+            self.inner.invariant_failed.store(true, Ordering::Release);
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+
+        let mut authority_state = match control.authority_state.lock() {
+            Ok(authority_state) => authority_state,
+            Err(_) => {
+                self.inner.invariant_failed.store(true, Ordering::Release);
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        if !matches!(
+            *authority_state,
+            ReservationAuthorityState::AbsenceProven(None)
+        ) {
+            self.inner.invariant_failed.store(true, Ordering::Release);
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+
+        state.reservations.push(ReservationRecord {
+            owner: control.owner(),
+            generation: control.generation,
+            kind: ReservationKind::Activation,
+            attached: true,
+        });
+        *authority_state = ReservationAuthorityState::ActivationPending;
+        control.phase.store(RESERVATION_ATTACHED, Ordering::Release);
         Ok(())
     }
 
@@ -445,6 +594,18 @@ struct ReservationControl {
     // registry remains the sole native owner. One mutex linearizes activation
     // evidence, exact authority ownership, native absence, and reclaim.
     authority_state: Mutex<ReservationAuthorityState>,
+    // The only inline destination for the delegated package-root lease. It
+    // remains here through every possible-owner state; the UI registry keeps
+    // this control alive instead of moving the lease into a second slot.
+    staged_native_root: Mutex<Option<ExtensionRuntimeNativeRootLease>>,
+    native_root_committed: AtomicBool,
+    // Notification only. The UI registry remains the sole physical owner.
+    native_call: NativeCallChannel,
+    // Exactly one ownership-changing dispatch for this reservation may be
+    // retained across the external main-loop queue and the reentrant host
+    // queue. A timed-out pending call keeps this bit until its cancelled
+    // closure is physically executed or dropped.
+    ownership_ingress_active: AtomicBool,
 }
 
 enum ReservationAuthorityState {
@@ -458,6 +619,13 @@ enum ReservationAuthorityState {
     RecoveryUncertain,
     AbsenceProven(Option<ExtensionRuntimeOperationAuthority>),
     AuthorityReclaimed,
+    // An impossible native-owner identity collision revokes operation use but
+    // keeps any already-published move-only authority captive until process
+    // teardown. This state is written under the same mutex witnesses read, so
+    // mint-before-collision or denial-after-collision is exact.
+    IntegrityQuarantined {
+        authority: Option<ExtensionRuntimeOperationAuthority>,
+    },
 }
 
 impl ReservationControl {
@@ -472,6 +640,74 @@ impl ReservationControl {
 
     fn phase(&self) -> u8 {
         self.phase.load(Ordering::Acquire)
+    }
+
+    fn try_acquire_ownership_ingress(self: &Arc<Self>) -> Option<ReservationOwnershipIngress> {
+        self.ownership_ingress_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(ReservationOwnershipIngress {
+            reservation: Arc::clone(self),
+        })
+    }
+
+    fn requires_native_root(&self) -> bool {
+        matches!(
+            &self.binding,
+            ReservationBinding::Activation { expectation, .. }
+                if expectation.target() == ExtensionRuntimeTarget::NativeWebExtension
+        )
+    }
+
+    fn has_staged_native_root(&self) -> Result<bool, ExtensionRuntimeHostBindError> {
+        match self.staged_native_root.lock() {
+            Ok(root) => Ok(root.is_some()),
+            Err(_) => {
+                self.gate
+                    .inner
+                    .invariant_failed
+                    .store(true, Ordering::Release);
+                Err(ExtensionRuntimeHostBindError::InternalInvariant)
+            }
+        }
+    }
+
+    fn stage_native_root(
+        &self,
+        root: ExtensionRuntimeNativeRootLease,
+    ) -> Result<(), ExtensionRuntimeNativeRootLease> {
+        let Ok(mut slot) = self.staged_native_root.lock() else {
+            self.gate
+                .inner
+                .invariant_failed
+                .store(true, Ordering::Release);
+            return Err(root);
+        };
+        if slot.is_some() || self.native_root_committed.load(Ordering::Acquire) {
+            return Err(root);
+        }
+        *slot = Some(root);
+        Ok(())
+    }
+
+    fn commit_staged_native_root(&self) -> Result<(), ExtensionRuntimeHostBindError> {
+        if !self.requires_native_root() {
+            return Ok(());
+        }
+        let root_is_present = self.has_staged_native_root()?;
+        if !root_is_present {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        self.native_root_committed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn native_root_state(&self) -> Result<(bool, bool), ExtensionRuntimeHostBindError> {
+        Ok((
+            self.has_staged_native_root()?,
+            self.native_root_committed.load(Ordering::Acquire),
+        ))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -749,6 +985,38 @@ impl ReservationControl {
         })
     }
 
+    fn quarantine_operation_authority(&self) -> Result<(), ExtensionRuntimeHostBindError> {
+        let mut state = match self.authority_state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.gate
+                    .inner
+                    .invariant_failed
+                    .store(true, Ordering::Release);
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        let previous = std::mem::replace(
+            &mut *state,
+            ReservationAuthorityState::IntegrityQuarantined { authority: None },
+        );
+        let authority = match previous {
+            ReservationAuthorityState::Published { authority, .. }
+            | ReservationAuthorityState::AbsenceProven(authority)
+            | ReservationAuthorityState::IntegrityQuarantined { authority } => authority,
+            ReservationAuthorityState::ActivationPending
+            | ReservationAuthorityState::Activated(_)
+            | ReservationAuthorityState::RecoveryUncertain
+            | ReservationAuthorityState::AuthorityReclaimed => None,
+        };
+        *state = ReservationAuthorityState::IntegrityQuarantined { authority };
+        self.gate
+            .inner
+            .invariant_failed
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
     fn attached_binding_status(&self) -> AttachedBindingStatus {
         if self.phase() != RESERVATION_ATTACHED {
             return AttachedBindingStatus::InvariantFailed;
@@ -816,10 +1084,33 @@ impl Drop for ReservationControl {
     }
 }
 
+/// Physical ownership-dispatch admission retained by the queued closure.
+struct ReservationOwnershipIngress {
+    reservation: Arc<ReservationControl>,
+}
+
+impl Drop for ReservationOwnershipIngress {
+    fn drop(&mut self) {
+        if self
+            .reservation
+            .ownership_ingress_active
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.reservation
+                .gate
+                .inner
+                .invariant_failed
+                .store(true, Ordering::Release);
+        }
+    }
+}
+
 struct RegistryEntry {
     owner: OwnerKey,
     generation: ExtensionRuntimeHostRegistryGeneration,
     reservation: Arc<ReservationControl>,
+    native: NativeLifecycleSlot,
 }
 
 impl RegistryEntry {
@@ -828,7 +1119,19 @@ impl RegistryEntry {
         {
             return AttachedBindingStatus::InvariantFailed;
         }
-        self.reservation.attached_binding_status()
+        let binding = self.reservation.attached_binding_status();
+        if binding != AttachedBindingStatus::Consistent {
+            return binding;
+        }
+        match self
+            .native
+            .notification_is_consistent(&self.reservation.native_call)
+        {
+            Ok(true) => AttachedBindingStatus::Consistent,
+            Ok(false) => AttachedBindingStatus::InvariantFailed,
+            Err(NativeCallChannelError::Busy) => AttachedBindingStatus::Unavailable,
+            Err(_) => AttachedBindingStatus::InvariantFailed,
+        }
     }
 
     #[cfg(test)]
@@ -850,6 +1153,13 @@ enum ProfileObligationStatus {
     Present,
     Unavailable,
     InvariantFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeCallRoute {
+    Begin,
+    Await(NativeCallTicket),
+    Immediate(NativeTerminalDisposition),
 }
 
 /// One physical profile-fence callback may exist across the platform main
@@ -900,6 +1210,7 @@ impl Drop for ProfileFenceAdmission {
 pub(super) struct ExtensionRuntimeRegistry {
     gate: ExtensionRuntimeFactoryGate,
     entries: Vec<RegistryEntry>,
+    next_native_attempt: Option<u64>,
     sealed: bool,
     invariant_failed: bool,
 }
@@ -909,6 +1220,7 @@ impl ExtensionRuntimeRegistry {
         Self {
             gate,
             entries: Vec::with_capacity(MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS),
+            next_native_attempt: Some(1),
             sealed: false,
             invariant_failed: false,
         }
@@ -937,10 +1249,22 @@ impl ExtensionRuntimeRegistry {
             return Err(ExtensionRuntimeHostBindError::OwnerConflict);
         }
         reservation.mark_attached()?;
+        let native = match &reservation.binding {
+            ReservationBinding::Activation { .. } => {
+                NativeLifecycleSlot::activation(owner, generation)
+            }
+            ReservationBinding::Recovery { expectation, .. } => NativeLifecycleSlot::recovery(
+                owner,
+                generation,
+                expectation.known_evidence(),
+                expectation.has_identity_conflict(),
+            ),
+        };
         self.entries.push(RegistryEntry {
             owner,
             generation,
             reservation,
+            native,
         });
         Ok(())
     }
@@ -964,6 +1288,37 @@ impl ExtensionRuntimeRegistry {
         }
     }
 
+    fn return_unattempted_activation(
+        &mut self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+    ) -> Result<(), ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(owner, generation)?;
+        if self.entries[index].native.phase() != NativeLifecyclePhase::ActivationReserved
+            || self.entries[index].native.current_ticket().is_some()
+            || !matches!(
+                &self.entries[index].reservation.binding,
+                ReservationBinding::Activation { .. }
+            )
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let entry = self.entries.remove(index);
+        if self
+            .gate
+            .return_unattempted_activation(&entry.reservation)
+            .is_err()
+        {
+            self.entries.insert(index, entry);
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        drop(entry);
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn prove_absence(
         &mut self,
         owner: OwnerKey,
@@ -978,6 +1333,9 @@ impl ExtensionRuntimeRegistry {
             // settle a newer generation reusing the same durable address.
             return Ok(false);
         };
+        if !self.entries[index].native.permits_unattempted_absence() {
+            return Err(ExtensionRuntimeHostBindError::Unavailable);
+        }
         let entry = self.entries.remove(index);
         match self.gate.prove_absence(&entry.reservation) {
             Ok(()) => Ok(true),
@@ -987,6 +1345,496 @@ impl ExtensionRuntimeRegistry {
                 Err(reason)
             }
         }
+    }
+
+    fn entry_index(
+        &self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+    ) -> Result<usize, ExtensionRuntimeHostBindError> {
+        self.entries
+            .iter()
+            .position(|entry| entry.owner == owner && entry.generation == generation)
+            .ok_or(ExtensionRuntimeHostBindError::OwnerConflict)
+    }
+
+    fn route_previous_call(
+        &mut self,
+        index: usize,
+    ) -> Result<Option<NativeCallTicket>, ExtensionRuntimeHostBindError> {
+        let notification = self.entries[index]
+            .reservation
+            .native_call
+            .current_notification();
+        match notification {
+            Ok(Some((ticket, NativeCallNotification::Pending)))
+            | Ok(Some((
+                ticket,
+                NativeCallNotification::Settled {
+                    observed: false, ..
+                },
+            ))) => Ok(Some(ticket)),
+            Ok(None) | Ok(Some((_, NativeCallNotification::Settled { observed: true, .. }))) => {
+                Ok(None)
+            }
+            Err(NativeCallChannelError::Busy) => Err(ExtensionRuntimeHostBindError::Unavailable),
+            Err(_) => {
+                self.fail_invariant();
+                Err(ExtensionRuntimeHostBindError::InternalInvariant)
+            }
+        }
+    }
+
+    fn native_call_route(
+        &mut self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        requested: NativeCallKind,
+    ) -> Result<NativeCallRoute, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(owner, generation)?;
+        if let Some(ticket) = self.route_previous_call(index)? {
+            return Ok(NativeCallRoute::Await(ticket));
+        }
+        let entry = &self.entries[index];
+        let evidence = entry.native.positive_evidence();
+        let route = match (requested, entry.native.phase()) {
+            (NativeCallKind::Activation, NativeLifecyclePhase::ActivationReserved)
+            | (NativeCallKind::Retirement, NativeLifecyclePhase::Owned)
+            | (
+                NativeCallKind::Reconciliation,
+                NativeLifecyclePhase::Uncertain
+                | NativeLifecyclePhase::RecoveryUncertainWithoutResource
+                | NativeLifecyclePhase::RecoveryUncertainWithResource,
+            ) => NativeCallRoute::Begin,
+            (NativeCallKind::Activation, NativeLifecyclePhase::Owned) => {
+                let Some(evidence) = evidence else {
+                    return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                };
+                NativeCallRoute::Immediate(NativeTerminalDisposition::Activation(
+                    ExtensionRuntimeActivationDisposition::Activated(evidence),
+                ))
+            }
+            (NativeCallKind::Reconciliation, NativeLifecyclePhase::Owned) => {
+                let Some(evidence) = evidence else {
+                    return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                };
+                NativeCallRoute::Immediate(NativeTerminalDisposition::Reconciliation(
+                    ExtensionRuntimeOwnershipDisposition::Owned(evidence),
+                ))
+            }
+            (NativeCallKind::Retirement, _) => {
+                NativeCallRoute::Immediate(NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence,
+                    },
+                ))
+            }
+            (NativeCallKind::Activation, _) => {
+                NativeCallRoute::Immediate(NativeTerminalDisposition::Activation(
+                    ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence,
+                    },
+                ))
+            }
+            (NativeCallKind::Reconciliation, _) => {
+                NativeCallRoute::Immediate(NativeTerminalDisposition::Reconciliation(
+                    ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence,
+                    },
+                ))
+            }
+        };
+        Ok(route)
+    }
+
+    /// Resolves attachment, retry re-entry, and already-proven absence before
+    /// selecting a native operation.
+    fn route_native_call(
+        &mut self,
+        reservation: Arc<ReservationControl>,
+        requested: NativeCallKind,
+    ) -> Result<NativeCallRoute, ExtensionRuntimeHostBindError> {
+        if self.invariant_failed || self.gate.inner.invariant_failed.load(Ordering::Acquire) {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        if !Arc::ptr_eq(&reservation.gate.inner, &self.gate.inner) {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        }
+        let owner = reservation.owner();
+        let generation = reservation.generation;
+        match reservation.phase() {
+            RESERVATION_UNATTACHED | RESERVATION_ATTACHED => {
+                self.attach_if_needed(reservation)?;
+                self.native_call_route(owner, generation, requested)
+            }
+            RESERVATION_ABSENCE_PROVEN | RESERVATION_AUTHORITY_RECLAIMED => match requested {
+                NativeCallKind::Retirement => Ok(NativeCallRoute::Immediate(
+                    NativeTerminalDisposition::Retirement(
+                        ExtensionRuntimeRetirementDisposition::Retired,
+                    ),
+                )),
+                NativeCallKind::Reconciliation => Ok(NativeCallRoute::Immediate(
+                    NativeTerminalDisposition::Reconciliation(
+                        ExtensionRuntimeOwnershipDisposition::Absent,
+                    ),
+                )),
+                NativeCallKind::Activation => {
+                    let observed_retryable = match reservation
+                        .native_call
+                        .observed_retryable_activation(owner, generation)
+                    {
+                        Ok(observed) => observed,
+                        Err(_) => {
+                            self.fail_invariant();
+                            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                        }
+                    };
+                    if reservation.phase() != RESERVATION_ABSENCE_PROVEN || !observed_retryable {
+                        self.fail_invariant();
+                        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                    }
+                    if self.sealed {
+                        return Err(ExtensionRuntimeHostBindError::Sealed);
+                    }
+                    if self.invariant_failed {
+                        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                    }
+                    if self.entries.len() >= MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS {
+                        return Err(ExtensionRuntimeHostBindError::CapacityExceeded);
+                    }
+                    if self
+                        .entries
+                        .iter()
+                        .any(|entry| entry.owner.same_native_lineage(owner))
+                    {
+                        return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+                    }
+                    self.gate.rearm_retryable_activation(&reservation)?;
+                    self.entries.push(RegistryEntry {
+                        owner,
+                        generation,
+                        reservation,
+                        native: NativeLifecycleSlot::activation(owner, generation),
+                    });
+                    self.native_call_route(owner, generation, requested)
+                }
+            },
+            _ => {
+                self.fail_invariant();
+                Err(ExtensionRuntimeHostBindError::InternalInvariant)
+            }
+        }
+    }
+
+    fn native_phase(
+        &self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+    ) -> Result<NativeLifecyclePhase, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(owner, generation)?;
+        Ok(self.entries[index].native.phase())
+    }
+
+    fn mint_native_ticket(
+        &mut self,
+        index: usize,
+        kind: NativeCallKind,
+    ) -> Result<NativeCallTicket, ExtensionRuntimeHostBindError> {
+        let Some(raw_attempt) = self.next_native_attempt else {
+            return Err(ExtensionRuntimeHostBindError::IdentityExhausted);
+        };
+        let Some(attempt) = NonZeroU64::new(raw_attempt) else {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        };
+        let Some(entry) = self.entries.get(index) else {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        };
+        let ticket = NativeCallTicket::from_registry(entry.owner, entry.generation, kind, attempt);
+        self.next_native_attempt = raw_attempt.checked_add(1);
+        Ok(ticket)
+    }
+
+    fn begin_native_activation(
+        &mut self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        deadline: Instant,
+        native: super::resources::NativeResourceLease,
+    ) -> Result<NativeCallTicket, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(owner, generation)?;
+        let ticket = self.mint_native_ticket(index, NativeCallKind::Activation)?;
+        if let Err((_reason, native)) = self.entries[index]
+            .native
+            .begin_activation(ticket, deadline, native)
+        {
+            drop(native);
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        if self.entries[index]
+            .reservation
+            .commit_staged_native_root()
+            .is_err()
+            || self.entries[index]
+                .reservation
+                .native_call
+                .begin(ticket)
+                .is_err()
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        Ok(ticket)
+    }
+
+    fn begin_native_retirement(
+        &mut self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        deadline: Instant,
+    ) -> Result<NativeCallTicket, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(owner, generation)?;
+        let ticket = self.mint_native_ticket(index, NativeCallKind::Retirement)?;
+        if self.entries[index]
+            .native
+            .begin_retirement(ticket, deadline)
+            .is_err()
+            || self.entries[index]
+                .reservation
+                .native_call
+                .begin(ticket)
+                .is_err()
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        Ok(ticket)
+    }
+
+    fn begin_native_reconciliation(
+        &mut self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        deadline: Instant,
+        recovery_native: Option<super::resources::NativeResourceLease>,
+    ) -> Result<NativeCallTicket, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(owner, generation)?;
+        let ticket = self.mint_native_ticket(index, NativeCallKind::Reconciliation)?;
+        if let Err((_reason, returned)) =
+            self.entries[index]
+                .native
+                .begin_reconciliation(ticket, deadline, recovery_native)
+        {
+            drop(returned);
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        if self.entries[index]
+            .reservation
+            .native_call
+            .begin(ticket)
+            .is_err()
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        Ok(ticket)
+    }
+
+    fn complete_native_activation(
+        &mut self,
+        ticket: NativeCallTicket,
+        disposition: ExtensionRuntimeActivationDisposition,
+        platform_owner: PlatformOwnerBundle,
+    ) -> Result<bool, ExtensionRuntimeHostBindError> {
+        let index = match self.entry_index(ticket.owner(), ticket.registry_generation()) {
+            Ok(index) => index,
+            Err(ExtensionRuntimeHostBindError::OwnerConflict) => return Ok(false),
+            Err(reason) => return Err(reason),
+        };
+        if !self.callback_is_pending(index, ticket)? {
+            return Ok(false);
+        }
+        let expectation = match &self.entries[index].reservation.binding {
+            ReservationBinding::Activation { expectation, .. } => *expectation,
+            ReservationBinding::Recovery { .. } => {
+                self.fail_invariant();
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        let effect = self.entries[index]
+            .native
+            .settle_activation(ticket, disposition, platform_owner, |evidence| {
+                activation_expectation_accepts(expectation, evidence)
+            })
+            .map_err(|reason| self.transition_error(reason))?;
+        self.publish_native_terminal(index, ticket, effect)
+    }
+
+    fn complete_native_retirement(
+        &mut self,
+        ticket: NativeCallTicket,
+        disposition: ExtensionRuntimeRetirementDisposition,
+    ) -> Result<bool, ExtensionRuntimeHostBindError> {
+        let index = match self.entry_index(ticket.owner(), ticket.registry_generation()) {
+            Ok(index) => index,
+            Err(ExtensionRuntimeHostBindError::OwnerConflict) => return Ok(false),
+            Err(reason) => return Err(reason),
+        };
+        if !self.callback_is_pending(index, ticket)? {
+            return Ok(false);
+        }
+        let expectation =
+            BindingEvidenceExpectation::from_binding(&self.entries[index].reservation.binding);
+        let effect = self.entries[index]
+            .native
+            .settle_retirement(ticket, disposition, |evidence| {
+                expectation.accepts(evidence)
+            })
+            .map_err(|reason| self.transition_error(reason))?;
+        self.publish_native_terminal(index, ticket, effect)
+    }
+
+    fn complete_native_reconciliation(
+        &mut self,
+        ticket: NativeCallTicket,
+        disposition: ExtensionRuntimeOwnershipDisposition,
+        platform_owner: PlatformOwnerBundle,
+    ) -> Result<bool, ExtensionRuntimeHostBindError> {
+        let index = match self.entry_index(ticket.owner(), ticket.registry_generation()) {
+            Ok(index) => index,
+            Err(ExtensionRuntimeHostBindError::OwnerConflict) => return Ok(false),
+            Err(reason) => return Err(reason),
+        };
+        if !self.callback_is_pending(index, ticket)? {
+            return Ok(false);
+        }
+        let expectation =
+            BindingEvidenceExpectation::from_binding(&self.entries[index].reservation.binding);
+        let effect = self.entries[index]
+            .native
+            .settle_reconciliation(ticket, disposition, platform_owner, |evidence| {
+                expectation.accepts(evidence)
+            })
+            .map_err(|reason| self.transition_error(reason))?;
+        self.publish_native_terminal(index, ticket, effect)
+    }
+
+    fn publish_native_terminal(
+        &mut self,
+        index: usize,
+        ticket: NativeCallTicket,
+        effect: NativeTerminalEffect,
+    ) -> Result<bool, ExtensionRuntimeHostBindError> {
+        if self.entries[index].native.phase() == NativeLifecyclePhase::OwnerCollisionQuarantined {
+            let quarantine = self.entries[index]
+                .reservation
+                .quarantine_operation_authority();
+            self.fail_invariant();
+            quarantine?;
+        }
+        let disposition = match effect {
+            NativeTerminalEffect::Publish(disposition) => {
+                if let NativeTerminalDisposition::Activation(
+                    ExtensionRuntimeActivationDisposition::Activated(evidence),
+                ) = disposition
+                {
+                    if let Err(reason) = self.entries[index].reservation.mark_activated(evidence) {
+                        self.fail_invariant();
+                        return Err(reason);
+                    }
+                }
+                if self.entries[index]
+                    .reservation
+                    .native_call
+                    .settle(ticket, disposition)
+                    .is_err()
+                {
+                    self.fail_invariant();
+                    return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                }
+                return Ok(true);
+            }
+            NativeTerminalEffect::DefiniteAbsence(disposition) => disposition,
+        };
+
+        if !matches!(
+            self.entries[index]
+                .reservation
+                .native_call
+                .notification_for(ticket),
+            Ok(NativeCallNotification::Pending)
+        ) {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let entry = self.entries.remove(index);
+        if let Err(reason) = self.gate.prove_absence(&entry.reservation) {
+            self.entries.insert(index, entry);
+            self.fail_invariant();
+            return Err(reason);
+        }
+        if entry
+            .reservation
+            .native_call
+            .settle(ticket, disposition)
+            .is_err()
+        {
+            // Gate absence already linearized. Retain every physical resource
+            // in an intentionally inconsistent entry so shutdown cannot claim
+            // clean quiescence after notification corruption.
+            self.entries.insert(index, entry);
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        drop(entry);
+        Ok(true)
+    }
+
+    fn fail_invariant(&mut self) {
+        self.invariant_failed = true;
+        self.gate
+            .inner
+            .invariant_failed
+            .store(true, Ordering::Release);
+    }
+
+    fn callback_is_pending(
+        &mut self,
+        index: usize,
+        ticket: NativeCallTicket,
+    ) -> Result<bool, ExtensionRuntimeHostBindError> {
+        match self.entries[index]
+            .reservation
+            .native_call
+            .notification_for(ticket)
+        {
+            Ok(NativeCallNotification::Pending) => Ok(true),
+            Ok(NativeCallNotification::Settled { .. })
+            | Err(NativeCallChannelError::StaleTicket) => Ok(false),
+            Err(NativeCallChannelError::Busy) => Err(ExtensionRuntimeHostBindError::Unavailable),
+            Err(_) => {
+                self.fail_invariant();
+                Err(ExtensionRuntimeHostBindError::InternalInvariant)
+            }
+        }
+    }
+
+    fn transition_error(&mut self, reason: NativeBeginError) -> ExtensionRuntimeHostBindError {
+        if reason == NativeBeginError::StaleTicket {
+            return ExtensionRuntimeHostBindError::OwnerConflict;
+        }
+        self.fail_invariant();
+        ExtensionRuntimeHostBindError::InternalInvariant
+    }
+
+    pub(super) fn fail_terminal_transport_invariant(&mut self) {
+        self.fail_invariant();
     }
 
     #[cfg(test)]
@@ -1012,7 +1860,11 @@ impl ExtensionRuntimeRegistry {
     }
 
     pub(super) fn is_quiescent(&self) -> bool {
-        self.sealed && !self.invariant_failed && self.entries.is_empty() && self.gate.is_quiescent()
+        self.sealed
+            && !self.invariant_failed
+            && self.entries.is_empty()
+            && self.gate.is_quiescent()
+            && super::dispatch::extension_runtime_terminals_are_quiescent()
     }
 
     /// Audits the complete process-local obligation ledger at one bounded
@@ -1190,6 +2042,58 @@ fn activation_expectation_accepts(
             ExtensionRuntimeOwnershipEvidence::Compatibility
         )
     )
+}
+
+#[derive(Clone, Copy)]
+enum BindingEvidenceExpectation {
+    Activation(ExtensionRuntimeNativeIdentityExpectation),
+    Recovery(ExtensionRuntimeRecoveryExpectation),
+}
+
+impl BindingEvidenceExpectation {
+    const fn from_binding(binding: &ReservationBinding) -> Self {
+        match binding {
+            ReservationBinding::Activation { expectation, .. } => Self::Activation(*expectation),
+            ReservationBinding::Recovery { expectation, .. } => Self::Recovery(*expectation),
+        }
+    }
+
+    fn accepts(self, evidence: ExtensionRuntimeOwnershipEvidence) -> bool {
+        match self {
+            Self::Activation(expectation) => activation_expectation_accepts(expectation, evidence),
+            Self::Recovery(expectation) => recovery_expectation_accepts(expectation, evidence),
+        }
+    }
+}
+
+fn recovery_expectation_accepts(
+    expectation: ExtensionRuntimeRecoveryExpectation,
+    evidence: ExtensionRuntimeOwnershipEvidence,
+) -> bool {
+    match (expectation, evidence) {
+        (
+            ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                catalog_expected,
+                adapter_observed,
+            },
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(actual),
+        )
+        | (
+            ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                catalog_expected,
+                adapter_observed,
+            },
+            ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(actual),
+        ) => {
+            catalog_expected.is_none_or(|expected| expected == actual)
+                && adapter_observed.is_none_or(|observed| observed == actual)
+        }
+        (
+            ExtensionRuntimeRecoveryExpectation::Compatibility,
+            ExtensionRuntimeOwnershipEvidence::Compatibility,
+        ) => true,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1385,6 +2289,7 @@ impl<Output> HostCall<Output> {
     }
 }
 
+#[cfg(test)]
 fn dispatch_host_call<Output, Operation>(
     dispatch: &MainThreadDispatch,
     deadline: Option<Instant>,
@@ -1398,7 +2303,30 @@ where
         dispatch,
         deadline,
         HostCallWaitMode::OwnershipMutation,
+        (),
         operation,
+    )
+}
+
+fn dispatch_reservation_host_call<Output, Operation>(
+    dispatch: &MainThreadDispatch,
+    deadline: Instant,
+    reservation: Arc<ReservationControl>,
+    operation: Operation,
+) -> Result<Output, HostCallFailure>
+where
+    Output: Send + 'static,
+    Operation: FnOnce(&mut EngineHost, Arc<ReservationControl>) -> Output + Send + 'static,
+{
+    let Some(ingress) = reservation.try_acquire_ownership_ingress() else {
+        return Err(HostCallFailure::Unavailable);
+    };
+    dispatch_host_call_with_mode(
+        dispatch,
+        Some(deadline),
+        HostCallWaitMode::OwnershipMutation,
+        ingress,
+        move |host| operation(host, reservation),
     )
 }
 
@@ -1415,19 +2343,22 @@ where
         dispatch,
         Some(deadline),
         HostCallWaitMode::ReadOnlyFence,
+        (),
         operation,
     )
 }
 
-fn dispatch_host_call_with_mode<Output, Operation>(
+fn dispatch_host_call_with_mode<Output, Operation, Lifetime>(
     dispatch: &MainThreadDispatch,
     deadline: Option<Instant>,
     mode: HostCallWaitMode,
+    lifetime: Lifetime,
     operation: Operation,
 ) -> Result<Output, HostCallFailure>
 where
     Output: Send + 'static,
     Operation: FnOnce(&mut EngineHost) -> Output + Send + 'static,
+    Lifetime: Send + 'static,
 {
     let completion = Arc::new(HostCall::new());
     let queued_completion = Arc::clone(&completion);
@@ -1437,6 +2368,10 @@ where
         }
         let host_completion = Arc::clone(&queued_completion);
         let host_task = move |host: &mut EngineHost| {
+            // The reservation-local single-flight admission spans both the
+            // external main-loop queue and this reentrant host queue. It is
+            // released only when the physical closure executes or is dropped.
+            let _lifetime = lifetime;
             if !host_completion.begin() {
                 return;
             }
@@ -1644,25 +2579,81 @@ impl zephium_extension_runtime_api::ExtensionRuntimeOwnershipPort for EngineLife
 impl zephium_extension_runtime_api::ExtensionRuntimeLifecyclePort for EngineLifecyclePort {
     fn activate_until(
         &mut self,
-        _access: &mut ExtensionPackageAccessView<'_>,
+        access: &mut ExtensionPackageAccessView<'_>,
         deadline: Instant,
     ) -> ExtensionRuntimeActivationDisposition {
+        if let Err(disposition) = stage_activation_native_root(&self.reservation, access) {
+            return disposition;
+        }
         let reservation = Arc::clone(&self.reservation);
-        match dispatch_host_call(&self.dispatch, Some(deadline), move |host| {
-            let owner = reservation.owner();
-            let generation = reservation.generation;
-            host.extension_runtime_registry
-                .attach_if_needed(Arc::clone(&reservation))?;
-            // No production native adapter is enabled in this commit. The
-            // logical harness proves the registry transition, then records
-            // definite absence without touching the native resource ledger.
-            host.extension_runtime_registry
-                .prove_absence(owner, generation)?;
-            Ok::<_, ExtensionRuntimeHostBindError>(())
-        }) {
-            Ok(Ok(())) => ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::UnsupportedTarget,
-            ),
+        match dispatch_reservation_host_call(
+            &self.dispatch,
+            deadline,
+            reservation,
+            move |host, reservation| {
+                let owner = reservation.owner();
+                let generation = reservation.generation;
+                match host
+                    .extension_runtime_registry
+                    .route_native_call(Arc::clone(&reservation), NativeCallKind::Activation)?
+                {
+                    NativeCallRoute::Begin => {
+                        let native = match acquire_extension_native_resource(
+                            host,
+                            NativeResourceClass::ExtensionBackground,
+                        ) {
+                            Ok(native) => native,
+                            Err(reason) => {
+                                host.extension_runtime_registry
+                                    .return_unattempted_activation(owner, generation)?;
+                                return Err(reason);
+                            }
+                        };
+                        let ticket = match host
+                            .extension_runtime_registry
+                            .begin_native_activation(owner, generation, deadline, native)
+                        {
+                            Ok(ticket) => ticket,
+                            Err(reason) => {
+                                if host
+                                    .extension_runtime_registry
+                                    .native_phase(owner, generation)
+                                    == Ok(NativeLifecyclePhase::ActivationReserved)
+                                {
+                                    host.extension_runtime_registry
+                                        .return_unattempted_activation(owner, generation)?;
+                                }
+                                return Err(reason);
+                            }
+                        };
+                        let accepted =
+                            super::dispatch::with_extension_runtime_terminal(move |host| {
+                                let settled =
+                                    host.extension_runtime_registry.complete_native_activation(
+                                        ticket,
+                                        ExtensionRuntimeActivationDisposition::Rejected(
+                                            ExtensionRuntimeFailure::UnsupportedTarget,
+                                        ),
+                                        PlatformOwnerBundle::Vacant,
+                                    );
+                                if settled.is_err() {
+                                    fail_extension_native_terminal(
+                                host,
+                                "logical extension activation terminal violated registry state",
+                            );
+                                }
+                            });
+                        // On refusal, the terminal transport itself owns the
+                        // sticky fail-stop. This exact attempt remains pending;
+                        // inventing uncertainty would admit a late native effect.
+                        let _terminal_transport_accepted = accepted;
+                        Ok(NativeCallRoute::Await(ticket))
+                    }
+                    route => Ok(route),
+                }
+            },
+        ) {
+            Ok(Ok(route)) => activation_disposition_from_route(&self.reservation, route, deadline),
             Ok(Err(reason)) => activation_bind_failure(reason),
             Err(HostCallFailure::TimedOut) => {
                 ExtensionRuntimeActivationDisposition::Retryable(ExtensionRuntimeFailure::TimedOut)
@@ -1711,23 +2702,44 @@ fn ownership_retirement(
     reservation: Arc<ReservationControl>,
     deadline: Instant,
 ) -> ExtensionRuntimeRetirementDisposition {
-    let is_recovery = matches!(reservation.binding, ReservationBinding::Recovery { .. });
-    match dispatch_host_call(dispatch, Some(deadline), move |host| {
-        host.extension_runtime_registry
-            .attach_if_needed(Arc::clone(&reservation))?;
-        if is_recovery {
-            return Ok::<_, ExtensionRuntimeHostBindError>(false);
-        }
-        let removed = host
-            .extension_runtime_registry
-            .prove_absence(reservation.owner(), reservation.generation)?;
-        Ok(removed)
-    }) {
-        Ok(Ok(true)) => ExtensionRuntimeRetirementDisposition::Retired,
-        Ok(Ok(false)) => ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
-            failure: ExtensionRuntimeFailure::UnsupportedTarget,
-            evidence: None,
+    let waiting = Arc::clone(&reservation);
+    match dispatch_reservation_host_call(
+        dispatch,
+        deadline,
+        reservation,
+        move |host, reservation| {
+            let owner = reservation.owner();
+            let generation = reservation.generation;
+            match host
+                .extension_runtime_registry
+                .route_native_call(Arc::clone(&reservation), NativeCallKind::Retirement)?
+            {
+                NativeCallRoute::Begin => {
+                    let ticket = host
+                        .extension_runtime_registry
+                        .begin_native_retirement(owner, generation, deadline)?;
+                    let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
+                        let settled = host.extension_runtime_registry.complete_native_retirement(
+                            ticket,
+                            ExtensionRuntimeRetirementDisposition::Retained(
+                                ExtensionRuntimeFailure::UnsupportedTarget,
+                            ),
+                        );
+                        if settled.is_err() {
+                            fail_extension_native_terminal(
+                                host,
+                                "logical extension retirement terminal violated registry state",
+                            );
+                        }
+                    });
+                    let _terminal_transport_accepted = accepted;
+                    Ok(NativeCallRoute::Await(ticket))
+                }
+                route => Ok(route),
+            }
         },
+    ) {
+        Ok(Ok(route)) => retirement_disposition_from_route(&waiting, route, deadline),
         Ok(Err(reason)) => retirement_bind_failure(reason),
         Err(HostCallFailure::TimedOut) => {
             ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
@@ -1755,23 +2767,65 @@ fn ownership_reconciliation(
     reservation: Arc<ReservationControl>,
     deadline: Instant,
 ) -> ExtensionRuntimeOwnershipDisposition {
-    let is_recovery = matches!(reservation.binding, ReservationBinding::Recovery { .. });
-    match dispatch_host_call(dispatch, Some(deadline), move |host| {
-        host.extension_runtime_registry
-            .attach_if_needed(Arc::clone(&reservation))?;
-        if is_recovery {
-            return Ok::<_, ExtensionRuntimeHostBindError>(false);
-        }
-        let removed = host
-            .extension_runtime_registry
-            .prove_absence(reservation.owner(), reservation.generation)?;
-        Ok(removed)
-    }) {
-        Ok(Ok(true)) => ExtensionRuntimeOwnershipDisposition::Absent,
-        Ok(Ok(false)) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
-            failure: ExtensionRuntimeFailure::UnsupportedTarget,
-            evidence: None,
+    let waiting = Arc::clone(&reservation);
+    match dispatch_reservation_host_call(
+        dispatch,
+        deadline,
+        reservation,
+        move |host, reservation| {
+            let owner = reservation.owner();
+            let generation = reservation.generation;
+            match host
+                .extension_runtime_registry
+                .route_native_call(Arc::clone(&reservation), NativeCallKind::Reconciliation)?
+            {
+                NativeCallRoute::Begin => {
+                    let recovery_native = match host
+                        .extension_runtime_registry
+                        .native_phase(owner, generation)?
+                    {
+                        NativeLifecyclePhase::RecoveryUncertainWithoutResource => {
+                            Some(acquire_extension_native_resource(
+                                host,
+                                NativeResourceClass::ReconciliationController,
+                            )?)
+                        }
+                        _ => None,
+                    };
+                    let ticket = host
+                        .extension_runtime_registry
+                        .begin_native_reconciliation(
+                            owner,
+                            generation,
+                            deadline,
+                            recovery_native,
+                        )?;
+                    let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
+                        let settled = host
+                            .extension_runtime_registry
+                            .complete_native_reconciliation(
+                                ticket,
+                                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                                    failure: ExtensionRuntimeFailure::UnsupportedTarget,
+                                    evidence: None,
+                                },
+                                PlatformOwnerBundle::Vacant,
+                            );
+                        if settled.is_err() {
+                            fail_extension_native_terminal(
+                                host,
+                                "logical extension reconciliation terminal violated registry state",
+                            );
+                        }
+                    });
+                    let _terminal_transport_accepted = accepted;
+                    Ok(NativeCallRoute::Await(ticket))
+                }
+                route => Ok(route),
+            }
         },
+    ) {
+        Ok(Ok(route)) => ownership_disposition_from_route(&waiting, route, deadline),
         Ok(Err(reason)) => ownership_bind_failure(reason),
         Err(HostCallFailure::TimedOut) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
             failure: ExtensionRuntimeFailure::TimedOut,
@@ -1785,6 +2839,210 @@ fn ownership_reconciliation(
             failure: ExtensionRuntimeFailure::Internal,
             evidence: None,
         },
+    }
+}
+
+fn stage_activation_native_root(
+    reservation: &ReservationControl,
+    access: &mut ExtensionPackageAccessView<'_>,
+) -> Result<(), ExtensionRuntimeActivationDisposition> {
+    if !reservation.requires_native_root() {
+        return Ok(());
+    }
+    match reservation.has_staged_native_root() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(_) => {
+            return Err(ExtensionRuntimeActivationDisposition::Rejected(
+                ExtensionRuntimeFailure::Internal,
+            ));
+        }
+    }
+    if access.target() != ExtensionRuntimeTarget::NativeWebExtension {
+        return Err(ExtensionRuntimeActivationDisposition::Rejected(
+            ExtensionRuntimeFailure::PackageRejected,
+        ));
+    }
+    let root = access.take_native_root_lease().map_err(|_| {
+        ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::PackageRejected)
+    })?;
+    reservation.stage_native_root(root).map_err(|root| {
+        drop(root);
+        ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::Internal)
+    })
+}
+
+fn acquire_extension_native_resource(
+    host: &mut EngineHost,
+    class: NativeResourceClass,
+) -> Result<super::resources::NativeResourceLease, ExtensionRuntimeHostBindError> {
+    match host.native_resources.try_acquire(class) {
+        Ok(native) => Ok(native),
+        Err(
+            super::resources::NativeResourceAdmissionError::ClassExhausted(_)
+            | super::resources::NativeResourceAdmissionError::GlobalExhausted,
+        ) => Err(ExtensionRuntimeHostBindError::CapacityExceeded),
+        Err(super::resources::NativeResourceAdmissionError::AccountingInvariant) => {
+            host.native_resource_accounting_failed = true;
+            Err(ExtensionRuntimeHostBindError::InternalInvariant)
+        }
+    }
+}
+
+fn fail_extension_native_terminal(host: &mut EngineHost, reason: &'static str) {
+    host.extension_runtime_registry
+        .fail_terminal_transport_invariant();
+    (host.native_terminal_failure)(reason);
+}
+
+fn terminal_from_route(
+    reservation: &ReservationControl,
+    route: NativeCallRoute,
+    deadline: Instant,
+) -> Result<NativeTerminalDisposition, NativeCallWaitError> {
+    match route {
+        NativeCallRoute::Await(ticket) => reservation.native_call.wait_until(ticket, deadline),
+        NativeCallRoute::Immediate(disposition) => Ok(disposition),
+        NativeCallRoute::Begin => Err(NativeCallWaitError::InvariantFailed),
+    }
+}
+
+fn mark_channel_invariant(reservation: &ReservationControl) {
+    reservation
+        .gate
+        .inner
+        .invariant_failed
+        .store(true, Ordering::Release);
+}
+
+fn activation_disposition_from_route(
+    reservation: &ReservationControl,
+    route: NativeCallRoute,
+    deadline: Instant,
+) -> ExtensionRuntimeActivationDisposition {
+    match terminal_from_route(reservation, route, deadline) {
+        Ok(NativeTerminalDisposition::Activation(disposition)) => disposition,
+        Ok(_) | Err(NativeCallWaitError::StaleTicket | NativeCallWaitError::InvariantFailed) => {
+            mark_channel_invariant(reservation);
+            ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            }
+        }
+        Err(NativeCallWaitError::TimedOut) => {
+            ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::TimedOut,
+                evidence: None,
+            }
+        }
+    }
+}
+
+fn retirement_disposition_from_route(
+    reservation: &ReservationControl,
+    route: NativeCallRoute,
+    deadline: Instant,
+) -> ExtensionRuntimeRetirementDisposition {
+    match terminal_from_route(reservation, route, deadline) {
+        Ok(NativeTerminalDisposition::Retirement(disposition)) => disposition,
+        Ok(NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::Retryable(_)
+            | ExtensionRuntimeActivationDisposition::Rejected(_),
+        ))
+        | Ok(NativeTerminalDisposition::Reconciliation(
+            ExtensionRuntimeOwnershipDisposition::Absent,
+        )) => ExtensionRuntimeRetirementDisposition::Retired,
+        Ok(NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::Activated(_),
+        ))
+        | Ok(NativeTerminalDisposition::Reconciliation(
+            ExtensionRuntimeOwnershipDisposition::Owned(_),
+        )) => ExtensionRuntimeRetirementDisposition::Retained(
+            ExtensionRuntimeFailure::BackendUnavailable,
+        ),
+        Ok(NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::OwnershipUncertain { failure, evidence },
+        ))
+        | Ok(NativeTerminalDisposition::Reconciliation(
+            ExtensionRuntimeOwnershipDisposition::StillUncertain { failure, evidence },
+        )) => ExtensionRuntimeRetirementDisposition::OwnershipUncertain { failure, evidence },
+        Ok(_) | Err(NativeCallWaitError::StaleTicket | NativeCallWaitError::InvariantFailed) => {
+            mark_channel_invariant(reservation);
+            ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            }
+        }
+        Err(NativeCallWaitError::TimedOut) => {
+            ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::TimedOut,
+                evidence: None,
+            }
+        }
+    }
+}
+
+fn ownership_disposition_from_route(
+    reservation: &ReservationControl,
+    route: NativeCallRoute,
+    deadline: Instant,
+) -> ExtensionRuntimeOwnershipDisposition {
+    match terminal_from_route(reservation, route, deadline) {
+        Ok(NativeTerminalDisposition::Reconciliation(disposition)) => disposition,
+        Ok(NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::Activated(evidence),
+        )) => ExtensionRuntimeOwnershipDisposition::Owned(evidence),
+        Ok(NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::Retryable(_)
+            | ExtensionRuntimeActivationDisposition::Rejected(_),
+        ))
+        | Ok(NativeTerminalDisposition::Retirement(
+            ExtensionRuntimeRetirementDisposition::Retired,
+        )) => ExtensionRuntimeOwnershipDisposition::Absent,
+        Ok(NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::OwnershipUncertain { failure, evidence },
+        ))
+        | Ok(NativeTerminalDisposition::Retirement(
+            ExtensionRuntimeRetirementDisposition::OwnershipUncertain { failure, evidence },
+        )) => ExtensionRuntimeOwnershipDisposition::StillUncertain { failure, evidence },
+        Ok(NativeTerminalDisposition::Retirement(
+            ExtensionRuntimeRetirementDisposition::Retained(failure),
+        )) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
+            failure,
+            evidence: binding_known_evidence(&reservation.binding),
+        },
+        Ok(_) | Err(NativeCallWaitError::StaleTicket | NativeCallWaitError::InvariantFailed) => {
+            mark_channel_invariant(reservation);
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            }
+        }
+        Err(NativeCallWaitError::TimedOut) => {
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::TimedOut,
+                evidence: None,
+            }
+        }
+    }
+}
+
+fn binding_known_evidence(
+    binding: &ReservationBinding,
+) -> Option<ExtensionRuntimeOwnershipEvidence> {
+    match binding {
+        ReservationBinding::Activation { expectation, .. } => match expectation {
+            ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(owner) => {
+                Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(*owner))
+            }
+            ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(owner) => Some(
+                ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(*owner),
+            ),
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility => {
+                Some(ExtensionRuntimeOwnershipEvidence::Compatibility)
+            }
+        },
+        ReservationBinding::Recovery { expectation, .. } => expectation.known_evidence(),
     }
 }
 
@@ -1989,6 +3247,7 @@ impl ExtensionRuntimeHostFactorySlot {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use zephium_core::extensions::{
@@ -2014,8 +3273,14 @@ mod tests {
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
     use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
     use zephium_extension_runtime_api::{
-        ExtensionRuntimeHostRecoveryBinding, ExtensionRuntimeNativeOwnerId,
-        ExtensionRuntimeRecoverySettlement,
+        ExtensionPackageAccess, ExtensionPackageAccessError, ExtensionPackageAccessPort,
+        ExtensionRuntimeActivationRequest, ExtensionRuntimeActivationSettlement,
+        ExtensionRuntimeHostRecoveryBinding, ExtensionRuntimeLifecyclePort,
+        ExtensionRuntimeNativeOwnerId, ExtensionRuntimeNativeRootLeasePort,
+        ExtensionRuntimeNativeRootVisitor, ExtensionRuntimeOwnershipPort,
+        ExtensionRuntimeRecoverySettlement, ExtensionRuntimeResource,
+        ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan,
+        ExtensionRuntimeResourceVisitor, ExtensionRuntimeTarget,
     };
 
     use super::*;
@@ -2117,6 +3382,140 @@ mod tests {
             owner,
             expectation: ExtensionRuntimeRecoveryExpectation::Compatibility,
         }
+    }
+
+    struct TestNativeRootPort {
+        dropped: Arc<AtomicUsize>,
+        root: PathBuf,
+    }
+
+    impl Drop for TestNativeRootPort {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl ExtensionRuntimeNativeRootLeasePort for TestNativeRootPort {
+        fn visit_native_root(
+            &mut self,
+            visitor: &mut dyn ExtensionRuntimeNativeRootVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            let _ = visitor.visit(&self.root);
+            Ok(())
+        }
+    }
+
+    struct TestNativePackageProvider {
+        root: Option<Box<TestNativeRootPort>>,
+    }
+
+    impl ExtensionPackageAccessPort for TestNativePackageProvider {
+        fn retained_bytes(&self) -> usize {
+            size_of::<Self>() + size_of::<TestNativeRootPort>() + (2 * size_of::<usize>())
+        }
+
+        fn visit_resource(
+            &mut self,
+            _resource: ExtensionRuntimeResource,
+            _visitor: &mut dyn ExtensionRuntimeResourceVisitor,
+        ) -> Result<(), ExtensionPackageAccessError> {
+            Err(ExtensionPackageAccessError::ResourceUnavailable)
+        }
+
+        fn take_native_root_lease(
+            &mut self,
+            target: ExtensionRuntimeTarget,
+        ) -> Result<Box<dyn ExtensionRuntimeNativeRootLeasePort>, ExtensionPackageAccessError>
+        {
+            if target != ExtensionRuntimeTarget::NativeWebExtension {
+                return Err(ExtensionPackageAccessError::NativeRootUnavailable);
+            }
+            self.root
+                .take()
+                .map(|root| root as Box<dyn ExtensionRuntimeNativeRootLeasePort>)
+                .ok_or(ExtensionPackageAccessError::Inactive)
+        }
+    }
+
+    struct RootCaptureLifecycle {
+        captured: Arc<Mutex<Option<ExtensionRuntimeNativeRootLease>>>,
+    }
+
+    impl ExtensionRuntimeOwnershipPort for RootCaptureLifecycle {
+        fn retained_bytes(&self) -> usize {
+            size_of::<Self>() + (2 * size_of::<usize>())
+        }
+
+        fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
+            ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            }
+        }
+
+        fn reconcile_ownership_until(
+            &mut self,
+            _deadline: Instant,
+        ) -> ExtensionRuntimeOwnershipDisposition {
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            }
+        }
+    }
+
+    impl ExtensionRuntimeLifecyclePort for RootCaptureLifecycle {
+        fn activate_until(
+            &mut self,
+            access: &mut ExtensionPackageAccessView<'_>,
+            _deadline: Instant,
+        ) -> ExtensionRuntimeActivationDisposition {
+            let root = access
+                .take_native_root_lease()
+                .expect("test provider delegates one root");
+            *self.captured.lock().expect("capture root") = Some(root);
+            ExtensionRuntimeActivationDisposition::Rejected(
+                ExtensionRuntimeFailure::PackageRejected,
+            )
+        }
+    }
+
+    fn test_native_root_lease(dropped: Arc<AtomicUsize>) -> ExtensionRuntimeNativeRootLease {
+        let plan =
+            ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+                "manifest.json",
+                2,
+                [7; 32],
+            )
+            .expect("manifest binding")])
+            .expect("native resource plan");
+        let access = ExtensionPackageAccess::from_delegated_provider(
+            ExtensionRuntimeTarget::NativeWebExtension,
+            plan,
+            Box::new(TestNativePackageProvider {
+                root: Some(Box::new(TestNativeRootPort {
+                    dropped,
+                    root: PathBuf::from("/tmp/zephium-extension-root"),
+                })),
+            }),
+        )
+        .expect("bounded test package access");
+        let captured = Arc::new(Mutex::new(None));
+        let request = ExtensionRuntimeActivationRequest::try_new(
+            access,
+            Box::new(RootCaptureLifecycle {
+                captured: Arc::clone(&captured),
+            }),
+        )
+        .expect("bounded capture request");
+        let settlement = request.settle_until(Instant::now() + std::time::Duration::from_secs(1));
+        assert!(matches!(
+            settlement,
+            ExtensionRuntimeActivationSettlement::Rejected { .. }
+        ));
+        drop(settlement);
+        let root = captured.lock().expect("captured root").take();
+        root.expect("capture lifecycle transferred root")
     }
 
     struct ActivationRegistryFixture {
@@ -2554,6 +3953,61 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_pending_owner_call_retains_one_reservation_ingress_until_late_drop() {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let reservation = gate
+            .reserve(recovery_binding(owner(3, 91, 91)))
+            .expect("recovery reservation");
+        let queued = Arc::new(Mutex::new(VecDeque::<Task>::new()));
+        let for_dispatch = Arc::clone(&queued);
+        let dispatch: MainThreadDispatch = Arc::new(move |task| {
+            for_dispatch.lock().expect("dispatch queue").push_back(task);
+            true
+        });
+
+        assert_eq!(
+            dispatch_reservation_host_call(
+                &dispatch,
+                Instant::now() + std::time::Duration::from_millis(100),
+                Arc::clone(&reservation),
+                |_, _| (),
+            ),
+            Err(HostCallFailure::TimedOut)
+        );
+        assert_eq!(queued.lock().expect("dispatch queue").len(), 1);
+        assert!(reservation.ownership_ingress_active.load(Ordering::Acquire));
+
+        // Retrying the same ownership proxy cannot enqueue a second cancelled
+        // closure while the first one still physically occupies either the
+        // external main-loop queue or, after transfer, the host queue.
+        assert_eq!(
+            dispatch_reservation_host_call(
+                &dispatch,
+                Instant::now() + std::time::Duration::from_secs(60),
+                Arc::clone(&reservation),
+                |_, _| (),
+            ),
+            Err(HostCallFailure::Unavailable)
+        );
+        assert_eq!(queued.lock().expect("dispatch queue").len(), 1);
+
+        let late = queued
+            .lock()
+            .expect("dispatch queue")
+            .pop_front()
+            .expect("one late owner callback");
+        late();
+        assert!(!reservation.ownership_ingress_active.load(Ordering::Acquire));
+        let readmitted = reservation
+            .try_acquire_ownership_ingress()
+            .expect("late cancelled closure releases exact reservation ingress");
+        drop(readmitted);
+        assert!(!reservation.ownership_ingress_active.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn running_read_only_host_fence_can_time_out_without_waiting_for_completion() {
         let ingress = ProfileFenceIngress::shared();
         let admission = ingress.try_admit().expect("first physical fence");
@@ -2666,21 +4120,16 @@ mod tests {
         });
         locked_receiver.recv().expect("authority lock held");
 
-        let (audit_sender, audit_receiver) = std::sync::mpsc::sync_channel(1);
-        let audit = std::thread::spawn(move || {
-            let status = registry.profile_obligation_status(profile);
-            audit_sender.send(status).expect("publish audit status");
-            registry
-        });
-        let audit_status = audit_receiver.recv_timeout(std::time::Duration::from_secs(1));
+        // The registry is deliberately UI-thread-only now that it owns Rc-
+        // backed native resource leases. The audit itself remains nonblocking:
+        // it uses try_lock on the cross-thread authority state.
+        let audit_started = Instant::now();
+        let audit_status = registry.profile_obligation_status(profile);
+        assert!(audit_started.elapsed() < std::time::Duration::from_secs(1));
 
         release_sender.send(()).expect("release authority lock");
         holder.join().expect("authority lock holder");
-        let mut registry = audit.join().expect("profile audit thread");
-        assert_eq!(
-            audit_status.expect("contended audit must return without blocking"),
-            ProfileObligationStatus::Unavailable
-        );
+        assert_eq!(audit_status, ProfileObligationStatus::Unavailable);
         assert!(!registry.invariant_failed);
         assert!(!gate.inner.invariant_failed.load(Ordering::Acquire));
         assert_eq!(
@@ -2792,6 +4241,412 @@ mod tests {
             proxy_retained_bytes::<EnginePublicationPort>(&activation),
             size_of::<EnginePublicationPort>() + box_allocator_overhead + activation_shared_charge
         );
+    }
+
+    #[test]
+    fn staged_native_root_survives_dispatch_refusal_and_keeps_one_stable_inline_charge() {
+        let fixture = activation_registry_fixture();
+        let ReservationBinding::Activation { owner, grants, .. } = fixture.binding else {
+            panic!("activation fixture");
+        };
+        let native_id = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
+            .expect("canonical native id");
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let reservation = gate
+            .reserve(ReservationBinding::Activation {
+                owner,
+                grants,
+                expectation: ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(
+                    native_id,
+                ),
+            })
+            .expect("native activation reservation");
+        let charged_before = proxy_retained_bytes::<EngineLifecyclePort>(&reservation);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let root = test_native_root_lease(Arc::clone(&dropped));
+        reservation
+            .stage_native_root(root)
+            .unwrap_or_else(|_| panic!("one root stages"));
+        assert_eq!(reservation.native_root_state(), Ok((true, false)));
+        assert_eq!(
+            proxy_retained_bytes::<EngineLifecyclePort>(&reservation),
+            charged_before,
+            "the permanent Option destination is charged once in ReservationControl"
+        );
+
+        let refused: MainThreadDispatch = Arc::new(|_| false);
+        assert_eq!(
+            dispatch_host_call(
+                &refused,
+                Some(Instant::now() + std::time::Duration::from_secs(1)),
+                |_| ()
+            ),
+            Err(HostCallFailure::Unavailable)
+        );
+        assert_eq!(reservation.native_root_state(), Ok((true, false)));
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        drop(reservation);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        drop(fixture._held_pin);
+    }
+
+    #[test]
+    fn observed_retryable_activation_proves_cancellable_absence_and_rearms_same_generation() {
+        let fixture = activation_registry_fixture();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(fixture.binding)
+            .expect("activation reservation");
+        let generation = reservation.generation;
+        assert_eq!(
+            registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Activation,),
+            Ok(NativeCallRoute::Begin)
+        );
+
+        let ledger = super::super::resources::NativeResourceLedger::default();
+        let first = registry
+            .begin_native_activation(
+                fixture.owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                ledger
+                    .try_acquire(NativeResourceClass::ExtensionBackground)
+                    .expect("first background resource"),
+            )
+            .expect("first activation ticket");
+        assert_eq!(
+            registry.complete_native_activation(
+                first,
+                ExtensionRuntimeActivationDisposition::Retryable(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                ),
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(true)
+        );
+        assert!(registry.entries.is_empty());
+        assert_eq!(gate.reservation_count(), Some(0));
+        assert_eq!(reservation.phase(), RESERVATION_ABSENCE_PROVEN);
+        assert!(ledger.is_quiescent());
+        assert_eq!(
+            registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Reconciliation,),
+            Ok(NativeCallRoute::Immediate(
+                NativeTerminalDisposition::Reconciliation(
+                    ExtensionRuntimeOwnershipDisposition::Absent,
+                )
+            )),
+            "an ownership caller may consume the already-proven absence"
+        );
+        assert_eq!(
+            reservation
+                .native_call
+                .wait_until(first, Instant::now() + std::time::Duration::from_secs(1),),
+            Ok(NativeTerminalDisposition::Activation(
+                ExtensionRuntimeActivationDisposition::Retryable(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                )
+            ))
+        );
+
+        assert_eq!(
+            registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Activation,),
+            Ok(NativeCallRoute::Begin),
+            "the same observed move-only request reuses its stable generation"
+        );
+        assert_eq!(reservation.phase(), RESERVATION_ATTACHED);
+        assert_eq!(gate.reservation_count(), Some(1));
+        assert_eq!(registry.entries.len(), 1);
+
+        let second = registry
+            .begin_native_activation(
+                fixture.owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                ledger
+                    .try_acquire(NativeResourceClass::ExtensionBackground)
+                    .expect("second background resource"),
+            )
+            .expect("second activation ticket");
+        assert_ne!(first, second);
+        assert_eq!(second.registry_generation(), generation);
+        assert_eq!(
+            registry.complete_native_activation(
+                second,
+                ExtensionRuntimeActivationDisposition::Rejected(
+                    ExtensionRuntimeFailure::PackageRejected,
+                ),
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            reservation
+                .native_call
+                .wait_until(second, Instant::now() + std::time::Duration::from_secs(1),),
+            Ok(NativeTerminalDisposition::Activation(
+                ExtensionRuntimeActivationDisposition::Rejected(
+                    ExtensionRuntimeFailure::PackageRejected,
+                )
+            ))
+        );
+        assert!(registry.entries.is_empty());
+        assert_eq!(gate.reservation_count(), Some(0));
+        assert!(ledger.is_quiescent());
+        drop(fixture._held_pin);
+    }
+
+    #[test]
+    fn pre_native_retryable_refusal_restores_passive_attachment_state() {
+        let fixture = activation_registry_fixture();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(fixture.binding)
+            .expect("activation reservation");
+        let generation = reservation.generation;
+        assert_eq!(
+            registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Activation,),
+            Ok(NativeCallRoute::Begin)
+        );
+        assert_eq!(reservation.phase(), RESERVATION_ATTACHED);
+
+        registry
+            .return_unattempted_activation(fixture.owner, generation)
+            .expect("pre-native refusal detaches exactly");
+        assert!(registry.entries.is_empty());
+        assert_eq!(reservation.phase(), RESERVATION_UNATTACHED);
+        assert_eq!(gate.reservation_count(), Some(1));
+
+        assert_eq!(
+            registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Activation,),
+            Ok(NativeCallRoute::Begin),
+            "the same request may retry without rebuilding its host binding"
+        );
+        assert_eq!(reservation.phase(), RESERVATION_ATTACHED);
+        assert_eq!(registry.prove_absence(fixture.owner, generation), Ok(true));
+        assert_eq!(gate.reservation_count(), Some(0));
+        drop(fixture._held_pin);
+    }
+
+    #[test]
+    fn registry_mints_exact_attempts_and_late_callbacks_cannot_cross_aba_fences() {
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let exact_owner = owner(2, 101, 101);
+        let reservation = gate
+            .reserve(recovery_binding(exact_owner))
+            .expect("recovery reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("registry attachment");
+        assert_eq!(
+            registry.native_call_route(exact_owner, generation, NativeCallKind::Reconciliation),
+            Ok(NativeCallRoute::Begin)
+        );
+        let ledger = super::super::resources::NativeResourceLedger::default();
+        let native = ledger
+            .try_acquire(NativeResourceClass::ReconciliationController)
+            .expect("reconciliation resource");
+        let first = registry
+            .begin_native_reconciliation(
+                exact_owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                Some(native),
+            )
+            .expect("first exact ticket");
+        assert_eq!(first.owner(), exact_owner);
+        assert_eq!(first.registry_generation(), generation);
+        assert_eq!(first.kind(), NativeCallKind::Reconciliation);
+        assert_eq!(first.attempt().get(), 1);
+        assert_eq!(
+            reservation.native_call.wait_until(first, Instant::now()),
+            Err(NativeCallWaitError::TimedOut)
+        );
+
+        let stale = NativeCallTicket::from_registry(
+            exact_owner,
+            generation,
+            NativeCallKind::Reconciliation,
+            NonZeroU64::new(2).expect("nonzero attempt"),
+        );
+        assert_eq!(
+            registry.complete_native_reconciliation(
+                stale,
+                ExtensionRuntimeOwnershipDisposition::Absent,
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            reservation.native_call.notification_for(first),
+            Ok(NativeCallNotification::Pending)
+        );
+
+        assert_eq!(
+            registry.complete_native_reconciliation(
+                first,
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: None,
+                },
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(true)
+        );
+        assert!(matches!(
+            reservation
+                .native_call
+                .wait_until(first, Instant::now() + std::time::Duration::from_secs(1)),
+            Ok(NativeTerminalDisposition::Reconciliation(
+                ExtensionRuntimeOwnershipDisposition::StillUncertain { .. }
+            ))
+        ));
+        assert_eq!(
+            registry.native_call_route(exact_owner, generation, NativeCallKind::Reconciliation),
+            Ok(NativeCallRoute::Begin)
+        );
+        let second = registry
+            .begin_native_reconciliation(
+                exact_owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                None,
+            )
+            .expect("retained reconciliation resource is reused");
+        assert_eq!(second.attempt().get(), 2);
+        assert_eq!(
+            registry.complete_native_reconciliation(
+                first,
+                ExtensionRuntimeOwnershipDisposition::Absent,
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(false),
+            "the prior exact callback cannot settle the second attempt"
+        );
+        assert_eq!(
+            registry.complete_native_reconciliation(
+                second,
+                ExtensionRuntimeOwnershipDisposition::Absent,
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            reservation
+                .native_call
+                .wait_until(second, Instant::now() + std::time::Duration::from_secs(1)),
+            Ok(NativeTerminalDisposition::Reconciliation(
+                ExtensionRuntimeOwnershipDisposition::Absent
+            ))
+        );
+        assert!(ledger.is_quiescent());
+    }
+
+    #[test]
+    fn registry_retained_retirement_keeps_exact_owner_and_resource_until_absence() {
+        let fixture = activation_registry_fixture();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(fixture.binding)
+            .expect("activation reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("activation attachment");
+        let ledger = super::super::resources::NativeResourceLedger::default();
+        let native = ledger
+            .try_acquire(NativeResourceClass::ExtensionBackground)
+            .expect("background resource");
+        let activation = registry
+            .begin_native_activation(
+                fixture.owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                native,
+            )
+            .expect("activation ticket");
+        assert_eq!(
+            registry.complete_native_activation(
+                activation,
+                ExtensionRuntimeActivationDisposition::Activated(
+                    ExtensionRuntimeOwnershipEvidence::Compatibility,
+                ),
+                PlatformOwnerBundle::Logical(native_lifecycle::LogicalPlatformOwner::new(
+                    NonZeroU64::new(77).expect("logical owner"),
+                ),),
+            ),
+            Ok(true)
+        );
+        let _ = reservation
+            .native_call
+            .wait_until(
+                activation,
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .expect("activation observed");
+        let retirement = registry
+            .begin_native_retirement(
+                fixture.owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .expect("retirement ticket");
+        assert_eq!(
+            registry.complete_native_retirement(
+                retirement,
+                ExtensionRuntimeRetirementDisposition::Retained(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                ),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            reservation.native_call.wait_until(
+                retirement,
+                Instant::now() + std::time::Duration::from_secs(1)
+            ),
+            Ok(NativeTerminalDisposition::Retirement(
+                ExtensionRuntimeRetirementDisposition::Retained(
+                    ExtensionRuntimeFailure::BackendUnavailable
+                )
+            ))
+        );
+        assert_eq!(
+            registry.entries[0].native.phase(),
+            NativeLifecyclePhase::Owned
+        );
+        assert!(!ledger.is_quiescent());
+
+        let final_retirement = registry
+            .begin_native_retirement(
+                fixture.owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .expect("second exact retirement");
+        assert_eq!(
+            registry.complete_native_retirement(
+                final_retirement,
+                ExtensionRuntimeRetirementDisposition::Retired,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            reservation.native_call.wait_until(
+                final_retirement,
+                Instant::now() + std::time::Duration::from_secs(1),
+            ),
+            Ok(NativeTerminalDisposition::Retirement(
+                ExtensionRuntimeRetirementDisposition::Retired
+            ))
+        );
+        assert!(registry.entries.is_empty());
+        assert!(ledger.is_quiescent());
+        drop(fixture._held_pin);
     }
 
     #[test]
@@ -3150,6 +5005,274 @@ mod tests {
     }
 
     #[test]
+    fn native_call_channel_invariant_stickies_registry_and_gate_during_routing() {
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(recovery_binding(owner(2, 1, 1)))
+            .expect("recovery reservation");
+        let exact_owner = reservation.owner();
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("registry attachment");
+        reservation.native_call.poison_for_test();
+
+        assert_eq!(
+            registry.native_call_route(exact_owner, generation, NativeCallKind::Reconciliation,),
+            Err(ExtensionRuntimeHostBindError::InternalInvariant)
+        );
+        assert!(registry.invariant_failed);
+        assert!(gate.inner.invariant_failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn owner_collision_revokes_published_witness_authority_and_retains_it_captive() {
+        let ActivationRegistryFixture {
+            _held_pin,
+            binding,
+            owner,
+            owned,
+            authority,
+            fingerprint,
+            ..
+        } = activation_registry_fixture();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate.reserve(binding).expect("activation reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("registry attachment");
+        let ledger = super::super::resources::NativeResourceLedger::default();
+        let native = ledger
+            .try_acquire(NativeResourceClass::ExtensionBackground)
+            .expect("background resource");
+        let activation = registry
+            .begin_native_activation(
+                owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                native,
+            )
+            .expect("activation ticket");
+        assert_eq!(
+            registry.complete_native_activation(
+                activation,
+                ExtensionRuntimeActivationDisposition::Activated(
+                    ExtensionRuntimeOwnershipEvidence::Compatibility,
+                ),
+                PlatformOwnerBundle::Logical(native_lifecycle::LogicalPlatformOwner::new(
+                    NonZeroU64::new(901).expect("logical owner A"),
+                )),
+            ),
+            Ok(true)
+        );
+        reservation
+            .native_call
+            .wait_until(
+                activation,
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .expect("activation observed");
+        reservation
+            .publish_authority(
+                owner,
+                generation,
+                &owned,
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+                authority,
+            )
+            .expect("operation authority published");
+        assert!(reservation
+            .mint_active_tab_grant_witness(
+                owner,
+                generation,
+                &fingerprint,
+                ExtensionUserInvocationKind::ToolbarAction,
+            )
+            .is_ok());
+        assert!(reservation
+            .mint_document_authority_witness(
+                owner,
+                generation,
+                &fingerprint,
+                ExtensionDocumentPurpose::ExecuteScript,
+            )
+            .is_ok());
+
+        let retirement = registry
+            .begin_native_retirement(
+                owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .expect("retirement ticket");
+        assert_eq!(
+            registry.complete_native_retirement(
+                retirement,
+                ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
+                },
+            ),
+            Ok(true)
+        );
+        reservation
+            .native_call
+            .wait_until(
+                retirement,
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .expect("retirement uncertainty observed");
+        let reconciliation = registry
+            .begin_native_reconciliation(
+                owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                None,
+            )
+            .expect("reconciliation ticket");
+        assert_eq!(
+            registry.complete_native_reconciliation(
+                reconciliation,
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
+                },
+                PlatformOwnerBundle::Logical(native_lifecycle::LogicalPlatformOwner::new(
+                    NonZeroU64::new(902).expect("logical owner B"),
+                )),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.native_phase(owner, generation),
+            Ok(NativeLifecyclePhase::OwnerCollisionQuarantined)
+        );
+        assert!(registry.invariant_failed);
+        assert!(gate.inner.invariant_failed.load(Ordering::Acquire));
+        assert!(matches!(
+            &*reservation
+                .authority_state
+                .lock()
+                .expect("quarantined authority state"),
+            ReservationAuthorityState::IntegrityQuarantined { authority: Some(_) }
+        ));
+        assert!(matches!(
+            reservation.mint_active_tab_grant_witness(
+                owner,
+                generation,
+                &fingerprint,
+                ExtensionUserInvocationKind::ToolbarAction,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+        ));
+        assert!(matches!(
+            reservation.mint_document_authority_witness(
+                owner,
+                generation,
+                &fingerprint,
+                ExtensionDocumentPurpose::ExecuteScript,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+        ));
+        drop(registry);
+        assert!(ledger.is_quiescent());
+        drop(_held_pin);
+    }
+
+    #[test]
+    fn authority_quarantine_linearizes_after_inflight_witness_critical_section() {
+        let ActivationRegistryFixture {
+            _held_pin,
+            binding,
+            owner,
+            owned,
+            authority,
+            fingerprint,
+            ..
+        } = activation_registry_fixture();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate.reserve(binding).expect("activation reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("registry attachment");
+        registry
+            .mark_activated(
+                owner,
+                generation,
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+            )
+            .expect("definite activation");
+        reservation
+            .publish_authority(
+                owner,
+                generation,
+                &owned,
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+                authority,
+            )
+            .expect("operation authority published");
+
+        let state = reservation
+            .authority_state
+            .lock()
+            .expect("hold witness linearization mutex");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let collision_reservation = Arc::clone(&reservation);
+        let collision_barrier = Arc::clone(&barrier);
+        let collision = std::thread::spawn(move || {
+            collision_barrier.wait();
+            collision_reservation.quarantine_operation_authority()
+        });
+        barrier.wait();
+        let ReservationAuthorityState::Published {
+            authority: Some(authority),
+            ..
+        } = &*state
+        else {
+            panic!("published authority remains in the held critical section");
+        };
+        assert!(
+            authority
+                .mint_active_tab_grant_witness(
+                    &fingerprint,
+                    ExtensionUserInvocationKind::ToolbarAction,
+                )
+                .is_ok()
+        );
+        drop(state);
+        assert_eq!(
+            collision.join().expect("collision transition thread"),
+            Ok(())
+        );
+
+        assert!(matches!(
+            reservation.mint_active_tab_grant_witness(
+                owner,
+                generation,
+                &fingerprint,
+                ExtensionUserInvocationKind::ToolbarAction,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+        ));
+        assert!(matches!(
+            reservation.mint_document_authority_witness(
+                owner,
+                generation,
+                &fingerprint,
+                ExtensionDocumentPurpose::ExecuteScript,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+        ));
+        assert!(gate.inner.invariant_failed.load(Ordering::Acquire));
+        drop(_held_pin);
+    }
+
+    #[test]
     fn engine_publication_port_routes_exact_publication_and_reclaim() {
         let ActivationRegistryFixture {
             _held_pin,
@@ -3435,6 +5558,26 @@ mod tests {
         assert!(registry
             .prove_absence(exact_owner, generation)
             .expect("trusted absence barrier"));
+        assert!(registry.is_quiescent());
+    }
+
+    #[test]
+    fn shutdown_quiescence_includes_accepted_extension_terminal_debts() {
+        super::super::dispatch::make_unavailable_for_test();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate);
+        registry.seal();
+        assert!(registry.is_quiescent());
+
+        assert!(
+            !super::super::dispatch::with_extension_runtime_terminal(|_| {}),
+            "no host can drain the accepted terminal"
+        );
+        assert!(
+            !registry.is_quiescent(),
+            "an external terminal debt participates in the clean-shutdown proof"
+        );
+        super::super::dispatch::make_unavailable_for_test();
         assert!(registry.is_quiescent());
     }
 

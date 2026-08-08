@@ -20,6 +20,10 @@ use super::ParentHandle;
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
     static PENDING: RefCell<VecDeque<QueuedHostTask>> = const { RefCell::new(VecDeque::new()) };
+    static PENDING_EXTENSION_RUNTIME_TERMINALS: Cell<ExtensionRuntimeTerminalSlots> =
+        const { Cell::new(ExtensionRuntimeTerminalSlots::EMPTY) };
+    static EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
+    static EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(not(target_os = "windows"))]
     static PENDING_CONTENT_POLICY_TERMINALS: Cell<ContentPolicyTerminalSlots> =
         const { Cell::new(ContentPolicyTerminalSlots::EMPTY) };
@@ -33,6 +37,92 @@ thread_local! {
 }
 
 type HostTask = Box<dyn FnOnce(&mut EngineHost)>;
+
+const EXTENSION_RUNTIME_TERMINAL_CAPACITY: usize =
+    2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
+
+/// Inline, noncoalescing terminal ring.
+///
+/// Native callbacks and their independently scheduled cancellation barriers
+/// can contribute at most two exact tasks per logical reservation. The ring
+/// never allocates, grows, replaces, or silently drops an accepted terminal.
+struct ExtensionRuntimeTerminalSlots {
+    slots: [Option<HostTask>; EXTENSION_RUNTIME_TERMINAL_CAPACITY],
+    head: usize,
+    len: usize,
+    // The normal capacity is proven from the logical reservation ceiling. If
+    // that proof is ever violated, retain the first rejected owner-bearing
+    // closure in one fixed fail-stop slot instead of running its destructor.
+    overflow_quarantine: Option<HostTask>,
+    // Number of ring tasks that were already ahead of the quarantined task.
+    // Reentrant tasks appended after overflow do not increment this fence.
+    overflow_predecessors: usize,
+}
+
+impl ExtensionRuntimeTerminalSlots {
+    const EMPTY: Self = Self {
+        slots: [const { None }; EXTENSION_RUNTIME_TERMINAL_CAPACITY],
+        head: 0,
+        len: 0,
+        overflow_quarantine: None,
+        overflow_predecessors: 0,
+    };
+
+    fn push_back(&mut self, task: HostTask) -> Result<(), HostTask> {
+        if self.len >= EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+            return Err(task);
+        }
+        let index = (self.head + self.len) % EXTENSION_RUNTIME_TERMINAL_CAPACITY;
+        debug_assert!(self.slots[index].is_none());
+        self.slots[index] = Some(task);
+        self.len += 1;
+        Ok(())
+    }
+
+    fn pop_front(&mut self) -> Option<HostTask> {
+        if self.overflow_quarantine.is_some() && self.overflow_predecessors == 0 {
+            return self.overflow_quarantine.take();
+        }
+        if self.len == 0 {
+            debug_assert!(self.overflow_quarantine.is_none());
+            return None;
+        }
+        let index = self.head;
+        let task = self.slots[index].take();
+        self.head = (self.head + 1) % EXTENSION_RUNTIME_TERMINAL_CAPACITY;
+        self.len -= 1;
+        if self.overflow_quarantine.is_some() {
+            debug_assert!(self.overflow_predecessors > 0);
+            self.overflow_predecessors = self.overflow_predecessors.saturating_sub(1);
+        }
+        debug_assert!(task.is_some());
+        task
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len + usize::from(self.overflow_quarantine.is_some())
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.len == 0 && self.overflow_quarantine.is_none()
+    }
+
+    fn quarantine_overflow(&mut self, task: HostTask) -> Result<(), HostTask> {
+        if self.overflow_quarantine.is_some() {
+            return Err(task);
+        }
+        self.overflow_predecessors = self.len;
+        self.overflow_quarantine = Some(task);
+        Ok(())
+    }
+}
+
+impl Default for ExtensionRuntimeTerminalSlots {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
 
 struct HostInstallClaim(std::marker::PhantomData<std::rc::Rc<()>>);
 
@@ -195,6 +285,14 @@ pub(crate) fn install(
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
     let _install_claim = HostInstallClaim::acquire()?;
+    if EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        // The quarantine may own the only wrapper returned by a native API.
+        // Process restart, not host reinstall, is the safe recovery boundary.
+        return Err(
+            "extension runtime terminal transport is fail-stopped; process restart required"
+                .to_owned(),
+        );
+    }
     let user_content = super::scripts::UserContentRegistry::with_initial_global(
         initial_user_content_generation,
         initial_user_content,
@@ -223,6 +321,11 @@ pub(crate) fn install(
             .clear();
         Ok::<(), String>(())
     })?;
+    PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionRuntimeTerminalSlots::EMPTY));
+    });
+    EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -354,6 +457,11 @@ pub(crate) fn make_unavailable_for_test() {
     HOST_INSTALLING.with(|installing| installing.set(false));
     HOST.with(|host| *host.borrow_mut() = None);
     PENDING.with(|pending| pending.borrow_mut().clear());
+    PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionRuntimeTerminalSlots::EMPTY));
+    });
+    EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -418,6 +526,120 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::ExtensionRuntime, None, f)
+}
+
+/// Admits one exact native extension terminal independently of ordinary
+/// ingress. Shutdown sealing and host reentrancy cannot discard it.
+pub(super) fn with_extension_runtime_terminal<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    admit_extension_runtime_terminal(Box::new(f))
+}
+
+fn admit_extension_runtime_terminal(task: HostTask) -> bool {
+    enum Admission {
+        Accepted,
+        Quarantined,
+        QuarantineExhausted(HostTask),
+    }
+
+    let admission = PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+        let mut slots = pending.take();
+        let admission = match slots.push_back(task) {
+            Ok(()) => Admission::Accepted,
+            Err(task) => match slots.quarantine_overflow(task) {
+                Ok(()) => Admission::Quarantined,
+                Err(task) => Admission::QuarantineExhausted(task),
+            },
+        };
+        pending.set(slots);
+        admission
+    });
+    match admission {
+        Admission::Accepted => drain_extension_runtime_terminals(),
+        Admission::Quarantined => {
+            EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            let _ = drain_extension_runtime_terminals();
+            false
+        }
+        Admission::QuarantineExhausted(task) => {
+            // Reaching a second overflow contradicts both the fixed logical
+            // owner ceiling and the first overflow's process-wide fail-stop.
+            // Aborting is the only bounded, non-unwinding action that cannot
+            // destroy another unknown native owner.
+            let _retained = std::mem::ManuallyDrop::new(task);
+            std::process::abort();
+        }
+    }
+}
+
+fn drain_extension_runtime_terminals() -> bool {
+    enum Drain {
+        Complete(bool),
+        Deferred,
+        Unavailable,
+    }
+
+    let drain = HOST.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return Drain::Deferred;
+        };
+        let Some(host) = slot.as_mut() else {
+            return Drain::Unavailable;
+        };
+        Drain::Complete(drain_extension_runtime_terminals_with_host(host))
+    });
+    match drain {
+        Drain::Complete(clean) => clean,
+        Drain::Deferred => true,
+        Drain::Unavailable => false,
+    }
+}
+
+fn drain_extension_runtime_terminals_with_host(host: &mut EngineHost) -> bool {
+    loop {
+        let task = PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            let task = slots.pop_front();
+            pending.set(slots);
+            task
+        });
+        let Some(task) = task else {
+            break;
+        };
+        task(host);
+        #[cfg(not(target_os = "windows"))]
+        host.finish_content_policy_shutdown_if_quiescent();
+    }
+
+    if !EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        return true;
+    }
+    HOST_SEALED.with(|sealed| sealed.set(true));
+    host.extension_runtime_registry
+        .fail_terminal_transport_invariant();
+    let report =
+        EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
+    if report {
+        (host.native_terminal_failure)(
+            "extension runtime terminal transport exceeded its proven exact capacity",
+        );
+    }
+    false
+}
+
+pub(super) fn extension_runtime_terminals_are_quiescent() -> bool {
+    if EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        return false;
+    }
+    PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+        let slots = pending.take();
+        let empty = slots.is_empty();
+        pending.set(slots);
+        empty
+    })
 }
 
 /// Admit the sole read-only extension profile-absence fence.
@@ -640,6 +862,7 @@ where
         Executed,
         Reentrant,
         Unavailable,
+        TerminalFailed,
     }
 
     if HOST_SEALED.with(Cell::get) {
@@ -653,6 +876,9 @@ where
                 return Access::Unavailable;
             };
             if priority == HostTaskPriority::Shutdown {
+                if !drain_extension_runtime_terminals_with_host(host) {
+                    return Access::TerminalFailed;
+                }
                 // The host exists and the barrier is about to execute. Seal
                 // before native teardown so a callback pumped by teardown
                 // cannot recreate a controller behind it.
@@ -669,6 +895,7 @@ where
     });
     match access {
         Access::Unavailable => return false,
+        Access::TerminalFailed => return false,
         Access::Reentrant => {
             return PENDING.with(|pending| {
                 let Ok(mut pending) = pending.try_borrow_mut() else {
@@ -710,6 +937,11 @@ where
             });
         }
         Access::Executed => {}
+    }
+
+    if !drain_extension_runtime_terminals() {
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        return false;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -766,6 +998,10 @@ where
                         .map(|mut pending| pending.push_front(queued))
                 });
             }
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            return false;
+        }
+        if !drain_extension_runtime_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }
@@ -1133,6 +1369,176 @@ mod tests {
         assert_eq!(PENDING.with(|pending| pending.borrow().len()), 1);
         PENDING.with(|pending| pending.borrow_mut().clear());
         HOST_SEALED.with(|sealed| sealed.set(false));
+    }
+
+    #[test]
+    fn extension_runtime_terminals_survive_shutdown_seal_and_recursive_queue_borrow() {
+        make_unavailable_for_test();
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        HOST.with(|host| {
+            let _active_host_borrow = host.borrow_mut();
+            PENDING.with(|pending| {
+                let _recursive_pending_borrow = pending.borrow_mut();
+                assert!(admit_extension_runtime_terminal(Box::new(|_| {
+                    panic!("reentrant terminal must not execute early")
+                })));
+                assert!(admit_extension_runtime_terminal(Box::new(|_| {
+                    panic!("reentrant terminal must not execute early")
+                })));
+            });
+        });
+        assert_eq!(
+            PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+                let slots = pending.take();
+                let len = slots.len();
+                pending.set(slots);
+                len
+            }),
+            2
+        );
+        assert!(!extension_runtime_terminals_are_quiescent());
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        make_unavailable_for_test();
+    }
+
+    #[test]
+    fn extension_runtime_terminal_slots_are_fixed_capacity_fifo_and_noncoalescing() {
+        struct DropMarker {
+            value: usize,
+            order: Arc<std::sync::Mutex<Vec<usize>>>,
+        }
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.order
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(self.value);
+            }
+        }
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut slots = ExtensionRuntimeTerminalSlots::default();
+        for value in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+            let marker = DropMarker {
+                value,
+                order: Arc::clone(&order),
+            };
+            assert!(slots.push_back(Box::new(move |_| drop(marker))).is_ok());
+        }
+        assert_eq!(slots.len(), EXTENSION_RUNTIME_TERMINAL_CAPACITY);
+        assert!(slots.push_back(Box::new(|_| {})).is_err());
+        for _ in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+            drop(slots.pop_front());
+        }
+        assert!(slots.is_empty());
+        assert_eq!(
+            *order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            (0..EXTENSION_RUNTIME_TERMINAL_CAPACITY).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extension_runtime_overflow_quarantine_stays_before_reentrant_new_work() {
+        struct DropMarker {
+            value: usize,
+            order: Arc<std::sync::Mutex<Vec<usize>>>,
+        }
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.order
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(self.value);
+            }
+        }
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let task = |value| {
+            let marker = DropMarker {
+                value,
+                order: Arc::clone(&order),
+            };
+            Box::new(move |_: &mut EngineHost| drop(marker)) as HostTask
+        };
+        let mut slots = ExtensionRuntimeTerminalSlots::default();
+        for value in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+            assert!(slots.push_back(task(value)).is_ok());
+        }
+        let quarantined = slots
+            .push_back(task(EXTENSION_RUNTIME_TERMINAL_CAPACITY))
+            .expect_err("the normal ring is full");
+        assert!(slots.quarantine_overflow(quarantined).is_ok());
+
+        drop(slots.pop_front());
+        assert!(slots
+            .push_back(task(EXTENSION_RUNTIME_TERMINAL_CAPACITY + 1))
+            .is_ok());
+        while !slots.is_empty() {
+            drop(slots.pop_front());
+        }
+
+        assert_eq!(
+            *order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            (0..(EXTENSION_RUNTIME_TERMINAL_CAPACITY + 2)).collect::<Vec<_>>(),
+            "Q must remain ahead of R appended by an older task during drain"
+        );
+    }
+
+    #[test]
+    fn extension_runtime_terminal_overflow_is_sticky_and_never_claims_quiescence() {
+        struct DropMarker(Arc<AtomicUsize>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        make_unavailable_for_test();
+        PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            for _ in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+                assert!(slots.push_back(Box::new(|_| {})).is_ok());
+            }
+            pending.set(slots);
+        });
+        let drops = Arc::new(AtomicUsize::new(0));
+        let marker = DropMarker(Arc::clone(&drops));
+        assert!(!admit_extension_runtime_terminal(Box::new(move |_| {
+            drop(marker);
+        })));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+                let slots = pending.take();
+                let len = slots.len();
+                pending.set(slots);
+                len
+            }),
+            EXTENSION_RUNTIME_TERMINAL_CAPACITY + 1,
+            "the only rejected owner-bearing closure remains in the fixed quarantine"
+        );
+        assert!(!extension_runtime_terminals_are_quiescent());
+
+        PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            for _ in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+                drop(slots.pop_front());
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+            }
+            drop(slots.pop_front());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(slots.is_empty());
+            pending.set(slots);
+        });
+        make_unavailable_for_test();
+        assert!(extension_runtime_terminals_are_quiescent());
     }
 
     #[cfg(not(target_os = "windows"))]
