@@ -572,10 +572,17 @@ On macOS 15.4 and newer, Apple's public `WKWebExtensionController` stack is the
 preferred native MV3 candidate. A feature-gated live probe proves controller
 attachment before view construction, explicit host/private-data grants,
 per-extension isolated worlds, frame matching, exact context unload/reload,
-and preservation of Zephium's protected scripts. It does not yet prove durable
-controller storage, background execution, extension UI, package admission, or
-product startup reconciliation, so ordinary builds still expose no extension
-runtime. Older admitted macOS versions and Linux require a Zephium
+preservation of Zephium's protected scripts, MV3 background execution, and
+same-principal extension-storage isolation across two persistent controller
+namespaces and fresh controller instances. It does not bind those controllers
+to separate website data stores. The probe also retires each namespace
+independently, reopens both to verify zero persistent extension bytes, and
+requires every native controller/context weak reference to release. It does
+not prove product profile-controller attachment, multiple principals inside a
+product controller, authenticated package admission, delegate/API mediation,
+extension UI, quotas/endurance, or product startup/crash reconciliation, so
+ordinary builds still expose no extension runtime. Older admitted macOS
+versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
 pass. Windows has two separate candidates: curated MV3 packages through a
