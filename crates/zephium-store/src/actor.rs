@@ -680,6 +680,23 @@ impl fmt::Display for ExtensionServiceStoreAuthorityClaimError {
 
 impl std::error::Error for ExtensionServiceStoreAuthorityClaimError {}
 
+/// Immutable startup classification captured before the Store actor thread is
+/// launched and before its unique extension-service capability can be claimed.
+///
+/// This is deliberately narrower than overall extension-service readiness: it
+/// reports only whether the exact durable native-ownership journal was proven
+/// empty while `SqliteStore::open` still owned SQLite synchronously. Repository
+/// residue and product provisioning remain the extension service's authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionServiceStoreStartupRequirement {
+    /// The complete native-ownership journal was valid and contained no
+    /// unresolved owner at Store admission.
+    NoNativeOwnershipDebt,
+    /// At least one unresolved owner exists, or the complete journal could not
+    /// be validated. The extension-service recovery worker must arbitrate it.
+    NativeOwnershipReconciliationRequired,
+}
+
 /// Settlement of one deadline-bounded extension-service store operation.
 ///
 /// Admission and observation are deliberately separate. A caller which loses
@@ -769,6 +786,16 @@ pub struct ExtensionServiceStoreAuthority {
 }
 
 impl ExtensionServiceStoreAuthority {
+    /// Returns the exact native-ownership startup requirement captured before
+    /// the Store actor began accepting commands.
+    ///
+    /// No later broad Store operation can create native ownership, and this
+    /// move-only capability is the only runtime mutation boundary. The value
+    /// therefore cannot race a native-owner mutation before service startup.
+    pub fn startup_requirement(&self) -> ExtensionServiceStoreStartupRequirement {
+        self.store.extension_service_startup_requirement
+    }
+
     /// Loads the exact complete reconciliation journal under one caller-owned
     /// deadline. Corrupt or over-limit durable state is returned as the
     /// inner load failure; it is never confused with non-admission.
@@ -976,6 +1003,7 @@ pub struct SqliteStore {
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
     extension_service_store_authority_claimed: AtomicBool,
+    extension_service_startup_requirement: ExtensionServiceStoreStartupRequirement,
 }
 
 impl SqliteStore {
@@ -999,6 +1027,21 @@ impl SqliteStore {
     }
 
     fn spawn(hub: Hub) -> rusqlite::Result<Self> {
+        let mut hub = hub;
+        let extension_service_startup_requirement =
+            match hub.load_extension_native_ownership_journal() {
+                Ok(ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal))
+                    if journal.entries().is_empty() =>
+                {
+                    ExtensionServiceStoreStartupRequirement::NoNativeOwnershipDebt
+                }
+                Ok(ExtensionNativeOwnershipJournalLoadOutcome::Loaded(_)) | Err(_) => {
+                    ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired
+                }
+                Ok(ExtensionNativeOwnershipJournalLoadOutcome::Failed) => {
+                    ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired
+                }
+            };
         let setting_keys = hub.app_setting_keys()?;
         // Session snapshots use a latest-value mailbox below. Bound every
         // remaining request too, so a compromised privileged UI cannot retain
@@ -1065,6 +1108,7 @@ impl SqliteStore {
             }),
             shutdown_clean: AtomicBool::new(false),
             extension_service_store_authority_claimed: AtomicBool::new(false),
+            extension_service_startup_requirement,
         })
     }
 

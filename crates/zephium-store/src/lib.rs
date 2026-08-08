@@ -11,5 +11,5 @@ mod windows_file_identity;
 
 pub use actor::{
     ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError,
-    ExtensionServiceStoreCallOutcome, SqliteStore,
+    ExtensionServiceStoreCallOutcome, ExtensionServiceStoreStartupRequirement, SqliteStore,
 };

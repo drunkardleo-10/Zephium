@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 zephium-core.workspace = true
+zephium-extension-authority.workspace = true
 zephium-extension-repository.workspace = true
 zephium-extension-runtime-api.workspace = true
 zephium-private-fs.workspace = true
@@ -14,7 +15,6 @@ zephium-store.workspace = true
 [dev-dependencies]
 sha2 = "=0.10.9"
 tempfile.workspace = true
-zephium-extension-authority.workspace = true
 zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
 
 [lints.rust]

@@ -84,6 +84,8 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         }),
         shutdown_clean: AtomicBool::new(false),
         extension_service_store_authority_claimed: AtomicBool::new(false),
+        extension_service_startup_requirement:
+            ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired,
     }
 }
 
@@ -2942,6 +2944,54 @@ fn extension_service_store_authority_is_send_and_claimed_once_per_actor_lifetime
 }
 
 #[test]
+fn extension_service_startup_requirement_is_captured_before_actor_admission() {
+    let empty_store = Arc::new(SqliteStore::in_memory().unwrap());
+    let empty_authority = empty_store
+        .claim_extension_service_store_authority()
+        .unwrap();
+    assert_eq!(
+        empty_authority.startup_requirement(),
+        ExtensionServiceStoreStartupRequirement::NoNativeOwnershipDebt
+    );
+    drop(empty_authority);
+    assert_eq!(
+        empty_store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+
+    let profile = ProfileId::from(1);
+    let install = ExtensionInstallId::from(1);
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let preparing = ExtensionNativeOwnershipJournal::empty()
+        .apply(
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            ExtensionNativeOwnershipJournalMutation::begin(native_ownership_preparation(
+                profile, install,
+            )),
+        )
+        .unwrap()
+        .entry()
+        .unwrap()
+        .clone();
+    hub.inject_extension_native_ownership_entry_for_interlock_test(&preparing)
+        .unwrap();
+    let debt_store = Arc::new(SqliteStore::spawn(hub).unwrap());
+    let debt_authority = debt_store
+        .claim_extension_service_store_authority()
+        .unwrap();
+    assert_eq!(
+        debt_authority.startup_requirement(),
+        ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired
+    );
+    drop(debt_authority);
+    assert_eq!(
+        debt_store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+}
+
+#[test]
 fn extension_service_store_authority_has_one_closed_public_surface() {
     fn collect_production_sources(
         directory: &Path,
@@ -3056,6 +3106,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         .expect("service Store authority impl boundary");
     let surface = &tail[..end];
     for required in [
+        "pub fn startup_requirement(",
         "pub fn load_native_ownership_until(",
         "pub fn mutate_native_ownership_until(",
         "pub fn begin_native_ownership_until(",
@@ -3077,7 +3128,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 6,
+        public_items, 7,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("mutate_extension_install"));

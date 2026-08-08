@@ -45,6 +45,7 @@
 pub(crate) use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 
 mod actor;
+mod boot;
 mod cleanup;
 mod evidence;
 mod journal_store;
@@ -65,6 +66,10 @@ pub use actor::{
     ExtensionServiceRuntimeActivationUnavailableReason, ExtensionServiceRuntimeFailureReason,
     ExtensionServiceRuntimeRetirementOutcome, ExtensionServiceRuntimeRetirementUnavailableReason,
     ExtensionServiceSpawnError, EXTENSION_SERVICE_DEFAULT_SHUTDOWN_TIMEOUT,
+};
+pub use boot::{
+    prepare_extension_service_boot, ExtensionServiceBootError, ExtensionServiceBootPlan,
+    ExtensionServiceWorkerLaunch,
 };
 pub use evidence::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence,

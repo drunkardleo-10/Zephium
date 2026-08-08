@@ -48,7 +48,8 @@ use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
 use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
 use zephium_extension_service::{
-    ExtensionRepositoryRoot, ExtensionServiceLaunchInput, ExtensionServiceOwner,
+    prepare_extension_service_boot, ExtensionRepositoryRoot, ExtensionServiceBootPlan,
+    ExtensionServiceOwner,
 };
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
@@ -3524,24 +3525,34 @@ pub fn run() {
                     )
                 })?;
             let store_authority = store.claim_extension_service_store_authority()?;
-            let host_factory = engine
-                .take_extension_runtime_host_factory()
-                .ok_or_else(|| {
-                    std::io::Error::other(
-                        "extension-runtime host factory was already transferred",
-                    )
-                })?;
-            let launch_input = ExtensionServiceLaunchInput::new(
+            let extension_boot = prepare_extension_service_boot(
                 store_authority,
                 extension_repository_root,
-                host_factory,
-            );
-            let now = std::time::Instant::now();
-            let startup_deadline = now
-                .checked_add(EXTENSION_SERVICE_INITIAL_STARTUP_TIMEOUT)
-                .unwrap_or(now);
-            let extension_service: ExtensionLifecycle =
-                Box::new(ExtensionServiceOwner::launch(launch_input, startup_deadline)?);
+            )?;
+            let extension_service: ExtensionLifecycle = match extension_boot {
+                ExtensionServiceBootPlan::Inert(extension_service) => extension_service,
+                ExtensionServiceBootPlan::Worker(worker_launch) => {
+                    // Native runtime authority stays inside the engine on the
+                    // inert path. Transfer it only after product authority or
+                    // possible cleanup state has selected the real worker.
+                    let host_factory = engine
+                        .take_extension_runtime_host_factory()
+                        .ok_or_else(|| {
+                            std::io::Error::other(
+                                "extension-runtime host factory was already transferred",
+                            )
+                        })?;
+                    let launch_input = worker_launch.bind_host_factory(host_factory);
+                    let now = std::time::Instant::now();
+                    let startup_deadline = now
+                        .checked_add(EXTENSION_SERVICE_INITIAL_STARTUP_TIMEOUT)
+                        .unwrap_or(now);
+                    Box::new(ExtensionServiceOwner::launch(
+                        launch_input,
+                        startup_deadline,
+                    )?)
+                }
+            };
             if let Err(extension_service) =
                 startup_extension_service.install(extension_service)
             {
@@ -4964,11 +4975,20 @@ mod tests {
         let store_authority = setup
             .find("store.claim_extension_service_store_authority()")
             .expect("unique Store extension authority claim");
+        let service_boot = setup
+            .find("prepare_extension_service_boot(")
+            .expect("extension service boot topology selection");
+        let inert_service = setup
+            .find("ExtensionServiceBootPlan::Inert(extension_service)")
+            .expect("zero-worker extension lifecycle branch");
+        let worker_service = setup
+            .find("ExtensionServiceBootPlan::Worker(worker_launch)")
+            .expect("full extension worker branch");
         let host_factory = setup
             .find(".take_extension_runtime_host_factory()")
             .expect("unique native-host factory transfer");
         let service_launch = setup
-            .find("ExtensionServiceOwner::launch(launch_input, startup_deadline)")
+            .find("ExtensionServiceOwner::launch(")
             .expect("extension-service worker launch");
         let service_install = setup
             .find("startup_extension_service.install(extension_service)")
@@ -5021,6 +5041,10 @@ mod tests {
         assert!(shell_owner < engine_transfer);
         assert!(blocker_start < startup_blocker_owner);
         assert!(startup_blocker_owner < store_authority);
+        assert!(store_authority < service_boot);
+        assert!(service_boot < inert_service);
+        assert!(inert_service < worker_service);
+        assert!(worker_service < host_factory);
         assert!(store_authority < host_factory);
         assert!(host_factory < service_launch);
         assert!(service_launch < service_install);
