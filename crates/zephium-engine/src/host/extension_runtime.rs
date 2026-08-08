@@ -7,6 +7,9 @@
 //! to [`ExtensionRuntimeRegistry`] on the UI thread; passive destruction can
 //! release only a reservation that never attached.
 
+#[cfg(test)]
+#[path = "extension_runtime/activation_issuer_test_support.rs"]
+mod activation_issuer_test_support;
 mod native_grants;
 mod native_lifecycle;
 
@@ -25,8 +28,12 @@ use zephium_core::extensions::{
     ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
 };
 use zephium_core::ids::ProfileId;
+#[cfg(test)]
+use zephium_extension_runtime_api::ExtensionRuntimeCompatibilityAbsenceAudit;
 use zephium_extension_runtime_api::{
-    ExtensionPackageAccessView, ExtensionRuntimeActivationDisposition, ExtensionRuntimeFailure,
+    ExtensionPackageAccessView, ExtensionRuntimeAbsenceEvidence,
+    ExtensionRuntimeAbsenceEvidenceIssuer, ExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeBoundAbsenceEvidenceIssuer, ExtensionRuntimeFailure,
     ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
     ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
     ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
@@ -333,7 +340,15 @@ impl ExtensionRuntimeFactoryGate {
     fn prove_absence(
         &self,
         control: &ReservationControl,
+        evidence: ExtensionRuntimeAbsenceEvidence,
     ) -> Result<(), ExtensionRuntimeHostBindError> {
+        if !control
+            .absence_issuer()
+            .accepts(evidence, evidence.attempt())
+        {
+            self.inner.invariant_failed.store(true, Ordering::Release);
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
         // Keep the same lock order as the profile audit and publication path:
         // reservation ledger first, authority state second. This makes native
         // absence linearize against service-thread publication without ever
@@ -374,15 +389,18 @@ impl ExtensionRuntimeFactoryGate {
                 };
                 Some(authority)
             }
-            ReservationAuthorityState::AbsenceProven(_)
-            | ReservationAuthorityState::AuthorityReclaimed
+            ReservationAuthorityState::AbsenceProven { .. }
+            | ReservationAuthorityState::AuthorityReclaimed(_)
             | ReservationAuthorityState::IntegrityQuarantined { .. } => {
                 self.inner.invariant_failed.store(true, Ordering::Release);
                 return Err(ExtensionRuntimeHostBindError::InternalInvariant);
             }
         };
         state.reservations.remove(index);
-        *authority_state = ReservationAuthorityState::AbsenceProven(returned_authority);
+        *authority_state = ReservationAuthorityState::AbsenceProven {
+            authority: returned_authority,
+            evidence,
+        };
         control
             .phase
             .store(RESERVATION_ABSENCE_PROVEN, Ordering::Release);
@@ -461,7 +479,10 @@ impl ExtensionRuntimeFactoryGate {
         };
         if !matches!(
             *authority_state,
-            ReservationAuthorityState::AbsenceProven(None)
+            ReservationAuthorityState::AbsenceProven {
+                authority: None,
+                ..
+            }
         ) {
             self.inner.invariant_failed.store(true, Ordering::Release);
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
@@ -554,10 +575,12 @@ enum ReservationBinding {
         owner: OwnerKey,
         grants: Box<EngineNativeGrantSnapshot>,
         expectation: ExtensionRuntimeNativeIdentityExpectation,
+        absence_issuer: ExtensionRuntimeAbsenceEvidenceIssuer,
     },
     Recovery {
         owner: OwnerKey,
         expectation: ExtensionRuntimeRecoveryExpectation,
+        absence_issuer: ExtensionRuntimeAbsenceEvidenceIssuer,
     },
 }
 
@@ -581,6 +604,17 @@ impl ReservationBinding {
                 .operation_authority_companion_retained_bytes()
                 .saturating_add(2 * size_of::<usize>()),
             Self::Recovery { .. } => 0,
+        }
+    }
+
+    const fn absence_issuer(
+        &self,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+    ) -> ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+        match self {
+            Self::Activation { absence_issuer, .. } | Self::Recovery { absence_issuer, .. } => {
+                absence_issuer.bind(generation)
+            }
         }
     }
 }
@@ -617,8 +651,11 @@ enum ReservationAuthorityState {
         authority: Option<ExtensionRuntimeOperationAuthority>,
     },
     RecoveryUncertain,
-    AbsenceProven(Option<ExtensionRuntimeOperationAuthority>),
-    AuthorityReclaimed,
+    AbsenceProven {
+        authority: Option<ExtensionRuntimeOperationAuthority>,
+        evidence: ExtensionRuntimeAbsenceEvidence,
+    },
+    AuthorityReclaimed(ExtensionRuntimeAbsenceEvidence),
     // An impossible native-owner identity collision revokes operation use but
     // keeps any already-published move-only authority captive until process
     // teardown. This state is written under the same mutex witnesses read, so
@@ -640,6 +677,50 @@ impl ReservationControl {
 
     fn phase(&self) -> u8 {
         self.phase.load(Ordering::Acquire)
+    }
+
+    fn absence_issuer(&self) -> ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+        self.binding.absence_issuer(self.generation)
+    }
+
+    fn accepts_absence_candidate(
+        &self,
+        ticket: NativeCallTicket,
+        evidence: ExtensionRuntimeAbsenceEvidence,
+    ) -> bool {
+        ticket.owner() == self.owner()
+            && ticket.registry_generation() == self.generation
+            && (!matches!(
+                evidence.proof_kind(),
+                zephium_extension_runtime_api::ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered
+            ) || ticket.kind() == NativeCallKind::Activation)
+            && self.absence_issuer().accepts(evidence, ticket.attempt())
+    }
+
+    fn retains_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        if !matches!(
+            self.phase(),
+            RESERVATION_ABSENCE_PROVEN | RESERVATION_AUTHORITY_RECLAIMED
+        ) {
+            return false;
+        }
+        matches!(
+            self.authority_state.lock().as_deref(),
+            Ok(ReservationAuthorityState::AbsenceProven {
+                evidence: retained,
+                ..
+            } | ReservationAuthorityState::AuthorityReclaimed(retained)) if *retained == evidence
+        )
+    }
+
+    fn retained_absence_evidence(&self) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        match self.authority_state.lock().as_deref() {
+            Ok(
+                ReservationAuthorityState::AbsenceProven { evidence, .. }
+                | ReservationAuthorityState::AuthorityReclaimed(evidence),
+            ) => Some(*evidence),
+            _ => None,
+        }
     }
 
     fn try_acquire_ownership_ingress(self: &Arc<Self>) -> Option<ReservationOwnershipIngress> {
@@ -833,8 +914,8 @@ impl ReservationControl {
                 };
                 Ok(())
             }
-            ReservationAuthorityState::AbsenceProven(_)
-            | ReservationAuthorityState::AuthorityReclaimed => Err(Box::new((
+            ReservationAuthorityState::AbsenceProven { .. }
+            | ReservationAuthorityState::AuthorityReclaimed(_) => Err(Box::new((
                 ExtensionRuntimeHostBindError::OwnerConflict,
                 authority,
             ))),
@@ -868,13 +949,18 @@ impl ReservationControl {
         if self.phase() != RESERVATION_ABSENCE_PROVEN {
             return Err(ExtensionRuntimeHostBindError::Unavailable);
         }
-        let ReservationAuthorityState::AbsenceProven(authority_slot) = &mut *state else {
+        let ReservationAuthorityState::AbsenceProven {
+            authority: authority_slot,
+            evidence,
+        } = &mut *state
+        else {
             self.gate
                 .inner
                 .invariant_failed
                 .store(true, Ordering::Release);
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         };
+        let absence = *evidence;
         let Some(authority) = authority_slot.take() else {
             return Err(ExtensionRuntimeHostBindError::Unavailable);
         };
@@ -891,7 +977,7 @@ impl ReservationControl {
                 .store(true, Ordering::Release);
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
-        *state = ReservationAuthorityState::AuthorityReclaimed;
+        *state = ReservationAuthorityState::AuthorityReclaimed(absence);
         self.phase
             .store(RESERVATION_AUTHORITY_RECLAIMED, Ordering::Release);
         Ok(authority)
@@ -1002,12 +1088,12 @@ impl ReservationControl {
         );
         let authority = match previous {
             ReservationAuthorityState::Published { authority, .. }
-            | ReservationAuthorityState::AbsenceProven(authority)
+            | ReservationAuthorityState::AbsenceProven { authority, .. }
             | ReservationAuthorityState::IntegrityQuarantined { authority } => authority,
             ReservationAuthorityState::ActivationPending
             | ReservationAuthorityState::Activated(_)
             | ReservationAuthorityState::RecoveryUncertain
-            | ReservationAuthorityState::AuthorityReclaimed => None,
+            | ReservationAuthorityState::AuthorityReclaimed(_) => None,
         };
         *state = ReservationAuthorityState::IntegrityQuarantined { authority };
         self.gate
@@ -1333,11 +1419,32 @@ impl ExtensionRuntimeRegistry {
             // settle a newer generation reusing the same durable address.
             return Ok(false);
         };
-        if !self.entries[index].native.permits_unattempted_absence() {
-            return Err(ExtensionRuntimeHostBindError::Unavailable);
-        }
+        let Some(raw_attempt) = self.next_native_attempt else {
+            return Err(ExtensionRuntimeHostBindError::IdentityExhausted);
+        };
+        let Some(attempt) = NonZeroU64::new(raw_attempt) else {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        };
+        self.next_native_attempt = raw_attempt.checked_add(1);
+        let issuer = self.entries[index].reservation.absence_issuer();
+        let absence = match self.entries[index].native.phase() {
+            NativeLifecyclePhase::ActivationReserved => issuer
+                .mint_activation_never_entered(attempt)
+                .ok_or(ExtensionRuntimeHostBindError::InternalInvariant)?,
+            NativeLifecyclePhase::RecoveryUncertainWithoutResource => {
+                let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+                    true, true, true, true,
+                )
+                .expect("test registry supplies the complete compatibility absence audit");
+                issuer
+                    .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
+                    .ok_or(ExtensionRuntimeHostBindError::Unavailable)?
+            }
+            _ => return Err(ExtensionRuntimeHostBindError::Unavailable),
+        };
         let entry = self.entries.remove(index);
-        match self.gate.prove_absence(&entry.reservation) {
+        match self.gate.prove_absence(&entry.reservation, absence) {
             Ok(()) => Ok(true),
             Err(reason) => {
                 self.entries.insert(index, entry);
@@ -1470,58 +1577,65 @@ impl ExtensionRuntimeRegistry {
                 self.attach_if_needed(reservation)?;
                 self.native_call_route(owner, generation, requested)
             }
-            RESERVATION_ABSENCE_PROVEN | RESERVATION_AUTHORITY_RECLAIMED => match requested {
-                NativeCallKind::Retirement => Ok(NativeCallRoute::Immediate(
-                    NativeTerminalDisposition::Retirement(
-                        ExtensionRuntimeRetirementDisposition::Retired,
-                    ),
-                )),
-                NativeCallKind::Reconciliation => Ok(NativeCallRoute::Immediate(
-                    NativeTerminalDisposition::Reconciliation(
-                        ExtensionRuntimeOwnershipDisposition::Absent,
-                    ),
-                )),
-                NativeCallKind::Activation => {
-                    let observed_retryable = match reservation
-                        .native_call
-                        .observed_retryable_activation(owner, generation)
-                    {
-                        Ok(observed) => observed,
-                        Err(_) => {
+            RESERVATION_ABSENCE_PROVEN | RESERVATION_AUTHORITY_RECLAIMED => {
+                let Some(absence) = reservation.retained_absence_evidence() else {
+                    self.fail_invariant();
+                    return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                };
+                match requested {
+                    NativeCallKind::Retirement => Ok(NativeCallRoute::Immediate(
+                        NativeTerminalDisposition::Retirement(
+                            ExtensionRuntimeRetirementDisposition::Retired(absence),
+                        ),
+                    )),
+                    NativeCallKind::Reconciliation => Ok(NativeCallRoute::Immediate(
+                        NativeTerminalDisposition::Reconciliation(
+                            ExtensionRuntimeOwnershipDisposition::Absent(absence),
+                        ),
+                    )),
+                    NativeCallKind::Activation => {
+                        let observed_retryable = match reservation
+                            .native_call
+                            .observed_retryable_activation(owner, generation)
+                        {
+                            Ok(observed) => observed,
+                            Err(_) => {
+                                self.fail_invariant();
+                                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                            }
+                        };
+                        if reservation.phase() != RESERVATION_ABSENCE_PROVEN || !observed_retryable
+                        {
                             self.fail_invariant();
                             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
                         }
-                    };
-                    if reservation.phase() != RESERVATION_ABSENCE_PROVEN || !observed_retryable {
-                        self.fail_invariant();
-                        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                        if self.sealed {
+                            return Err(ExtensionRuntimeHostBindError::Sealed);
+                        }
+                        if self.invariant_failed {
+                            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                        }
+                        if self.entries.len() >= MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS {
+                            return Err(ExtensionRuntimeHostBindError::CapacityExceeded);
+                        }
+                        if self
+                            .entries
+                            .iter()
+                            .any(|entry| entry.owner.same_native_lineage(owner))
+                        {
+                            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+                        }
+                        self.gate.rearm_retryable_activation(&reservation)?;
+                        self.entries.push(RegistryEntry {
+                            owner,
+                            generation,
+                            reservation,
+                            native: NativeLifecycleSlot::activation(owner, generation),
+                        });
+                        self.native_call_route(owner, generation, requested)
                     }
-                    if self.sealed {
-                        return Err(ExtensionRuntimeHostBindError::Sealed);
-                    }
-                    if self.invariant_failed {
-                        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
-                    }
-                    if self.entries.len() >= MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS {
-                        return Err(ExtensionRuntimeHostBindError::CapacityExceeded);
-                    }
-                    if self
-                        .entries
-                        .iter()
-                        .any(|entry| entry.owner.same_native_lineage(owner))
-                    {
-                        return Err(ExtensionRuntimeHostBindError::OwnerConflict);
-                    }
-                    self.gate.rearm_retryable_activation(&reservation)?;
-                    self.entries.push(RegistryEntry {
-                        owner,
-                        generation,
-                        reservation,
-                        native: NativeLifecycleSlot::activation(owner, generation),
-                    });
-                    self.native_call_route(owner, generation, requested)
                 }
-            },
+            }
             _ => {
                 self.fail_invariant();
                 Err(ExtensionRuntimeHostBindError::InternalInvariant)
@@ -1590,6 +1704,60 @@ impl ExtensionRuntimeRegistry {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
         Ok(ticket)
+    }
+
+    fn mint_activation_never_entered(
+        &mut self,
+        ticket: NativeCallTicket,
+    ) -> Result<ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeHostBindError> {
+        if ticket.kind() != NativeCallKind::Activation {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let index = self.entry_index(ticket.owner(), ticket.registry_generation())?;
+        if !matches!(
+            self.entries[index]
+                .reservation
+                .native_call
+                .notification_for(ticket),
+            Ok(NativeCallNotification::Pending)
+        ) || self.entries[index]
+            .native
+            .claim_activation_never_entered(ticket)
+            .is_err()
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let Some(absence) = self.entries[index]
+            .reservation
+            .absence_issuer()
+            .mint_activation_never_entered(ticket.attempt())
+        else {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        };
+        Ok(absence)
+    }
+
+    /// Marks the exact one-shot activation admission immediately before a
+    /// platform adapter is entered. This and absence minting are mutually
+    /// exclusive transitions on the same native lifecycle slot.
+    #[allow(dead_code)] // Required pre-adapter contract; production adapters remain disabled.
+    fn mark_activation_native_entered(
+        &mut self,
+        ticket: NativeCallTicket,
+    ) -> Result<(), ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(ticket.owner(), ticket.registry_generation())?;
+        if self.entries[index]
+            .native
+            .mark_activation_native_entered(ticket)
+            .is_err()
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        Ok(())
     }
 
     fn begin_native_retirement(
@@ -1667,11 +1835,16 @@ impl ExtensionRuntimeRegistry {
                 return Err(ExtensionRuntimeHostBindError::InternalInvariant);
             }
         };
+        let reservation = Arc::clone(&self.entries[index].reservation);
         let effect = self.entries[index]
             .native
-            .settle_activation(ticket, disposition, platform_owner, |evidence| {
-                activation_expectation_accepts(expectation, evidence)
-            })
+            .settle_activation(
+                ticket,
+                disposition,
+                platform_owner,
+                |evidence| activation_expectation_accepts(expectation, evidence),
+                |absence| reservation.accepts_absence_candidate(ticket, absence),
+            )
             .map_err(|reason| self.transition_error(reason))?;
         self.publish_native_terminal(index, ticket, effect)
     }
@@ -1691,11 +1864,15 @@ impl ExtensionRuntimeRegistry {
         }
         let expectation =
             BindingEvidenceExpectation::from_binding(&self.entries[index].reservation.binding);
+        let reservation = Arc::clone(&self.entries[index].reservation);
         let effect = self.entries[index]
             .native
-            .settle_retirement(ticket, disposition, |evidence| {
-                expectation.accepts(evidence)
-            })
+            .settle_retirement(
+                ticket,
+                disposition,
+                |evidence| expectation.accepts(evidence),
+                |absence| reservation.accepts_absence_candidate(ticket, absence),
+            )
             .map_err(|reason| self.transition_error(reason))?;
         self.publish_native_terminal(index, ticket, effect)
     }
@@ -1716,11 +1893,16 @@ impl ExtensionRuntimeRegistry {
         }
         let expectation =
             BindingEvidenceExpectation::from_binding(&self.entries[index].reservation.binding);
+        let reservation = Arc::clone(&self.entries[index].reservation);
         let effect = self.entries[index]
             .native
-            .settle_reconciliation(ticket, disposition, platform_owner, |evidence| {
-                expectation.accepts(evidence)
-            })
+            .settle_reconciliation(
+                ticket,
+                disposition,
+                platform_owner,
+                |evidence| expectation.accepts(evidence),
+                |absence| reservation.accepts_absence_candidate(ticket, absence),
+            )
             .map_err(|reason| self.transition_error(reason))?;
         self.publish_native_terminal(index, ticket, effect)
     }
@@ -1762,6 +1944,10 @@ impl ExtensionRuntimeRegistry {
             }
             NativeTerminalEffect::DefiniteAbsence(disposition) => disposition,
         };
+        let Some(absence) = disposition.absence_evidence() else {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        };
 
         if !matches!(
             self.entries[index]
@@ -1774,7 +1960,7 @@ impl ExtensionRuntimeRegistry {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
         let entry = self.entries.remove(index);
-        if let Err(reason) = self.gate.prove_absence(&entry.reservation) {
+        if let Err(reason) = self.gate.prove_absence(&entry.reservation, absence) {
             self.entries.insert(index, entry);
             self.fail_invariant();
             return Err(reason);
@@ -2421,11 +2607,13 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
         }
         let owner = OwnerKey::from_address(context.owner());
         let expectation = context.identity_expectation();
+        let absence_issuer = context.absence_evidence_issuer();
         let grants = Box::new(EngineNativeGrantSnapshot::try_from_context(context)?);
         let reservation = self.gate.reserve(ReservationBinding::Activation {
             owner,
             grants,
             expectation,
+            absence_issuer,
         })?;
         Ok(ExtensionRuntimeHostActivationPorts::new(
             reservation.generation,
@@ -2448,6 +2636,7 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
         let reservation = self.gate.reserve(ReservationBinding::Recovery {
             owner: OwnerKey::from_address(context.owner()),
             expectation: context.expectation(),
+            absence_issuer: context.absence_evidence_issuer(),
         })?;
         Ok(Box::new(EngineOwnershipPort {
             dispatch: Arc::clone(&self.dispatch),
@@ -2564,6 +2753,10 @@ impl zephium_extension_runtime_api::ExtensionRuntimeOwnershipPort for EngineLife
         proxy_retained_bytes::<Self>(&self.reservation)
     }
 
+    fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        self.reservation.retains_absence_evidence(evidence)
+    }
+
     fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
         ownership_retirement(&self.dispatch, Arc::clone(&self.reservation), deadline)
     }
@@ -2582,8 +2775,11 @@ impl zephium_extension_runtime_api::ExtensionRuntimeLifecyclePort for EngineLife
         access: &mut ExtensionPackageAccessView<'_>,
         deadline: Instant,
     ) -> ExtensionRuntimeActivationDisposition {
-        if let Err(disposition) = stage_activation_native_root(&self.reservation, access) {
-            return disposition;
+        if let Err(failure) = stage_activation_native_root(&self.reservation, access) {
+            return ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                failure,
+                evidence: None,
+            };
         }
         let reservation = Arc::clone(&self.reservation);
         match dispatch_reservation_host_call(
@@ -2626,23 +2822,28 @@ impl zephium_extension_runtime_api::ExtensionRuntimeLifecyclePort for EngineLife
                                 return Err(reason);
                             }
                         };
-                        let accepted =
-                            super::dispatch::with_extension_runtime_terminal(move |host| {
+                        let absence = host
+                            .extension_runtime_registry
+                            .mint_activation_never_entered(ticket)?;
+                        let accepted = super::dispatch::with_extension_runtime_terminal(
+                            move |host| {
                                 let settled =
                                     host.extension_runtime_registry.complete_native_activation(
                                         ticket,
-                                        ExtensionRuntimeActivationDisposition::Rejected(
-                                            ExtensionRuntimeFailure::UnsupportedTarget,
-                                        ),
+                                        ExtensionRuntimeActivationDisposition::Rejected {
+                                            failure: ExtensionRuntimeFailure::UnsupportedTarget,
+                                            absence,
+                                        },
                                         PlatformOwnerBundle::Vacant,
                                     );
                                 if settled.is_err() {
                                     fail_extension_native_terminal(
-                                host,
-                                "logical extension activation terminal violated registry state",
-                            );
+                                        host,
+                                        "logical extension activation terminal violated registry state",
+                                    );
                                 }
-                            });
+                            },
+                        );
                         // On refusal, the terminal transport itself owns the
                         // sticky fail-stop. This exact attempt remains pending;
                         // inventing uncertainty would admit a late native effect.
@@ -2656,11 +2857,17 @@ impl zephium_extension_runtime_api::ExtensionRuntimeLifecyclePort for EngineLife
             Ok(Ok(route)) => activation_disposition_from_route(&self.reservation, route, deadline),
             Ok(Err(reason)) => activation_bind_failure(reason),
             Err(HostCallFailure::TimedOut) => {
-                ExtensionRuntimeActivationDisposition::Retryable(ExtensionRuntimeFailure::TimedOut)
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: None,
+                }
             }
-            Err(HostCallFailure::Unavailable) => ExtensionRuntimeActivationDisposition::Retryable(
-                ExtensionRuntimeFailure::BackendUnavailable,
-            ),
+            Err(HostCallFailure::Unavailable) => {
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::BackendUnavailable,
+                    evidence: None,
+                }
+            }
             Err(HostCallFailure::Invariant) => {
                 ExtensionRuntimeActivationDisposition::OwnershipUncertain {
                     failure: ExtensionRuntimeFailure::Internal,
@@ -2681,6 +2888,10 @@ struct EngineOwnershipPort {
 impl zephium_extension_runtime_api::ExtensionRuntimeOwnershipPort for EngineOwnershipPort {
     fn retained_bytes(&self) -> usize {
         proxy_retained_bytes::<Self>(&self.reservation)
+    }
+
+    fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        self.reservation.retains_absence_evidence(evidence)
     }
 
     fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
@@ -2845,7 +3056,7 @@ fn ownership_reconciliation(
 fn stage_activation_native_root(
     reservation: &ReservationControl,
     access: &mut ExtensionPackageAccessView<'_>,
-) -> Result<(), ExtensionRuntimeActivationDisposition> {
+) -> Result<(), ExtensionRuntimeFailure> {
     if !reservation.requires_native_root() {
         return Ok(());
     }
@@ -2853,22 +3064,18 @@ fn stage_activation_native_root(
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(_) => {
-            return Err(ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::Internal,
-            ));
+            return Err(ExtensionRuntimeFailure::Internal);
         }
     }
     if access.target() != ExtensionRuntimeTarget::NativeWebExtension {
-        return Err(ExtensionRuntimeActivationDisposition::Rejected(
-            ExtensionRuntimeFailure::PackageRejected,
-        ));
+        return Err(ExtensionRuntimeFailure::PackageRejected);
     }
-    let root = access.take_native_root_lease().map_err(|_| {
-        ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::PackageRejected)
-    })?;
+    let root = access
+        .take_native_root_lease()
+        .map_err(|_| ExtensionRuntimeFailure::PackageRejected)?;
     reservation.stage_native_root(root).map_err(|root| {
         drop(root);
-        ExtensionRuntimeActivationDisposition::Rejected(ExtensionRuntimeFailure::Internal)
+        ExtensionRuntimeFailure::Internal
     })
 }
 
@@ -2946,12 +3153,12 @@ fn retirement_disposition_from_route(
     match terminal_from_route(reservation, route, deadline) {
         Ok(NativeTerminalDisposition::Retirement(disposition)) => disposition,
         Ok(NativeTerminalDisposition::Activation(
-            ExtensionRuntimeActivationDisposition::Retryable(_)
-            | ExtensionRuntimeActivationDisposition::Rejected(_),
-        ))
-        | Ok(NativeTerminalDisposition::Reconciliation(
-            ExtensionRuntimeOwnershipDisposition::Absent,
-        )) => ExtensionRuntimeRetirementDisposition::Retired,
+            ExtensionRuntimeActivationDisposition::Retryable { absence, .. }
+            | ExtensionRuntimeActivationDisposition::Rejected { absence, .. },
+        )) => ExtensionRuntimeRetirementDisposition::Retired(absence),
+        Ok(NativeTerminalDisposition::Reconciliation(
+            ExtensionRuntimeOwnershipDisposition::Absent(absence),
+        )) => ExtensionRuntimeRetirementDisposition::Retired(absence),
         Ok(NativeTerminalDisposition::Activation(
             ExtensionRuntimeActivationDisposition::Activated(_),
         ))
@@ -2993,12 +3200,12 @@ fn ownership_disposition_from_route(
             ExtensionRuntimeActivationDisposition::Activated(evidence),
         )) => ExtensionRuntimeOwnershipDisposition::Owned(evidence),
         Ok(NativeTerminalDisposition::Activation(
-            ExtensionRuntimeActivationDisposition::Retryable(_)
-            | ExtensionRuntimeActivationDisposition::Rejected(_),
-        ))
-        | Ok(NativeTerminalDisposition::Retirement(
-            ExtensionRuntimeRetirementDisposition::Retired,
-        )) => ExtensionRuntimeOwnershipDisposition::Absent,
+            ExtensionRuntimeActivationDisposition::Retryable { absence, .. }
+            | ExtensionRuntimeActivationDisposition::Rejected { absence, .. },
+        )) => ExtensionRuntimeOwnershipDisposition::Absent(absence),
+        Ok(NativeTerminalDisposition::Retirement(
+            ExtensionRuntimeRetirementDisposition::Retired(absence),
+        )) => ExtensionRuntimeOwnershipDisposition::Absent(absence),
         Ok(NativeTerminalDisposition::Activation(
             ExtensionRuntimeActivationDisposition::OwnershipUncertain { failure, evidence },
         ))
@@ -3070,17 +3277,9 @@ fn activation_bind_failure(
     reason: ExtensionRuntimeHostBindError,
 ) -> ExtensionRuntimeActivationDisposition {
     let failure = failure_from_bind(reason);
-    if matches!(
-        reason,
-        ExtensionRuntimeHostBindError::OwnerConflict
-            | ExtensionRuntimeHostBindError::InternalInvariant
-    ) {
-        ExtensionRuntimeActivationDisposition::OwnershipUncertain {
-            failure,
-            evidence: None,
-        }
-    } else {
-        ExtensionRuntimeActivationDisposition::Retryable(failure)
+    ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+        failure,
+        evidence: None,
     }
 }
 
@@ -3378,10 +3577,32 @@ mod tests {
     }
 
     fn recovery_binding(owner: OwnerKey) -> ReservationBinding {
+        let entry = recovery_entry(
+            owner.revision.get(),
+            owner.operation.get(),
+            owner.incarnation.get(),
+        );
+        let binding = ExtensionRuntimeHostRecoveryBinding::try_new(entry)
+            .expect("valid exact recovery binding");
         ReservationBinding::Recovery {
             owner,
             expectation: ExtensionRuntimeRecoveryExpectation::Compatibility,
+            absence_issuer: binding.context().absence_evidence_issuer(),
         }
+    }
+
+    fn compatibility_absence_for(
+        reservation: &ReservationControl,
+        ticket: NativeCallTicket,
+    ) -> ExtensionRuntimeAbsenceEvidence {
+        let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+            true, true, true, true,
+        )
+        .expect("test compatibility owner is fully quiescent");
+        reservation
+            .absence_issuer()
+            .mint_compatibility_registry_absent_and_quiescent(ticket.attempt(), audit)
+            .expect("exact compatibility reservation accepts the complete audit")
     }
 
     struct TestNativeRootPort {
@@ -3474,9 +3695,10 @@ mod tests {
                 .take_native_root_lease()
                 .expect("test provider delegates one root");
             *self.captured.lock().expect("capture root") = Some(root);
-            ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::PackageRejected,
-            )
+            ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::PackageRejected,
+                evidence: None,
+            }
         }
     }
 
@@ -3511,7 +3733,7 @@ mod tests {
         let settlement = request.settle_until(Instant::now() + std::time::Duration::from_secs(1));
         assert!(matches!(
             settlement,
-            ExtensionRuntimeActivationSettlement::Rejected { .. }
+            ExtensionRuntimeActivationSettlement::OwnershipUncertain { .. }
         ));
         drop(settlement);
         let root = captured.lock().expect("captured root").take();
@@ -3527,6 +3749,78 @@ mod tests {
         release: ExtensionNativeOwnershipEntry,
         authority: ExtensionRuntimeOperationAuthority,
         fingerprint: ExtensionRuntimeFingerprint,
+    }
+
+    struct AbsenceIssuerCaptureFactory {
+        captured: Arc<Mutex<Option<ExtensionRuntimeAbsenceEvidenceIssuer>>>,
+    }
+
+    impl ExtensionRuntimeHostFactoryPort for AbsenceIssuerCaptureFactory {
+        fn bind_activation(
+            &mut self,
+            context: ExtensionRuntimeHostActivationContext<'_>,
+        ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+            *self.captured.lock().expect("capture issuer") =
+                Some(context.absence_evidence_issuer());
+            Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+        }
+
+        fn bind_recovery(
+            &mut self,
+            _context: ExtensionRuntimeHostRecoveryContext,
+        ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError>
+        {
+            Err(ExtensionRuntimeHostBindError::UnsupportedBackend)
+        }
+    }
+
+    fn capture_activation_absence_issuer(
+        entry: ExtensionNativeOwnershipEntry,
+        authority: ExtensionRuntimeOperationAuthority,
+    ) -> (
+        ExtensionRuntimeAbsenceEvidenceIssuer,
+        ExtensionRuntimeOperationAuthority,
+    ) {
+        let plan =
+            ExtensionRuntimeResourcePlan::try_new(vec![ExtensionRuntimeResourceBinding::try_new(
+                "manifest.json",
+                2,
+                [7; 32],
+            )
+            .expect("manifest binding")])
+            .expect("test resource plan");
+        let access = ExtensionPackageAccess::from_delegated_provider(
+            ExtensionRuntimeTarget::Compatibility,
+            plan,
+            Box::new(TestNativePackageProvider { root: None }),
+        )
+        .expect("bounded compatibility access");
+        let binding = activation_issuer_test_support::assemble_activation_binding(
+            entry,
+            access,
+            authority,
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+        );
+        let captured = Arc::new(Mutex::new(None));
+        let mut factory =
+            ExtensionRuntimeHostFactory::from_trusted_port(Box::new(AbsenceIssuerCaptureFactory {
+                captured: Arc::clone(&captured),
+            }));
+        let refusal = factory
+            .bind_activation(binding)
+            .expect_err("capture factory refuses after observing context");
+        let (_entry, access, authority, expectation) = refusal.cancel_into_parts();
+        assert_eq!(
+            expectation,
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility
+        );
+        drop(access);
+        let issuer = captured
+            .lock()
+            .expect("capture issuer")
+            .take()
+            .expect("activation context yielded issuer");
+        (issuer, authority)
     }
 
     fn activation_registry_fixture() -> ActivationRegistryFixture {
@@ -3712,6 +4006,8 @@ mod tests {
             incarnation: cas.native_incarnation(),
             backend: may_own.runtime_backend(),
         };
+        let (absence_issuer, authority) =
+            capture_activation_absence_issuer(may_own.clone(), authority);
         ActivationRegistryFixture {
             _held_pin: held_pin,
             binding: ReservationBinding::Activation {
@@ -3720,6 +4016,7 @@ mod tests {
                     EngineNativeGrantSnapshot::from_valid_core_snapshot_for_test(grants),
                 ),
                 expectation: ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+                absence_issuer,
             },
             owner,
             initial: may_own,
@@ -3855,6 +4152,7 @@ mod tests {
                 .reserve(ReservationBinding::Recovery {
                     owner: OwnerKey::from_address(context.owner()),
                     expectation: context.expectation(),
+                    absence_issuer: context.absence_evidence_issuer(),
                 })
                 .expect("exact recovery reservation");
             match &reservation.binding {
@@ -4246,7 +4544,13 @@ mod tests {
     #[test]
     fn staged_native_root_survives_dispatch_refusal_and_keeps_one_stable_inline_charge() {
         let fixture = activation_registry_fixture();
-        let ReservationBinding::Activation { owner, grants, .. } = fixture.binding else {
+        let ReservationBinding::Activation {
+            owner,
+            grants,
+            absence_issuer,
+            ..
+        } = fixture.binding
+        else {
             panic!("activation fixture");
         };
         let native_id = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
@@ -4259,6 +4563,7 @@ mod tests {
                 expectation: ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(
                     native_id,
                 ),
+                absence_issuer,
             })
             .expect("native activation reservation");
         let charged_before = proxy_retained_bytes::<EngineLifecyclePort>(&reservation);
@@ -4315,12 +4620,16 @@ mod tests {
                     .expect("first background resource"),
             )
             .expect("first activation ticket");
+        let first_absence = registry
+            .mint_activation_never_entered(first)
+            .expect("registry proves first native call was never entered");
         assert_eq!(
             registry.complete_native_activation(
                 first,
-                ExtensionRuntimeActivationDisposition::Retryable(
-                    ExtensionRuntimeFailure::BackendUnavailable,
-                ),
+                ExtensionRuntimeActivationDisposition::Retryable {
+                    failure: ExtensionRuntimeFailure::BackendUnavailable,
+                    absence: first_absence,
+                },
                 PlatformOwnerBundle::Vacant,
             ),
             Ok(true)
@@ -4333,7 +4642,7 @@ mod tests {
             registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Reconciliation,),
             Ok(NativeCallRoute::Immediate(
                 NativeTerminalDisposition::Reconciliation(
-                    ExtensionRuntimeOwnershipDisposition::Absent,
+                    ExtensionRuntimeOwnershipDisposition::Absent(first_absence),
                 )
             )),
             "an ownership caller may consume the already-proven absence"
@@ -4343,9 +4652,10 @@ mod tests {
                 .native_call
                 .wait_until(first, Instant::now() + std::time::Duration::from_secs(1),),
             Ok(NativeTerminalDisposition::Activation(
-                ExtensionRuntimeActivationDisposition::Retryable(
-                    ExtensionRuntimeFailure::BackendUnavailable,
-                )
+                ExtensionRuntimeActivationDisposition::Retryable {
+                    failure: ExtensionRuntimeFailure::BackendUnavailable,
+                    absence: first_absence,
+                }
             ))
         );
 
@@ -4368,14 +4678,18 @@ mod tests {
                     .expect("second background resource"),
             )
             .expect("second activation ticket");
+        let second_absence = registry
+            .mint_activation_never_entered(second)
+            .expect("registry proves second native call was never entered");
         assert_ne!(first, second);
         assert_eq!(second.registry_generation(), generation);
         assert_eq!(
             registry.complete_native_activation(
                 second,
-                ExtensionRuntimeActivationDisposition::Rejected(
-                    ExtensionRuntimeFailure::PackageRejected,
-                ),
+                ExtensionRuntimeActivationDisposition::Rejected {
+                    failure: ExtensionRuntimeFailure::PackageRejected,
+                    absence: second_absence,
+                },
                 PlatformOwnerBundle::Vacant,
             ),
             Ok(true)
@@ -4385,15 +4699,90 @@ mod tests {
                 .native_call
                 .wait_until(second, Instant::now() + std::time::Duration::from_secs(1),),
             Ok(NativeTerminalDisposition::Activation(
-                ExtensionRuntimeActivationDisposition::Rejected(
-                    ExtensionRuntimeFailure::PackageRejected,
-                )
+                ExtensionRuntimeActivationDisposition::Rejected {
+                    failure: ExtensionRuntimeFailure::PackageRejected,
+                    absence: second_absence,
+                }
             ))
         );
         assert!(registry.entries.is_empty());
         assert_eq!(gate.reservation_count(), Some(0));
         assert!(ledger.is_quiescent());
         drop(fixture._held_pin);
+    }
+
+    #[test]
+    fn entered_activation_rejects_never_entered_evidence_and_retains_resources() {
+        let fixture = activation_registry_fixture();
+        let held_pin = fixture._held_pin;
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(fixture.binding)
+            .expect("activation reservation");
+        let generation = reservation.generation;
+        assert_eq!(
+            registry.route_native_call(Arc::clone(&reservation), NativeCallKind::Activation),
+            Ok(NativeCallRoute::Begin)
+        );
+
+        let ledger = super::super::resources::NativeResourceLedger::default();
+        let ticket = registry
+            .begin_native_activation(
+                fixture.owner,
+                generation,
+                Instant::now() + std::time::Duration::from_secs(5),
+                ledger
+                    .try_acquire(NativeResourceClass::ExtensionBackground)
+                    .expect("background resource"),
+            )
+            .expect("activation ticket");
+        let fabricated = reservation
+            .absence_issuer()
+            .mint_activation_never_entered(ticket.attempt())
+            .expect("test bypasses the registry token to exercise settlement defense in depth");
+        registry
+            .mark_activation_native_entered(ticket)
+            .expect("native entry consumes the one-shot token");
+
+        assert_eq!(
+            registry.complete_native_activation(
+                ticket,
+                ExtensionRuntimeActivationDisposition::Retryable {
+                    failure: ExtensionRuntimeFailure::BackendUnavailable,
+                    absence: fabricated,
+                },
+                PlatformOwnerBundle::Vacant,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            reservation
+                .native_call
+                .wait_until(ticket, Instant::now() + std::time::Duration::from_secs(1),),
+            Ok(NativeTerminalDisposition::Activation(
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::Internal,
+                    evidence: None,
+                }
+            ))
+        );
+        assert_eq!(
+            registry.native_phase(fixture.owner, generation),
+            Ok(NativeLifecyclePhase::Uncertain)
+        );
+        assert!(!ledger.is_quiescent());
+        assert_eq!(gate.reservation_count(), Some(1));
+
+        drop(registry);
+        assert!(ledger.is_quiescent());
+        drop(reservation);
+        assert_eq!(
+            gate.reservation_count(),
+            Some(1),
+            "passive destruction must not convert uncertain ownership into reusable admission"
+        );
+        drop(held_pin);
     }
 
     #[test]
@@ -4472,10 +4861,11 @@ mod tests {
             NativeCallKind::Reconciliation,
             NonZeroU64::new(2).expect("nonzero attempt"),
         );
+        let stale_absence = compatibility_absence_for(&reservation, stale);
         assert_eq!(
             registry.complete_native_reconciliation(
                 stale,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(stale_absence),
                 PlatformOwnerBundle::Vacant,
             ),
             Ok(false)
@@ -4517,19 +4907,21 @@ mod tests {
             )
             .expect("retained reconciliation resource is reused");
         assert_eq!(second.attempt().get(), 2);
+        let first_absence = compatibility_absence_for(&reservation, first);
         assert_eq!(
             registry.complete_native_reconciliation(
                 first,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(first_absence),
                 PlatformOwnerBundle::Vacant,
             ),
             Ok(false),
             "the prior exact callback cannot settle the second attempt"
         );
+        let second_absence = compatibility_absence_for(&reservation, second);
         assert_eq!(
             registry.complete_native_reconciliation(
                 second,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(second_absence),
                 PlatformOwnerBundle::Vacant,
             ),
             Ok(true)
@@ -4539,7 +4931,7 @@ mod tests {
                 .native_call
                 .wait_until(second, Instant::now() + std::time::Duration::from_secs(1)),
             Ok(NativeTerminalDisposition::Reconciliation(
-                ExtensionRuntimeOwnershipDisposition::Absent
+                ExtensionRuntimeOwnershipDisposition::Absent(second_absence)
             ))
         );
         assert!(ledger.is_quiescent());
@@ -4628,10 +5020,11 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(5),
             )
             .expect("second exact retirement");
+        let final_absence = compatibility_absence_for(&reservation, final_retirement);
         assert_eq!(
             registry.complete_native_retirement(
                 final_retirement,
-                ExtensionRuntimeRetirementDisposition::Retired,
+                ExtensionRuntimeRetirementDisposition::Retired(final_absence),
             ),
             Ok(true)
         );
@@ -4641,7 +5034,7 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
             ),
             Ok(NativeTerminalDisposition::Retirement(
-                ExtensionRuntimeRetirementDisposition::Retired
+                ExtensionRuntimeRetirementDisposition::Retired(final_absence)
             ))
         );
         assert!(registry.entries.is_empty());

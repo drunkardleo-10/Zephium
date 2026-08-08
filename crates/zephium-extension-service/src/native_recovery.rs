@@ -9,11 +9,12 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::ProfileId;
 use zephium_extension_runtime_api::{
-    ExtensionRuntimeFailure, ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
-    ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostProfileAbsenceEvidence,
-    ExtensionRuntimeHostRecoveryBinding, ExtensionRuntimeOwnershipEvidence,
-    ExtensionRuntimeRecoveryOwner, ExtensionRuntimeRecoveryRequest,
-    ExtensionRuntimeRecoveryRetirementSettlement, ExtensionRuntimeRecoverySettlement,
+    ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeFailure, ExtensionRuntimeHostBindError,
+    ExtensionRuntimeHostFactory, ExtensionRuntimeHostProfileAbsenceDisposition,
+    ExtensionRuntimeHostProfileAbsenceEvidence, ExtensionRuntimeHostRecoveryBinding,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryOwner,
+    ExtensionRuntimeRecoveryRequest, ExtensionRuntimeRecoveryRetirementSettlement,
+    ExtensionRuntimeRecoverySettlement,
 };
 
 use crate::cleanup::CancellationCheck;
@@ -76,7 +77,7 @@ enum NativeRecoveryControl {
         attached: bool,
     },
     Owner(ExtensionRuntimeRecoveryOwner),
-    AbsenceFence,
+    AbsenceFence(ExtensionRuntimeAbsenceEvidence),
 }
 
 struct NativeRecoveryFrontier {
@@ -239,9 +240,13 @@ impl NativeRecoveryState {
                 cancellation,
                 deadline,
             ),
-            NativeRecoveryControl::AbsenceFence => {
-                self.advance_absence(frontier.durable, journal_backend, projection, deadline)
-            }
+            NativeRecoveryControl::AbsenceFence(absence) => self.advance_absence(
+                frontier.durable,
+                absence,
+                journal_backend,
+                projection,
+                deadline,
+            ),
         };
         self.frontier = frontier;
         step
@@ -303,12 +308,20 @@ impl NativeRecoveryState {
                 },
                 NativeRecoveryStep::Progress,
             ),
-            ExtensionRuntimeRecoverySettlement::Absent => (
-                NativeRecoveryFrontier {
-                    durable,
-                    control: NativeRecoveryControl::AbsenceFence,
-                },
-                NativeRecoveryStep::Progress,
+            ExtensionRuntimeRecoverySettlement::Absent(absence)
+                if absence.structurally_matches_entry(&durable.entry) =>
+            {
+                (
+                    NativeRecoveryFrontier {
+                        durable,
+                        control: NativeRecoveryControl::AbsenceFence(absence),
+                    },
+                    NativeRecoveryStep::Progress,
+                )
+            }
+            ExtensionRuntimeRecoverySettlement::Absent(absence) => (
+                absence_frontier(durable, absence),
+                NativeRecoveryStep::Failed(NativeRecoveryFailure::HostInvariant),
             ),
             ExtensionRuntimeRecoverySettlement::StillUncertain { request, failure } => (
                 request_frontier(durable, request, true),
@@ -415,12 +428,20 @@ impl NativeRecoveryState {
         let settlement = owner.into_retirement_request().settle_until(deadline);
         self.native_call_panic_fence = false;
         let (frontier, provisional_step) = match settlement {
-            ExtensionRuntimeRecoveryRetirementSettlement::Absent => (
-                NativeRecoveryFrontier {
-                    durable,
-                    control: NativeRecoveryControl::AbsenceFence,
-                },
-                NativeRecoveryStep::Progress,
+            ExtensionRuntimeRecoveryRetirementSettlement::Absent(absence)
+                if absence.structurally_matches_entry(&durable.entry) =>
+            {
+                (
+                    NativeRecoveryFrontier {
+                        durable,
+                        control: NativeRecoveryControl::AbsenceFence(absence),
+                    },
+                    NativeRecoveryStep::Progress,
+                )
+            }
+            ExtensionRuntimeRecoveryRetirementSettlement::Absent(absence) => (
+                absence_frontier(durable, absence),
+                NativeRecoveryStep::Failed(NativeRecoveryFailure::HostInvariant),
             ),
             ExtensionRuntimeRecoveryRetirementSettlement::Retained { owner, failure } => (
                 owner_frontier(durable, owner),
@@ -446,10 +467,17 @@ impl NativeRecoveryState {
     fn advance_absence(
         &mut self,
         mut durable: DurableRecoveryLineage,
+        absence: ExtensionRuntimeAbsenceEvidence,
         journal_backend: &impl JournalBackend,
         projection: &mut JournalProjection,
         deadline: Instant,
     ) -> (Option<NativeRecoveryFrontier>, NativeRecoveryStep) {
+        if !absence.structurally_matches_entry(&durable.entry) {
+            return (
+                Some(absence_frontier(durable, absence)),
+                NativeRecoveryStep::Failed(NativeRecoveryFailure::HostInvariant),
+            );
+        }
         if durable.pending.is_some() {
             let step =
                 settle_pending_transition(&mut durable, journal_backend, projection, deadline);
@@ -460,12 +488,12 @@ impl NativeRecoveryState {
             {
                 return (None, NativeRecoveryStep::Progress);
             }
-            return (Some(absence_frontier(durable)), step);
+            return (Some(absence_frontier(durable, absence)), step);
         }
         if let Some(step) =
             ensure_exact_durable_row(&durable.entry, journal_backend, projection, deadline)
         {
-            return (Some(absence_frontier(durable)), step);
+            return (Some(absence_frontier(durable, absence)), step);
         }
         if durable.entry.intent() == ExtensionNativeOwnershipIntent::Release
             && durable.entry.phase() == ExtensionNativeOwnershipPhase::NativeAbsentReleasePending
@@ -493,7 +521,7 @@ impl NativeRecoveryState {
             ),
             _ => {
                 return (
-                    Some(absence_frontier(durable)),
+                    Some(absence_frontier(durable, absence)),
                     NativeRecoveryStep::Failed(NativeRecoveryFailure::InvalidJournalTransition),
                 );
             }
@@ -513,7 +541,7 @@ impl NativeRecoveryState {
         {
             (None, NativeRecoveryStep::Progress)
         } else {
-            (Some(absence_frontier(durable)), step)
+            (Some(absence_frontier(durable, absence)), step)
         }
     }
 }
@@ -539,10 +567,13 @@ fn owner_frontier(
     }
 }
 
-fn absence_frontier(durable: DurableRecoveryLineage) -> NativeRecoveryFrontier {
+fn absence_frontier(
+    durable: DurableRecoveryLineage,
+    absence: ExtensionRuntimeAbsenceEvidence,
+) -> NativeRecoveryFrontier {
     NativeRecoveryFrontier {
         durable,
-        control: NativeRecoveryControl::AbsenceFence,
+        control: NativeRecoveryControl::AbsenceFence(absence),
     }
 }
 
@@ -701,7 +732,7 @@ fn settle_new_frontier_evidence(
     let evidence = match &frontier.control {
         NativeRecoveryControl::Request { request, .. } => request.ownership_evidence(),
         NativeRecoveryControl::Owner(owner) => Some(owner.ownership_evidence()),
-        NativeRecoveryControl::AbsenceFence => None,
+        NativeRecoveryControl::AbsenceFence(_) => None,
     }?;
     match ensure_evidence_is_durable(&mut frontier.durable, evidence, projection) {
         EvidenceDurability::Exact => None,
@@ -897,11 +928,14 @@ mod tests {
         BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
     };
     use zephium_extension_runtime_api::{
-        ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
-        ExtensionRuntimeHostFactoryPort, ExtensionRuntimeHostOwnershipPort,
-        ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeNativeOwnerId,
-        ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipPort,
-        ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRetirementDisposition,
+        ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+        ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeHostActivationContext,
+        ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostFactoryPort,
+        ExtensionRuntimeHostOwnershipPort, ExtensionRuntimeHostRecoveryContext,
+        ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeMacosAbsenceAudit,
+        ExtensionRuntimeNativeOwnerId, ExtensionRuntimeOwnershipDisposition,
+        ExtensionRuntimeOwnershipPort, ExtensionRuntimeRecoveryExpectation,
+        ExtensionRuntimeRetirementDisposition,
     };
     use zephium_store::ExtensionServiceStoreCallOutcome;
 
@@ -1088,8 +1122,17 @@ mod tests {
         profile_absence: VecDeque<Result<(), ExtensionRuntimeHostProfileAbsenceDisposition>>,
         reconcile_deadlines: Vec<Instant>,
         retire_deadlines: Vec<Instant>,
-        reconcile: VecDeque<ExtensionRuntimeOwnershipDisposition>,
-        retire: VecDeque<ExtensionRuntimeRetirementDisposition>,
+        reconcile: VecDeque<ScriptedReconciliation>,
+        retire: VecDeque<ScriptedRetirement>,
+    }
+
+    enum ScriptedReconciliation {
+        Disposition(ExtensionRuntimeOwnershipDisposition),
+        Absent,
+    }
+
+    enum ScriptedRetirement {
+        Retired,
     }
 
     impl HostScript {
@@ -1136,6 +1179,13 @@ mod tests {
             drop(script);
             Ok(Box::new(ScriptedOwnershipPort {
                 script: Arc::clone(&self.script),
+                absence_issuer: context.absence_evidence_issuer().bind(
+                    ExtensionRuntimeHostRegistryGeneration::new(1)
+                        .expect("test registry generation is nonzero"),
+                ),
+                last_absence: None,
+                next_absence_attempt: 1,
+                recovery_expectation: context.expectation(),
             }))
         }
 
@@ -1154,6 +1204,53 @@ mod tests {
 
     struct ScriptedOwnershipPort {
         script: Arc<Mutex<HostScript>>,
+        absence_issuer: ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+        last_absence: Option<ExtensionRuntimeAbsenceEvidence>,
+        next_absence_attempt: u64,
+        recovery_expectation: ExtensionRuntimeRecoveryExpectation,
+    }
+
+    impl ScriptedOwnershipPort {
+        fn mint_absence(&mut self) -> Option<ExtensionRuntimeAbsenceEvidence> {
+            let attempt = std::num::NonZeroU64::new(self.next_absence_attempt)
+                .expect("test absence attempt remains nonzero");
+            self.next_absence_attempt = self
+                .next_absence_attempt
+                .checked_add(1)
+                .expect("test absence attempt does not exhaust");
+            let absence = match self.recovery_expectation {
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected,
+                    adapter_observed,
+                } if catalog_expected.or(adapter_observed).is_some_and(|anchor| {
+                    catalog_expected.is_none_or(|expected| expected == anchor)
+                        && adapter_observed.is_none_or(|observed| observed == anchor)
+                }) =>
+                {
+                    let observed = catalog_expected
+                        .or(adapter_observed)
+                        .expect("guard established one exact native identity anchor");
+                    let audit = ExtensionRuntimeMacosAbsenceAudit::try_from_observations(
+                        true, true, true, true, false, false, true, true, true, true,
+                    )
+                    .expect("scripted macOS absence audit is complete");
+                    self.absence_issuer
+                        .mint_macos_zero_grants_and_unloaded(attempt, observed, audit)
+                }
+                ExtensionRuntimeRecoveryExpectation::Compatibility => {
+                    let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+                        true, true, true, true,
+                    )
+                    .expect("scripted compatibility runtime is fully quiescent");
+                    self.absence_issuer
+                        .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
+                }
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension { .. }
+                | ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { .. } => None,
+            };
+            self.last_absence = absence;
+            absence
+        }
     }
 
     impl ExtensionRuntimeOwnershipPort for ScriptedOwnershipPort {
@@ -1161,27 +1258,55 @@ mod tests {
             0
         }
 
+        fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+            self.last_absence == Some(evidence)
+                && self.absence_issuer.accepts(evidence, evidence.attempt())
+        }
+
         fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
-            let mut script = self.script.lock().unwrap();
-            script.retire_calls += 1;
-            script.retire_deadlines.push(deadline);
-            script
-                .retire
-                .pop_front()
-                .expect("unexpected retirement call")
+            let disposition = {
+                let mut script = self.script.lock().unwrap();
+                script.retire_calls += 1;
+                script.retire_deadlines.push(deadline);
+                script
+                    .retire
+                    .pop_front()
+                    .expect("unexpected retirement call")
+            };
+            match disposition {
+                ScriptedRetirement::Retired => self.mint_absence().map_or(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: None,
+                    },
+                    ExtensionRuntimeRetirementDisposition::Retired,
+                ),
+            }
         }
 
         fn reconcile_ownership_until(
             &mut self,
             deadline: Instant,
         ) -> ExtensionRuntimeOwnershipDisposition {
-            let mut script = self.script.lock().unwrap();
-            script.reconcile_calls += 1;
-            script.reconcile_deadlines.push(deadline);
-            script
-                .reconcile
-                .pop_front()
-                .expect("unexpected reconciliation call")
+            let disposition = {
+                let mut script = self.script.lock().unwrap();
+                script.reconcile_calls += 1;
+                script.reconcile_deadlines.push(deadline);
+                script
+                    .reconcile
+                    .pop_front()
+                    .expect("unexpected reconciliation call")
+            };
+            match disposition {
+                ScriptedReconciliation::Disposition(disposition) => disposition,
+                ScriptedReconciliation::Absent => self.mint_absence().map_or(
+                    ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: None,
+                    },
+                    ExtensionRuntimeOwnershipDisposition::Absent,
+                ),
+            }
         }
     }
 
@@ -1526,10 +1651,12 @@ mod tests {
     fn catalog_expectation_is_bound_but_never_persisted_as_adapter_observation() {
         let mut host = HostScript::new();
         host.reconcile
-            .push_back(ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: ExtensionRuntimeFailure::TimedOut,
-                evidence: None,
-            });
+            .push_back(ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: None,
+                },
+            ));
         let script = Arc::new(Mutex::new(host));
         let initial = possible_owner(ExtensionRuntimeBackendTarget::MacosNative);
         let expected = initial.entries()[0]
@@ -1568,17 +1695,19 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_observation_is_durable_but_only_definite_absence_releases() {
+    fn mismatched_observation_cannot_be_discharged_by_other_identity_absence() {
         let mismatched = conflicting_native_owner_id();
         let mut host = HostScript::new();
         host.reconcile.extend([
-            ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: ExtensionRuntimeFailure::TimedOut,
-                evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
-                    mismatched,
-                )),
-            },
-            ExtensionRuntimeOwnershipDisposition::Absent,
+            ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
+                        mismatched,
+                    )),
+                },
+            ),
+            ScriptedReconciliation::Absent,
         ]);
         let script = Arc::new(Mutex::new(host));
         let backend =
@@ -1617,7 +1746,7 @@ mod tests {
         ));
         assert_eq!(repository.releases, 0);
 
-        assert!(matches!(
+        assert_eq!(
             run(
                 &backend,
                 &mut projection,
@@ -1626,10 +1755,11 @@ mod tests {
                 &NeverCancelled,
                 Instant::now() + TEST_DEADLINE,
             ),
-            CleanupStartupOutcome::Ready { .. }
-        ));
-        assert!(backend.durable().entries().is_empty());
-        assert_eq!(repository.releases, 1);
+            CleanupStartupOutcome::Failed(crate::cleanup::CleanupFailure::NativeHostInvariant)
+        );
+        assert_eq!(backend.durable(), after_durable_attachment);
+        assert_eq!(repository.releases, 0);
+        assert!(native.has_frontier());
         let script = script.lock().unwrap();
         assert_eq!(script.bind_calls, 1);
         assert_eq!(script.reconcile_calls, 2);
@@ -1641,9 +1771,10 @@ mod tests {
         let evidence = ExtensionRuntimeOwnershipEvidence::MacosWebExtension(native_owner_id());
         let mut host = HostScript::new();
         host.reconcile
-            .push_back(ExtensionRuntimeOwnershipDisposition::Owned(evidence));
-        host.retire
-            .push_back(ExtensionRuntimeRetirementDisposition::Retired);
+            .push_back(ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::Owned(evidence),
+            ));
+        host.retire.push_back(ScriptedRetirement::Retired);
         let script = Arc::new(Mutex::new(host));
         let initial = legacy_observed_only_owner(
             ExtensionRuntimeBackendTarget::MacosNative,
@@ -1689,7 +1820,7 @@ mod tests {
             .lock()
             .unwrap()
             .reconcile
-            .push_back(ExtensionRuntimeOwnershipDisposition::Absent);
+            .push_back(ScriptedReconciliation::Absent);
         let backend = FakeJournalBackend::new(possible_owner(
             ExtensionRuntimeBackendTarget::LinuxCompatibility,
         ));
@@ -1721,8 +1852,8 @@ mod tests {
     fn multiple_rows_are_recovered_serially_with_one_host_reservation_each() {
         let mut host = HostScript::new();
         host.reconcile.extend([
-            ExtensionRuntimeOwnershipDisposition::Absent,
-            ExtensionRuntimeOwnershipDisposition::Absent,
+            ScriptedReconciliation::Absent,
+            ScriptedReconciliation::Absent,
         ]);
         let script = Arc::new(Mutex::new(host));
         let backend = FakeJournalBackend::new(two_possible_owners(
@@ -1756,11 +1887,12 @@ mod tests {
     fn ambiguous_observation_attachment_reloads_exact_after_state_without_rebinding() {
         let mut host = HostScript::new();
         host.reconcile
-            .push_back(ExtensionRuntimeOwnershipDisposition::Owned(
-                ExtensionRuntimeOwnershipEvidence::MacosWebExtension(native_owner_id()),
+            .push_back(ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::Owned(
+                    ExtensionRuntimeOwnershipEvidence::MacosWebExtension(native_owner_id()),
+                ),
             ));
-        host.retire
-            .push_back(ExtensionRuntimeRetirementDisposition::Retired);
+        host.retire.push_back(ScriptedRetirement::Retired);
         let script = Arc::new(Mutex::new(host));
         let backend =
             FakeJournalBackend::new(possible_owner(ExtensionRuntimeBackendTarget::MacosNative))
@@ -1817,13 +1949,15 @@ mod tests {
     fn uncertain_request_and_authenticated_identity_survive_retry_without_rebinding() {
         let mut host = HostScript::new();
         host.reconcile.extend([
-            ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: ExtensionRuntimeFailure::TimedOut,
-                evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
-                    native_owner_id(),
-                )),
-            },
-            ExtensionRuntimeOwnershipDisposition::Absent,
+            ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
+                        native_owner_id(),
+                    )),
+                },
+            ),
+            ScriptedReconciliation::Absent,
         ]);
         let script = Arc::new(Mutex::new(host));
         let backend =
@@ -1897,10 +2031,12 @@ mod tests {
     fn stale_store_row_after_ambiguous_native_call_fails_closed() {
         let mut host = HostScript::new();
         host.reconcile
-            .push_back(ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: ExtensionRuntimeFailure::BackendUnavailable,
-                evidence: None,
-            });
+            .push_back(ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::BackendUnavailable,
+                    evidence: None,
+                },
+            ));
         let script = Arc::new(Mutex::new(host));
         let backend = FakeJournalBackend::new(possible_owner(
             ExtensionRuntimeBackendTarget::LinuxCompatibility,
@@ -2017,11 +2153,13 @@ mod tests {
     fn shutdown_style_drain_settles_an_attached_request_or_retains_it_fail_closed() {
         let mut host = HostScript::new();
         host.reconcile.extend([
-            ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: ExtensionRuntimeFailure::TimedOut,
-                evidence: None,
-            },
-            ExtensionRuntimeOwnershipDisposition::Absent,
+            ScriptedReconciliation::Disposition(
+                ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                    failure: ExtensionRuntimeFailure::TimedOut,
+                    evidence: None,
+                },
+            ),
+            ScriptedReconciliation::Absent,
         ]);
         let script = Arc::new(Mutex::new(host));
         let backend = FakeJournalBackend::new(possible_owner(

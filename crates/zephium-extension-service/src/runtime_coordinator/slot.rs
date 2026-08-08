@@ -8,11 +8,11 @@ use zephium_core::extensions::{
     ExtensionRuntimeGeneration,
 };
 use zephium_extension_runtime_api::{
-    ExtensionPackageAccess, ExtensionRuntimeActivationRequest, ExtensionRuntimeFailure,
-    ExtensionRuntimeOwner, ExtensionRuntimePendingPublication, ExtensionRuntimePublicationReceipt,
-    ExtensionRuntimePublicationReclaimRefusal, ExtensionRuntimePublicationRefusal,
-    ExtensionRuntimePublicationRequest, ExtensionRuntimeRetirementRequest,
-    ExtensionRuntimeUncertainOwner,
+    ExtensionPackageAccess, ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeActivationRequest,
+    ExtensionRuntimeFailure, ExtensionRuntimeOwner, ExtensionRuntimePendingPublication,
+    ExtensionRuntimePublicationReceipt, ExtensionRuntimePublicationReclaimRefusal,
+    ExtensionRuntimePublicationRefusal, ExtensionRuntimePublicationRequest,
+    ExtensionRuntimeRetirementRequest, ExtensionRuntimeUncertainOwner,
 };
 
 use crate::journal_store::{
@@ -235,6 +235,9 @@ pub(super) struct MayOwnAccessState {
 pub(super) struct NativeActivationState {
     pub(super) initial_entry: ExtensionNativeOwnershipEntry,
     pub(super) request: ExtensionRuntimeActivationRequest,
+    /// Present only after an adapter call returned definite absence. `None`
+    /// means the activation request has never crossed the native boundary.
+    pub(super) absence: Option<ExtensionRuntimeAbsenceEvidence>,
     pub(super) pending: ExtensionRuntimePendingPublication,
     pub(super) recovery: ServiceRuntimeRecovery,
 }
@@ -292,6 +295,17 @@ pub(super) struct PostHostReleaseAuthority {
     pub(super) access: ExtensionPackageAccess,
     pub(super) operation: RuntimeOperationControl,
     pub(super) recovery: ServiceRuntimeRecovery,
+    pub(super) absence: PostHostAbsenceBasis,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PostHostAbsenceBasis {
+    /// The bound activation request never crossed the lifecycle port. This is
+    /// not post-native evidence and may only accompany an unpublished pending
+    /// operation.
+    ActivationUnentered,
+    /// Exact evidence returned after a lifecycle-port call.
+    Proven(ExtensionRuntimeAbsenceEvidence),
 }
 
 pub(super) struct ReleaseRuntimeState {
@@ -366,6 +380,7 @@ pub(super) struct PublicationReclaimFailStopAuthority {
     pub(super) refusal: ExtensionRuntimePublicationReclaimRefusal,
     pub(super) recovery: ServiceRuntimeRecovery,
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
+    pub(super) absence: PostHostAbsenceBasis,
 }
 
 #[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
@@ -380,6 +395,7 @@ pub(super) struct PublicationReclaimCallPanicAuthority {
     pub(super) access: ExtensionPackageAccess,
     pub(super) recovery: ServiceRuntimeRecovery,
     pub(super) current_entry: ExtensionNativeOwnershipEntry,
+    pub(super) absence: PostHostAbsenceBasis,
 }
 
 impl RuntimeSlot {
@@ -532,9 +548,58 @@ impl ReleaseRuntimeState {
 }
 
 impl RuntimeOperationControl {
+    pub(super) const fn registry_generation(
+        &self,
+    ) -> zephium_extension_runtime_api::ExtensionRuntimeHostRegistryGeneration {
+        match self {
+            Self::Pending(pending) => pending.registry_generation(),
+            Self::PublicationRequest(request) => request.registry_generation(),
+            Self::Published(receipt) => receipt.registry_generation(),
+        }
+    }
+
     fn has_attached_obligation(&self) -> bool {
         matches!(self, Self::Published(_))
     }
+}
+
+impl PostHostReleaseAuthority {
+    /// Rejoins non-authorizing host evidence to the exact durable/service
+    /// authority that is about to consume it. This is the final local ABA
+    /// fence before publication reclaim and repository release.
+    pub(super) fn accepts_absence_for(&self, entry: &ExtensionNativeOwnershipEntry) -> bool {
+        match self.absence {
+            PostHostAbsenceBasis::ActivationUnentered => {
+                matches!(self.operation, RuntimeOperationControl::Pending(_))
+                    && runtime_target_matches_backend(self.access.target(), entry.runtime_backend())
+            }
+            PostHostAbsenceBasis::Proven(absence) => {
+                absence.target() == self.access.target()
+                    && absence.registry_generation() == self.operation.registry_generation()
+                    && absence.structurally_matches_entry(entry)
+            }
+        }
+    }
+}
+
+const fn runtime_target_matches_backend(
+    target: zephium_extension_runtime_api::ExtensionRuntimeTarget,
+    backend: zephium_core::extensions::ExtensionRuntimeBackendTarget,
+) -> bool {
+    use zephium_core::extensions::ExtensionRuntimeBackendTarget;
+    use zephium_extension_runtime_api::ExtensionRuntimeTarget;
+    matches!(
+        (target, backend),
+        (
+            ExtensionRuntimeTarget::NativeWebExtension,
+            ExtensionRuntimeBackendTarget::MacosNative
+                | ExtensionRuntimeBackendTarget::WindowsNative
+        ) | (
+            ExtensionRuntimeTarget::Compatibility,
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+                | ExtensionRuntimeBackendTarget::LinuxCompatibility
+        )
+    )
 }
 
 impl RuntimeRowFenceOperation {

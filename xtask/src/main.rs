@@ -615,6 +615,10 @@ fn check_extension_runtime_host_assembler_call_sites() {
     const NEEDLE: &str = "try_from_authenticated_repository(";
     const REPOSITORY_BRIDGE: &str =
         "crates/zephium-extension-repository/src/package_lease/runtime_access.rs";
+    const ENGINE_TEST_SUPPORT: &str =
+        "crates/zephium-engine/src/host/extension_runtime/activation_issuer_test_support.rs";
+    const ENGINE_MODULE: &str = "crates/zephium-engine/src/host/extension_runtime.rs";
+    const TEST_ONLY_MODULE_DECLARATION: &str = "#[cfg(test)]\n#[path = \"extension_runtime/activation_issuer_test_support.rs\"]\nmod activation_issuer_test_support;";
     const EXPECTED_REPOSITORY_CALLS: usize = 2;
 
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -623,6 +627,7 @@ fn check_extension_runtime_host_assembler_call_sites() {
     sources.sort();
 
     let mut repository_calls = 0;
+    let mut engine_test_support_calls = 0;
     let mut forbidden = Vec::new();
     for path in sources {
         let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
@@ -639,6 +644,8 @@ fn check_extension_runtime_host_assembler_call_sites() {
             .to_string_lossy();
         if relative == REPOSITORY_BRIDGE {
             repository_calls = calls;
+        } else if relative == ENGINE_TEST_SUPPORT {
+            engine_test_support_calls = calls;
         } else if relative == "crates/zephium-extension-runtime-api/src/host.rs" && calls == 1 {
             // The sole constructor definition. Calls remain repository-only.
         } else if relative != "crates/zephium-extension-runtime-api/src/host_tests.rs" {
@@ -646,12 +653,26 @@ fn check_extension_runtime_host_assembler_call_sites() {
         }
     }
 
-    if repository_calls != EXPECTED_REPOSITORY_CALLS || !forbidden.is_empty() {
+    let engine_module =
+        std::fs::read_to_string(repository.join(ENGINE_MODULE)).unwrap_or_else(|error| {
+            eprintln!("cannot read {ENGINE_MODULE}: {error}");
+            exit(1);
+        });
+    let engine_test_support_is_cfg_only = engine_module.contains(TEST_ONLY_MODULE_DECLARATION);
+
+    if repository_calls != EXPECTED_REPOSITORY_CALLS
+        || engine_test_support_calls != 1
+        || !engine_test_support_is_cfg_only
+        || !forbidden.is_empty()
+    {
         eprintln!(
-            "extension host activation assembly must remain behind the authenticated repository bridge"
+            "product extension host activation assembly must remain behind the authenticated repository bridge"
         );
         eprintln!(
             "{REPOSITORY_BRIDGE} contains {repository_calls} constructor calls, expected {EXPECTED_REPOSITORY_CALLS}"
+        );
+        eprintln!(
+            "{ENGINE_TEST_SUPPORT} contains {engine_test_support_calls} constructor calls, expected 1 behind the exact cfg(test) module declaration: {engine_test_support_is_cfg_only}"
         );
         for (path, calls) in forbidden {
             eprintln!("forbidden host activation constructor use: {path} ({calls} calls)");
@@ -933,7 +954,7 @@ fn list_extension_repository_tests(internal: bool) -> std::collections::BTreeSet
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_extension_service_e2e_tests() {
     const FILTER: &str = "runtime_coordinator::e2e::";
-    const EXPECTED_TESTS: usize = 6;
+    const EXPECTED_TESTS: usize = 7;
 
     let regular_inventory = list_extension_service_tests(false);
     let internal_inventory = list_extension_service_tests(true);

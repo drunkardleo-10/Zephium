@@ -29,11 +29,13 @@ use zephium_core::extensions::{
 use zephium_core::ids::ProfileId;
 
 use crate::{
-    ExtensionPackageAccess, ExtensionRuntimeActivationBuildError,
-    ExtensionRuntimeActivationRequest, ExtensionRuntimeLifecyclePort,
-    ExtensionRuntimeNativeOwnerId, ExtensionRuntimeOwnershipEvidence,
-    ExtensionRuntimeOwnershipPort, ExtensionRuntimeRecoveryBuildError,
-    ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRecoveryRequest, ExtensionRuntimeTarget,
+    ExtensionPackageAccess, ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeAbsenceProofKind,
+    ExtensionRuntimeActivationBuildError, ExtensionRuntimeActivationRequest,
+    ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeLifecyclePort,
+    ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeNativeOwnerId,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeOwnershipPort,
+    ExtensionRuntimeRecoveryBuildError, ExtensionRuntimeRecoveryExpectation,
+    ExtensionRuntimeRecoveryRequest, ExtensionRuntimeTarget,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
@@ -262,6 +264,223 @@ impl ExtensionRuntimeHostRegistryGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+/// Reservation-bound issuer for trusted native-absence evidence.
+///
+/// Only an authenticated activation or recovery context can create this
+/// value. It is structural and non-authorizing: the resulting evidence still
+/// has to be revalidated by the exact engine slot and again by the host proxy
+/// before package or Store authority may be released.
+#[derive(Clone, Copy)]
+pub struct ExtensionRuntimeAbsenceEvidenceIssuer {
+    owner: ExtensionRuntimeOwnerAddress,
+    target: ExtensionRuntimeTarget,
+    provenance: ExtensionRuntimeAbsenceIssuerProvenance,
+    expected_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+    previously_observed_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExtensionRuntimeAbsenceIssuerProvenance {
+    FreshActivation,
+    Recovery,
+}
+
+impl ExtensionRuntimeAbsenceEvidenceIssuer {
+    /// Binds this authenticated owner lineage to one process-local registry
+    /// generation. A host must use the exact generation returned beside its
+    /// lifecycle proxy.
+    #[must_use]
+    pub const fn bind(
+        self,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+    ) -> ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+        ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+            lineage: self,
+            generation,
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeAbsenceEvidenceIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeAbsenceEvidenceIssuer")
+            .field("owner", &"[redacted]")
+            .field("backend", &self.owner.backend())
+            .field("target", &self.target)
+            .field("native_identity", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Exact generation-bound native-absence evidence issuer.
+///
+/// This value is obtainable only through a trusted host binding context. Its
+/// methods assert observations made by that trusted engine/native boundary;
+/// callers outside the selected host cannot construct a substitute issuer.
+#[derive(Clone, Copy)]
+pub struct ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+    lineage: ExtensionRuntimeAbsenceEvidenceIssuer,
+    generation: ExtensionRuntimeHostRegistryGeneration,
+}
+
+impl ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+    /// Mints proof that the exact platform-native attempt was never entered.
+    ///
+    /// The engine registry may call this only after its ticket/admission state
+    /// proves that no native adapter call or late callback can exist.
+    #[must_use]
+    pub fn mint_activation_never_entered(
+        self,
+        attempt: NonZeroU64,
+    ) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        if self.lineage.provenance != ExtensionRuntimeAbsenceIssuerProvenance::FreshActivation {
+            return None;
+        }
+        Some(ExtensionRuntimeAbsenceEvidence::from_trusted_host(
+            self.lineage.owner.cas(),
+            self.lineage.owner.backend(),
+            self.lineage.target,
+            self.generation,
+            attempt,
+            ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered,
+            self.lineage.expected_native_identity,
+            self.lineage.previously_observed_native_identity,
+        ))
+    }
+
+    /// Mints proof that one exact compatibility owner and every subordinate
+    /// obligation are absent from the authoritative in-process registry.
+    #[must_use]
+    pub fn mint_compatibility_registry_absent_and_quiescent(
+        self,
+        attempt: NonZeroU64,
+        _audit: ExtensionRuntimeCompatibilityAbsenceAudit,
+    ) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        if self.lineage.target != ExtensionRuntimeTarget::Compatibility
+            || !matches!(
+                self.lineage.owner.backend(),
+                ExtensionRuntimeBackendTarget::MacosCompatibility
+                    | ExtensionRuntimeBackendTarget::LinuxCompatibility
+            )
+            || self.lineage.expected_native_identity.is_some()
+            || self.lineage.previously_observed_native_identity.is_some()
+        {
+            return None;
+        }
+        Some(ExtensionRuntimeAbsenceEvidence::from_trusted_host(
+            self.lineage.owner.cas(),
+            self.lineage.owner.backend(),
+            self.lineage.target,
+            self.generation,
+            attempt,
+            ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent,
+            None,
+            None,
+        ))
+    }
+
+    /// Mints a macOS post-native proof after the complete WebKit audit passed.
+    ///
+    /// The independently observed context identifier must equal the catalog
+    /// expectation or, for a migrated row which predates that field, the
+    /// previously persisted adapter observation. When both anchors exist they
+    /// must agree. An identityless, compatibility, or non-macOS lineage
+    /// therefore cannot mint this proof.
+    #[must_use]
+    pub fn mint_macos_zero_grants_and_unloaded(
+        self,
+        attempt: NonZeroU64,
+        observed_native_identity: ExtensionRuntimeNativeOwnerId,
+        _audit: ExtensionRuntimeMacosAbsenceAudit,
+    ) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        let identity_anchor = self
+            .lineage
+            .expected_native_identity
+            .or(self.lineage.previously_observed_native_identity)?;
+        if self.lineage.owner.backend() != ExtensionRuntimeBackendTarget::MacosNative
+            || self.lineage.target != ExtensionRuntimeTarget::NativeWebExtension
+            || identity_anchor != observed_native_identity
+            || self
+                .lineage
+                .previously_observed_native_identity
+                .is_some_and(|previous| previous != observed_native_identity)
+        {
+            return None;
+        }
+        Some(ExtensionRuntimeAbsenceEvidence::from_trusted_host(
+            self.lineage.owner.cas(),
+            self.lineage.owner.backend(),
+            self.lineage.target,
+            self.generation,
+            attempt,
+            ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded,
+            self.lineage.expected_native_identity,
+            Some(observed_native_identity),
+        ))
+    }
+
+    /// Revalidates complete evidence lineage and exact native attempt.
+    #[must_use]
+    pub fn accepts(self, evidence: ExtensionRuntimeAbsenceEvidence, attempt: NonZeroU64) -> bool {
+        if evidence.owner() != Some(self.lineage.owner.cas())
+            || evidence.backend() != self.lineage.owner.backend()
+            || evidence.target() != self.lineage.target
+            || evidence.registry_generation() != self.generation
+            || evidence.attempt() != attempt
+        {
+            return false;
+        }
+        match evidence.proof_kind() {
+            ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered => {
+                self.lineage.provenance == ExtensionRuntimeAbsenceIssuerProvenance::FreshActivation
+                    && evidence.expected_native_identity() == self.lineage.expected_native_identity
+                    && evidence.observed_native_identity()
+                        == self.lineage.previously_observed_native_identity
+            }
+            ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded => {
+                let identity_anchor = self
+                    .lineage
+                    .expected_native_identity
+                    .or(self.lineage.previously_observed_native_identity);
+                self.lineage.owner.backend() == ExtensionRuntimeBackendTarget::MacosNative
+                    && self.lineage.target == ExtensionRuntimeTarget::NativeWebExtension
+                    && evidence.expected_native_identity() == self.lineage.expected_native_identity
+                    && identity_anchor.is_some()
+                    && identity_anchor == evidence.observed_native_identity()
+                    && self
+                        .lineage
+                        .previously_observed_native_identity
+                        .is_none_or(|previous| {
+                            evidence.observed_native_identity() == Some(previous)
+                        })
+            }
+            ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent => {
+                self.lineage.target == ExtensionRuntimeTarget::Compatibility
+                    && matches!(
+                        self.lineage.owner.backend(),
+                        ExtensionRuntimeBackendTarget::MacosCompatibility
+                            | ExtensionRuntimeBackendTarget::LinuxCompatibility
+                    )
+                    && self.lineage.expected_native_identity.is_none()
+                    && self.lineage.previously_observed_native_identity.is_none()
+                    && evidence.expected_native_identity().is_none()
+                    && evidence.observed_native_identity().is_none()
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeBoundAbsenceEvidenceIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeBoundAbsenceEvidenceIssuer")
+            .field("lineage", &self.lineage)
+            .field("generation", &self.generation)
+            .finish()
     }
 }
 
@@ -613,6 +832,26 @@ impl<'binding> ExtensionRuntimeHostActivationContext<'binding> {
         &self.native_grants
     }
 
+    /// Derives the only absence-evidence issuer authorized for this exact
+    /// authenticated owner lineage.
+    #[must_use]
+    pub const fn absence_evidence_issuer(&self) -> ExtensionRuntimeAbsenceEvidenceIssuer {
+        let expected_native_identity = match self.expectation {
+            ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(identity)
+            | ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(identity) => {
+                Some(identity)
+            }
+            ExtensionRuntimeNativeIdentityExpectation::Compatibility => None,
+        };
+        ExtensionRuntimeAbsenceEvidenceIssuer {
+            owner: self.owner,
+            target: self.target,
+            provenance: ExtensionRuntimeAbsenceIssuerProvenance::FreshActivation,
+            expected_native_identity,
+            previously_observed_native_identity: None,
+        }
+    }
+
     /// Retains the exact structural grants for a trusted host reservation.
     ///
     /// One context yields one transport snapshot across the host boundary. The
@@ -772,6 +1011,37 @@ impl ExtensionRuntimeHostRecoveryContext {
     #[must_use]
     pub const fn expectation(self) -> ExtensionRuntimeRecoveryExpectation {
         self.expectation
+    }
+
+    /// Derives the only absence-evidence issuer authorized for this exact
+    /// persisted possible-owner lineage.
+    #[must_use]
+    pub const fn absence_evidence_issuer(self) -> ExtensionRuntimeAbsenceEvidenceIssuer {
+        let (expected_native_identity, previously_observed_native_identity, target) =
+            match self.expectation {
+                ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                    catalog_expected,
+                    adapter_observed,
+                }
+                | ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                    catalog_expected,
+                    adapter_observed,
+                } => (
+                    catalog_expected,
+                    adapter_observed,
+                    ExtensionRuntimeTarget::NativeWebExtension,
+                ),
+                ExtensionRuntimeRecoveryExpectation::Compatibility => {
+                    (None, None, ExtensionRuntimeTarget::Compatibility)
+                }
+            };
+        ExtensionRuntimeAbsenceEvidenceIssuer {
+            owner: self.owner,
+            target,
+            provenance: ExtensionRuntimeAbsenceIssuerProvenance::Recovery,
+            expected_native_identity,
+            previously_observed_native_identity,
+        }
     }
 }
 
@@ -2084,6 +2354,12 @@ pub struct ExtensionRuntimePublicationRequest {
 }
 
 impl ExtensionRuntimePublicationRequest {
+    /// Exact engine registry generation reserved for this publication.
+    #[must_use]
+    pub const fn registry_generation(&self) -> ExtensionRuntimeHostRegistryGeneration {
+        self.generation
+    }
+
     /// Publishes operation authority into the exact engine registry generation.
     pub fn publish(
         self,

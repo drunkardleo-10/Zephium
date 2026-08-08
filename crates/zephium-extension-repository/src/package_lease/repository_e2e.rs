@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Cursor, Read};
 use std::mem::{size_of, size_of_val};
+use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -38,11 +39,13 @@ use zephium_extension_package::{
 };
 use zephium_extension_runtime_api::{
     ExtensionPackageAccess, ExtensionPackageAccessBuildError, ExtensionPackageAccessError,
-    ExtensionPackageAccessView, ExtensionRuntimeActivationDisposition,
-    ExtensionRuntimeActivationSettlement, ExtensionRuntimeFailure, ExtensionRuntimeHostActivation,
-    ExtensionRuntimeHostActivationBinding, ExtensionRuntimeHostActivationBindingError,
-    ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
-    ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
+    ExtensionPackageAccessView, ExtensionRuntimeAbsenceEvidence,
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeActivationSettlement,
+    ExtensionRuntimeBoundAbsenceEvidenceIssuer, ExtensionRuntimeCompatibilityAbsenceAudit,
+    ExtensionRuntimeFailure, ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBinding,
+    ExtensionRuntimeHostActivationBindingError, ExtensionRuntimeHostActivationContext,
+    ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError,
+    ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
     ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
     ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
     ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
@@ -839,6 +842,37 @@ fn install_catalog(
 
 struct SuccessfulCompatibilityLifecycle {
     retained_bytes: usize,
+    absence_issuer: ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+    next_attempt: Option<u64>,
+    last_absence: Option<ExtensionRuntimeAbsenceEvidence>,
+}
+
+impl SuccessfulCompatibilityLifecycle {
+    fn begin_attempt(&mut self) -> Option<NonZeroU64> {
+        let raw = self.next_attempt?;
+        let attempt = NonZeroU64::new(raw)?;
+        self.next_attempt = raw.checked_add(1);
+        Some(attempt)
+    }
+
+    fn compatibility_absence(&mut self) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        let attempt = self.begin_attempt()?;
+        let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+            true, true, true, true,
+        )?;
+        let evidence = self
+            .absence_issuer
+            .mint_compatibility_registry_absent_and_quiescent(attempt, audit)?;
+        self.last_absence = Some(evidence);
+        Some(evidence)
+    }
+
+    fn activation_absence(&mut self) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        let attempt = self.begin_attempt()?;
+        let evidence = self.absence_issuer.mint_activation_never_entered(attempt)?;
+        self.last_absence = Some(evidence);
+        Some(evidence)
+    }
 }
 
 impl ExtensionRuntimeOwnershipPort for SuccessfulCompatibilityLifecycle {
@@ -846,15 +880,32 @@ impl ExtensionRuntimeOwnershipPort for SuccessfulCompatibilityLifecycle {
         self.retained_bytes
     }
 
+    fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        self.last_absence == Some(evidence)
+            && self.absence_issuer.accepts(evidence, evidence.attempt())
+    }
+
     fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
-        ExtensionRuntimeRetirementDisposition::Retired
+        self.compatibility_absence().map_or(
+            ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            },
+            ExtensionRuntimeRetirementDisposition::Retired,
+        )
     }
 
     fn reconcile_ownership_until(
         &mut self,
         _deadline: Instant,
     ) -> ExtensionRuntimeOwnershipDisposition {
-        ExtensionRuntimeOwnershipDisposition::Absent
+        self.compatibility_absence().map_or(
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            },
+            ExtensionRuntimeOwnershipDisposition::Absent,
+        )
     }
 }
 
@@ -865,24 +916,45 @@ impl ExtensionRuntimeLifecyclePort for SuccessfulCompatibilityLifecycle {
         _deadline: Instant,
     ) -> ExtensionRuntimeActivationDisposition {
         if access.target() != ExtensionRuntimeTarget::Compatibility {
-            return ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::UnsupportedTarget,
+            return self.activation_absence().map_or(
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::Internal,
+                    evidence: None,
+                },
+                |absence| ExtensionRuntimeActivationDisposition::Rejected {
+                    failure: ExtensionRuntimeFailure::UnsupportedTarget,
+                    absence,
+                },
             );
         }
         if !matches!(
             access.take_native_root_lease(),
             Err(ExtensionPackageAccessError::NativeRootUnavailable)
         ) {
-            return ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::PackageRejected,
+            return self.activation_absence().map_or(
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::Internal,
+                    evidence: None,
+                },
+                |absence| ExtensionRuntimeActivationDisposition::Rejected {
+                    failure: ExtensionRuntimeFailure::PackageRejected,
+                    absence,
+                },
             );
         }
         match access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())) {
             Ok(Ok(())) => ExtensionRuntimeActivationDisposition::Activated(
                 ExtensionRuntimeOwnershipEvidence::Compatibility,
             ),
-            Ok(Err(_)) | Err(_) => ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::PackageRejected,
+            Ok(Err(_)) | Err(_) => self.activation_absence().map_or(
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: ExtensionRuntimeFailure::Internal,
+                    evidence: None,
+                },
+                |absence| ExtensionRuntimeActivationDisposition::Rejected {
+                    failure: ExtensionRuntimeFailure::PackageRejected,
+                    absence,
+                },
             ),
         }
     }
@@ -1114,10 +1186,14 @@ impl ExtensionRuntimeHostFactoryPort for SuccessfulCompatibilityHostFactory {
             });
         let generation = ExtensionRuntimeHostRegistryGeneration::new(1)
             .ok_or(ExtensionRuntimeHostBindError::IdentityExhausted)?;
+        let absence_issuer = context.absence_evidence_issuer().bind(generation);
         Ok(ExtensionRuntimeHostActivationPorts::new(
             generation,
             Box::new(SuccessfulCompatibilityLifecycle {
                 retained_bytes: self.lifecycle_retained_bytes,
+                absence_issuer,
+                next_attempt: Some(1),
+                last_absence: None,
             }),
             Box::new(SuccessfulCompatibilityPublication {
                 owner: context.owner(),
@@ -1227,7 +1303,10 @@ fn settle_compatibility_host_activation(
         .into_retirement_request()
         .settle_until(Instant::now() + Duration::from_secs(60))
     {
-        ExtensionRuntimeRetirementSettlement::Retired(access) => access,
+        ExtensionRuntimeRetirementSettlement::Retired { access, absence } => {
+            assert!(absence.structurally_matches_entry(release_entry));
+            access
+        }
         settlement => panic!("unexpected retirement settlement: {settlement:?}"),
     };
     let authority = receipt.reclaim_after_absence(release_entry).unwrap();

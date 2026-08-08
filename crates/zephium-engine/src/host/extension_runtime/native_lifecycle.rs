@@ -9,9 +9,10 @@ use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 use zephium_extension_runtime_api::{
-    ExtensionRuntimeActivationDisposition, ExtensionRuntimeFailure,
-    ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeOwnershipDisposition,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeFailure, ExtensionRuntimeHostRegistryGeneration,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeRetirementDisposition,
 };
 
 use super::super::resources::{
@@ -64,7 +65,6 @@ impl NativeCallTicket {
         self.kind
     }
 
-    #[cfg(test)]
     pub(super) const fn attempt(self) -> NonZeroU64 {
         self.attempt
     }
@@ -84,6 +84,20 @@ impl NativeTerminalDisposition {
             Self::Activation(_) => NativeCallKind::Activation,
             Self::Retirement(_) => NativeCallKind::Retirement,
             Self::Reconciliation(_) => NativeCallKind::Reconciliation,
+        }
+    }
+
+    pub(super) const fn absence_evidence(self) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        match self {
+            Self::Activation(
+                ExtensionRuntimeActivationDisposition::Retryable { absence, .. }
+                | ExtensionRuntimeActivationDisposition::Rejected { absence, .. },
+            )
+            | Self::Retirement(ExtensionRuntimeRetirementDisposition::Retired(absence))
+            | Self::Reconciliation(ExtensionRuntimeOwnershipDisposition::Absent(absence)) => {
+                Some(absence)
+            }
+            _ => None,
         }
     }
 }
@@ -293,7 +307,7 @@ impl NativeCallChannel {
             NativeCallChannelState::Settled {
                 ticket,
                 disposition: NativeTerminalDisposition::Activation(
-                    ExtensionRuntimeActivationDisposition::Retryable(_)
+                    ExtensionRuntimeActivationDisposition::Retryable { .. }
                 ),
                 observed: true,
             } if ticket.owner() == owner
@@ -579,7 +593,15 @@ impl RecoveryResources {
 struct PendingActivation {
     ticket: NativeCallTicket,
     _deadline: Instant,
+    native_entry: ActivationNativeEntry,
     resources: ActivationResources,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationNativeEntry {
+    Available,
+    Entered,
+    AbsenceClaimed,
 }
 
 struct PendingRecovery {
@@ -700,8 +722,57 @@ impl NativeLifecycleSlot {
         self.state = TypedNativeState::Activation(ActivationState::Activating(PendingActivation {
             ticket,
             _deadline: deadline,
+            native_entry: ActivationNativeEntry::Available,
             resources: ActivationResources { _native: native },
         }));
+        Ok(())
+    }
+
+    /// Atomically consumes the exact activation ticket's pre-native token.
+    /// Once consumed for absence, the same attempt can never enter native.
+    pub(super) fn claim_activation_never_entered(
+        &mut self,
+        ticket: NativeCallTicket,
+    ) -> Result<(), NativeBeginError> {
+        if !self.accepts_ticket(ticket, NativeCallKind::Activation) {
+            return Err(NativeBeginError::StaleTicket);
+        }
+        let TypedNativeState::Activation(ActivationState::Activating(active)) = &mut self.state
+        else {
+            return Err(NativeBeginError::WrongState);
+        };
+        if active.ticket != ticket {
+            return Err(NativeBeginError::StaleTicket);
+        }
+        if active.native_entry != ActivationNativeEntry::Available {
+            return Err(NativeBeginError::WrongState);
+        }
+        active.native_entry = ActivationNativeEntry::AbsenceClaimed;
+        Ok(())
+    }
+
+    /// Consumes the other side of the pre-native token immediately before a
+    /// real activation adapter call. Future adapters must cross this boundary
+    /// before invoking ownership-changing native code.
+    #[allow(dead_code)] // Required pre-adapter contract; production adapters remain disabled.
+    pub(super) fn mark_activation_native_entered(
+        &mut self,
+        ticket: NativeCallTicket,
+    ) -> Result<(), NativeBeginError> {
+        if !self.accepts_ticket(ticket, NativeCallKind::Activation) {
+            return Err(NativeBeginError::StaleTicket);
+        }
+        let TypedNativeState::Activation(ActivationState::Activating(active)) = &mut self.state
+        else {
+            return Err(NativeBeginError::WrongState);
+        };
+        if active.ticket != ticket {
+            return Err(NativeBeginError::StaleTicket);
+        }
+        if active.native_entry != ActivationNativeEntry::Available {
+            return Err(NativeBeginError::WrongState);
+        }
+        active.native_entry = ActivationNativeEntry::Entered;
         Ok(())
     }
 
@@ -725,6 +796,7 @@ impl NativeLifecycleSlot {
                 TypedNativeState::Activation(ActivationState::Retiring(PendingActivation {
                     ticket,
                     _deadline: deadline,
+                    native_entry: ActivationNativeEntry::Available,
                     resources,
                 }))
             }
@@ -766,6 +838,7 @@ impl NativeLifecycleSlot {
                 TypedNativeState::Activation(ActivationState::Reconciling(PendingActivation {
                     ticket,
                     _deadline: deadline,
+                    native_entry: ActivationNativeEntry::Available,
                     resources,
                 }))
             }
@@ -851,6 +924,7 @@ impl NativeLifecycleSlot {
         disposition: ExtensionRuntimeActivationDisposition,
         platform_owner: PlatformOwnerBundle,
         accepts_evidence: impl FnOnce(ExtensionRuntimeOwnershipEvidence) -> bool,
+        accepts_absence: impl FnOnce(ExtensionRuntimeAbsenceEvidence) -> bool,
     ) -> Result<NativeTerminalEffect, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Activation) {
             return Err(NativeBeginError::StaleTicket);
@@ -909,16 +983,22 @@ impl NativeLifecycleSlot {
                     },
                 )
             }
-            ExtensionRuntimeActivationDisposition::Retryable(failure) => {
+            ExtensionRuntimeActivationDisposition::Retryable { failure, absence } => {
                 let owner_observation = self.platform_owners.observe(platform_owner);
+                let entry_state_accepts = !matches!(
+                    absence.proof_kind(),
+                    zephium_extension_runtime_api::ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered
+                ) || active.native_entry == ActivationNativeEntry::AbsenceClaimed;
                 if owner_observation == PlatformOwnerMerge::VacantObservation
                     && !self.platform_owners.has_retained_owner()
                     && !self.platform_owners.is_quarantined()
+                    && entry_state_accepts
+                    && accepts_absence(absence)
                 {
                     self.state = TypedNativeState::Activation(ActivationState::Activating(active));
                     return Ok(NativeTerminalEffect::DefiniteAbsence(
                         NativeTerminalDisposition::Activation(
-                            ExtensionRuntimeActivationDisposition::Retryable(failure),
+                            ExtensionRuntimeActivationDisposition::Retryable { failure, absence },
                         ),
                     ));
                 }
@@ -931,16 +1011,22 @@ impl NativeLifecycleSlot {
                     },
                 )
             }
-            ExtensionRuntimeActivationDisposition::Rejected(failure) => {
+            ExtensionRuntimeActivationDisposition::Rejected { failure, absence } => {
                 let owner_observation = self.platform_owners.observe(platform_owner);
+                let entry_state_accepts = !matches!(
+                    absence.proof_kind(),
+                    zephium_extension_runtime_api::ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered
+                ) || active.native_entry == ActivationNativeEntry::AbsenceClaimed;
                 if owner_observation == PlatformOwnerMerge::VacantObservation
                     && !self.platform_owners.has_retained_owner()
                     && !self.platform_owners.is_quarantined()
+                    && entry_state_accepts
+                    && accepts_absence(absence)
                 {
                     self.state = TypedNativeState::Activation(ActivationState::Activating(active));
                     return Ok(NativeTerminalEffect::DefiniteAbsence(
                         NativeTerminalDisposition::Activation(
-                            ExtensionRuntimeActivationDisposition::Rejected(failure),
+                            ExtensionRuntimeActivationDisposition::Rejected { failure, absence },
                         ),
                     ));
                 }
@@ -963,6 +1049,7 @@ impl NativeLifecycleSlot {
         ticket: NativeCallTicket,
         disposition: ExtensionRuntimeRetirementDisposition,
         accepts_evidence: impl FnOnce(ExtensionRuntimeOwnershipEvidence) -> bool,
+        accepts_absence: impl FnOnce(ExtensionRuntimeAbsenceEvidence) -> bool,
     ) -> Result<NativeTerminalEffect, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Retirement) {
             return Err(NativeBeginError::StaleTicket);
@@ -976,19 +1063,46 @@ impl NativeLifecycleSlot {
         );
         let tagged = match (previous, disposition) {
             (
-                state @ TypedNativeState::Activation(ActivationState::Retiring(_)),
-                ExtensionRuntimeRetirementDisposition::Retired,
-            )
-            | (
-                state @ TypedNativeState::Recovery(RecoveryState::Retiring(_)),
-                ExtensionRuntimeRetirementDisposition::Retired,
+                TypedNativeState::Activation(ActivationState::Retiring(active)),
+                ExtensionRuntimeRetirementDisposition::Retired(absence),
             ) => {
-                self.state = state;
-                return Ok(NativeTerminalEffect::DefiniteAbsence(
-                    NativeTerminalDisposition::Retirement(
-                        ExtensionRuntimeRetirementDisposition::Retired,
-                    ),
-                ));
+                if accepts_absence(absence) {
+                    self.state = TypedNativeState::Activation(ActivationState::Retiring(active));
+                    return Ok(NativeTerminalEffect::DefiniteAbsence(
+                        NativeTerminalDisposition::Retirement(
+                            ExtensionRuntimeRetirementDisposition::Retired(absence),
+                        ),
+                    ));
+                }
+                self.state =
+                    TypedNativeState::Activation(ActivationState::Uncertain(active.resources));
+                NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: self.evidence.positive(),
+                    },
+                )
+            }
+            (
+                TypedNativeState::Recovery(RecoveryState::Retiring(active)),
+                ExtensionRuntimeRetirementDisposition::Retired(absence),
+            ) => {
+                if accepts_absence(absence) {
+                    self.state = TypedNativeState::Recovery(RecoveryState::Retiring(active));
+                    return Ok(NativeTerminalEffect::DefiniteAbsence(
+                        NativeTerminalDisposition::Retirement(
+                            ExtensionRuntimeRetirementDisposition::Retired(absence),
+                        ),
+                    ));
+                }
+                self.state =
+                    TypedNativeState::Recovery(RecoveryState::Uncertain(Some(active.resources)));
+                NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: self.evidence.positive(),
+                    },
+                )
             }
             (
                 TypedNativeState::Activation(ActivationState::Retiring(active)),
@@ -1058,6 +1172,7 @@ impl NativeLifecycleSlot {
         disposition: ExtensionRuntimeOwnershipDisposition,
         platform_owner: PlatformOwnerBundle,
         accepts_evidence: impl FnOnce(ExtensionRuntimeOwnershipEvidence) -> bool,
+        accepts_absence: impl FnOnce(ExtensionRuntimeAbsenceEvidence) -> bool,
     ) -> Result<NativeTerminalEffect, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Reconciliation) {
             return Err(NativeBeginError::StaleTicket);
@@ -1072,11 +1187,12 @@ impl NativeLifecycleSlot {
         let tagged = match (previous, disposition) {
             (
                 TypedNativeState::Activation(ActivationState::Reconciling(active)),
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence),
             ) => {
                 let owner_observation = self.platform_owners.observe(platform_owner);
                 if owner_observation == PlatformOwnerMerge::VacantObservation
                     && !self.platform_owners.is_quarantined()
+                    && accepts_absence(absence)
                 {
                     // The exact native call proved absence and returned no
                     // physical owner. Releasing a previously retained wrapper
@@ -1086,7 +1202,7 @@ impl NativeLifecycleSlot {
                     self.state = TypedNativeState::Activation(ActivationState::Reconciling(active));
                     return Ok(NativeTerminalEffect::DefiniteAbsence(
                         NativeTerminalDisposition::Reconciliation(
-                            ExtensionRuntimeOwnershipDisposition::Absent,
+                            ExtensionRuntimeOwnershipDisposition::Absent(absence),
                         ),
                     ));
                 }
@@ -1105,17 +1221,18 @@ impl NativeLifecycleSlot {
             }
             (
                 TypedNativeState::Recovery(RecoveryState::Reconciling(active)),
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence),
             ) => {
                 let owner_observation = self.platform_owners.observe(platform_owner);
                 if owner_observation == PlatformOwnerMerge::VacantObservation
                     && !self.platform_owners.is_quarantined()
+                    && accepts_absence(absence)
                 {
                     self.platform_owners.clear_after_proven_absence();
                     self.state = TypedNativeState::Recovery(RecoveryState::Reconciling(active));
                     return Ok(NativeTerminalEffect::DefiniteAbsence(
                         NativeTerminalDisposition::Reconciliation(
-                            ExtensionRuntimeOwnershipDisposition::Absent,
+                            ExtensionRuntimeOwnershipDisposition::Absent(absence),
                         ),
                     ));
                 }
@@ -1307,15 +1424,6 @@ impl NativeLifecycleSlot {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn permits_unattempted_absence(&self) -> bool {
-        matches!(
-            self.state,
-            TypedNativeState::Activation(ActivationState::Reserved)
-                | TypedNativeState::Recovery(RecoveryState::Uncertain(None))
-        )
-    }
-
     pub(super) fn notification_is_consistent(
         &self,
         channel: &NativeCallChannel,
@@ -1394,9 +1502,15 @@ mod tests {
     use std::time::Duration;
 
     use zephium_core::extensions::{
-        ExtensionGrantBrowsingContext, ExtensionNativeIncarnation,
-        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipKey,
-        ExtensionNativeOwnershipOperation, ExtensionRuntimeBackendTarget,
+        ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionCatalogGenerationRole,
+        ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
+        ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+        ExtensionManifestDigest, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
+        ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+        ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+        ExtensionTreeDigest,
     };
     use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
@@ -1440,6 +1554,108 @@ mod tests {
         PlatformOwnerBundle::Logical(LogicalPlatformOwner::new(
             NonZeroU64::new(token).expect("nonzero logical owner"),
         ))
+    }
+
+    #[test]
+    fn activation_native_entry_and_absence_claim_are_one_mutually_exclusive_token() {
+        let ledger = NativeResourceLedger::default();
+        let exact_owner = owner(1);
+        let exact_generation = generation(1);
+
+        let absence_ticket = ticket(exact_owner, exact_generation, NativeCallKind::Activation, 1);
+        let mut absence_slot = NativeLifecycleSlot::activation(exact_owner, exact_generation);
+        assert!(absence_slot
+            .begin_activation(
+                absence_ticket,
+                Instant::now() + Duration::from_secs(5),
+                activation_lease(&ledger),
+            )
+            .is_ok());
+        assert_eq!(
+            absence_slot.claim_activation_never_entered(absence_ticket),
+            Ok(())
+        );
+        assert_eq!(
+            absence_slot.mark_activation_native_entered(absence_ticket),
+            Err(NativeBeginError::WrongState),
+            "an absence claim must make later native entry impossible"
+        );
+        assert_eq!(
+            absence_slot.claim_activation_never_entered(absence_ticket),
+            Err(NativeBeginError::WrongState),
+            "absence itself is one-shot"
+        );
+
+        let entered_ticket = ticket(exact_owner, exact_generation, NativeCallKind::Activation, 2);
+        let mut entered_slot = NativeLifecycleSlot::activation(exact_owner, exact_generation);
+        assert!(entered_slot
+            .begin_activation(
+                entered_ticket,
+                Instant::now() + Duration::from_secs(5),
+                activation_lease(&ledger),
+            )
+            .is_ok());
+        assert_eq!(
+            entered_slot.mark_activation_native_entered(entered_ticket),
+            Ok(())
+        );
+        assert_eq!(
+            entered_slot.claim_activation_never_entered(entered_ticket),
+            Err(NativeBeginError::WrongState),
+            "native entry must permanently prevent a never-entered proof"
+        );
+        assert_eq!(
+            entered_slot.mark_activation_native_entered(entered_ticket),
+            Err(NativeBeginError::WrongState),
+            "native entry itself is one-shot"
+        );
+    }
+
+    fn absence_for(ticket: NativeCallTicket) -> ExtensionRuntimeAbsenceEvidence {
+        let exact_owner = ticket.owner();
+        let entry = ExtensionNativeOwnershipEntry::from_persisted(
+            exact_owner.key,
+            exact_owner.operation,
+            exact_owner.revision,
+            ExtensionPackageIdentity::new(
+                ExtensionAuthorityId::from_bytes([1; 32]),
+                ExtensionPackageKey::from_bytes([2; 32]),
+                ExtensionPackageRevision::INITIAL,
+                ExtensionPackagePayloadIdentity::acquired_zip(
+                    1,
+                    ExtensionArchiveDigest::from_bytes([3; 32]),
+                )
+                .expect("bounded test archive"),
+                ExtensionManifestDigest::from_bytes([4; 32]),
+                ExtensionTreeDigest::from_bytes([5; 32]),
+            ),
+            ExtensionCatalogSetDigest::from_bytes([6; 32]),
+            ExtensionCatalogGenerationRole::Active,
+            ExtensionInstallCatalogRevision::INITIAL,
+            ExtensionInstallRevision::INITIAL,
+            ExtensionGrantRevision::INITIAL,
+            ExtensionGrantDigest::from_bytes([7; 32]),
+            exact_owner.backend,
+            exact_owner.incarnation,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        )
+        .expect("valid test recovery row");
+        let binding =
+            zephium_extension_runtime_api::ExtensionRuntimeHostRecoveryBinding::try_new(entry)
+                .expect("valid test recovery binding");
+        binding
+            .context()
+            .absence_evidence_issuer()
+            .bind(ticket.registry_generation())
+            .mint_compatibility_registry_absent_and_quiescent(
+                ticket.attempt(),
+                zephium_extension_runtime_api::ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+                    true, true, true, true,
+                )
+                .expect("test compatibility owner is fully quiescent"),
+            )
+            .expect("test compatibility lineage accepts the complete absence audit")
     }
 
     fn logical_owner_drop_probe(token: u64, drop_counter: Arc<AtomicUsize>) -> PlatformOwnerBundle {
@@ -1589,13 +1805,15 @@ mod tests {
             ticket(exact_owner, exact_generation, NativeCallKind::Retirement, 7),
             ticket(exact_owner, exact_generation, NativeCallKind::Activation, 8),
         ] {
+            let absence = absence_for(stale);
             assert_eq!(
                 channel.settle(
                     stale,
                     NativeTerminalDisposition::Activation(
-                        ExtensionRuntimeActivationDisposition::Rejected(
-                            ExtensionRuntimeFailure::PackageRejected,
-                        ),
+                        ExtensionRuntimeActivationDisposition::Rejected {
+                            failure: ExtensionRuntimeFailure::PackageRejected,
+                            absence,
+                        },
                     ),
                 ),
                 if stale.kind() == NativeCallKind::Activation {
@@ -1609,15 +1827,17 @@ mod tests {
             channel.settle(
                 exact,
                 NativeTerminalDisposition::Retirement(
-                    ExtensionRuntimeRetirementDisposition::Retired,
+                    ExtensionRuntimeRetirementDisposition::Retired(absence_for(exact)),
                 ),
             ),
             Err(NativeCallChannelError::DispositionKindMismatch)
         );
-        let terminal =
-            NativeTerminalDisposition::Activation(ExtensionRuntimeActivationDisposition::Rejected(
-                ExtensionRuntimeFailure::PackageRejected,
-            ));
+        let terminal = NativeTerminalDisposition::Activation(
+            ExtensionRuntimeActivationDisposition::Rejected {
+                failure: ExtensionRuntimeFailure::PackageRejected,
+                absence: absence_for(exact),
+            },
+        );
         channel.settle(exact, terminal).expect("exact terminal");
         assert_eq!(
             channel.settle(exact, terminal),
@@ -1651,6 +1871,7 @@ mod tests {
                 ),
                 logical_owner(9),
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Activation(
@@ -1677,6 +1898,7 @@ mod tests {
                     ExtensionRuntimeFailure::BackendUnavailable,
                 ),
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Retirement(
@@ -1725,6 +1947,7 @@ mod tests {
             },
             logical_owner(3),
             |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+            |_| false,
         )
         .expect("activation becomes uncertain");
         assert_eq!(slot.phase(), NativeLifecyclePhase::Uncertain);
@@ -1745,6 +1968,7 @@ mod tests {
                 ),
                 PlatformOwnerBundle::Vacant,
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -1788,6 +2012,7 @@ mod tests {
             },
             PlatformOwnerBundle::Vacant,
             |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+            |_| false,
         )
         .expect("activation becomes uncertain");
         assert!(slot
@@ -1801,9 +2026,10 @@ mod tests {
         assert_eq!(
             slot.settle_reconciliation(
                 contradictory_absence,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(contradictory_absence,)),
                 logical_owner(13),
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |absence| absence == absence_for(contradictory_absence),
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -1834,13 +2060,14 @@ mod tests {
         assert_eq!(
             slot.settle_reconciliation(
                 proven_absence,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(proven_absence)),
                 PlatformOwnerBundle::Vacant,
                 |_| true,
+                |absence| absence == absence_for(proven_absence),
             ),
             Ok(NativeTerminalEffect::DefiniteAbsence(
                 NativeTerminalDisposition::Reconciliation(
-                    ExtensionRuntimeOwnershipDisposition::Absent
+                    ExtensionRuntimeOwnershipDisposition::Absent(absence_for(proven_absence))
                 )
             ))
         );
@@ -1884,6 +2111,7 @@ mod tests {
             },
             logical_owner(31),
             |_| true,
+            |_| false,
         )
         .expect("activation retains owner A");
 
@@ -1899,6 +2127,7 @@ mod tests {
                 },
                 logical_owner(31),
                 |_| true,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -1923,9 +2152,10 @@ mod tests {
         assert!(matches!(
             slot.settle_reconciliation(
                 distinct_owner,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(distinct_owner)),
                 logical_owner(37),
                 |_| true,
+                |absence| absence == absence_for(distinct_owner),
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -2096,6 +2326,7 @@ mod tests {
                 ),
                 logical_owner(4),
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -2144,9 +2375,10 @@ mod tests {
         assert_eq!(
             slot.settle_reconciliation(
                 contradictory_absence,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(contradictory_absence,)),
                 logical_owner(17),
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |absence| absence == absence_for(contradictory_absence),
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -2180,13 +2412,14 @@ mod tests {
         assert_eq!(
             slot.settle_reconciliation(
                 proven_absence,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(proven_absence)),
                 PlatformOwnerBundle::Vacant,
                 |_| true,
+                |absence| absence == absence_for(proven_absence),
             ),
             Ok(NativeTerminalEffect::DefiniteAbsence(
                 NativeTerminalDisposition::Reconciliation(
-                    ExtensionRuntimeOwnershipDisposition::Absent
+                    ExtensionRuntimeOwnershipDisposition::Absent(absence_for(proven_absence))
                 )
             ))
         );
@@ -2235,6 +2468,7 @@ mod tests {
                 },
                 logical_owner(41),
                 |_| true,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(_))
         ));
@@ -2244,9 +2478,10 @@ mod tests {
         assert!(matches!(
             slot.settle_reconciliation(
                 owner_b,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(owner_b)),
                 logical_owner(43),
                 |_| true,
+                |absence| absence == absence_for(owner_b),
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -2316,6 +2551,7 @@ mod tests {
                 ),
                 logical_owner(8),
                 |_| true,
+                |_| false,
             ),
             Ok(NativeTerminalEffect::Publish(
                 NativeTerminalDisposition::Reconciliation(
@@ -2344,13 +2580,14 @@ mod tests {
         assert_eq!(
             slot.settle_reconciliation(
                 absence,
-                ExtensionRuntimeOwnershipDisposition::Absent,
+                ExtensionRuntimeOwnershipDisposition::Absent(absence_for(absence)),
                 PlatformOwnerBundle::Vacant,
                 |_| false,
+                |evidence| evidence == absence_for(absence),
             ),
             Ok(NativeTerminalEffect::DefiniteAbsence(
                 NativeTerminalDisposition::Reconciliation(
-                    ExtensionRuntimeOwnershipDisposition::Absent
+                    ExtensionRuntimeOwnershipDisposition::Absent(absence_for(absence))
                 )
             ))
         );

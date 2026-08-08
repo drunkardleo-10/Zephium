@@ -39,7 +39,10 @@ use zephium_store::{
 
 use super::super::RuntimeCoordinatorResources;
 use super::fixture;
-use super::host::{scripted_host_factory, HostProbe, PublicationMode};
+use super::host::{
+    scripted_host_factory, scripted_host_factory_with_absence_evidence, AbsenceEvidenceMode,
+    HostProbe, PublicationMode,
+};
 use crate::journal_store::JournalProjection;
 use crate::native_recovery::NativeRecoveryState;
 use crate::repository::ServiceRepository;
@@ -71,6 +74,14 @@ pub(super) struct RealAuthorityHarness {
 
 impl RealAuthorityHarness {
     pub(super) fn new(profile_count: usize, publication_mode: PublicationMode) -> Self {
+        Self::new_with_absence_evidence(profile_count, publication_mode, AbsenceEvidenceMode::Exact)
+    }
+
+    pub(super) fn new_with_absence_evidence(
+        profile_count: usize,
+        publication_mode: PublicationMode,
+        absence_evidence_mode: AbsenceEvidenceMode,
+    ) -> Self {
         let temporary = RepositoryTemporary::new();
         let manifest = provision_authenticated_repository(&temporary);
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -80,7 +91,11 @@ impl RealAuthorityHarness {
         let root = ExtensionRepositoryRoot::from_app_data_directory(temporary.path()).unwrap();
         let mut repository = ServiceRepository::new(root);
         repository.open().unwrap();
-        let (factory, probe) = scripted_host_factory(publication_mode);
+        let (factory, probe) = if absence_evidence_mode == AbsenceEvidenceMode::Exact {
+            scripted_host_factory(publication_mode)
+        } else {
+            scripted_host_factory_with_absence_evidence(publication_mode, absence_evidence_mode)
+        };
 
         Self {
             authority,

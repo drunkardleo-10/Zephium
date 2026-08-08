@@ -1412,6 +1412,7 @@ fn bind_host(
                 NativeActivationState {
                     initial_entry: entry,
                     request,
+                    absence: None,
                     pending,
                     recovery,
                 },
@@ -1510,6 +1511,7 @@ fn settle_native_activation(state: NativeActivationState, deadline: Instant) -> 
     let NativeActivationState {
         initial_entry,
         request,
+        absence: prior_absence,
         pending,
         recovery,
     } = state;
@@ -1545,30 +1547,36 @@ fn settle_native_activation(state: NativeActivationState, deadline: Instant) -> 
                 recovery,
             })))
         }
-        ExtensionRuntimeActivationSettlement::Retryable { request, failure } => {
-            activation_unavailable(
-                RuntimeSlotState::NativeActivation(Box::new(NativeActivationState {
-                    initial_entry,
-                    request,
-                    pending,
-                    recovery,
-                })),
-                RuntimeActivationUnavailableReason::NativeRetryable(failure),
-            )
-        }
-        ExtensionRuntimeActivationSettlement::Rejected { access, failure } => {
-            ActivationDrive::Continue(RuntimeSlotState::Release(Box::new(ReleaseRuntimeState {
-                current_entry: initial_entry,
-                authority: ReleaseAuthority::PostHost(Box::new(PostHostReleaseAuthority {
-                    access,
-                    operation: RuntimeOperationControl::Pending(Box::new(pending)),
-                    recovery,
-                })),
-                completion: ReleaseCompletion::ActivationRejected(
-                    RuntimeActivationRejectionReason::NativeRejected(failure),
-                ),
-            })))
-        }
+        ExtensionRuntimeActivationSettlement::Retryable {
+            request,
+            failure,
+            absence,
+        } => activation_unavailable(
+            RuntimeSlotState::NativeActivation(Box::new(NativeActivationState {
+                initial_entry,
+                request,
+                absence: absence.or(prior_absence),
+                pending,
+                recovery,
+            })),
+            RuntimeActivationUnavailableReason::NativeRetryable(failure),
+        ),
+        ExtensionRuntimeActivationSettlement::Rejected {
+            access,
+            failure,
+            absence,
+        } => ActivationDrive::Continue(RuntimeSlotState::Release(Box::new(ReleaseRuntimeState {
+            current_entry: initial_entry,
+            authority: ReleaseAuthority::PostHost(Box::new(PostHostReleaseAuthority {
+                access,
+                operation: RuntimeOperationControl::Pending(Box::new(pending)),
+                recovery,
+                absence: super::slot::PostHostAbsenceBasis::Proven(absence),
+            })),
+            completion: ReleaseCompletion::ActivationRejected(
+                RuntimeActivationRejectionReason::NativeRejected(failure),
+            ),
+        }))),
         ExtensionRuntimeActivationSettlement::OwnershipUncertain { owner, failure } => {
             activation_unavailable(
                 RuntimeSlotState::NativeUncertain(Box::new(NativeUncertainState {
@@ -1613,13 +1621,14 @@ fn reconcile_native_uncertainty(state: NativeUncertainState, deadline: Instant) 
                 RuntimeActivationUnavailableReason::NativeOwnershipUncertain(failure),
             )
         }
-        Ok(ExtensionRuntimeReconciliationSettlement::Absent(access)) => {
+        Ok(ExtensionRuntimeReconciliationSettlement::Absent { access, absence }) => {
             ActivationDrive::Continue(RuntimeSlotState::Release(Box::new(ReleaseRuntimeState {
                 current_entry,
                 authority: ReleaseAuthority::PostHost(Box::new(PostHostReleaseAuthority {
                     access,
                     operation: RuntimeOperationControl::Pending(Box::new(pending)),
                     recovery,
+                    absence: super::slot::PostHostAbsenceBasis::Proven(absence),
                 })),
                 completion: ReleaseCompletion::ActivationUnavailable(
                     RuntimeActivationUnavailableReason::NativeRetryable(failure),

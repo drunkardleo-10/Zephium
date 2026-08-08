@@ -12,7 +12,7 @@ use super::{
     RuntimeActivationOutcome, RuntimeActivationUnavailableReason, RuntimeCoordinator,
     RuntimeCoordinatorFailureReason, RuntimeDrainOutcome, RuntimeRetirementOutcome,
 };
-use host::PublicationMode;
+use host::{AbsenceEvidenceMode, PublicationMode};
 use support::{deadline, RealAuthorityHarness};
 
 #[test]
@@ -117,6 +117,49 @@ fn real_authority_stale_owned_row_suppresses_publication_retry() {
     harness
         .probe
         .clear_abandoned_unpublished_owner_for_test(key);
+    assert_eq!(harness.probe.registry_obligation_count(), 0);
+    harness.finish();
+}
+
+#[test]
+fn real_authority_rejects_post_host_absence_from_a_stale_registry_generation() {
+    let mut harness = RealAuthorityHarness::new_with_absence_evidence(
+        1,
+        PublicationMode::Immediate,
+        AbsenceEvidenceMode::StaleRegistryGeneration,
+    );
+    let key = harness.keys[0];
+    let mut coordinator = RuntimeCoordinator::new();
+
+    assert_eq!(
+        coordinator.activate_until(harness.resources(), key, false, deadline()),
+        RuntimeActivationOutcome::Activated(ExtensionRuntimeGeneration::INITIAL)
+    );
+    assert_eq!(
+        coordinator.retire_key_until(harness.resources(), key, deadline()),
+        RuntimeRetirementOutcome::FailedClosed(RuntimeCoordinatorFailureReason::HostInvariant)
+    );
+    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.reclaim_calls(), 0);
+    assert!(coordinator.has_obligation());
+    assert!(coordinator.has_attached_obligation());
+    let durable = harness.journal();
+    let entry = durable
+        .get(key)
+        .expect("stale evidence must retain the release row");
+    assert_eq!(
+        entry.intent(),
+        zephium_core::extensions::ExtensionNativeOwnershipIntent::Release
+    );
+    assert_eq!(
+        entry.phase(),
+        zephium_core::extensions::ExtensionNativeOwnershipPhase::NativeAbsentReleasePending
+    );
+
+    drop(coordinator);
+    assert_eq!(harness.probe.live_reservation_count(), 0);
+    assert_eq!(harness.probe.registry_obligation_count(), 1);
+    harness.probe.clear_failed_closed_absent_owner_for_test(key);
     assert_eq!(harness.probe.registry_obligation_count(), 0);
     harness.finish();
 }

@@ -36,6 +36,7 @@ pub use access::{
 };
 pub use capacity::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 pub use host::{
+    ExtensionRuntimeAbsenceEvidenceIssuer, ExtensionRuntimeBoundAbsenceEvidenceIssuer,
     ExtensionRuntimeHostActivation, ExtensionRuntimeHostActivationBindRefusal,
     ExtensionRuntimeHostActivationBinding, ExtensionRuntimeHostActivationBindingError,
     ExtensionRuntimeHostActivationBindingRefusal, ExtensionRuntimeHostActivationContext,
@@ -69,6 +70,8 @@ pub use lifecycle::{
     ExtensionRuntimeRetirementSettlement, ExtensionRuntimeUncertainOwner,
 };
 pub use ownership_evidence::{
+    ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeAbsenceProofKind,
+    ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeMacosAbsenceAudit,
     ExtensionRuntimeNativeOwnerId, ExtensionRuntimeNativeOwnerIdError,
     ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
     EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,

@@ -1,8 +1,13 @@
 //! Exact, backend-authenticated native ownership evidence.
 
 use std::fmt;
+use std::num::NonZeroU64;
 
-use crate::ExtensionRuntimeTarget;
+use zephium_core::extensions::{
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas, ExtensionRuntimeBackendTarget,
+};
+
+use crate::{ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeTarget};
 
 /// Exact byte length of a canonical native extension-owner identifier.
 pub const EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES: usize = 32;
@@ -99,6 +104,375 @@ impl fmt::Display for ExtensionRuntimeNativeOwnerIdError {
 }
 
 impl std::error::Error for ExtensionRuntimeNativeOwnerIdError {}
+
+/// Closed class of a trusted backend's definite-native-absence proof.
+///
+/// The class is descriptive rather than authorizing. A value becomes usable
+/// only after the runtime API joins the complete evidence to the exact host
+/// reservation which issued it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ExtensionRuntimeAbsenceProofKind {
+    /// The engine proved that the fresh activation attempt never entered its
+    /// ownership-changing native boundary. This proof never establishes
+    /// absence for retirement or crash recovery of a possible prior owner.
+    ActivationNeverEntered,
+    /// macOS proved all four grant dictionaries empty, private/all-host flags
+    /// false, captured permission and pattern statuses non-granted,
+    /// `isLoaded == false`, and exact controller-context absence.
+    MacosZeroGrantsAndUnloaded,
+    /// The compatibility-runtime registry proved the exact owner absent, all
+    /// owned native resources and injected content removed, and every owned
+    /// callback/task drained.
+    CompatibilityRegistryAbsentAndQuiescent,
+}
+
+/// Validated observations required to prove one compatibility runtime absent.
+///
+/// Compatibility runtimes have no platform extension identifier, so their
+/// engine registry is authoritative only after every subordinate native and
+/// asynchronous obligation has also been discharged. This witness prevents a
+/// trusted adapter from omitting one of those checks when minting evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionRuntimeCompatibilityAbsenceAudit {
+    _validated: (),
+}
+
+impl ExtensionRuntimeCompatibilityAbsenceAudit {
+    /// Validates the complete compatibility-runtime absence observation set.
+    #[must_use]
+    pub const fn try_from_observations(
+        owner_registry_absent: bool,
+        owned_native_resources_absent: bool,
+        injected_content_absent: bool,
+        callbacks_and_tasks_drained: bool,
+    ) -> Option<Self> {
+        if owner_registry_absent
+            && owned_native_resources_absent
+            && injected_content_absent
+            && callbacks_and_tasks_drained
+        {
+            Some(Self { _validated: () })
+        } else {
+            None
+        }
+    }
+}
+
+/// Validated raw macOS observations required before an adapter may claim
+/// post-native absence.
+///
+/// This zero-sized witness carries no authority and no lineage. It merely
+/// prevents the trusted raw WebKit boundary from accidentally omitting one of
+/// the required readbacks when asking a reservation-bound issuer to mint the
+/// actual evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionRuntimeMacosAbsenceAudit {
+    _validated: (),
+}
+
+impl ExtensionRuntimeMacosAbsenceAudit {
+    /// Validates the complete closed macOS absence observation set.
+    ///
+    /// Each `*_empty`, `*_non_granted`, `unloaded`, and `controller_absent`
+    /// argument must be true. The private/all-host access observations must be
+    /// false. Any omitted, contradictory, or future-unrecognized observation
+    /// therefore fails closed.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn try_from_observations(
+        granted_permissions_empty: bool,
+        denied_permissions_empty: bool,
+        granted_patterns_empty: bool,
+        denied_patterns_empty: bool,
+        private_access: bool,
+        all_hosts_access: bool,
+        captured_permission_status_non_granted: bool,
+        captured_pattern_status_non_granted: bool,
+        unloaded: bool,
+        controller_absent: bool,
+    ) -> Option<Self> {
+        if granted_permissions_empty
+            && denied_permissions_empty
+            && granted_patterns_empty
+            && denied_patterns_empty
+            && !private_access
+            && !all_hosts_access
+            && captured_permission_status_non_granted
+            && captured_pattern_status_non_granted
+            && unloaded
+            && controller_absent
+        {
+            Some(Self { _validated: () })
+        } else {
+            None
+        }
+    }
+}
+
+/// Compact, non-authorizing proof of definite native-runtime absence.
+///
+/// Raw construction is deliberately unavailable. Trusted host bindings mint
+/// evidence through an issuer which is itself derived from an authenticated,
+/// move-only activation or recovery context. The complete durable owner CAS,
+/// backend, runtime family, registry generation, and native attempt form the
+/// ABA fence. A macOS post-native proof additionally carries the independently
+/// adapter-observed native identity. That observation must agree with the
+/// catalog expectation, or with the durable prior observation for a migrated
+/// row which predates the catalog-expectation field. When both anchors exist,
+/// they must agree before the proof can be minted.
+///
+/// Copying this structural value grants no package, Store, native, or release
+/// authority. Every consumer must rejoin it to the exact live host reservation.
+///
+/// Bare construction is intentionally impossible:
+///
+/// ```compile_fail
+/// use zephium_extension_runtime_api::ExtensionRuntimeAbsenceEvidence;
+/// fn fabricate() -> ExtensionRuntimeAbsenceEvidence {
+///     ExtensionRuntimeAbsenceEvidence {}
+/// }
+/// ```
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ExtensionRuntimeAbsenceEvidence {
+    lineage: ExtensionRuntimeAbsenceLineage,
+    backend: ExtensionRuntimeBackendTarget,
+    target: ExtensionRuntimeTarget,
+    generation: ExtensionRuntimeHostRegistryGeneration,
+    attempt: NonZeroU64,
+    proof: ExtensionRuntimeAbsenceProofKind,
+    expected_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+    observed_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExtensionRuntimeAbsenceLineage {
+    Host(ExtensionNativeOwnershipEntryCas),
+    #[cfg(test)]
+    Test(NonZeroU64),
+}
+
+impl ExtensionRuntimeAbsenceEvidence {
+    // Keep every security-relevant claim explicit at this sole raw boundary;
+    // grouping them would make omitted lineage fields easier to default.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn from_trusted_host(
+        owner: ExtensionNativeOwnershipEntryCas,
+        backend: ExtensionRuntimeBackendTarget,
+        target: ExtensionRuntimeTarget,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        attempt: NonZeroU64,
+        proof: ExtensionRuntimeAbsenceProofKind,
+        expected_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+        observed_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+    ) -> Self {
+        Self {
+            lineage: ExtensionRuntimeAbsenceLineage::Host(owner),
+            backend,
+            target,
+            generation,
+            attempt,
+            proof,
+            expected_native_identity,
+            observed_native_identity,
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn for_test_host_lineage(
+        owner: ExtensionNativeOwnershipEntryCas,
+        backend: ExtensionRuntimeBackendTarget,
+        target: ExtensionRuntimeTarget,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        attempt: NonZeroU64,
+        proof: ExtensionRuntimeAbsenceProofKind,
+        expected_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+        observed_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+    ) -> Self {
+        Self::from_trusted_host(
+            owner,
+            backend,
+            target,
+            generation,
+            attempt,
+            proof,
+            expected_native_identity,
+            observed_native_identity,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn for_test_lineage(
+        lineage: NonZeroU64,
+        backend: ExtensionRuntimeBackendTarget,
+        target: ExtensionRuntimeTarget,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        attempt: NonZeroU64,
+        proof: ExtensionRuntimeAbsenceProofKind,
+        expected_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+        observed_native_identity: Option<ExtensionRuntimeNativeOwnerId>,
+    ) -> Self {
+        Self {
+            lineage: ExtensionRuntimeAbsenceLineage::Test(lineage),
+            backend,
+            target,
+            generation,
+            attempt,
+            proof,
+            expected_native_identity,
+            observed_native_identity,
+        }
+    }
+
+    /// Exact durable owner CAS to which this observation is bound.
+    #[must_use]
+    pub const fn owner(self) -> Option<ExtensionNativeOwnershipEntryCas> {
+        match self.lineage {
+            ExtensionRuntimeAbsenceLineage::Host(owner) => Some(owner),
+            #[cfg(test)]
+            ExtensionRuntimeAbsenceLineage::Test(_) => None,
+        }
+    }
+
+    /// Exact durable runtime backend to which this observation is bound.
+    #[must_use]
+    pub const fn backend(self) -> ExtensionRuntimeBackendTarget {
+        self.backend
+    }
+
+    /// Runtime family to which this observation is bound.
+    #[must_use]
+    pub const fn target(self) -> ExtensionRuntimeTarget {
+        self.target
+    }
+
+    /// Exact process-local host-registry generation.
+    #[must_use]
+    pub const fn registry_generation(self) -> ExtensionRuntimeHostRegistryGeneration {
+        self.generation
+    }
+
+    /// Exact nonzero native-attempt identity within the registry process.
+    #[must_use]
+    pub const fn attempt(self) -> NonZeroU64 {
+        self.attempt
+    }
+
+    /// Closed native-absence proof class.
+    #[must_use]
+    pub const fn proof_kind(self) -> ExtensionRuntimeAbsenceProofKind {
+        self.proof
+    }
+
+    /// Catalog-authenticated identity carried by a post-native proof.
+    #[must_use]
+    pub const fn expected_native_identity(self) -> Option<ExtensionRuntimeNativeOwnerId> {
+        self.expected_native_identity
+    }
+
+    /// Independently adapter-observed identity carried by a post-native proof.
+    #[must_use]
+    pub const fn observed_native_identity(self) -> Option<ExtensionRuntimeNativeOwnerId> {
+        self.observed_native_identity
+    }
+
+    /// Checks this structural observation against one exact durable lineage.
+    ///
+    /// This is deliberately non-authorizing: the caller must still validate
+    /// the process-local registry generation and the live reservation which
+    /// issued the evidence. It centralizes the durable ABA, backend, runtime
+    /// family, and expected/observed identity checks shared by activation and
+    /// crash-recovery consumers.
+    #[must_use]
+    pub fn structurally_matches_entry(self, entry: &ExtensionNativeOwnershipEntry) -> bool {
+        let Some(owner) = self.owner() else {
+            return false;
+        };
+        if owner.key() != entry.key()
+            || owner.operation() != entry.operation()
+            || owner.native_incarnation() != entry.native_incarnation()
+            || owner.revision() > entry.revision()
+            || self.backend != entry.runtime_backend()
+            || !target_matches_backend(self.target, self.backend)
+            || self
+                .expected_native_identity
+                .map(|identity| identity.encoded_bytes())
+                != entry
+                    .expected_native_identity()
+                    .map(|identity| identity.bytes())
+        {
+            return false;
+        }
+
+        match self.proof {
+            ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered => {
+                self.observed_native_identity
+                    .map(|identity| identity.encoded_bytes())
+                    == entry.native_identity().map(|identity| identity.bytes())
+            }
+            ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded => {
+                let identity_anchor = self
+                    .expected_native_identity
+                    .or(self.observed_native_identity);
+                self.backend == ExtensionRuntimeBackendTarget::MacosNative
+                    && self.target == ExtensionRuntimeTarget::NativeWebExtension
+                    && identity_anchor.is_some()
+                    && self.observed_native_identity == identity_anchor
+                    && entry.native_identity().is_none_or(|identity| {
+                        self.observed_native_identity
+                            .is_some_and(|observed| observed.encoded_bytes() == identity.bytes())
+                    })
+            }
+            ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent => {
+                self.target == ExtensionRuntimeTarget::Compatibility
+                    && matches!(
+                        self.backend,
+                        ExtensionRuntimeBackendTarget::MacosCompatibility
+                            | ExtensionRuntimeBackendTarget::LinuxCompatibility
+                    )
+                    && self.expected_native_identity.is_none()
+                    && self.observed_native_identity.is_none()
+                    && entry.expected_native_identity().is_none()
+                    && entry.native_identity().is_none()
+            }
+        }
+    }
+}
+
+const fn target_matches_backend(
+    target: ExtensionRuntimeTarget,
+    backend: ExtensionRuntimeBackendTarget,
+) -> bool {
+    matches!(
+        (target, backend),
+        (
+            ExtensionRuntimeTarget::NativeWebExtension,
+            ExtensionRuntimeBackendTarget::MacosNative
+                | ExtensionRuntimeBackendTarget::WindowsNative
+        ) | (
+            ExtensionRuntimeTarget::Compatibility,
+            ExtensionRuntimeBackendTarget::MacosCompatibility
+                | ExtensionRuntimeBackendTarget::LinuxCompatibility
+        )
+    )
+}
+
+impl fmt::Debug for ExtensionRuntimeAbsenceEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeAbsenceEvidence")
+            .field("lineage", &"[redacted]")
+            .field("backend", &self.backend)
+            .field("target", &self.target)
+            .field("generation", &self.generation)
+            .field("attempt", &self.attempt)
+            .field("proof", &self.proof)
+            .field("native_identity", &"[redacted]")
+            .finish()
+    }
+}
 
 /// Closed, structural description of exact native runtime ownership evidence.
 ///
@@ -597,5 +971,60 @@ mod tests {
             ),
             "MacosWebExtension { catalog_expected: None, adapter_observed: None }"
         );
+    }
+
+    #[test]
+    fn absence_audits_require_every_observation_without_exception() {
+        let compatibility = [true; 4];
+        assert!(
+            ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+                compatibility[0],
+                compatibility[1],
+                compatibility[2],
+                compatibility[3],
+            )
+            .is_some()
+        );
+        for flipped in 0..compatibility.len() {
+            let mut observations = compatibility;
+            observations[flipped] = false;
+            assert!(
+                ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+                    observations[0],
+                    observations[1],
+                    observations[2],
+                    observations[3],
+                )
+                .is_none(),
+                "compatibility observation {flipped} must be mandatory"
+            );
+        }
+
+        let macos = [true, true, true, true, false, false, true, true, true, true];
+        assert!(ExtensionRuntimeMacosAbsenceAudit::try_from_observations(
+            macos[0], macos[1], macos[2], macos[3], macos[4], macos[5], macos[6], macos[7],
+            macos[8], macos[9],
+        )
+        .is_some());
+        for flipped in 0..macos.len() {
+            let mut observations = macos;
+            observations[flipped] = !observations[flipped];
+            assert!(
+                ExtensionRuntimeMacosAbsenceAudit::try_from_observations(
+                    observations[0],
+                    observations[1],
+                    observations[2],
+                    observations[3],
+                    observations[4],
+                    observations[5],
+                    observations[6],
+                    observations[7],
+                    observations[8],
+                    observations[9],
+                )
+                .is_none(),
+                "macOS observation {flipped} must be mandatory"
+            );
+        }
     }
 }

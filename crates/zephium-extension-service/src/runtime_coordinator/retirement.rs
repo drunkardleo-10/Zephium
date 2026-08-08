@@ -29,10 +29,10 @@ use super::reconciliation::{
 };
 use super::slot::{
     MayOwnAccessState, NativeRetirementCallPanicAuthority, NativeRetirementState,
-    NativeRetirementUncertainState, PostHostReleaseAuthority, PreparingAccessState,
-    ReleaseAuthority, ReleaseCompletion, ReleaseRuntimeState, RuntimeFailStopRetained,
-    RuntimeOperationControl, RuntimeRowFenceAuthority, RuntimeRowFenceMutation,
-    RuntimeRowFenceOperation, RuntimeSlotState,
+    NativeRetirementUncertainState, PostHostAbsenceBasis, PostHostReleaseAuthority,
+    PreparingAccessState, ReleaseAuthority, ReleaseCompletion, ReleaseRuntimeState,
+    RuntimeFailStopRetained, RuntimeOperationControl, RuntimeRowFenceAuthority,
+    RuntimeRowFenceMutation, RuntimeRowFenceOperation, RuntimeSlotState,
 };
 use super::{RuntimeCoordinator, RuntimeCoordinatorResources};
 
@@ -436,6 +436,7 @@ pub(super) fn drive_retirement_state(
             let super::slot::NativeActivationState {
                 initial_entry,
                 request,
+                absence,
                 pending,
                 recovery,
             } = *state;
@@ -447,6 +448,10 @@ pub(super) fn drive_retirement_state(
                     access,
                     operation: RuntimeOperationControl::Pending(Box::new(pending)),
                     recovery,
+                    absence: absence.map_or(
+                        PostHostAbsenceBasis::ActivationUnentered,
+                        PostHostAbsenceBasis::Proven,
+                    ),
                 })),
                 completion: ReleaseCompletion::Retired,
             })))
@@ -661,13 +666,14 @@ fn reconcile_activation_uncertainty_for_retirement(
                 reason: RuntimeRetirementUnavailableReason::NativeOwnershipUncertain(failure),
             }
         }
-        Ok(ExtensionRuntimeReconciliationSettlement::Absent(access)) => {
+        Ok(ExtensionRuntimeReconciliationSettlement::Absent { access, absence }) => {
             RetirementDrive::Continue(RuntimeSlotState::Release(Box::new(ReleaseRuntimeState {
                 current_entry,
                 authority: ReleaseAuthority::PostHost(Box::new(PostHostReleaseAuthority {
                     access,
                     operation: RuntimeOperationControl::Pending(Box::new(pending)),
                     recovery,
+                    absence: PostHostAbsenceBasis::Proven(absence),
                 })),
                 completion: ReleaseCompletion::Retired,
             })))
@@ -744,13 +750,14 @@ fn settle_native_retirement(state: NativeRetirementState, deadline: Instant) -> 
     // request; release builds abort. Durable MayOwn remains untouched and the
     // sibling authorities keep this slot permanently attached and fail-closed.
     match panic::catch_unwind(AssertUnwindSafe(|| request.settle_until(deadline))) {
-        Ok(ExtensionRuntimeRetirementSettlement::Retired(access)) => {
+        Ok(ExtensionRuntimeRetirementSettlement::Retired { access, absence }) => {
             RetirementDrive::Continue(RuntimeSlotState::Release(Box::new(ReleaseRuntimeState {
                 current_entry,
                 authority: ReleaseAuthority::PostHost(Box::new(PostHostReleaseAuthority {
                     access,
                     operation,
                     recovery,
+                    absence: PostHostAbsenceBasis::Proven(absence),
                 })),
                 completion,
             })))
@@ -813,13 +820,14 @@ fn reconcile_retirement_uncertainty(
                 recovery,
             })),
         ),
-        Ok(ExtensionRuntimeReconciliationSettlement::Absent(access)) => {
+        Ok(ExtensionRuntimeReconciliationSettlement::Absent { access, absence }) => {
             RetirementDrive::Continue(RuntimeSlotState::Release(Box::new(ReleaseRuntimeState {
                 current_entry,
                 authority: ReleaseAuthority::PostHost(Box::new(PostHostReleaseAuthority {
                     access,
                     operation,
                     recovery,
+                    absence: PostHostAbsenceBasis::Proven(absence),
                 })),
                 completion,
             })))
@@ -1019,6 +1027,16 @@ fn recover_post_host(
     completion: ReleaseCompletion,
     deadline: Instant,
 ) -> RetirementDrive {
+    if !post_host.accepts_absence_for(&current_entry) {
+        return RetirementDrive::FailStop {
+            retained: RuntimeFailStopRetained::Prior(Box::new(post_host_release_state(
+                current_entry,
+                post_host,
+                completion,
+            ))),
+            reason: RuntimeCoordinatorFailureReason::HostInvariant,
+        };
+    }
     let revalidation = match resources.projection.reload(resources.store, deadline) {
         Ok(journal) => classify_post_absence_reload(Ok(
             journal.get(current_entry.key()) == Some(&current_entry)
@@ -1048,6 +1066,7 @@ fn recover_post_host(
         access,
         operation,
         recovery,
+        absence,
     } = post_host;
     let operation_authority = match operation {
         RuntimeOperationControl::Pending(pending) => {
@@ -1065,6 +1084,7 @@ fn recover_post_host(
                                             refusal.into_pending(),
                                         )),
                                         recovery,
+                                        absence,
                                     },
                                 )),
                                 completion,
@@ -1090,6 +1110,7 @@ fn recover_post_host(
                                             Box::new(refusal.into_request()),
                                         ),
                                         recovery,
+                                        absence,
                                     },
                                 )),
                                 completion,
@@ -1111,6 +1132,7 @@ fn recover_post_host(
                                 access,
                                 recovery,
                                 current_entry,
+                                absence,
                             }),
                         ),
                         reason: RuntimeCoordinatorFailureReason::NativeCallPanicked,
@@ -1132,6 +1154,7 @@ fn recover_post_host(
                                                     Box::new(receipt),
                                                 ),
                                                 recovery,
+                                                absence,
                                             },
                                         )),
                                         completion,
@@ -1158,6 +1181,7 @@ fn recover_post_host(
                                         refusal,
                                         recovery,
                                         current_entry,
+                                        absence,
                                     },
                                 )),
                                 reason: RuntimeCoordinatorFailureReason::HostInvariant,

@@ -18,12 +18,12 @@ use zephium_core::extensions::{
     ExtensionManifestResourceDigest, ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement,
     ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
-    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackagePayloadIdentity, ExtensionPackagePinAcquisitionBinding,
-    ExtensionPackagePinHeldBinding, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-    ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority,
-    ExtensionTreeDigest,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournalError,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinHeldBinding,
+    ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
+    ExtensionRuntimeGeneration, ExtensionRuntimeOperationAuthority, ExtensionTreeDigest,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
@@ -594,6 +594,30 @@ struct FakeLifecycle {
     probe: Arc<HostProbe>,
     reservation: Arc<Reservation>,
     retained_bytes: usize,
+    absence_issuer: ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+    last_absence: Option<ExtensionRuntimeAbsenceEvidence>,
+    next_absence_attempt: u64,
+}
+
+impl FakeLifecycle {
+    fn mint_absence(&mut self) -> ExtensionRuntimeAbsenceEvidence {
+        let attempt = std::num::NonZeroU64::new(self.next_absence_attempt)
+            .expect("test absence attempt remains nonzero");
+        self.next_absence_attempt = self
+            .next_absence_attempt
+            .checked_add(1)
+            .expect("test absence attempt does not exhaust");
+        let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+            true, true, true, true,
+        )
+        .expect("scripted compatibility runtime is fully quiescent");
+        let evidence = self
+            .absence_issuer
+            .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
+            .expect("compatibility activation issuer accepts the complete audit");
+        self.last_absence = Some(evidence);
+        evidence
+    }
 }
 
 impl ExtensionRuntimeOwnershipPort for FakeLifecycle {
@@ -601,10 +625,15 @@ impl ExtensionRuntimeOwnershipPort for FakeLifecycle {
         self.retained_bytes
     }
 
+    fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        self.last_absence == Some(evidence)
+            && self.absence_issuer.accepts(evidence, evidence.attempt())
+    }
+
     fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
         self.reservation.attach();
         self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
-        ExtensionRuntimeRetirementDisposition::Retired
+        ExtensionRuntimeRetirementDisposition::Retired(self.mint_absence())
     }
 
     fn reconcile_ownership_until(
@@ -613,7 +642,7 @@ impl ExtensionRuntimeOwnershipPort for FakeLifecycle {
     ) -> ExtensionRuntimeOwnershipDisposition {
         self.reservation.attach();
         self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
-        ExtensionRuntimeOwnershipDisposition::Absent
+        ExtensionRuntimeOwnershipDisposition::Absent(self.mint_absence())
     }
 }
 
@@ -647,6 +676,30 @@ struct FakeOwnership {
     probe: Arc<HostProbe>,
     reservation: Arc<Reservation>,
     retained_bytes: usize,
+    absence_issuer: ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+    last_absence: Option<ExtensionRuntimeAbsenceEvidence>,
+    next_absence_attempt: u64,
+}
+
+impl FakeOwnership {
+    fn mint_absence(&mut self) -> ExtensionRuntimeAbsenceEvidence {
+        let attempt = std::num::NonZeroU64::new(self.next_absence_attempt)
+            .expect("test absence attempt remains nonzero");
+        self.next_absence_attempt = self
+            .next_absence_attempt
+            .checked_add(1)
+            .expect("test absence attempt does not exhaust");
+        let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+            true, true, true, true,
+        )
+        .expect("scripted compatibility runtime is fully quiescent");
+        let evidence = self
+            .absence_issuer
+            .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
+            .expect("compatibility recovery issuer accepts the complete audit");
+        self.last_absence = Some(evidence);
+        evidence
+    }
 }
 
 impl ExtensionRuntimeOwnershipPort for FakeOwnership {
@@ -654,10 +707,15 @@ impl ExtensionRuntimeOwnershipPort for FakeOwnership {
         self.retained_bytes
     }
 
+    fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        self.last_absence == Some(evidence)
+            && self.absence_issuer.accepts(evidence, evidence.attempt())
+    }
+
     fn retire_until(&mut self, _deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
         self.reservation.attach();
         self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
-        ExtensionRuntimeRetirementDisposition::Retired
+        ExtensionRuntimeRetirementDisposition::Retired(self.mint_absence())
     }
 
     fn reconcile_ownership_until(
@@ -666,7 +724,7 @@ impl ExtensionRuntimeOwnershipPort for FakeOwnership {
     ) -> ExtensionRuntimeOwnershipDisposition {
         self.reservation.attach();
         self.probe.lifecycle_calls.fetch_add(1, Ordering::Relaxed);
-        ExtensionRuntimeOwnershipDisposition::Absent
+        ExtensionRuntimeOwnershipDisposition::Absent(self.mint_absence())
     }
 }
 
@@ -850,6 +908,9 @@ impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
         &mut self,
         context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
+        let generation =
+            ExtensionRuntimeHostRegistryGeneration::new(17).expect("nonzero host generation");
+        let absence_issuer = context.absence_evidence_issuer().bind(generation);
         let grants = context.native_grants();
         *self
             .probe
@@ -905,11 +966,14 @@ impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
         }
         let reservation = Reservation::new(Arc::clone(&self.probe));
         Ok(ExtensionRuntimeHostActivationPorts::new(
-            ExtensionRuntimeHostRegistryGeneration::new(17).expect("nonzero host generation"),
+            generation,
             Box::new(FakeLifecycle {
                 probe: Arc::clone(&self.probe),
                 reservation: Arc::clone(&reservation),
                 retained_bytes: self.lifecycle_retained_bytes,
+                absence_issuer,
+                last_absence: None,
+                next_absence_attempt: 1,
             }),
             Box::new(FakePublication {
                 probe: Arc::clone(&self.probe),
@@ -925,17 +989,22 @@ impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
 
     fn bind_recovery(
         &mut self,
-        _context: ExtensionRuntimeHostRecoveryContext,
+        context: ExtensionRuntimeHostRecoveryContext,
     ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError> {
         self.probe.recovery_binds.fetch_add(1, Ordering::Relaxed);
         if let Some(reason) = self.recovery_error {
             return Err(reason);
         }
         let reservation = Reservation::new(Arc::clone(&self.probe));
+        let generation =
+            ExtensionRuntimeHostRegistryGeneration::new(18).expect("nonzero host generation");
         Ok(Box::new(FakeOwnership {
             probe: Arc::clone(&self.probe),
             reservation,
             retained_bytes: self.recovery_retained_bytes,
+            absence_issuer: context.absence_evidence_issuer().bind(generation),
+            last_absence: None,
+            next_absence_attempt: 1,
         }))
     }
 }
@@ -1586,6 +1655,344 @@ fn recovery_binding_accepts_only_possible_owner_states_and_preserves_refusals() 
     let binding = ExtensionRuntimeHostRecoveryBinding::try_new(mismatched)
         .expect("mismatched durable claims remain absence-cleanup capable");
     assert!(binding.context().expectation().has_identity_conflict());
+}
+
+#[test]
+fn recovery_issuer_cannot_mint_or_accept_activation_never_entered() {
+    let fixture = ActivationFixture::compatibility(59);
+    let entry = fixture.template.may_own();
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(entry.clone())
+        .expect("possible compatibility owner is recoverable");
+    let generation = ExtensionRuntimeHostRegistryGeneration::new(3).expect("nonzero generation");
+    let attempt = std::num::NonZeroU64::new(5).expect("nonzero attempt");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+
+    assert_eq!(issuer.mint_activation_never_entered(attempt), None);
+    let structurally_exact_but_wrong_provenance =
+        ExtensionRuntimeAbsenceEvidence::for_test_host_lineage(
+            entry.cas(),
+            ExtensionRuntimeBackendTarget::LinuxCompatibility,
+            ExtensionRuntimeTarget::Compatibility,
+            generation,
+            attempt,
+            ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered,
+            None,
+            None,
+        );
+    assert!(!issuer.accepts(structurally_exact_but_wrong_provenance, attempt));
+}
+
+#[test]
+fn absence_evidence_structural_matcher_checks_every_representable_lineage_dimension() {
+    #[allow(clippy::too_many_arguments)]
+    fn try_rebuild(
+        source: &ExtensionNativeOwnershipEntry,
+        key: ExtensionNativeOwnershipKey,
+        operation: ExtensionNativeOwnershipOperation,
+        revision: u64,
+        backend: ExtensionRuntimeBackendTarget,
+        expected: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        observed: Option<ExtensionNativeOwnershipIdentity>,
+        incarnation: ExtensionNativeIncarnation,
+        intent: ExtensionNativeOwnershipIntent,
+        phase: ExtensionNativeOwnershipPhase,
+    ) -> Result<ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournalError> {
+        ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            key,
+            operation,
+            ExtensionNativeOwnershipEntryRevision::new(revision).expect("nonzero revision"),
+            source.package().clone(),
+            source.catalog_set_digest(),
+            source.catalog_role(),
+            source.store_catalog_revision(),
+            source.store_install_revision(),
+            source.store_grant_revision(),
+            source.grant_digest(),
+            backend,
+            expected,
+            observed,
+            incarnation,
+            intent,
+            phase,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild(
+        source: &ExtensionNativeOwnershipEntry,
+        key: ExtensionNativeOwnershipKey,
+        operation: ExtensionNativeOwnershipOperation,
+        revision: u64,
+        backend: ExtensionRuntimeBackendTarget,
+        expected: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        observed: Option<ExtensionNativeOwnershipIdentity>,
+        incarnation: ExtensionNativeIncarnation,
+        intent: ExtensionNativeOwnershipIntent,
+        phase: ExtensionNativeOwnershipPhase,
+    ) -> ExtensionNativeOwnershipEntry {
+        try_rebuild(
+            source,
+            key,
+            operation,
+            revision,
+            backend,
+            expected,
+            observed,
+            incarnation,
+            intent,
+            phase,
+        )
+        .expect("valid structural matcher fixture row")
+    }
+
+    fn evidence(
+        entry: &ExtensionNativeOwnershipEntry,
+        backend: ExtensionRuntimeBackendTarget,
+        target: ExtensionRuntimeTarget,
+        proof: ExtensionRuntimeAbsenceProofKind,
+        expected: Option<ExtensionRuntimeNativeOwnerId>,
+        observed: Option<ExtensionRuntimeNativeOwnerId>,
+    ) -> ExtensionRuntimeAbsenceEvidence {
+        ExtensionRuntimeAbsenceEvidence::for_test_host_lineage(
+            entry.cas(),
+            backend,
+            target,
+            ExtensionRuntimeHostRegistryGeneration::new(7).expect("nonzero generation"),
+            std::num::NonZeroU64::new(9).expect("nonzero attempt"),
+            proof,
+            expected,
+            observed,
+        )
+    }
+
+    let native = ActivationFixture::macos(60);
+    let initial = native.initial.clone();
+    let release = native.release();
+    let expected_id = ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+        .expect("canonical expected ID");
+    let other_id =
+        ExtensionRuntimeNativeOwnerId::parse_exact(OTHER_NATIVE_ID).expect("canonical other ID");
+    let exact = evidence(
+        &initial,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded,
+        Some(expected_id),
+        Some(expected_id),
+    );
+    assert!(exact.structurally_matches_entry(&initial));
+    assert!(
+        exact.structurally_matches_entry(&release),
+        "an older proof may match the same owner after a monotonic row revision"
+    );
+
+    let newer_evidence = evidence(
+        &release,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded,
+        Some(expected_id),
+        Some(expected_id),
+    );
+    assert!(!newer_evidence.structurally_matches_entry(&initial));
+    let different_key = ActivationFixture::macos(61).initial;
+    assert_ne!(different_key.key(), initial.key());
+    assert_eq!(different_key.operation(), initial.operation());
+    assert_eq!(different_key.revision(), initial.revision());
+    assert_eq!(
+        different_key.native_incarnation(),
+        initial.native_incarnation()
+    );
+    assert_eq!(different_key.runtime_backend(), initial.runtime_backend());
+    assert_eq!(
+        different_key.expected_native_identity(),
+        initial.expected_native_identity()
+    );
+    assert_eq!(different_key.native_identity(), initial.native_identity());
+    assert!(!exact.structurally_matches_entry(&different_key));
+
+    let second_operation = ExtensionNativeOwnershipOperation::new(2).expect("operation");
+    let second_incarnation = ExtensionNativeIncarnation::new(2).expect("incarnation");
+    let different_operation = rebuild(
+        &initial,
+        initial.key(),
+        second_operation,
+        2,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        native.expected_native_identity,
+        None,
+        second_incarnation,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+    );
+    assert!(!exact.structurally_matches_entry(&different_operation));
+    assert!(matches!(
+        try_rebuild(
+            &initial,
+            initial.key(),
+            second_operation,
+            2,
+            ExtensionRuntimeBackendTarget::MacosNative,
+            native.expected_native_identity,
+            None,
+            initial.native_incarnation(),
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        ),
+        Err(ExtensionNativeOwnershipJournalError::OperationIncarnationMismatch)
+    ));
+    assert!(matches!(
+        try_rebuild(
+            &initial,
+            initial.key(),
+            initial.operation(),
+            2,
+            ExtensionRuntimeBackendTarget::MacosNative,
+            native.expected_native_identity,
+            None,
+            second_incarnation,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        ),
+        Err(ExtensionNativeOwnershipJournalError::OperationIncarnationMismatch)
+    ));
+
+    let windows_expected = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+        ExtensionRuntimeBackendTarget::WindowsNative,
+        expected_id.encoded_bytes(),
+    )
+    .expect("canonical Windows expected ID");
+    let different_backend = rebuild(
+        &initial,
+        initial.key(),
+        initial.operation(),
+        2,
+        ExtensionRuntimeBackendTarget::WindowsNative,
+        Some(windows_expected),
+        None,
+        initial.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+    );
+    assert!(!exact.structurally_matches_entry(&different_backend));
+
+    let wrong_target = evidence(
+        &initial,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::Compatibility,
+        ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered,
+        Some(expected_id),
+        None,
+    );
+    assert!(!wrong_target.structurally_matches_entry(&initial));
+
+    let other_expected = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        other_id.encoded_bytes(),
+    )
+    .expect("canonical alternate expected ID");
+    let expected_mismatch = rebuild(
+        &initial,
+        initial.key(),
+        initial.operation(),
+        2,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        Some(other_expected),
+        None,
+        initial.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+    );
+    assert!(!exact.structurally_matches_entry(&expected_mismatch));
+
+    let other_observed = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        other_id.encoded_bytes(),
+    )
+    .expect("canonical alternate observed ID");
+    let observed_mismatch = rebuild(
+        &initial,
+        initial.key(),
+        initial.operation(),
+        3,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        native.expected_native_identity,
+        Some(other_observed),
+        initial.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+    );
+    assert!(!exact.structurally_matches_entry(&observed_mismatch));
+
+    let activation_unentered = evidence(
+        &initial,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered,
+        Some(expected_id),
+        None,
+    );
+    assert!(activation_unentered.structurally_matches_entry(&initial));
+    let wrong_native_proof = evidence(
+        &initial,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent,
+        None,
+        None,
+    );
+    assert!(!wrong_native_proof.structurally_matches_entry(&initial));
+
+    let legacy_observed = rebuild(
+        &initial,
+        initial.key(),
+        initial.operation(),
+        3,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        None,
+        native.native_identity,
+        initial.native_incarnation(),
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+    );
+    let legacy_absence = evidence(
+        &legacy_observed,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded,
+        None,
+        Some(expected_id),
+    );
+    assert!(legacy_absence.structurally_matches_entry(&legacy_observed));
+    let identityless_absence = evidence(
+        &initial,
+        ExtensionRuntimeBackendTarget::MacosNative,
+        ExtensionRuntimeTarget::NativeWebExtension,
+        ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded,
+        None,
+        None,
+    );
+    assert!(!identityless_absence.structurally_matches_entry(&initial));
+
+    let compatibility = ActivationFixture::compatibility(62);
+    let compatibility_absence = evidence(
+        &compatibility.initial,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        ExtensionRuntimeTarget::Compatibility,
+        ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent,
+        None,
+        None,
+    );
+    assert!(compatibility_absence.structurally_matches_entry(&compatibility.initial));
+    let compatibility_as_macos = evidence(
+        &compatibility.initial,
+        ExtensionRuntimeBackendTarget::LinuxCompatibility,
+        ExtensionRuntimeTarget::Compatibility,
+        ExtensionRuntimeAbsenceProofKind::MacosZeroGrantsAndUnloaded,
+        None,
+        None,
+    );
+    assert!(!compatibility_as_macos.structurally_matches_entry(&compatibility.initial));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::mem::size_of;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
@@ -12,10 +13,11 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::ProfileId;
 use zephium_extension_runtime_api::{
-    ExtensionPackageAccessError, ExtensionPackageAccessView, ExtensionRuntimeActivationDisposition,
-    ExtensionRuntimeFailure, ExtensionRuntimeHostActivationContext,
-    ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError,
-    ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
+    ExtensionPackageAccessError, ExtensionPackageAccessView, ExtensionRuntimeAbsenceEvidence,
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+    ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeFailure,
+    ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
+    ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
     ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
     ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostPublicationPort,
     ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
@@ -33,6 +35,12 @@ const MAX_SCRIPTED_NATIVE_OWNERS: usize = crate::MAX_CONCURRENT_EXTENSION_BACKGR
 pub(super) enum PublicationMode {
     Immediate,
     RefuseFirst,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AbsenceEvidenceMode {
+    Exact,
+    StaleRegistryGeneration,
 }
 
 pub(super) struct HostProbe {
@@ -169,6 +177,32 @@ impl HostProbe {
             matching_index = Some(index);
         }
         let index = matching_index.expect("expected abandoned owner must remain observable");
+        registry.records[index] = None;
+    }
+
+    /// Releases only a test-owned, post-absence published record after the
+    /// coordinator has intentionally retained and then dropped fail-stop
+    /// authority. Production requires an explicit reclaim and has no such
+    /// escape hatch.
+    pub(super) fn clear_failed_closed_absent_owner_for_test(
+        &self,
+        expected: ExtensionNativeOwnershipKey,
+    ) {
+        assert_eq!(self.live_reservation_count(), 0);
+        let mut registry = self
+            .lock_registry()
+            .expect("scripted native registry must remain healthy");
+        let index = registry
+            .records
+            .iter()
+            .position(|slot| {
+                slot.as_ref().is_some_and(|record| {
+                    record.owner.cas().key() == expected
+                        && record.phase == RegistryPhase::Absent
+                        && record.authority.is_some()
+                })
+            })
+            .expect("expected failed-closed published owner must remain observable");
         registry.records[index] = None;
     }
 
@@ -466,9 +500,17 @@ impl Drop for ReservationControl {
 pub(super) fn scripted_host_factory(
     publication_mode: PublicationMode,
 ) -> (ExtensionRuntimeHostFactory, Arc<HostProbe>) {
+    scripted_host_factory_with_absence_evidence(publication_mode, AbsenceEvidenceMode::Exact)
+}
+
+pub(super) fn scripted_host_factory_with_absence_evidence(
+    publication_mode: PublicationMode,
+    absence_evidence_mode: AbsenceEvidenceMode,
+) -> (ExtensionRuntimeHostFactory, Arc<HostProbe>) {
     let probe = Arc::new(HostProbe::default());
     let factory = ScriptedHostFactory {
         publication_mode,
+        absence_evidence_mode,
         probe: Arc::clone(&probe),
         next_generation: Some(1),
     };
@@ -480,6 +522,7 @@ pub(super) fn scripted_host_factory(
 
 struct ScriptedHostFactory {
     publication_mode: PublicationMode,
+    absence_evidence_mode: AbsenceEvidenceMode,
     probe: Arc<HostProbe>,
     next_generation: Option<u64>,
 }
@@ -515,6 +558,18 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
         let generation = ExtensionRuntimeHostRegistryGeneration::new(raw_generation)
             .ok_or(ExtensionRuntimeHostBindError::IdentityExhausted)?;
         self.next_generation = raw_generation.checked_add(1);
+        let issuer_generation = match self.absence_evidence_mode {
+            AbsenceEvidenceMode::Exact => generation,
+            AbsenceEvidenceMode::StaleRegistryGeneration => {
+                ExtensionRuntimeHostRegistryGeneration::new(
+                    raw_generation
+                        .checked_add(1)
+                        .ok_or(ExtensionRuntimeHostBindError::IdentityExhausted)?,
+                )
+                .ok_or(ExtensionRuntimeHostBindError::IdentityExhausted)?
+            }
+        };
+        let absence_issuer = context.absence_evidence_issuer().bind(issuer_generation);
         let reservation = self.probe.reserve(context.owner(), generation)?;
         self.probe.bind_calls.fetch_add(1, Ordering::AcqRel);
 
@@ -522,6 +577,9 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
             generation,
             Box::new(ScriptedLifecycle {
                 reservation: Arc::clone(&reservation),
+                absence_issuer,
+                next_attempt: Some(1),
+                last_absence: None,
             }),
             Box::new(ScriptedPublication {
                 mode: self.publication_mode,
@@ -570,6 +628,15 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
 
 struct ScriptedLifecycle {
     reservation: Arc<ReservationControl>,
+    absence_issuer: ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+    next_attempt: Option<u64>,
+    last_absence: Option<ExtensionRuntimeAbsenceEvidence>,
+}
+
+#[derive(Clone, Copy)]
+enum ScriptedActivationAbsence {
+    Retryable,
+    Rejected,
 }
 
 const SHARED_RESERVATION_RETAINED_BYTES: usize = size_of::<ReservationControl>()
@@ -580,6 +647,41 @@ const SCRIPTED_LIFECYCLE_RETAINED_BYTES: usize = size_of::<ScriptedLifecycle>()
     + SHARED_RESERVATION_RETAINED_BYTES;
 
 impl ScriptedLifecycle {
+    fn begin_attempt(&mut self) -> Option<NonZeroU64> {
+        let raw = self.next_attempt?;
+        let attempt = NonZeroU64::new(raw)?;
+        self.next_attempt = raw.checked_add(1);
+        Some(attempt)
+    }
+
+    fn retain_absence(
+        &mut self,
+        evidence: ExtensionRuntimeAbsenceEvidence,
+    ) -> ExtensionRuntimeAbsenceEvidence {
+        self.last_absence = Some(evidence);
+        evidence
+    }
+
+    fn mint_activation_absence(&mut self, attempt: NonZeroU64) -> ExtensionRuntimeAbsenceEvidence {
+        let evidence = self
+            .absence_issuer
+            .mint_activation_never_entered(attempt)
+            .expect("scripted activation never crossed a platform-native boundary");
+        self.retain_absence(evidence)
+    }
+
+    fn mint_owner_absence(&mut self, attempt: NonZeroU64) -> ExtensionRuntimeAbsenceEvidence {
+        let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+            true, true, true, true,
+        )
+        .expect("scripted compatibility owner is fully quiescent");
+        let evidence = self
+            .absence_issuer
+            .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
+            .expect("exact compatibility issuer accepts the complete audit");
+        self.retain_absence(evidence)
+    }
+
     fn uncertain_activation(
         failure: ExtensionRuntimeFailure,
         evidence: Option<ExtensionRuntimeOwnershipEvidence>,
@@ -588,8 +690,10 @@ impl ScriptedLifecycle {
     }
 
     fn settle_definite_activation_absence(
-        &self,
-        disposition: ExtensionRuntimeActivationDisposition,
+        &mut self,
+        attempt: NonZeroU64,
+        kind: ScriptedActivationAbsence,
+        failure: ExtensionRuntimeFailure,
     ) -> ExtensionRuntimeActivationDisposition {
         match self
             .reservation
@@ -600,7 +704,17 @@ impl ScriptedLifecycle {
                     .probe
                     .finalize_absent_without_authority(&self.reservation)
             }) {
-            Ok(()) => disposition,
+            Ok(()) => {
+                let absence = self.mint_activation_absence(attempt);
+                match kind {
+                    ScriptedActivationAbsence::Retryable => {
+                        ExtensionRuntimeActivationDisposition::Retryable { failure, absence }
+                    }
+                    ScriptedActivationAbsence::Rejected => {
+                        ExtensionRuntimeActivationDisposition::Rejected { failure, absence }
+                    }
+                }
+            }
             Err(_) => Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None),
         }
     }
@@ -609,6 +723,11 @@ impl ScriptedLifecycle {
 impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
     fn retained_bytes(&self) -> usize {
         SCRIPTED_LIFECYCLE_RETAINED_BYTES
+    }
+
+    fn accepts_absence_evidence(&self, evidence: ExtensionRuntimeAbsenceEvidence) -> bool {
+        self.last_absence == Some(evidence)
+            && self.absence_issuer.accepts(evidence, evidence.attempt())
     }
 
     fn retire_until(&mut self, deadline: Instant) -> ExtensionRuntimeRetirementDisposition {
@@ -628,6 +747,12 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                 ExtensionRuntimeFailure::TimedOut,
             );
         }
+        let Some(attempt) = self.begin_attempt() else {
+            return ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            };
+        };
         self.reservation
             .probe
             .retirement_calls
@@ -644,7 +769,9 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                 .probe
                 .finalize_absent_without_authority(&self.reservation)
             {
-                Ok(()) => ExtensionRuntimeRetirementDisposition::Retired,
+                Ok(()) => {
+                    ExtensionRuntimeRetirementDisposition::Retired(self.mint_owner_absence(attempt))
+                }
                 Err(_) => ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
                     failure: ExtensionRuntimeFailure::Internal,
                     evidence: None,
@@ -679,6 +806,12 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                 evidence: None,
             };
         }
+        let Some(attempt) = self.begin_attempt() else {
+            return ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::Internal,
+                evidence: None,
+            };
+        };
         let phase = self.reservation.probe.phase(&self.reservation);
         if Instant::now() >= deadline {
             let evidence = matches!(phase, Ok(RegistryPhase::Active))
@@ -705,7 +838,9 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                         .probe
                         .finalize_absent_without_authority(&self.reservation)
                     {
-                        Ok(()) => ExtensionRuntimeOwnershipDisposition::Absent,
+                        Ok(()) => ExtensionRuntimeOwnershipDisposition::Absent(
+                            self.mint_owner_absence(attempt),
+                        ),
                         Err(_) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
                             failure: ExtensionRuntimeFailure::Internal,
                             evidence: None,
@@ -722,7 +857,9 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                 .probe
                 .finalize_absent_without_authority(&self.reservation)
             {
-                Ok(()) => ExtensionRuntimeOwnershipDisposition::Absent,
+                Ok(()) => {
+                    ExtensionRuntimeOwnershipDisposition::Absent(self.mint_owner_absence(attempt))
+                }
                 Err(_) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
                     failure: ExtensionRuntimeFailure::Internal,
                     evidence: None,
@@ -745,20 +882,23 @@ impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
         deadline: Instant,
     ) -> ExtensionRuntimeActivationDisposition {
         if Instant::now() >= deadline {
-            return ExtensionRuntimeActivationDisposition::Retryable(
-                ExtensionRuntimeFailure::TimedOut,
-            );
+            return Self::uncertain_activation(ExtensionRuntimeFailure::TimedOut, None);
         }
         if self.reservation.probe.attach(&self.reservation).is_err() {
             return Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None);
         }
+        let Some(attempt) = self.begin_attempt() else {
+            return Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None);
+        };
         self.reservation
             .probe
             .activation_calls
             .fetch_add(1, Ordering::AcqRel);
         if Instant::now() >= deadline {
             return self.settle_definite_activation_absence(
-                ExtensionRuntimeActivationDisposition::Retryable(ExtensionRuntimeFailure::TimedOut),
+                attempt,
+                ScriptedActivationAbsence::Retryable,
+                ExtensionRuntimeFailure::TimedOut,
             );
         }
         if access.target() != ExtensionRuntimeTarget::Compatibility
@@ -768,14 +908,16 @@ impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
             )
         {
             return self.settle_definite_activation_absence(
-                ExtensionRuntimeActivationDisposition::Rejected(
-                    ExtensionRuntimeFailure::PackageRejected,
-                ),
+                attempt,
+                ScriptedActivationAbsence::Rejected,
+                ExtensionRuntimeFailure::PackageRejected,
             );
         }
         match access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())) {
             Ok(Ok(())) if Instant::now() >= deadline => self.settle_definite_activation_absence(
-                ExtensionRuntimeActivationDisposition::Retryable(ExtensionRuntimeFailure::TimedOut),
+                attempt,
+                ScriptedActivationAbsence::Retryable,
+                ExtensionRuntimeFailure::TimedOut,
             ),
             Ok(Ok(())) => match self.reservation.probe.mark_active(&self.reservation) {
                 Ok(()) if Instant::now() < deadline => {
@@ -790,9 +932,9 @@ impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
                 Err(_) => Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None),
             },
             Ok(Err(_)) | Err(_) => self.settle_definite_activation_absence(
-                ExtensionRuntimeActivationDisposition::Rejected(
-                    ExtensionRuntimeFailure::PackageRejected,
-                ),
+                attempt,
+                ScriptedActivationAbsence::Rejected,
+                ExtensionRuntimeFailure::PackageRejected,
             ),
         }
     }
