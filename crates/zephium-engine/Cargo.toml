@@ -25,6 +25,7 @@ native-web-extension-probes = [
     "objc2-web-kit/WKWebExtensionPermission",
     "objc2-web-kit/WKWebExtensionTab",
     "objc2-web-kit/WKWebExtensionWindow",
+    "objc2-web-kit/WKHTTPCookieStore",
     "objc2-web-kit/WKWebView",
 ]
 # Compiles the intentionally non-product Windows CDP feasibility harness. The

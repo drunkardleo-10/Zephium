@@ -8,5 +8,7 @@ mod controller_registry;
 mod erasure;
 mod grants;
 
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use controller_registry::ProbeControllerPreparation;
 pub(crate) use controller_registry::{ControllerErasureSettlement, PersistentControllerRegistry};
 pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};

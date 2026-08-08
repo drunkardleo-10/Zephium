@@ -8,6 +8,8 @@ mod stage;
 #[cfg(feature = "native-web-extension-probes")]
 mod web_extensions;
 
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::ProbeControllerPreparation;
 pub(crate) use extensions::{
     ControllerErasureSettlement, ControllerErasureTicket, PersistentControllerRegistry,
     ProfileControllerErasure,

@@ -15,27 +15,24 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use super::{
+    drain_run_loop_once, new_context, persistent_probe_profiles, set_phase, wait_for_result,
+    write_fixture_file, PROBE_TIMEOUT, PROBE_TOKEN,
+};
+use crate::platform::macos::{PersistentControllerRegistry, ProbeControllerPreparation};
 use objc2::rc::{Retained, Weak};
-use objc2::{AnyThread, MainThreadOnly};
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSDate, NSDictionary, NSError, NSRunLoop, NSSet, NSString, NSUUID,
+    MainThreadMarker, NSArray, NSDate, NSDictionary, NSError, NSRunLoop, NSSet, NSString,
 };
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
-    WKWebExtensionController, WKWebExtensionControllerConfiguration, WKWebExtensionDataRecord,
-    WKWebExtensionDataRecordError, WKWebExtensionDataType, WKWebExtensionMatchPattern,
-    WKWebExtensionPermission,
+    WKWebExtensionController, WKWebExtensionDataRecord, WKWebExtensionDataRecordError,
+    WKWebExtensionDataType, WKWebExtensionMatchPattern, WKWebExtensionPermission,
+    WKWebsiteDataStore,
 };
 use serde_json::json;
 
-use super::{
-    drain_run_loop_once, new_context, set_phase, wait_for_result, write_fixture_file,
-    PROBE_TIMEOUT, PROBE_TOKEN,
-};
-
-const EXTENSION_PRINCIPAL: &str = "abcdefghijklmnopabcdefghijklmnop";
-const STORAGE_CONTROLLER_A: &str = "f0cc44f2-4355-4cf9-a74f-27fe6cb37eda";
-const STORAGE_CONTROLLER_B: &str = "6a90af85-503a-4db6-8359-a0825da907ab";
+pub(super) const EXTENSION_PRINCIPAL: &str = "abcdefghijklmnopabcdefghijklmnop";
 const STORAGE_KEY: &str = "zephiumNativeProbe";
 const STORAGE_SENTINEL_KEY: &str = "zephiumNativeProbeCompletion";
 const LOCK_FILE_NAME: &str = ".zephium-wk-web-extension-probe.lock";
@@ -45,7 +42,6 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_LOCK_ATTEMPTS: usize = 4_500;
 const MAX_DATA_POLLS: usize = 128;
-const MAX_DATA_RECORDS: usize = 1;
 const MAX_RECORD_ERRORS: usize = 4;
 const MAX_FAILURES: usize = 8;
 const MAX_DIAGNOSTIC_CHARS: usize = 256;
@@ -70,18 +66,22 @@ pub(super) struct PersistentProbeEvidence {
     pub(super) all_type_removal_callbacks: usize,
     pub(super) controllers_released: usize,
     pub(super) contexts_released: usize,
+    pub(super) stores_released: usize,
 }
 
-struct NamespaceLock {
+pub(super) struct NamespaceLock {
     _file: File,
 }
 
-struct PersistentControllerBundle {
-    _configuration: Retained<WKWebExtensionControllerConfiguration>,
-    controller: Retained<WKWebExtensionController>,
+struct PersistentProfilePair {
+    registry: PersistentControllerRegistry,
+    controller_a: Retained<WKWebExtensionController>,
+    controller_b: Retained<WKWebExtensionController>,
+    store_a: Retained<WKWebsiteDataStore>,
+    store_b: Retained<WKWebsiteDataStore>,
 }
 
-struct NativeDataTypes {
+pub(super) struct NativeDataTypes {
     all: Retained<NSSet<WKWebExtensionDataType>>,
     persistent: Retained<NSSet<WKWebExtensionDataType>>,
     local: Retained<NSSet<WKWebExtensionDataType>>,
@@ -115,17 +115,20 @@ struct CycleOutcome {
     removal_callbacks: usize,
     controllers_released: usize,
     contexts_released: usize,
+    stores_released: usize,
 }
 
 struct ReleaseCounts {
     controllers: usize,
     contexts: usize,
+    stores: usize,
 }
 
 #[derive(Default)]
 struct ReleaseInventory {
     controllers: Vec<Weak<WKWebExtensionController>>,
     contexts: Vec<Weak<WKWebExtensionContext>>,
+    stores: Vec<Weak<WKWebsiteDataStore>>,
 }
 
 pub(super) fn validate_persistent_runtime_gates(
@@ -287,11 +290,23 @@ fn exercise_persistent_runtime_sequence(
         total.checked_add(outcome.contexts_released)
     })
     .ok_or_else(|| "released-context count overflow".to_owned())?;
+    let stores_released = [
+        &writer_outcome,
+        &verifier_one_outcome,
+        &verifier_two_outcome,
+        &empty_outcome,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, outcome| {
+        total.checked_add(outcome.stores_released)
+    })
+    .ok_or_else(|| "released-store count overflow".to_owned())?;
 
     Ok(PersistentProbeEvidence {
         all_type_removal_callbacks,
         controllers_released,
         contexts_released,
+        stores_released,
     })
 }
 
@@ -318,19 +333,22 @@ fn run_cycle(
     let (gate_result, release_inventory) = objc2::rc::autoreleasepool(|_| {
         let mut release_inventory = ReleaseInventory::default();
         let gate_result = (|| {
-            let controller_a = new_persistent_controller(STORAGE_CONTROLLER_A, mtm)?;
-            let controller_b = new_persistent_controller(STORAGE_CONTROLLER_B, mtm)?;
-            let controller_weak_a = Weak::from_retained(&controller_a.controller);
-            let controller_weak_b = Weak::from_retained(&controller_b.controller);
+            let profiles = new_persistent_profiles(mtm)?;
+            let controller_weak_a = Weak::from_retained(&profiles.controller_a);
+            let controller_weak_b = Weak::from_retained(&profiles.controller_b);
             assert_distinct_controller_identity(
-                &controller_a.controller,
-                &controller_b.controller,
+                &profiles.controller_a,
+                &profiles.controller_b,
                 &controller_weak_a,
                 &controller_weak_b,
             )?;
             release_inventory
                 .controllers
                 .extend([controller_weak_a, controller_weak_b]);
+            release_inventory.stores.extend([
+                Weak::from_retained(&profiles.store_a),
+                Weak::from_retained(&profiles.store_b),
+            ]);
 
             let context_a = new_context(extension_a, EXTENSION_PRINCIPAL)?;
             let context_b = new_context(extension_b, EXTENSION_PRINCIPAL)?;
@@ -347,8 +365,8 @@ fn run_cycle(
                 .extend([context_weak_a, context_weak_b]);
 
             let result = exercise_cycle(
-                &controller_a.controller,
-                &controller_b.controller,
+                &profiles.controller_a,
+                &profiles.controller_b,
                 &context_a,
                 &context_b,
                 phase_a,
@@ -360,8 +378,8 @@ fn run_cycle(
             );
             let result = if result.is_err() {
                 let cleanup = recover_failed_cycle(
-                    &controller_a.controller,
-                    &controller_b.controller,
+                    &profiles.controller_a,
+                    &profiles.controller_b,
                     &context_a,
                     &context_b,
                     data_types,
@@ -375,9 +393,7 @@ fn run_cycle(
 
             drop(context_a);
             drop(context_b);
-            drop(controller_a);
-            drop(controller_b);
-            result
+            combine_gate_and_cleanup(result, release_persistent_profiles(profiles))
         })();
         (gate_result, release_inventory)
     });
@@ -387,6 +403,7 @@ fn run_cycle(
         (Ok(mut outcome), Ok(released)) => {
             outcome.controllers_released = released.controllers;
             outcome.contexts_released = released.contexts;
+            outcome.stores_released = released.stores;
             Ok(outcome)
         }
         (Err(gate), Ok(_)) => Err(bounded_text(&gate)),
@@ -455,11 +472,22 @@ fn exercise_cycle(
     run_loop: &NSRunLoop,
 ) -> Result<CycleOutcome, String> {
     let mut outcome = CycleOutcome::default();
+    let [principals_a, principals_b] = profile_record_principal_scopes();
     if matches!(kind, CycleKind::Writer) {
-        outcome.removal_callbacks +=
-            erase_all_extension_data(controller_a, data_types, run_loop, "controller A preflight")?;
-        outcome.removal_callbacks +=
-            erase_all_extension_data(controller_b, data_types, run_loop, "controller B preflight")?;
+        outcome.removal_callbacks += erase_all_extension_data(
+            controller_a,
+            data_types,
+            run_loop,
+            "controller A preflight",
+            &principals_a,
+        )?;
+        outcome.removal_callbacks += erase_all_extension_data(
+            controller_b,
+            data_types,
+            run_loop,
+            "controller B preflight",
+            &principals_b,
+        )?;
     }
 
     prepare_exact_storage_permission(context_a, storage_permission, "storage context A")?;
@@ -492,6 +520,7 @@ fn exercise_cycle(
         data_types,
         run_loop,
         "persistent storage A",
+        &principals_a,
     )?;
     outcome.local_size_b = observe_phase(
         controller_b,
@@ -499,6 +528,7 @@ fn exercise_cycle(
         data_types,
         run_loop,
         "persistent storage B",
+        &principals_b,
     )?;
 
     match kind {
@@ -509,12 +539,14 @@ fn exercise_cycle(
                 data_types,
                 run_loop,
                 "controller A retirement",
+                &principals_a,
             )?;
             let surviving_b = fetch_exact_local_size(
                 controller_b,
                 data_types,
                 run_loop,
                 "controller B after A retirement",
+                &principals_b,
             )?;
             if surviving_b != outcome.local_size_b {
                 return Err(format!(
@@ -529,12 +561,14 @@ fn exercise_cycle(
                 data_types,
                 run_loop,
                 "controller B retirement",
+                &principals_b,
             )?;
             wait_for_zero_persistent_data(
                 controller_a,
                 data_types,
                 run_loop,
                 "controller A after B retirement",
+                &principals_a,
             )?;
         }
     }
@@ -547,10 +581,17 @@ fn observe_phase(
     data_types: &NativeDataTypes,
     run_loop: &NSRunLoop,
     description: &str,
+    allowed_principals: &[&str],
 ) -> Result<usize, String> {
     match phase {
         RuntimePhase::Empty => {
-            wait_for_zero_persistent_data(controller, data_types, run_loop, description)?;
+            wait_for_zero_persistent_data(
+                controller,
+                data_types,
+                run_loop,
+                description,
+                allowed_principals,
+            )?;
             Ok(0)
         }
         RuntimePhase::Writer | RuntimePhase::VerifierOne | RuntimePhase::VerifierTwo => {
@@ -560,6 +601,7 @@ fn observe_phase(
                 phase.minimum_completed_local_bytes(),
                 run_loop,
                 description,
+                allowed_principals,
             )?;
             Ok(size)
         }
@@ -576,6 +618,7 @@ fn recover_failed_cycle(
     storage_permission: &WKWebExtensionPermission,
     run_loop: &NSRunLoop,
 ) -> Result<(), String> {
+    let [principals_a, principals_b] = profile_record_principal_scopes();
     let mut failures = Vec::new();
     for (controller, context, name) in [
         (controller_a, context_a, "storage A failure cleanup"),
@@ -592,13 +635,22 @@ fn recover_failed_cycle(
             clear_permission_state(context, storage_permission, name),
         );
     }
-    for (controller, name) in [
-        (controller_a, "controller A failure cleanup"),
-        (controller_b, "controller B failure cleanup"),
+    for (controller, name, allowed_principals) in [
+        (
+            controller_a,
+            "controller A failure cleanup",
+            principals_a.as_slice(),
+        ),
+        (
+            controller_b,
+            "controller B failure cleanup",
+            principals_b.as_slice(),
+        ),
     ] {
         collect_failure(
             &mut failures,
-            erase_all_extension_data(controller, data_types, run_loop, name).map(|_| ()),
+            erase_all_extension_data(controller, data_types, run_loop, name, allowed_principals)
+                .map(|_| ()),
         );
     }
     failures_to_result(failures)
@@ -612,42 +664,45 @@ fn finalize_failed_namespaces(
     let (cleanup_result, controller_weaks) = objc2::rc::autoreleasepool(|_| {
         let mut controller_weaks = Vec::new();
         let cleanup_result = (|| {
-            let controller_a = new_persistent_controller(STORAGE_CONTROLLER_A, mtm)?;
-            let controller_b = new_persistent_controller(STORAGE_CONTROLLER_B, mtm)?;
-            let weak_a = Weak::from_retained(&controller_a.controller);
-            let weak_b = Weak::from_retained(&controller_b.controller);
+            let profiles = new_persistent_profiles(mtm)?;
+            let weak_a = Weak::from_retained(&profiles.controller_a);
+            let weak_b = Weak::from_retained(&profiles.controller_b);
             assert_distinct_controller_identity(
-                &controller_a.controller,
-                &controller_b.controller,
+                &profiles.controller_a,
+                &profiles.controller_b,
                 &weak_a,
                 &weak_b,
             )?;
             controller_weaks.extend([weak_a, weak_b]);
 
             let mut failures = Vec::new();
+            let [principals_a, principals_b] = profile_record_principal_scopes();
             collect_failure(
                 &mut failures,
                 erase_all_extension_data(
-                    &controller_a.controller,
+                    &profiles.controller_a,
                     data_types,
                     run_loop,
                     "controller A outer failure finalizer",
+                    &principals_a,
                 )
                 .map(|_| ()),
             );
             collect_failure(
                 &mut failures,
                 erase_all_extension_data(
-                    &controller_b.controller,
+                    &profiles.controller_b,
                     data_types,
                     run_loop,
                     "controller B outer failure finalizer",
+                    &principals_b,
                 )
                 .map(|_| ()),
             );
-            drop(controller_a);
-            drop(controller_b);
-            failures_to_result(failures)
+            combine_gate_and_cleanup(
+                failures_to_result(failures),
+                release_persistent_profiles(profiles),
+            )
         })();
         (cleanup_result, controller_weaks)
     });
@@ -717,7 +772,7 @@ fn failures_to_result(failures: Vec<String>) -> Result<(), String> {
 }
 
 impl NamespaceLock {
-    fn acquire() -> Result<Self, String> {
+    pub(super) fn acquire() -> Result<Self, String> {
         let effective_uid = unsafe { geteuid() };
         let temp_directory = std::env::temp_dir().canonicalize().map_err(|error| {
             format!("cannot canonicalize per-user temporary directory: {error}")
@@ -862,7 +917,7 @@ fn validate_same_file(
 }
 
 impl NativeDataTypes {
-    fn discover(mtm: MainThreadMarker) -> Result<Self, String> {
+    pub(super) fn discover(mtm: MainThreadMarker) -> Result<Self, String> {
         let local_type = webkit_string_symbol(
             b"WKWebExtensionDataTypeLocal\0",
             "local extension data type",
@@ -941,34 +996,67 @@ fn validate_principal() -> Result<(), String> {
     Ok(())
 }
 
-fn new_persistent_controller(
-    identifier: &str,
-    mtm: MainThreadMarker,
-) -> Result<PersistentControllerBundle, String> {
-    let identifier =
-        NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(identifier))
-            .ok_or_else(|| "invalid fixed UUID for persistent extension probe".to_owned())?;
-    let configuration = unsafe {
-        WKWebExtensionControllerConfiguration::configurationWithIdentifier(&identifier, mtm)
-    };
-    if !unsafe { configuration.isPersistent() } {
-        return Err("WebKit returned a non-persistent named controller configuration".into());
+fn new_persistent_profiles(_mtm: MainThreadMarker) -> Result<PersistentProfilePair, String> {
+    let [profile_a, profile_b] = persistent_probe_profiles();
+    let mut registry = PersistentControllerRegistry::new();
+    for profile in [profile_a, profile_b] {
+        match registry
+            .prepare_for_native_probe(profile)
+            .map_err(|error| format!("cannot prepare product profile controller: {error}"))?
+        {
+            ProbeControllerPreparation::Prepared => {}
+            ProbeControllerPreparation::RuntimeUnavailable => {
+                return Err("supported probe runtime refused profile controller preparation".into())
+            }
+        }
     }
-    let actual_identifier = unsafe { configuration.identifier() }
-        .ok_or_else(|| "persistent controller configuration omitted its identifier".to_owned())?;
-    if actual_identifier.UUIDString() != identifier.UUIDString() {
-        return Err("persistent controller configuration changed its identifier".into());
+
+    let prepared_a = registry
+        .configuration_for_durable_profile(profile_a)
+        .map_err(|error| format!("cannot configure product profile A: {error}"))?
+        .ok_or_else(|| "prepared product profile A returned no view configuration".to_owned())?;
+    let prepared_b = registry
+        .configuration_for_durable_profile(profile_b)
+        .map_err(|error| format!("cannot configure product profile B: {error}"))?
+        .ok_or_else(|| "prepared product profile B returned no view configuration".to_owned())?;
+    let (configuration_a, proof_a) = prepared_a.into_parts();
+    let (configuration_b, proof_b) = prepared_b.into_parts();
+    let store_a = unsafe { configuration_a.websiteDataStore() };
+    let store_b = unsafe { configuration_b.websiteDataStore() };
+    let controller_a = unsafe { configuration_a.webExtensionController() }
+        .ok_or_else(|| "product profile A omitted its extension controller".to_owned())?;
+    let controller_b = unsafe { configuration_b.webExtensionController() }
+        .ok_or_else(|| "product profile B omitted its extension controller".to_owned())?;
+    if Retained::as_ptr(&store_a) == Retained::as_ptr(&store_b) {
+        return Err("product profiles resolved to the same website data store".into());
     }
-    let controller = unsafe {
-        WKWebExtensionController::initWithConfiguration(
-            WKWebExtensionController::alloc(mtm),
-            &configuration,
-        )
-    };
-    Ok(PersistentControllerBundle {
-        _configuration: configuration,
-        controller,
+    if Retained::as_ptr(&controller_a) == Retained::as_ptr(&controller_b) {
+        return Err("product profiles resolved to the same extension controller".into());
+    }
+    drop(proof_a);
+    drop(proof_b);
+    drop(configuration_a);
+    drop(configuration_b);
+    Ok(PersistentProfilePair {
+        registry,
+        controller_a,
+        controller_b,
+        store_a,
+        store_b,
     })
+}
+
+fn release_persistent_profiles(mut profiles: PersistentProfilePair) -> Result<(), String> {
+    drop(profiles.controller_a);
+    drop(profiles.controller_b);
+    drop(profiles.store_a);
+    drop(profiles.store_b);
+    profiles.registry.seal();
+    if profiles.registry.release_all_after_views() {
+        Ok(())
+    } else {
+        Err("product profile controller registry did not release cleanly".into())
+    }
 }
 
 fn prepare_exact_storage_permission(
@@ -1015,6 +1103,31 @@ fn prepare_exact_storage_permission(
         ));
     }
     Ok(())
+}
+
+pub(super) fn prepare_private_storage_page_context(
+    context: &WKWebExtensionContext,
+) -> Result<(), String> {
+    let storage_permission = webkit_string_symbol(
+        b"WKWebExtensionPermissionStorage\0",
+        "extension storage permission",
+    )?;
+    prepare_exact_storage_permission(context, storage_permission, "private storage page")?;
+    unsafe { context.setHasAccessToPrivateData(true) };
+    if !unsafe { context.hasAccessToPrivateData() } {
+        return Err("private storage page refused explicit private-data access".into());
+    }
+    Ok(())
+}
+
+pub(super) fn clear_private_storage_page_context(
+    context: &WKWebExtensionContext,
+) -> Result<(), String> {
+    let storage_permission = webkit_string_symbol(
+        b"WKWebExtensionPermissionStorage\0",
+        "extension storage permission",
+    )?;
+    clear_permission_state(context, storage_permission, "private storage page")
 }
 
 fn clear_permission_state(
@@ -1146,9 +1259,13 @@ fn load_background_content(
 fn fetch_extension_data_records(
     controller: &WKWebExtensionController,
     data_types: &NSSet<WKWebExtensionDataType>,
+    max_records: usize,
     run_loop: &NSRunLoop,
     operation: &str,
 ) -> Result<Retained<NSArray<WKWebExtensionDataRecord>>, String> {
+    if max_records == 0 {
+        return Err(format!("{operation} has an invalid zero record bound"));
+    }
     let result = Rc::new(RefCell::new(None));
     let callback_result = result.clone();
     let callback =
@@ -1161,10 +1278,17 @@ fn fetch_extension_data_records(
         controller.fetchDataRecordsOfTypes_completionHandler(data_types, &callback);
     }
     let records = wait_for_result(result.as_ref(), run_loop, operation)?;
-    if records.count() > MAX_DATA_RECORDS {
+    if records.count() > max_records {
+        let identifiers = (0..records.count().min(4))
+            .map(|index| {
+                bounded_text(
+                    &unsafe { records.objectAtIndex(index).uniqueIdentifier() }.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
         return Err(format!(
-            "{operation} returned {} records, exceeding the isolated-principal bound {MAX_DATA_RECORDS}",
-            records.count()
+            "{operation} returned {} records, exceeding its exact bound {max_records}; identifiers={identifiers:?}",
+            records.count(),
         ));
     }
     Ok(records)
@@ -1194,26 +1318,29 @@ fn erase_all_extension_data(
     data_types: &NativeDataTypes,
     run_loop: &NSRunLoop,
     description: &str,
+    allowed_principals: &[&str],
 ) -> Result<usize, String> {
     erase_extension_data_for_principals(
         controller,
         data_types,
         run_loop,
         description,
-        &[EXTENSION_PRINCIPAL],
+        allowed_principals,
     )
 }
 
-fn erase_extension_data_for_principals(
+pub(super) fn erase_extension_data_for_principals(
     controller: &WKWebExtensionController,
     data_types: &NativeDataTypes,
     run_loop: &NSRunLoop,
     description: &str,
     allowed_principals: &[&str],
 ) -> Result<usize, String> {
+    validate_allowed_principals(allowed_principals)?;
     let records = fetch_extension_data_records(
         controller,
         &data_types.all,
+        allowed_principals.len(),
         run_loop,
         &format!("fetch {description} all-type records"),
     )?;
@@ -1246,13 +1373,14 @@ fn wait_for_zero_persistent_data(
     data_types: &NativeDataTypes,
     run_loop: &NSRunLoop,
     description: &str,
+    allowed_principals: &[&str],
 ) -> Result<(), String> {
     wait_for_zero_persistent_data_for_principals(
         controller,
         data_types,
         run_loop,
         description,
-        &[EXTENSION_PRINCIPAL],
+        allowed_principals,
     )
 }
 
@@ -1268,6 +1396,7 @@ fn wait_for_zero_persistent_data_for_principals(
         let records = fetch_extension_data_records(
             controller,
             &data_types.persistent,
+            allowed_principals.len(),
             run_loop,
             &format!("verify {description} persistent-byte readback"),
         )?;
@@ -1275,15 +1404,27 @@ fn wait_for_zero_persistent_data_for_principals(
             return Ok(());
         }
         validate_record_identity(&records, description, allowed_principals)?;
-        let record = records.objectAtIndex(0);
-        validate_error_free_record(&record, description)?;
-        if unsafe { record.sizeInBytesOfTypes(&data_types.persistent) } == 0 {
+        let mut first_nonzero = None;
+        for index in 0..records.count() {
+            let record = records.objectAtIndex(index);
+            validate_error_free_record(&record, description)?;
+            if unsafe { record.sizeInBytesOfTypes(&data_types.persistent) } != 0 {
+                first_nonzero = Some(record);
+                break;
+            }
+        }
+        if first_nonzero.is_none() {
             return Ok(());
         }
         if poll == MAX_DATA_POLLS || Instant::now() >= deadline {
             return Err(format!(
                 "{description} retained persistent bytes after {poll} polls: {}",
-                describe_data_record(&record, data_types)
+                describe_data_record(
+                    first_nonzero
+                        .as_ref()
+                        .ok_or_else(|| "nonzero persistent record disappeared".to_owned())?,
+                    data_types,
+                )
             ));
         }
         drain_run_loop_once(run_loop);
@@ -1299,32 +1440,29 @@ fn wait_for_local_storage(
     minimum_completed_bytes: usize,
     run_loop: &NSRunLoop,
     description: &str,
+    allowed_principals: &[&str],
 ) -> Result<usize, String> {
     let deadline = Instant::now() + PROBE_TIMEOUT;
     for poll in 1..=MAX_DATA_POLLS {
         let records = fetch_extension_data_records(
             controller,
             &data_types.local,
+            allowed_principals.len(),
             run_loop,
             &format!("fetch {description} local-storage evidence"),
         )?;
-        if records.count() == 1 {
-            validate_record_identity(&records, description, &[EXTENSION_PRINCIPAL])?;
-            let record = records.objectAtIndex(0);
-            // Native record errors are terminal. In particular, code 2
-            // (LocalStorageFailed) is not normalized into a retry.
-            validate_error_free_record(&record, description)?;
-            let contained = unsafe { record.containedDataTypes() };
-            let local_size = unsafe { record.sizeInBytesOfTypes(&data_types.local) };
-            if contained.containsObject(data_types.local_type)
-                && local_size >= minimum_completed_bytes
-            {
+        let target = inspect_local_records(&records, data_types, description, allowed_principals)?;
+        if let Some((local_size, contains_local)) = target {
+            if contains_local && local_size >= minimum_completed_bytes {
                 return Ok(local_size);
             }
         }
         if poll == MAX_DATA_POLLS || Instant::now() >= deadline {
-            let last = if records.count() == 1 {
-                describe_data_record(&records.objectAtIndex(0), data_types)
+            let last = if let Some(index) = (0..records.count()).find(|index| {
+                unsafe { records.objectAtIndex(*index).uniqueIdentifier() }.to_string()
+                    == EXTENSION_PRINCIPAL
+            }) {
+                describe_data_record(&records.objectAtIndex(index), data_types)
             } else {
                 "records=[]".to_owned()
             };
@@ -1344,20 +1482,23 @@ fn fetch_exact_local_size(
     data_types: &NativeDataTypes,
     run_loop: &NSRunLoop,
     description: &str,
+    allowed_principals: &[&str],
 ) -> Result<usize, String> {
-    let records =
-        fetch_extension_data_records(controller, &data_types.local, run_loop, description)?;
-    if records.count() != 1 {
+    let records = fetch_extension_data_records(
+        controller,
+        &data_types.local,
+        allowed_principals.len(),
+        run_loop,
+        description,
+    )?;
+    let Some((size, contains_local)) =
+        inspect_local_records(&records, data_types, description, allowed_principals)?
+    else {
         return Err(format!(
-            "{description} expected one isolated-principal record, got {}",
-            records.count()
+            "{description} omitted the exact persistent extension principal"
         ));
-    }
-    validate_record_identity(&records, description, &[EXTENSION_PRINCIPAL])?;
-    let record = records.objectAtIndex(0);
-    validate_error_free_record(&record, description)?;
-    let size = unsafe { record.sizeInBytesOfTypes(&data_types.local) };
-    if size == 0 || !unsafe { record.containedDataTypes() }.containsObject(data_types.local_type) {
+    };
+    if size == 0 || !contains_local {
         return Err(format!(
             "{description} did not retain exact nonzero local-storage evidence"
         ));
@@ -1365,23 +1506,87 @@ fn fetch_exact_local_size(
     Ok(size)
 }
 
+fn inspect_local_records(
+    records: &NSArray<WKWebExtensionDataRecord>,
+    data_types: &NativeDataTypes,
+    description: &str,
+    allowed_principals: &[&str],
+) -> Result<Option<(usize, bool)>, String> {
+    validate_record_identity(records, description, allowed_principals)?;
+    let mut target = None;
+    for index in 0..records.count() {
+        let record = records.objectAtIndex(index);
+        // Native record errors are terminal. In particular, code 2
+        // (LocalStorageFailed) is not normalized into a retry.
+        validate_error_free_record(&record, description)?;
+        let identifier = unsafe { record.uniqueIdentifier() }.to_string();
+        let size = unsafe { record.sizeInBytesOfTypes(&data_types.local) };
+        let contains_local =
+            unsafe { record.containedDataTypes() }.containsObject(data_types.local_type);
+        if identifier == EXTENSION_PRINCIPAL {
+            target = Some((size, contains_local));
+        } else if size != 0 {
+            return Err(format!(
+                "{description} companion principal retained nonzero local-storage bytes: {}",
+                bounded_text(&identifier),
+            ));
+        }
+    }
+    Ok(target)
+}
+
+fn profile_record_principal_scopes() -> [[&'static str; 2]; 2] {
+    [
+        [EXTENSION_PRINCIPAL, super::PROFILE_ROUTING_PRINCIPALS[0]],
+        [EXTENSION_PRINCIPAL, super::PROFILE_ROUTING_PRINCIPALS[1]],
+    ]
+}
+
 fn validate_record_identity(
     records: &NSArray<WKWebExtensionDataRecord>,
     description: &str,
     allowed_principals: &[&str],
 ) -> Result<(), String> {
-    if records.count() > MAX_DATA_RECORDS {
+    validate_allowed_principals(allowed_principals)?;
+    if records.count() > allowed_principals.len() {
         return Err(format!(
-            "{description} exceeded the extension-data record bound"
+            "{description} exceeded its exact extension-principal record bound"
         ));
     }
-    if records.count() == 1 {
-        let identifier = unsafe { records.objectAtIndex(0).uniqueIdentifier() };
+    for index in 0..records.count() {
+        let identifier = unsafe { records.objectAtIndex(index).uniqueIdentifier() };
         if !allowed_principals.contains(&identifier.to_string().as_str()) {
             return Err(format!(
                 "{description} observed an unexpected extension principal: {}",
                 bounded_text(&identifier.to_string())
             ));
+        }
+        for prior_index in 0..index {
+            let prior = unsafe { records.objectAtIndex(prior_index).uniqueIdentifier() };
+            if identifier.isEqualToString(&prior) {
+                return Err(format!(
+                    "{description} returned duplicate extension-principal records"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_allowed_principals(allowed_principals: &[&str]) -> Result<(), String> {
+    const MAX_ALLOWED_PRINCIPALS: usize = 2;
+    if allowed_principals.is_empty() || allowed_principals.len() > MAX_ALLOWED_PRINCIPALS {
+        return Err("extension-data principal cleanup scope is outside its exact bound".into());
+    }
+    for (index, principal) in allowed_principals.iter().enumerate() {
+        if principal.is_empty()
+            || principal.len() > 64
+            || !principal
+                .bytes()
+                .all(|byte| byte == b'-' || byte.is_ascii_lowercase())
+            || allowed_principals[..index].contains(principal)
+        {
+            return Err("extension-data principal cleanup scope is noncanonical".into());
         }
     }
     Ok(())
@@ -1494,11 +1699,15 @@ fn wait_for_release(
     inventory: &ReleaseInventory,
     run_loop: &NSRunLoop,
 ) -> Result<ReleaseCounts, String> {
-    if inventory.controllers.len() != 2 || inventory.contexts.len() != 2 {
+    if !(1..=2).contains(&inventory.controllers.len())
+        || inventory.contexts.len() != inventory.controllers.len()
+        || inventory.stores.len() != inventory.controllers.len()
+    {
         return Err(format!(
-            "persistent cycle release inventory mismatch: controllers={}, contexts={}",
+            "extension-storage cycle release inventory mismatch: controllers={}, contexts={}, stores={}",
             inventory.controllers.len(),
-            inventory.contexts.len()
+            inventory.contexts.len(),
+            inventory.stores.len(),
         ));
     }
     let deadline = Instant::now() + RELEASE_TIMEOUT;
@@ -1513,19 +1722,27 @@ fn wait_for_release(
             .iter()
             .filter(|context| context.load().is_none())
             .count();
+        let released_stores = inventory
+            .stores
+            .iter()
+            .filter(|store| store.load().is_none())
+            .count();
         if released_controllers == inventory.controllers.len()
             && released_contexts == inventory.contexts.len()
+            && released_stores == inventory.stores.len()
         {
             return Ok(ReleaseCounts {
                 controllers: released_controllers,
                 contexts: released_contexts,
+                stores: released_stores,
             });
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "persistent native release did not converge: controllers={released_controllers}/{}, contexts={released_contexts}/{}",
+                "extension-storage native release did not converge: controllers={released_controllers}/{}, contexts={released_contexts}/{}, stores={released_stores}/{}",
                 inventory.controllers.len(),
                 inventory.contexts.len(),
+                inventory.stores.len(),
             ));
         }
         drain_run_loop_once(run_loop);
@@ -1604,7 +1821,38 @@ fn write_runtime_extension(path: &Path, phase: RuntimePhase) -> Result<(), Strin
         }
     });
     write_fixture_file(path, "manifest.json", &manifest.to_string())?;
-    write_fixture_file(path, "background.js", &runtime_script(phase))
+    write_fixture_file(path, "background.js", &runtime_script(phase))?;
+    write_fixture_file(
+        path,
+        "probe.html",
+        "<!doctype html><meta charset=\"utf-8\"><title>zephium-storage-pending</title><script type=\"module\" src=\"probe.js\"></script>",
+    )?;
+    write_fixture_file(path, "probe.js", &runtime_page_script(phase))?;
+    write_fixture_file(
+        path,
+        "probe-verifier-one.html",
+        "<!doctype html><meta charset=\"utf-8\"><title>zephium-storage-pending</title><script type=\"module\" src=\"probe-verifier-one.js\"></script>",
+    )?;
+    write_fixture_file(
+        path,
+        "probe-verifier-one.js",
+        &runtime_page_script(RuntimePhase::VerifierOne),
+    )
+}
+
+fn runtime_page_script(phase: RuntimePhase) -> String {
+    let phase_name = match phase {
+        RuntimePhase::Writer => "writer",
+        RuntimePhase::VerifierOne => "verifier-one",
+        RuntimePhase::VerifierTwo => "verifier-two",
+        RuntimePhase::Empty => "empty",
+    };
+    format!(
+        "{}\ndocument.title = {};",
+        runtime_script(phase),
+        serde_json::to_string(&format!("zephium-storage-pass-{phase_name}"))
+            .expect("static page title is serializable")
+    )
 }
 
 fn runtime_script(phase: RuntimePhase) -> String {
@@ -1822,6 +2070,24 @@ mod tests {
     #[test]
     fn persistent_principal_is_chromium_compatible() {
         assert_eq!(validate_principal(), Ok(()));
+    }
+
+    #[test]
+    fn profile_record_scopes_are_exact_distinct_and_bounded() {
+        let [profile_a, profile_b] = profile_record_principal_scopes();
+        assert_eq!(profile_a[0], EXTENSION_PRINCIPAL);
+        assert_eq!(profile_b[0], EXTENSION_PRINCIPAL);
+        assert_eq!(profile_a[1], super::super::PROFILE_ROUTING_PRINCIPALS[0]);
+        assert_eq!(profile_b[1], super::super::PROFILE_ROUTING_PRINCIPALS[1]);
+        assert_ne!(profile_a[1], profile_b[1]);
+        assert_eq!(validate_allowed_principals(&profile_a), Ok(()));
+        assert_eq!(validate_allowed_principals(&profile_b), Ok(()));
+        assert!(validate_allowed_principals(&[]).is_err());
+        assert!(validate_allowed_principals(&[EXTENSION_PRINCIPAL, EXTENSION_PRINCIPAL,]).is_err());
+        assert!(
+            validate_allowed_principals(&[EXTENSION_PRINCIPAL, profile_a[1], profile_b[1],])
+                .is_err()
+        );
     }
 
     #[test]

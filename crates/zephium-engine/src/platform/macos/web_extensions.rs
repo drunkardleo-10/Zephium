@@ -6,6 +6,7 @@
 //! extension-support enablement decision.
 
 mod persistent_runtime;
+mod profile_isolation;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -58,12 +59,23 @@ const MAX_WEBVIEW_CALLBACKS: usize = 1_024;
 const EXPECTED_NATIVE_CONTROLLERS: usize = 2;
 const EXPECTED_NATIVE_CONTEXTS: usize = 3;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
+const PERSISTENT_PROFILE_A: u128 = 0xf0cc_44f2_4355_4cf9_a74f_27fe_6cb3_7eda;
+const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
+const PROFILE_ROUTING_PRINCIPALS: [&str; 2] =
+    ["zephium-profile-route-a", "zephium-profile-route-b"];
 const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const EXCLUDED_MATCH_PATTERN: &str = "http://127.0.0.1/excluded/*";
 const EXPECTED_ROLES: [&str; 8] = [
     "main", "same", "cross", "excluded", "about", "srcdoc", "data", "blob",
 ];
 static PROBE_PHASE: Mutex<&'static str> = Mutex::new("runtime-admission");
+
+fn persistent_probe_profiles() -> [zephium_core::ids::ProfileId; 2] {
+    [
+        zephium_core::ids::ProfileId::from(PERSISTENT_PROFILE_A),
+        zephium_core::ids::ProfileId::from(PERSISTENT_PROFILE_B),
+    ]
+}
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -168,6 +180,7 @@ impl Drop for ProbeTab {
 
 struct ProbeWindowIvars {
     tab: Retained<ProbeTab>,
+    is_private: bool,
     lifecycle_drops: Arc<AtomicUsize>,
 }
 
@@ -200,7 +213,7 @@ define_class!(
 
         #[unsafe(method(isPrivateForWebExtensionContext:))]
         fn is_private(&self, _context: &WKWebExtensionContext) -> bool {
-            true
+            self.ivars().is_private
         }
     }
 );
@@ -209,10 +222,12 @@ impl ProbeWindow {
     fn new(
         mtm: MainThreadMarker,
         tab: Retained<ProbeTab>,
+        is_private: bool,
         lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
         let object = Self::alloc(mtm).set_ivars(ProbeWindowIvars {
             tab,
+            is_private,
             lifecycle_drops,
         });
         // SAFETY: NSObject is the declared superclass and the ivars are fully
@@ -399,6 +414,12 @@ struct ProbeTeardown {
     persistent_all_type_removal_callbacks: usize,
     persistent_controllers_released: usize,
     persistent_contexts_released: usize,
+    persistent_stores_released: usize,
+    profile_views: Vec<Weak<WKWebView>>,
+    profile_contexts: Vec<Weak<WKWebExtensionContext>>,
+    profile_controllers: Vec<Weak<WKWebExtensionController>>,
+    profile_stores: Vec<Weak<WKWebsiteDataStore>>,
+    profile_lifecycle_drops: Vec<Arc<AtomicUsize>>,
     operating_system: String,
 }
 
@@ -413,7 +434,7 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.persistent_all_type_removal_callbacks,
             teardown.baseline_script_count,
@@ -423,6 +444,16 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
             teardown.contexts.len(),
             teardown.persistent_controllers_released,
             teardown.persistent_contexts_released,
+            teardown.persistent_stores_released,
+            teardown.profile_views.len(),
+            teardown.profile_contexts.len(),
+            teardown.profile_controllers.len(),
+            teardown.profile_stores.len(),
+            teardown
+                .profile_lifecycle_drops
+                .iter()
+                .map(|drops| drops.load(Ordering::Acquire))
+                .sum::<usize>(),
         );
         Ok(true)
     })();
@@ -522,6 +553,14 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         persistent_runtime::validate_runtime_extension(runtime_extension)?;
     }
 
+    set_phase("profile-isolation-gates");
+    let profile_isolation_evidence = profile_isolation::validate_profile_isolation(
+        &run_loop,
+        mtm,
+        &primary_extension,
+        &runtime_writer,
+        &runtime_empty,
+    )?;
     set_phase("persistent-runtime-gates");
     let persistent_evidence = persistent_runtime::validate_persistent_runtime_gates(
         &runtime_writer,
@@ -622,7 +661,7 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         webview_requests.clone(),
         lifecycle_drops.clone(),
     );
-    let extension_window = ProbeWindow::new(mtm, tab.clone(), lifecycle_drops.clone());
+    let extension_window = ProbeWindow::new(mtm, tab.clone(), true, lifecycle_drops.clone());
     tab.set_window(&extension_window);
     let delegate =
         ProbeControllerDelegate::new(mtm, extension_window.clone(), lifecycle_drops.clone());
@@ -914,6 +953,12 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         persistent_all_type_removal_callbacks: persistent_evidence.all_type_removal_callbacks,
         persistent_controllers_released: persistent_evidence.controllers_released,
         persistent_contexts_released: persistent_evidence.contexts_released,
+        persistent_stores_released: persistent_evidence.stores_released,
+        profile_views: profile_isolation_evidence.views,
+        profile_contexts: profile_isolation_evidence.contexts,
+        profile_controllers: profile_isolation_evidence.controllers,
+        profile_stores: profile_isolation_evidence.stores,
+        profile_lifecycle_drops: profile_isolation_evidence.lifecycle_drops,
         operating_system,
     })
 }
@@ -1514,13 +1559,28 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
 }
 
 fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
+    const EXPECTED_PROFILE_VIEWS: usize = 7;
+    const EXPECTED_PROFILE_OWNERS: usize = 6;
+    const EXPECTED_PROFILE_CONTEXTS: usize = 4;
+    const EXPECTED_PROFILE_LIFECYCLE_GROUPS: usize = 1;
+    const EXPECTED_PROFILE_LIFECYCLE_DROPS: usize = 6;
     if teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
         || teardown.contexts.len() != EXPECTED_NATIVE_CONTEXTS
+        || teardown.profile_views.len() != EXPECTED_PROFILE_VIEWS
+        || teardown.profile_contexts.len() != EXPECTED_PROFILE_CONTEXTS
+        || teardown.profile_controllers.len() != EXPECTED_PROFILE_OWNERS
+        || teardown.profile_stores.len() != EXPECTED_PROFILE_OWNERS
+        || teardown.profile_lifecycle_drops.len() != EXPECTED_PROFILE_LIFECYCLE_GROUPS
     {
         return Err(format!(
-            "native teardown inventory mismatch: controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{EXPECTED_NATIVE_CONTEXTS}",
+            "native teardown inventory mismatch: controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{EXPECTED_NATIVE_CONTEXTS}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
             teardown.controllers.len(),
             teardown.contexts.len(),
+            teardown.profile_views.len(),
+            teardown.profile_contexts.len(),
+            teardown.profile_controllers.len(),
+            teardown.profile_stores.len(),
+            teardown.profile_lifecycle_drops.len(),
         ));
     }
     let run_loop = NSRunLoop::mainRunLoop();
@@ -1534,22 +1594,61 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
             .contexts
             .iter()
             .all(|context| context.load().is_none());
+        let profile_views_released = teardown
+            .profile_views
+            .iter()
+            .all(|view| view.load().is_none());
+        let profile_contexts_released = teardown
+            .profile_contexts
+            .iter()
+            .all(|context| context.load().is_none());
+        let profile_controllers_released = teardown
+            .profile_controllers
+            .iter()
+            .all(|controller| controller.load().is_none());
+        let profile_stores_released = teardown
+            .profile_stores
+            .iter()
+            .all(|store| store.load().is_none());
+        let profile_lifecycle_released = teardown
+            .profile_lifecycle_drops
+            .iter()
+            .all(|drops| drops.load(Ordering::Acquire) == EXPECTED_PROFILE_LIFECYCLE_DROPS);
         if teardown.view.load().is_none()
             && controllers_released
             && contexts_released
+            && profile_views_released
+            && profile_contexts_released
+            && profile_controllers_released
+            && profile_stores_released
+            && profile_lifecycle_released
             && teardown.lifecycle_drops.load(Ordering::Acquire) == 3
         {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, controllers_released={}/{}, contexts_released={}/{}, lifecycle_drops={}/3",
+                "native teardown did not converge: view={}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={:?}/{}",
                 teardown.view.load().is_none(),
                 teardown.controllers.iter().filter(|controller| controller.load().is_none()).count(),
                 teardown.controllers.len(),
                 teardown.contexts.iter().filter(|context| context.load().is_none()).count(),
                 teardown.contexts.len(),
+                teardown.profile_views.iter().filter(|view| view.load().is_none()).count(),
+                teardown.profile_views.len(),
+                teardown.profile_contexts.iter().filter(|context| context.load().is_none()).count(),
+                teardown.profile_contexts.len(),
+                teardown.profile_controllers.iter().filter(|controller| controller.load().is_none()).count(),
+                teardown.profile_controllers.len(),
+                teardown.profile_stores.iter().filter(|store| store.load().is_none()).count(),
+                teardown.profile_stores.len(),
                 teardown.lifecycle_drops.load(Ordering::Acquire),
+                teardown
+                    .profile_lifecycle_drops
+                    .iter()
+                    .map(|drops| drops.load(Ordering::Acquire))
+                    .collect::<Vec<_>>(),
+                EXPECTED_PROFILE_LIFECYCLE_DROPS,
             ));
         }
         drain_run_loop_once(&run_loop);

@@ -574,15 +574,29 @@ attachment before view construction, explicit host/private-data grants,
 per-extension isolated worlds, frame matching, exact context unload/reload,
 preservation of Zephium's protected scripts, MV3 background execution, and
 same-principal extension-storage isolation across two persistent controller
-namespaces and fresh controller instances. It does not bind those controllers
-to separate website data stores. The probe also retires each namespace
-independently, reopens both to verify zero persistent extension bytes, and
-requires every native controller/context weak reference to release. It does
-not prove product profile-controller attachment, multiple principals inside a
-product controller, authenticated package admission, delegate/API mediation,
-extension UI, quotas/endurance, or product startup/crash reconciliation, so
-ordinary builds still expose no extension runtime. Older admitted macOS
-versions and Linux require a Zephium
+namespaces and fresh controller instances. A second behavioral gate constructs
+two regular profiles through the exact dormant product registry and one
+nonpersistent private session. It pointer-attests each view/controller/store
+binding, proves mutually exclusive cookie and extension-storage state, proves
+regular reconstruction and private noninheritance, and publishes distinct
+tab/window/delegate graphs to demonstrate that each controller exposes only its
+own profile surface. The probe retires each namespace independently, reopens
+both to verify zero persistent extension bytes, and requires every native
+view/controller/context/store and routing object weak reference to release.
+
+An extension-origin page is not navigated in a normal profile view. WebKit
+requires the loaded context's customized
+[`webViewConfiguration`](https://developer.apple.com/documentation/webkit/wkwebextensioncontext/webviewconfiguration),
+so toolbar popups and other extension UI use a separately budgeted view and a
+controlled swap at the extension-origin boundary. One private extension context
+per installed extension lives for the private-session lifetime; its UI views
+may be recreated from that context, while destroying the session context,
+controller, and nonpersistent store is the storage-erasure boundary.
+
+These probes do not prove authenticated package admission, production
+delegate/API mediation, product extension UI, quotas/endurance, or product
+startup/crash reconciliation, so ordinary builds still expose no extension
+runtime. Older admitted macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
 pass. Windows has two separate candidates: curated MV3 packages through a
