@@ -24,6 +24,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules};
+use zephium_core::extensions::{
+    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+    ExtensionBrowserWindow,
+};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::{Engine, NativeDispatch, Partition};
@@ -166,6 +170,23 @@ fn run() -> Result<ProbeDisposition, String> {
     set_phase("profile-view");
     let page = PageServer::start()?;
     let item = ItemId::from(1);
+    let window = ExtensionBrowserWindow::new(
+        1,
+        false,
+        Some(item),
+        vec![ExtensionBrowserTab::new(item, true)],
+    )
+    .map_err(|error| format!("cannot construct product-probe browser window: {error:?}"))?;
+    let surface = ExtensionBrowserSurface::new(
+        profile,
+        ExtensionBrowserSurfaceGeneration::INITIAL,
+        Some(1),
+        vec![window],
+    )
+    .map_err(|error| format!("cannot construct product-probe browser surface: {error:?}"))?;
+    if engine.engine().set_extension_browser_surface(surface) != NativeDispatch::Scheduled {
+        return Err("profile browser surface was not scheduled".to_owned());
+    }
     let view_started = Instant::now();
     if !engine.engine().create_view(
         item,
@@ -176,6 +197,8 @@ fn run() -> Result<ProbeDisposition, String> {
         return Err("profile view request was not admitted".to_owned());
     }
     engine.wait_for_view_commit(item, page.url(), deadline())?;
+    set_phase("executable-mv3");
+    engine.wait_for_executable_extension(item, deadline())?;
     let profile_view = view_started.elapsed();
 
     // Service shutdown must run off the native main thread. It blocks until

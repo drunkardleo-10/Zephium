@@ -34,6 +34,9 @@ const MAIN_TASK_CAPACITY: usize = 512;
 const EVENT_CAPACITY: usize = 512;
 const MAX_TASKS_PER_PUMP: usize = 64;
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
+const HTML_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
+const EXTENSION_MARKER: &str = "data-zephium-extension-product-probe";
+const EXTENSION_MARKER_VALUE: &str = "ready:1";
 
 type MainTask = Box<dyn FnOnce() + Send + 'static>;
 
@@ -223,6 +226,73 @@ impl MacosEngineHarness {
                     }
                 }
             }
+        })
+    }
+
+    pub(crate) fn wait_for_executable_extension(
+        &mut self,
+        item: ItemId,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let expected = format!(r#"{EXTENSION_MARKER}="{EXTENSION_MARKER_VALUE}""#);
+        let failure_prefix = format!(r#"{EXTENSION_MARKER}=""#);
+        let mut next_observation = Instant::now();
+        self.pump_until("executable MV3 extension observation", deadline, |harness| {
+            loop {
+                match harness.events.try_recv() {
+                    Ok(EngineEvent::HtmlExtracted {
+                        id,
+                        html,
+                        truncated,
+                    }) if id == item => {
+                        if truncated {
+                            return Err(
+                                "extension marker observation returned truncated HTML".to_owned()
+                            );
+                        }
+                        if html.contains(&expected) {
+                            return Ok(true);
+                        }
+                        if let Some(marker_start) = html.find(&failure_prefix) {
+                            let value_start = marker_start + failure_prefix.len();
+                            let value = html[value_start..]
+                                .split('"')
+                                .next()
+                                .unwrap_or_default()
+                                .chars()
+                                .take(160)
+                                .collect::<String>();
+                            return Err(format!(
+                                "authenticated extension reported marker {value:?}; expected {EXTENSION_MARKER_VALUE:?}"
+                            ));
+                        }
+                    }
+                    Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {
+                        return Err("profile view failed during extension execution".to_owned())
+                    }
+                    Ok(EngineEvent::Crashed { id }) if id == item => {
+                        return Err("profile view crashed during extension execution".to_owned())
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("engine event ingress disconnected".to_owned())
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            if now >= next_observation {
+                if harness.engine.extract_html(item)
+                    != zephium_core::ports::engine::NativeDispatch::Scheduled
+                {
+                    return Err("HTML observation was not admitted".to_owned());
+                }
+                next_observation = now
+                    .checked_add(HTML_OBSERVATION_INTERVAL)
+                    .ok_or_else(|| "HTML-observation deadline overflowed".to_owned())?;
+            }
+            Ok(false)
         })
     }
 
