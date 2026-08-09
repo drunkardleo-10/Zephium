@@ -349,6 +349,7 @@ pub(crate) fn install(
             extension_runtime_registry:
                 super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),
             extension_document_authority: super::extensions::ExtensionDocumentAuthority::default(),
+            extension_browser_surfaces: HashMap::new(),
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),

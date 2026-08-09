@@ -621,6 +621,7 @@ impl EngineHost {
         // Durable erasure tombstones the profile and synchronously retires
         // every transient runtime/document authority before native cleanup.
         self.extension_document_authority.revoke_profile(profile);
+        self.retire_extension_browser_surface(profile);
         #[cfg(target_os = "windows")]
         self.pending_profile_recovery.remove(&profile);
 
@@ -760,10 +761,18 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             // The service-runtime fence above proves there is no process-local
-            // extension owner. Move a process-retained controller only after
-            // every profile view and warm spare has been dropped. Join the
-            // exact Store-owned durable scope; process-local map absence is
-            // never promoted into cross-restart namespace absence.
+            // extension owner. Clear its now-viewless logical delegate graph,
+            // then move a process-retained controller only after every profile
+            // view and warm spare has been dropped. Join the exact Store-owned
+            // durable scope; process-local map absence is never promoted into
+            // cross-restart namespace absence.
+            if !self.clear_retired_extension_browser_surface(profile) {
+                eprintln!("privacy: cannot clear the retiring macOS extension browser surface");
+                completion.report_unsettled(
+                    zephium_core::ports::engine::ProfileDataErasureOutcome::Failed,
+                );
+                return;
+            }
             let controller_erasure = match self.macos_extension_controllers.begin_profile_erasure(
                 profile,
                 completion.attempt_flag(),

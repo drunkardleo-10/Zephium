@@ -41,7 +41,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
-use zephium_core::extensions::ExtensionNativeNamespaceScope;
+use zephium_core::extensions::{ExtensionBrowserSurface, ExtensionNativeNamespaceScope};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
@@ -1149,6 +1149,42 @@ impl Engine for WebviewEngine {
                 });
             }
         });
+    }
+
+    fn set_extension_browser_surface(&self, surface: ExtensionBrowserSurface) -> NativeDispatch {
+        let profile = surface.profile();
+        if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+            return NativeDispatch::Rejected;
+        }
+        let queued_retirement = self.retirement.clone();
+        let queued_delivery = self.event_delivery.clone();
+        let queued_fatal = self.fatal_security_failure.clone();
+        NativeDispatch::from_scheduled(self.run(move || {
+            if !lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
+                return;
+            }
+            let application_retirement = queued_retirement.clone();
+            let application_delivery = queued_delivery.clone();
+            let application_fatal = queued_fatal.clone();
+            let admitted = host::try_with(move |host| {
+                if !host.set_extension_browser_surface(surface) {
+                    fail_native_host_admission(
+                        &application_delivery,
+                        &application_retirement,
+                        &application_fatal,
+                        "extension browser surface failed native application",
+                    );
+                }
+            });
+            if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
+                fail_native_host_admission(
+                    &queued_delivery,
+                    &queued_retirement,
+                    &queued_fatal,
+                    "extension browser surface was not admitted by the engine host",
+                );
+            }
+        }))
     }
 
     fn reload(&self, id: ItemId) -> NativeDispatch {

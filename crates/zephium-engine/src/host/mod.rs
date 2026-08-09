@@ -2,6 +2,7 @@ mod construction;
 mod content_rules;
 mod discard;
 mod dispatch;
+mod extension_browser_surface;
 pub(crate) mod extension_runtime;
 mod extensions;
 mod lifecycle;
@@ -46,6 +47,7 @@ use wry::WebView;
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 use zephium_core::blocker::ContentPolicyGeneration;
+use zephium_core::extensions::ExtensionBrowserSurface;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{Partition, Shortcut};
 #[cfg(target_os = "macos")]
@@ -344,6 +346,9 @@ pub(crate) struct EngineHost {
     native_resources: NativeResourceLedger,
     extension_runtime_registry: extension_runtime::ExtensionRuntimeRegistry,
     extension_document_authority: ExtensionDocumentAuthority,
+    // Allocates only after an explicit Shell publication. Ordinary inert
+    // startup retains the empty map and creates no native delegate graph.
+    extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
     partitions: HashMap<ItemId, Partition>,

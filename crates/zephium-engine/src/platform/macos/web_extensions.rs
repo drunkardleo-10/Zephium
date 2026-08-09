@@ -1719,8 +1719,8 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
     const EXPECTED_PROFILE_VIEWS: usize = 7;
     const EXPECTED_PROFILE_OWNERS: usize = 6;
     const EXPECTED_PROFILE_CONTEXTS: usize = 4;
-    const EXPECTED_PROFILE_LIFECYCLE_GROUPS: usize = 1;
-    const EXPECTED_PROFILE_LIFECYCLE_DROPS: usize = 6;
+    const EXPECTED_PROFILE_LIFECYCLE_GROUPS: usize =
+        profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS.len();
     if teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
         || teardown.contexts.len() != EXPECTED_NATIVE_CONTEXTS
         || teardown.profile_views.len() != EXPECTED_PROFILE_VIEWS
@@ -1767,10 +1767,10 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
             .profile_stores
             .iter()
             .all(|store| store.load().is_none());
-        let profile_lifecycle_released = teardown
-            .profile_lifecycle_drops
-            .iter()
-            .all(|drops| drops.load(Ordering::Acquire) == EXPECTED_PROFILE_LIFECYCLE_DROPS);
+        let profile_lifecycle_counts =
+            profile_isolation::browser_surface_lifecycle_counts(&teardown.profile_lifecycle_drops);
+        let profile_lifecycle_released = profile_lifecycle_counts.as_slice()
+            == profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS;
         if teardown.view.load().is_none()
             && controllers_released
             && contexts_released
@@ -1785,7 +1785,7 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={:?}/{}",
+                "native teardown did not converge: view={}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
                 teardown.view.load().is_none(),
                 teardown.controllers.iter().filter(|controller| controller.load().is_none()).count(),
                 teardown.controllers.len(),
@@ -1800,12 +1800,7 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
                 teardown.profile_stores.iter().filter(|store| store.load().is_none()).count(),
                 teardown.profile_stores.len(),
                 teardown.lifecycle_drops.load(Ordering::Acquire),
-                teardown
-                    .profile_lifecycle_drops
-                    .iter()
-                    .map(|drops| drops.load(Ordering::Acquire))
-                    .collect::<Vec<_>>(),
-                EXPECTED_PROFILE_LIFECYCLE_DROPS,
+                profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS,
             ));
         }
         drain_run_loop_once(&run_loop);

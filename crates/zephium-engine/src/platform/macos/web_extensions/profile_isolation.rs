@@ -23,7 +23,11 @@ use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
 };
 use wry::WebViewBuilderExtMacos;
-use zephium_core::extensions::ExtensionNativeNamespaceScope;
+use zephium_core::extensions::{
+    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+    ExtensionBrowserWindow, ExtensionNativeNamespaceScope,
+};
+use zephium_core::ids::ItemId;
 
 use super::persistent_runtime::{NamespaceLock, EXTENSION_PRINCIPAL};
 use super::{persistent_probe_profiles, ProbeHostView, PROBE_TIMEOUT, PROFILE_ROUTING_PRINCIPALS};
@@ -39,6 +43,7 @@ const COOKIE_VALUE_B: &str = "regular-b";
 const COOKIE_VALUE_PRIVATE: &str = "private";
 const EXPECTED_REGULAR_PROFILES: usize = 2;
 const EXPECTED_NATIVE_OWNERS_PER_GENERATION: usize = 3;
+pub(super) const EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS: [usize; 4] = [1, 1, 3, 3];
 
 pub(super) struct ProfileIsolationEvidence {
     pub(super) views: Vec<Weak<WKWebView>>,
@@ -58,7 +63,6 @@ struct ProfileGeneration {
     private_bundle: super::ControllerBundle,
     private_contexts: Vec<Weak<WKWebExtensionContext>>,
     regular_contexts: Vec<Weak<WKWebExtensionContext>>,
-    routing_lifecycle_drops: Vec<Arc<AtomicUsize>>,
     regular_controllers: [Retained<WKWebExtensionController>; EXPECTED_REGULAR_PROFILES],
     regular_stores: [Retained<WKWebsiteDataStore>; EXPECTED_REGULAR_PROFILES],
 }
@@ -103,7 +107,6 @@ fn wait_for_profile_release(
     evidence: &ProfileIsolationEvidence,
     run_loop: &NSRunLoop,
 ) -> Result<(), String> {
-    const EXPECTED_ROUTING_LIFECYCLE_DROPS: usize = 6;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {
         let views_released = evidence.views.iter().all(|view| view.load().is_none());
@@ -116,10 +119,9 @@ fn wait_for_profile_release(
             .iter()
             .all(|controller| controller.load().is_none());
         let stores_released = evidence.stores.iter().all(|store| store.load().is_none());
-        let lifecycle_released = evidence
-            .lifecycle_drops
-            .iter()
-            .all(|drops| drops.load(Ordering::Acquire) == EXPECTED_ROUTING_LIFECYCLE_DROPS);
+        let lifecycle_counts = browser_surface_lifecycle_counts(&evidence.lifecycle_drops);
+        let lifecycle_released =
+            lifecycle_counts.as_slice() == EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS;
         if views_released
             && contexts_released
             && controllers_released
@@ -130,7 +132,7 @@ fn wait_for_profile_release(
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "profile-isolation objects did not release before cleanup: views={}/{}, contexts={}/{}, controllers={}/{}, stores={}/{}, lifecycle={:?}/{EXPECTED_ROUTING_LIFECYCLE_DROPS}",
+                "profile-isolation objects did not release before cleanup: views={}/{}, contexts={}/{}, controllers={}/{}, stores={}/{}, lifecycle={lifecycle_counts:?}/{EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS:?}",
                 evidence.views.iter().filter(|view| view.load().is_none()).count(),
                 evidence.views.len(),
                 evidence.contexts.iter().filter(|context| context.load().is_none()).count(),
@@ -139,15 +141,19 @@ fn wait_for_profile_release(
                 evidence.controllers.len(),
                 evidence.stores.iter().filter(|store| store.load().is_none()).count(),
                 evidence.stores.len(),
-                evidence
-                    .lifecycle_drops
-                    .iter()
-                    .map(|drops| drops.load(Ordering::Acquire))
-                    .collect::<Vec<_>>(),
             ));
         }
         super::drain_run_loop_once(run_loop);
     }
+}
+
+pub(super) fn browser_surface_lifecycle_counts(lifecycle_drops: &[Arc<AtomicUsize>]) -> Vec<usize> {
+    let mut counts = lifecycle_drops
+        .iter()
+        .map(|drops| drops.load(Ordering::Acquire))
+        .collect::<Vec<_>>();
+    counts.sort_unstable();
+    counts
 }
 
 fn exercise_profile_isolation(
@@ -311,7 +317,6 @@ impl ProfileGeneration {
             private_bundle,
             private_contexts: Vec::new(),
             regular_contexts: Vec::new(),
-            routing_lifecycle_drops: Vec::new(),
             regular_controllers,
             regular_stores,
         })
@@ -320,133 +325,142 @@ impl ProfileGeneration {
     fn validate_regular_tab_routing(
         &mut self,
         extension: &WKWebExtension,
-        mtm: MainThreadMarker,
+        _mtm: MainThreadMarker,
     ) -> Result<(), String> {
+        const WINDOW_A: u64 = 1;
+        const WINDOW_B: u64 = 2;
+        let [profile_a, profile_b] = persistent_probe_profiles();
+        let item_a = ItemId::from(1);
+        let item_b = ItemId::from(2);
         let context_a = super::new_context(extension, PROFILE_ROUTING_PRINCIPALS[0])?;
         let context_b = super::new_context(extension, PROFILE_ROUTING_PRINCIPALS[1])?;
         self.regular_contexts.extend([
             Weak::from_retained(&context_a),
             Weak::from_retained(&context_b),
         ]);
-        let lifecycle_drops = Arc::new(AtomicUsize::new(0));
-        self.routing_lifecycle_drops.push(lifecycle_drops.clone());
-        let webview_requests = Arc::new(AtomicUsize::new(0));
         let native_a = super::super::native::webkit(&self.regular_views[0]);
         let native_b = super::super::native::webkit(&self.regular_views[1]);
-        let tab_a = super::ProbeTab::new(
-            mtm,
-            native_a.clone(),
-            webview_requests.clone(),
-            lifecycle_drops.clone(),
-        );
-        let tab_b = super::ProbeTab::new(
-            mtm,
-            native_b.clone(),
-            webview_requests.clone(),
-            lifecycle_drops.clone(),
-        );
-        let window_a = super::ProbeWindow::new(mtm, tab_a.clone(), false, lifecycle_drops.clone());
-        let window_b = super::ProbeWindow::new(mtm, tab_b.clone(), false, lifecycle_drops.clone());
-        tab_a.set_window(&window_a);
-        tab_b.set_window(&window_b);
-        let delegate_a =
-            super::ProbeControllerDelegate::new(mtm, window_a.clone(), lifecycle_drops.clone());
-        let delegate_b =
-            super::ProbeControllerDelegate::new(mtm, window_b.clone(), lifecycle_drops.clone());
-        let window_protocol_a = ProtocolObject::from_ref(&*window_a);
-        let window_protocol_b = ProtocolObject::from_ref(&*window_b);
-        let tab_protocol_a = ProtocolObject::from_ref(&*tab_a);
-        let tab_protocol_b = ProtocolObject::from_ref(&*tab_b);
-        let delegate_protocol_a = ProtocolObject::from_ref(&*delegate_a);
-        let delegate_protocol_b = ProtocolObject::from_ref(&*delegate_b);
-        let mut published = false;
+        let surface_a = ExtensionBrowserSurface::new(
+            profile_a,
+            ExtensionBrowserSurfaceGeneration::INITIAL,
+            Some(WINDOW_A),
+            vec![ExtensionBrowserWindow::new(
+                WINDOW_A,
+                false,
+                Some(item_a),
+                vec![ExtensionBrowserTab::new(item_a, true)],
+            )
+            .map_err(|error| format!("cannot build profile A probe window: {error:?}"))?],
+        )
+        .map_err(|error| format!("cannot build profile A probe surface: {error:?}"))?;
+        let surface_b = ExtensionBrowserSurface::new(
+            profile_b,
+            ExtensionBrowserSurfaceGeneration::INITIAL,
+            Some(WINDOW_B),
+            vec![ExtensionBrowserWindow::new(
+                WINDOW_B,
+                false,
+                Some(item_b),
+                vec![ExtensionBrowserTab::new(item_b, true)],
+            )
+            .map_err(|error| format!("cannot build profile B probe window: {error:?}"))?],
+        )
+        .map_err(|error| format!("cannot build profile B probe surface: {error:?}"))?;
+        let mut published_a = false;
+        let mut published_b = false;
 
         let gate = (|| {
             super::load_context(&self.regular_controllers[0], &context_a, "profile route A")?;
             super::load_context(&self.regular_controllers[1], &context_b, "profile route B")?;
-            unsafe {
-                self.regular_controllers[0].setDelegate(Some(delegate_protocol_a));
-                self.regular_controllers[1].setDelegate(Some(delegate_protocol_b));
-                self.regular_controllers[0].didOpenWindow(window_protocol_a);
-                self.regular_controllers[0].didOpenTab(tab_protocol_a);
-                self.regular_controllers[0].didFocusWindow(Some(window_protocol_a));
-                self.regular_controllers[0].didActivateTab_previousActiveTab(tab_protocol_a, None);
-                self.regular_controllers[1].didOpenWindow(window_protocol_b);
-                self.regular_controllers[1].didOpenTab(tab_protocol_b);
-                self.regular_controllers[1].didFocusWindow(Some(window_protocol_b));
-                self.regular_controllers[1].didActivateTab_previousActiveTab(tab_protocol_b, None);
-            }
-            published = true;
+            self.registry
+                .apply_browser_surface(&surface_a, |id| (id == item_a).then(|| native_a.clone()))
+                .map_err(|error| format!("cannot publish profile A browser surface: {error}"))?;
+            published_a = true;
+            self.registry
+                .apply_browser_surface(&surface_b, |id| (id == item_b).then(|| native_b.clone()))
+                .map_err(|error| format!("cannot publish profile B browser surface: {error}"))?;
+            published_b = true;
+            let (window_a, tab_a) = self
+                .registry
+                .probe_browser_surface_identity(profile_a, WINDOW_A, item_a)
+                .map_err(|error| format!("cannot inspect profile A browser surface: {error}"))?
+                .ok_or_else(|| {
+                    "profile A browser surface omitted its native identities".to_owned()
+                })?;
+            let (window_b, tab_b) = self
+                .registry
+                .probe_browser_surface_identity(profile_b, WINDOW_B, item_b)
+                .map_err(|error| format!("cannot inspect profile B browser surface: {error}"))?
+                .ok_or_else(|| {
+                    "profile B browser surface omitted its native identities".to_owned()
+                })?;
             super::assert_context_surface(
                 &context_a,
-                window_protocol_a,
-                tab_protocol_a,
+                &window_a,
+                &tab_a,
                 true,
                 "profile A own tab route",
             )?;
             super::assert_context_surface(
                 &context_b,
-                window_protocol_b,
-                tab_protocol_b,
+                &window_b,
+                &tab_b,
                 true,
                 "profile B own tab route",
             )?;
             assert_context_excludes_foreign_surface(
                 &context_a,
-                window_protocol_b,
-                tab_protocol_b,
+                &window_b,
+                &tab_b,
                 "profile A foreign tab route",
             )?;
             assert_context_excludes_foreign_surface(
                 &context_b,
-                window_protocol_a,
-                tab_protocol_a,
+                &window_a,
+                &tab_a,
                 "profile B foreign tab route",
             )?;
-            unsafe {
-                self.regular_controllers[0].didFocusWindow(None);
-                self.regular_controllers[0].didCloseTab_windowIsClosing(tab_protocol_a, true);
-                self.regular_controllers[0].didCloseWindow(window_protocol_a);
-                self.regular_controllers[1].didFocusWindow(None);
-                self.regular_controllers[1].didCloseTab_windowIsClosing(tab_protocol_b, true);
-                self.regular_controllers[1].didCloseWindow(window_protocol_b);
-            }
-            published = false;
+            let empty_a = ExtensionBrowserSurface::new(
+                profile_a,
+                ExtensionBrowserSurfaceGeneration::new(2).unwrap(),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+            let empty_b = ExtensionBrowserSurface::new(
+                profile_b,
+                ExtensionBrowserSurfaceGeneration::new(2).unwrap(),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+            self.registry
+                .apply_browser_surface(&empty_a, |_| None)
+                .map_err(|error| format!("cannot close profile A browser surface: {error}"))?;
+            published_a = false;
+            self.registry
+                .apply_browser_surface(&empty_b, |_| None)
+                .map_err(|error| format!("cannot close profile B browser surface: {error}"))?;
+            published_b = false;
             super::assert_context_surface(
                 &context_a,
-                window_protocol_a,
-                tab_protocol_a,
+                &window_a,
+                &tab_a,
                 false,
                 "profile A closed tab route",
             )?;
             super::assert_context_surface(
                 &context_b,
-                window_protocol_b,
-                tab_protocol_b,
+                &window_b,
+                &tab_b,
                 false,
                 "profile B closed tab route",
             )?;
             super::validate_context_errors(&context_a, "profile route A")?;
             super::validate_context_errors(&context_b, "profile route B")?;
-            let requests = webview_requests.load(Ordering::Acquire);
-            if !(2..=super::MAX_WEBVIEW_CALLBACKS).contains(&requests) {
-                return Err(format!(
-                    "profile routing WebView callback count outside bound: {requests}"
-                ));
-            }
             Ok(())
         })();
 
-        if published {
-            unsafe {
-                self.regular_controllers[0].didFocusWindow(None);
-                self.regular_controllers[0].didCloseTab_windowIsClosing(tab_protocol_a, true);
-                self.regular_controllers[0].didCloseWindow(window_protocol_a);
-                self.regular_controllers[1].didFocusWindow(None);
-                self.regular_controllers[1].didCloseTab_windowIsClosing(tab_protocol_b, true);
-                self.regular_controllers[1].didCloseWindow(window_protocol_b);
-            }
-        }
         let mut cleanup_failures = Vec::new();
         for (controller, context, name) in [
             (&self.regular_controllers[0], &context_a, "profile route A"),
@@ -457,14 +471,21 @@ impl ProfileGeneration {
                     cleanup_failures.push(error);
                 }
             }
-            unsafe { controller.setDelegate(None) };
         }
-        drop(delegate_a);
-        drop(delegate_b);
-        drop(window_a);
-        drop(window_b);
-        drop(tab_a);
-        drop(tab_b);
+        if published_a {
+            if let Err(error) = self.registry.clear_browser_surface(profile_a) {
+                cleanup_failures.push(format!(
+                    "cannot clear failed profile A browser surface: {error}"
+                ));
+            }
+        }
+        if published_b {
+            if let Err(error) = self.registry.clear_browser_surface(profile_b) {
+                cleanup_failures.push(format!(
+                    "cannot clear failed profile B browser surface: {error}"
+                ));
+            }
+        }
         drop(native_a);
         drop(native_b);
         drop(context_a);
@@ -592,6 +613,20 @@ impl ProfileGeneration {
     }
 
     fn release(mut self) -> Result<ProfileIsolationEvidence, String> {
+        let had_regular_routing = !self.regular_contexts.is_empty();
+        let lifecycle_drops = persistent_probe_profiles()
+            .into_iter()
+            .map(|profile| {
+                self.registry
+                    .probe_browser_surface_lifecycle_drops(profile)
+                    .map_err(|error| {
+                        format!("cannot inspect product browser-surface lifecycle: {error}")
+                    })?
+                    .ok_or_else(|| {
+                        "prepared product profile omitted its browser-surface lifecycle".to_owned()
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut evidence = ProfileIsolationEvidence {
             views: self
                 .regular_views
@@ -609,7 +644,7 @@ impl ProfileGeneration {
                 .iter()
                 .map(Weak::from_retained)
                 .collect(),
-            lifecycle_drops: std::mem::take(&mut self.routing_lifecycle_drops),
+            lifecycle_drops,
         };
         evidence.contexts.append(&mut self.regular_contexts);
         evidence.views.append(&mut self.retired_private_views);
@@ -624,10 +659,10 @@ impl ProfileGeneration {
         evidence
             .stores
             .push(Weak::from_retained(&self.private_bundle._data_store));
-        let expected_inventory = match evidence.lifecycle_drops.len() {
-            0 => (EXPECTED_REGULAR_PROFILES + 1, 1),
-            1 => (EXPECTED_REGULAR_PROFILES + 2, EXPECTED_REGULAR_PROFILES + 1),
-            _ => return Err("profile-isolation lifecycle inventory is outside its bound".into()),
+        let expected_inventory = if had_regular_routing {
+            (EXPECTED_REGULAR_PROFILES + 2, EXPECTED_REGULAR_PROFILES + 1)
+        } else {
+            (EXPECTED_REGULAR_PROFILES + 1, 1)
         };
         if evidence.views.len() != expected_inventory.0
             || evidence.contexts.len() != expected_inventory.1

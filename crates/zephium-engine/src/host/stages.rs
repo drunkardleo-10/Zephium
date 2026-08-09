@@ -61,11 +61,22 @@ impl EngineHost {
             self.close(id);
             return;
         }
-        if reconciled {
+        #[cfg(target_os = "macos")]
+        let extension_surface_bound = self
+            .partitions
+            .get(&id)
+            .copied()
+            .map(crate::host::Partition::profile)
+            .map(|profile| self.bind_extension_browser_surface_view(profile, id))
+            .unwrap_or(false);
+        #[cfg(not(target_os = "macos"))]
+        let extension_surface_bound = true;
+
+        if reconciled && extension_surface_bound {
             return;
         }
 
-        eprintln!("engine: native view could not catch up to retained stage layout");
+        eprintln!("engine: native view could not catch up to retained browser routing state");
         self.close(id);
         self.sink
             .emit_for(event_token.clone(), EngineEvent::ViewCreationFailed { id });

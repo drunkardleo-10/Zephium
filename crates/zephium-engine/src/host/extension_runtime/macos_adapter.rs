@@ -62,6 +62,10 @@ pub(super) fn begin_native_activation(
             return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
         }
     }
+    if let Err(error) = host.reconcile_extension_browser_surface(profile) {
+        report_product_probe_failure("browser-surface reconciliation", error);
+        return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
+    }
     let controller = match host
         .macos_extension_controllers
         .controller_for_native_runtime(profile, ExtensionNativeNamespaceScope::MacosControllerV1)

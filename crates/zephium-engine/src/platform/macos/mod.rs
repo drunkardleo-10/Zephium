@@ -34,6 +34,7 @@ use dispatch2::DispatchObject as _;
 
 #[cfg(feature = "native-isolation-probes")]
 pub(crate) use native::run_principal_isolation_probe;
+pub(crate) use native::webkit as native_webview;
 pub use native::{
     add_user_script, configure, query_document_activity, stop_loading, user_script_refusal,
     user_style_refusal,

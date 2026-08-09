@@ -74,6 +74,15 @@ impl EngineHost {
             .partitions
             .get(&id)
             .map(|partition| partition.profile());
+        #[cfg(target_os = "macos")]
+        if let Some(profile) = profile {
+            if !self.unbind_extension_browser_surface_view(profile, id) {
+                self.native_resource_accounting_failed = true;
+                (self.native_terminal_failure)(
+                    "macOS extension browser surface could not unbind a retiring view",
+                );
+            }
+        }
         let removed = self.views.remove(&id);
         self.navigation_snapshots.remove(&id);
         self.partitions.remove(&id);
@@ -183,14 +192,22 @@ impl EngineHost {
         // Shutdown is a terminal authority barrier, including runtimes that
         // currently have no tab-scoped grant rows.
         self.extension_runtime_registry.seal();
-        #[cfg(target_os = "macos")]
-        self.macos_extension_controllers.seal();
         self.extension_document_authority.revoke_all();
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {
             self.close(id);
         }
         self.spare = None;
+        #[cfg(target_os = "macos")]
+        {
+            // Ingress is already terminally sealed by the Engine boundary,
+            // but closing each view must still clear its weak native binding
+            // while the exact controller entry is inspectable. Seal the
+            // controller registry only after those non-allocating retirements;
+            // sealing earlier would turn an orderly close into a fabricated
+            // integrity failure.
+            self.macos_extension_controllers.seal();
+        }
         #[cfg(target_os = "macos")]
         if !self.macos_extension_controllers.release_all_after_views() {
             // Reuse the host's existing sticky clean-shutdown barrier. A
@@ -201,6 +218,7 @@ impl EngineHost {
         self.begin_content_policy_shutdown();
         self.navigation_snapshots.clear();
         self.partitions.clear();
+        self.extension_browser_surfaces.clear();
         // Release native composition roots as part of the shutdown barrier.
         // Popups are separate native windows and macOS' parent view retains
         // subviews, so clearing only the Rust map is not sufficient.

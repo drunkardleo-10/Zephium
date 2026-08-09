@@ -13,20 +13,15 @@ native-isolation-probes = []
 # the probe fixture, delegate graph, HTTP harness, or diagnostic surfaces.
 native-web-extension-probes = [
     "dep:tempfile",
-    "objc2-web-kit/objc2-app-kit",
     "objc2-web-kit/WKWebExtension",
     "objc2-web-kit/WKWebExtensionContext",
     "objc2-web-kit/WKWebExtensionController",
     "objc2-web-kit/WKWebExtensionControllerConfiguration",
-    "objc2-web-kit/WKWebExtensionControllerDelegate",
     "objc2-web-kit/WKWebExtensionDataRecord",
     "objc2-web-kit/WKWebExtensionDataType",
     "objc2-web-kit/WKWebExtensionMatchPattern",
     "objc2-web-kit/WKWebExtensionPermission",
-    "objc2-web-kit/WKWebExtensionTab",
-    "objc2-web-kit/WKWebExtensionWindow",
     "objc2-web-kit/WKHTTPCookieStore",
-    "objc2-web-kit/WKWebView",
 ]
 # Adds only redacted native-adapter phase diagnostics consumed by the separate
 # authenticated product-path probe. Ordinary engine and desktop builds do not
@@ -85,6 +80,7 @@ objc2-core-graphics = "0.3"
 objc2-foundation = "0.3"
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
+    "objc2-app-kit",
     "WKContentWorld",
     "WKContentRuleList",
     "WKContentRuleListStore",
@@ -95,10 +91,14 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKWebExtensionContext",
     "WKWebExtensionController",
     "WKWebExtensionControllerConfiguration",
+    "WKWebExtensionControllerDelegate",
     "WKWebExtensionDataRecord",
     "WKWebExtensionDataType",
     "WKWebExtensionMatchPattern",
     "WKWebExtensionPermission",
+    "WKWebExtensionTab",
+    "WKWebExtensionWindow",
+    "WKWebView",
     "WKWebViewConfiguration",
     "WKWebsiteDataRecord",
     "WKWebsiteDataStore",

@@ -20,11 +20,16 @@ use objc2::MainThreadOnly;
 use objc2_foundation::MainThreadMarker;
 use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUUID};
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
-use objc2_web_kit::{WKWebExtensionController, WKWebViewConfiguration, WKWebsiteDataStore};
-use zephium_core::extensions::ExtensionNativeNamespaceScope;
-use zephium_core::ids::ProfileId;
+use objc2_web_kit::{
+    WKWebExtensionController, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+};
+use zephium_core::extensions::{ExtensionBrowserSurface, ExtensionNativeNamespaceScope};
+use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit;
 
+#[cfg(feature = "native-web-extension-probes")]
+use super::browser_surface::ProbeBrowserSurfaceIdentity;
+use super::browser_surface::{BrowserSurfaceError, MacosExtensionBrowserSurfaceHost};
 use super::erasure::{
     ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
     ProfileControllerErasure,
@@ -55,6 +60,11 @@ pub(crate) enum ControllerRegistryError {
     ViewStoreMismatch,
     ViewControllerMismatch,
     UnexpectedViewController,
+    BrowserSurfaceProfileMismatch,
+    BrowserSurfaceStale,
+    BrowserSurfacePrivacyChanged,
+    BrowserSurfaceIntegrity,
+    ControllerDelegateMismatch,
     ErasureInFlight,
     ErasureGenerationExhausted,
     NamespaceScopeRequired,
@@ -110,6 +120,21 @@ impl fmt::Display for ControllerRegistryError {
             }
             Self::UnexpectedViewController => {
                 "a view without prepared extension authority received a controller"
+            }
+            Self::BrowserSurfaceProfileMismatch => {
+                "an extension browser surface crossed profile ownership"
+            }
+            Self::BrowserSurfaceStale => {
+                "a stale extension browser-surface generation reached the native adapter"
+            }
+            Self::BrowserSurfacePrivacyChanged => {
+                "an extension browser window changed privacy class in place"
+            }
+            Self::BrowserSurfaceIntegrity => {
+                "the native extension browser-surface graph lost integrity"
+            }
+            Self::ControllerDelegateMismatch => {
+                "an extension controller did not retain its exact browser-surface delegate"
             }
             Self::ErasureInFlight => "macOS extension-controller erasure is already in flight",
             Self::ErasureGenerationExhausted => {
@@ -221,6 +246,7 @@ pub(super) struct PersistentControllerEntry {
     pub(super) profile: ProfileId,
     pub(super) store: Retained<WKWebsiteDataStore>,
     pub(super) controller: Retained<WKWebExtensionController>,
+    browser_surface: MacosExtensionBrowserSurfaceHost,
 }
 
 enum PersistentControllerSlot {
@@ -286,6 +312,12 @@ pub(crate) enum ControllerErasureSettlement {
     IntegrityFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerSurfaceApplication {
+    ControllerUnprepared,
+    Applied,
+}
+
 impl PersistentControllerRegistry {
     pub(crate) fn new() -> Self {
         Self {
@@ -334,6 +366,123 @@ impl PersistentControllerRegistry {
             self.slots.poison();
         }
         prepared.map(Some)
+    }
+
+    /// Reconciles one newer Shell-owned logical surface with an already
+    /// authorized controller. An absent controller is an inert no-op; this
+    /// path never allocates a native namespace as a side effect.
+    pub(crate) fn apply_browser_surface(
+        &mut self,
+        surface: &ExtensionBrowserSurface,
+        mut webview_for: impl FnMut(ItemId) -> Option<Retained<WKWebView>>,
+    ) -> Result<ControllerSurfaceApplication, ControllerRegistryError> {
+        self.slots.admission(surface.profile())?;
+        let Some(slot) = self.slots.entries.get_mut(&surface.profile()) else {
+            return Ok(ControllerSurfaceApplication::ControllerUnprepared);
+        };
+        let PersistentControllerSlot::Prepared(entry) = slot else {
+            return Err(ControllerRegistryError::ErasureInFlight);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            entry
+                .browser_surface
+                .apply(&entry.controller, surface, &mut webview_for)
+                .map_err(map_browser_surface_error)?;
+            validate_entry_identity(entry)
+        });
+        if result.is_err() {
+            self.slots.poison();
+            return result.map(|()| ControllerSurfaceApplication::Applied);
+        }
+        Ok(ControllerSurfaceApplication::Applied)
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(crate) fn probe_browser_surface_identity(
+        &mut self,
+        profile: ProfileId,
+        window: zephium_core::ids::WindowId,
+        tab: ItemId,
+    ) -> Result<Option<ProbeBrowserSurfaceIdentity>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry.browser_surface.probe_identity(window, tab))
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(crate) fn probe_browser_surface_lifecycle_drops(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<Option<Arc<std::sync::atomic::AtomicUsize>>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(Some(entry.browser_surface.probe_lifecycle_drops()))
+    }
+
+    /// Updates only the physical-view binding of one already-projected tab.
+    /// A missing controller or tab is intentionally inert: surface and view
+    /// publication may arrive in either FIFO order on the native event loop.
+    pub(crate) fn bind_browser_surface_view(
+        &mut self,
+        profile: ProfileId,
+        id: ItemId,
+        webview: Option<&Retained<WKWebView>>,
+    ) -> Result<(), ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(slot) = self.slots.entries.get(&profile) else {
+            return Ok(());
+        };
+        let PersistentControllerSlot::Prepared(entry) = slot else {
+            return Err(ControllerRegistryError::ErasureInFlight);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            entry.browser_surface.bind_webview(id, webview);
+            Ok(())
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
+    }
+
+    /// Clears an authorized profile's delegate graph after all of its views
+    /// and runtime contexts have retired. An absent controller is inert; no
+    /// native namespace is created by cleanup.
+    pub(crate) fn clear_browser_surface(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<(), ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(slot) = self.slots.entries.get_mut(&profile) else {
+            return Ok(());
+        };
+        let PersistentControllerSlot::Prepared(entry) = slot else {
+            return Err(ControllerRegistryError::ErasureInFlight);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            if unsafe { entry.controller.extensionContexts() }.count() != 0
+                || unsafe { entry.controller.extensions() }.count() != 0
+            {
+                return Err(ControllerRegistryError::UnexpectedLoadedContext);
+            }
+            entry.browser_surface.clear(&entry.controller);
+            validate_entry_identity(entry)
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
     }
 
     /// Verify the configuration Wry actually used. On a supported runtime,
@@ -529,6 +678,22 @@ impl PersistentControllerRegistry {
         });
         if !entries_are_inert {
             self.slots.poison();
+        } else {
+            for slot in self.slots.entries.values_mut() {
+                let PersistentControllerSlot::Prepared(entry) = slot else {
+                    self.slots.poison();
+                    break;
+                };
+                if catch_native(|| {
+                    entry.browser_surface.clear(&entry.controller);
+                    validate_entry_identity(entry)
+                })
+                .is_err()
+                {
+                    self.slots.poison();
+                    break;
+                }
+            }
         }
         self.slots.release_all();
         self.slots.is_quiescent()
@@ -730,6 +895,20 @@ pub(super) fn catch_native<T>(
         .map_err(|_| ControllerRegistryError::NativeException)?
 }
 
+fn map_browser_surface_error(error: BrowserSurfaceError) -> ControllerRegistryError {
+    match error {
+        BrowserSurfaceError::MainThreadRequired => ControllerRegistryError::MainThreadRequired,
+        BrowserSurfaceError::ProfileMismatch => {
+            ControllerRegistryError::BrowserSurfaceProfileMismatch
+        }
+        BrowserSurfaceError::StaleGeneration => ControllerRegistryError::BrowserSurfaceStale,
+        BrowserSurfaceError::PrivacyClassChanged => {
+            ControllerRegistryError::BrowserSurfacePrivacyChanged
+        }
+        BrowserSurfaceError::IntegrityFailed => ControllerRegistryError::BrowserSurfaceIntegrity,
+    }
+}
+
 fn validate_store(
     store: &WKWebsiteDataStore,
     profile: ProfileId,
@@ -764,6 +943,9 @@ pub(super) fn validate_entry_identity(
         return Err(ControllerRegistryError::ControllerStoreMismatch);
     }
     validate_store(&default_store, entry.profile)?;
+    if !entry.browser_surface.is_attached(&entry.controller) {
+        return Err(ControllerRegistryError::ControllerDelegateMismatch);
+    }
     let basis = unsafe { configuration.webViewConfiguration() };
     let basis_store = unsafe { basis.websiteDataStore() };
     if Retained::as_ptr(&basis_store) != Retained::as_ptr(&entry.store) {
@@ -824,10 +1006,14 @@ fn create_entry(profile: ProfileId) -> Result<PersistentControllerEntry, Control
             &controller_configuration,
         )
     };
+    let browser_surface =
+        MacosExtensionBrowserSurfaceHost::new(profile).map_err(map_browser_surface_error)?;
+    browser_surface.attach(&controller);
     let entry = PersistentControllerEntry {
         profile,
         store,
         controller,
+        browser_surface,
     };
     validate_quiescent_entry(&entry)?;
     Ok(entry)
@@ -858,6 +1044,15 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
             sel!(extensionContexts),
             sel!(fetchDataRecordsOfTypes:completionHandler:),
             sel!(removeDataOfTypes:fromDataRecords:completionHandler:),
+            sel!(delegate),
+            sel!(setDelegate:),
+            sel!(didOpenWindow:),
+            sel!(didCloseWindow:),
+            sel!(didFocusWindow:),
+            sel!(didOpenTab:),
+            sel!(didCloseTab:windowIsClosing:),
+            sel!(didActivateTab:previousActiveTab:),
+            sel!(didMoveTab:fromIndex:inWindow:),
         ],
     )?;
     require_class_selectors(controller, &[sel!(allExtensionDataTypes)])?;

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
-use crate::extensions::ExtensionNativeNamespaceScope;
+use crate::extensions::{ExtensionBrowserSurface, ExtensionNativeNamespaceScope};
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
@@ -576,6 +576,16 @@ pub trait Engine {
     /// suspends where it has a primitive (WebView2) and resumes implicitly
     /// when a view becomes visible again.
     fn set_dormant(&self, _ids: Vec<ItemId>) {}
+    /// Replaces one profile's Shell-owned logical window/tab routing facts.
+    ///
+    /// This projection is deliberately incapable of creating a native view.
+    /// Platform adapters may bind only tabs for which the engine already owns
+    /// the exact live view generation; discarded tabs remain logical entries.
+    /// Newer generations supersede older ones, and a rejected dispatch has no
+    /// later settlement.
+    fn set_extension_browser_surface(&self, _surface: ExtensionBrowserSurface) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Installs one exact, immutable profile-scoped content policy.
     ///
     /// Queue admission is not native application. The terminal result arrives

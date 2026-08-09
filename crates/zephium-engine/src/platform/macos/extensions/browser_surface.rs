@@ -1,0 +1,637 @@
+//! Main-thread WKWebExtension window/tab delegate graph.
+//!
+//! The graph mirrors Shell-owned logical identities but never creates a
+//! `WKWebView`. A tab callback returns a native view only when the Shell marks
+//! the tab resident and the engine already owns that exact physical view.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+#[cfg(feature = "native-web-extension-probes")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "native-web-extension-probes")]
+use std::sync::Arc;
+
+use objc2::rc::{Retained, Weak};
+use objc2::runtime::{NSObject, ProtocolObject};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2_foundation::{MainThreadMarker, NSArray, NSObjectProtocol};
+use objc2_web_kit::{
+    WKWebExtensionContext, WKWebExtensionController, WKWebExtensionControllerDelegate,
+    WKWebExtensionTab, WKWebExtensionWindow, WKWebView,
+};
+use zephium_core::extensions::{ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration};
+use zephium_core::ids::{ItemId, ProfileId, WindowId};
+
+#[cfg(feature = "native-web-extension-probes")]
+pub(super) type ProbeBrowserSurfaceIdentity = (
+    Retained<ProtocolObject<dyn WKWebExtensionWindow>>,
+    Retained<ProtocolObject<dyn WKWebExtensionTab>>,
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BrowserSurfaceError {
+    MainThreadRequired,
+    ProfileMismatch,
+    StaleGeneration,
+    PrivacyClassChanged,
+    IntegrityFailed,
+}
+
+struct BrowserTabIvars {
+    // ItemId is 16-byte aligned. Keep it behind a pointer-sized field because
+    // objc2's dynamic class registrar supports ivar alignments only through 8.
+    id: Box<ItemId>,
+    window: RefCell<Option<Weak<BrowserWindow>>>,
+    webview: RefCell<Option<Weak<WKWebView>>>,
+    index: Cell<usize>,
+    selected: Cell<bool>,
+    resident: Cell<bool>,
+    #[cfg(feature = "native-web-extension-probes")]
+    lifecycle_drops: Arc<AtomicUsize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumExtensionBrowserTab"]
+    #[ivars = BrowserTabIvars]
+    struct BrowserTab;
+
+    unsafe impl NSObjectProtocol for BrowserTab {}
+
+    unsafe impl WKWebExtensionTab for BrowserTab {
+        #[unsafe(method_id(windowForWebExtensionContext:))]
+        fn window_for_context(
+            &self,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            self.ivars()
+                .window
+                .borrow()
+                .as_ref()
+                .and_then(Weak::load)
+                .map(ProtocolObject::from_retained)
+        }
+
+        #[unsafe(method_id(webViewForWebExtensionContext:))]
+        fn webview_for_context(
+            &self,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<WKWebView>> {
+            self.ivars()
+                .resident
+                .get()
+                .then(|| self.ivars().webview.borrow().as_ref().and_then(Weak::load))
+                .flatten()
+        }
+
+        #[unsafe(method(indexInWindowForWebExtensionContext:))]
+        fn index_in_window(&self, _context: &WKWebExtensionContext) -> usize {
+            self.ivars().index.get()
+        }
+
+        #[unsafe(method(isSelectedForWebExtensionContext:))]
+        fn is_selected(&self, _context: &WKWebExtensionContext) -> bool {
+            self.ivars().selected.get()
+        }
+    }
+);
+
+impl BrowserTab {
+    fn new(
+        mtm: MainThreadMarker,
+        id: ItemId,
+        #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(BrowserTabIvars {
+            id: Box::new(id),
+            window: RefCell::new(None),
+            webview: RefCell::new(None),
+            index: Cell::new(0),
+            selected: Cell::new(false),
+            resident: Cell::new(false),
+            #[cfg(feature = "native-web-extension-probes")]
+            lifecycle_drops,
+        });
+        // SAFETY: NSObject is the declared superclass and every ivar is fully
+        // initialized before invoking its initializer.
+        unsafe { msg_send![super(object), init] }
+    }
+
+    fn id(&self) -> ItemId {
+        *self.ivars().id
+    }
+
+    fn update(
+        &self,
+        window: &Retained<BrowserWindow>,
+        index: usize,
+        selected: bool,
+        resident: bool,
+        webview: Option<&Retained<WKWebView>>,
+    ) {
+        *self.ivars().window.borrow_mut() = Some(Weak::from_retained(window));
+        *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
+        self.ivars().index.set(index);
+        self.ivars().selected.set(selected);
+        self.ivars().resident.set(resident);
+    }
+
+    fn bind_webview(&self, webview: Option<&Retained<WKWebView>>) {
+        *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
+    }
+
+    fn index(&self) -> usize {
+        self.ivars().index.get()
+    }
+
+    fn window(&self) -> Option<Retained<BrowserWindow>> {
+        self.ivars().window.borrow().as_ref().and_then(Weak::load)
+    }
+}
+
+#[cfg(feature = "native-web-extension-probes")]
+impl Drop for BrowserTab {
+    fn drop(&mut self) {
+        self.ivars().lifecycle_drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct BrowserWindowIvars {
+    id: WindowId,
+    private: bool,
+    tabs: RefCell<Vec<Retained<BrowserTab>>>,
+    active: RefCell<Option<Retained<BrowserTab>>>,
+    #[cfg(feature = "native-web-extension-probes")]
+    lifecycle_drops: Arc<AtomicUsize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumExtensionBrowserWindow"]
+    #[ivars = BrowserWindowIvars]
+    struct BrowserWindow;
+
+    unsafe impl NSObjectProtocol for BrowserWindow {}
+
+    unsafe impl WKWebExtensionWindow for BrowserWindow {
+        #[unsafe(method_id(tabsForWebExtensionContext:))]
+        fn tabs_for_context(
+            &self,
+            _context: &WKWebExtensionContext,
+        ) -> Retained<NSArray<ProtocolObject<dyn WKWebExtensionTab>>> {
+            let tabs = self
+                .ivars()
+                .tabs
+                .borrow()
+                .iter()
+                .cloned()
+                .map(ProtocolObject::from_retained)
+                .collect::<Vec<_>>();
+            NSArray::from_retained_slice(&tabs)
+        }
+
+        #[unsafe(method_id(activeTabForWebExtensionContext:))]
+        fn active_tab_for_context(
+            &self,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionTab>>> {
+            self.ivars()
+                .active
+                .borrow()
+                .as_ref()
+                .cloned()
+                .map(ProtocolObject::from_retained)
+        }
+
+        #[unsafe(method(isPrivateForWebExtensionContext:))]
+        fn is_private(&self, _context: &WKWebExtensionContext) -> bool {
+            self.ivars().private
+        }
+    }
+);
+
+impl BrowserWindow {
+    fn new(
+        mtm: MainThreadMarker,
+        id: WindowId,
+        private: bool,
+        #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(BrowserWindowIvars {
+            id,
+            private,
+            tabs: RefCell::new(Vec::new()),
+            active: RefCell::new(None),
+            #[cfg(feature = "native-web-extension-probes")]
+            lifecycle_drops,
+        });
+        // SAFETY: NSObject is the declared superclass and every ivar is fully
+        // initialized before invoking its initializer.
+        unsafe { msg_send![super(object), init] }
+    }
+
+    fn id(&self) -> WindowId {
+        self.ivars().id
+    }
+
+    fn private_class(&self) -> bool {
+        self.ivars().private
+    }
+
+    fn active_id(&self) -> Option<ItemId> {
+        self.ivars().active.borrow().as_ref().map(|tab| tab.id())
+    }
+
+    fn replace_tabs(&self, tabs: Vec<Retained<BrowserTab>>, active: Option<ItemId>) {
+        let active = active.and_then(|active| tabs.iter().find(|tab| tab.id() == active).cloned());
+        *self.ivars().tabs.borrow_mut() = tabs;
+        *self.ivars().active.borrow_mut() = active;
+    }
+}
+
+#[cfg(feature = "native-web-extension-probes")]
+impl Drop for BrowserWindow {
+    fn drop(&mut self) {
+        self.ivars().lifecycle_drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct BrowserControllerDelegateIvars {
+    windows: RefCell<Vec<Retained<BrowserWindow>>>,
+    focused: RefCell<Option<Retained<BrowserWindow>>>,
+    #[cfg(feature = "native-web-extension-probes")]
+    lifecycle_drops: Arc<AtomicUsize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumExtensionBrowserControllerDelegate"]
+    #[ivars = BrowserControllerDelegateIvars]
+    struct BrowserControllerDelegate;
+
+    unsafe impl NSObjectProtocol for BrowserControllerDelegate {}
+
+    unsafe impl WKWebExtensionControllerDelegate for BrowserControllerDelegate {
+        #[unsafe(method_id(webExtensionController:openWindowsForExtensionContext:))]
+        fn open_windows(
+            &self,
+            _controller: &WKWebExtensionController,
+            _context: &WKWebExtensionContext,
+        ) -> Retained<NSArray<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            let windows = self
+                .ivars()
+                .windows
+                .borrow()
+                .iter()
+                .cloned()
+                .map(ProtocolObject::from_retained)
+                .collect::<Vec<_>>();
+            NSArray::from_retained_slice(&windows)
+        }
+
+        #[unsafe(method_id(webExtensionController:focusedWindowForExtensionContext:))]
+        fn focused_window(
+            &self,
+            _controller: &WKWebExtensionController,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            self.ivars()
+                .focused
+                .borrow()
+                .as_ref()
+                .cloned()
+                .map(ProtocolObject::from_retained)
+        }
+    }
+);
+
+impl BrowserControllerDelegate {
+    fn new(
+        mtm: MainThreadMarker,
+        #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(BrowserControllerDelegateIvars {
+            windows: RefCell::new(Vec::new()),
+            focused: RefCell::new(None),
+            #[cfg(feature = "native-web-extension-probes")]
+            lifecycle_drops,
+        });
+        // SAFETY: NSObject is the declared superclass and every ivar is fully
+        // initialized before invoking its initializer.
+        unsafe { msg_send![super(object), init] }
+    }
+
+    fn replace(
+        &self,
+        windows: Vec<Retained<BrowserWindow>>,
+        focused: Option<Retained<BrowserWindow>>,
+    ) {
+        *self.ivars().windows.borrow_mut() = windows;
+        *self.ivars().focused.borrow_mut() = focused;
+    }
+}
+
+#[cfg(feature = "native-web-extension-probes")]
+impl Drop for BrowserControllerDelegate {
+    fn drop(&mut self) {
+        self.ivars().lifecycle_drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(super) struct MacosExtensionBrowserSurfaceHost {
+    profile: ProfileId,
+    generation: Option<ExtensionBrowserSurfaceGeneration>,
+    delegate: Retained<BrowserControllerDelegate>,
+    windows: HashMap<WindowId, Retained<BrowserWindow>>,
+    tabs: HashMap<ItemId, Retained<BrowserTab>>,
+    #[cfg(feature = "native-web-extension-probes")]
+    lifecycle_drops: Arc<AtomicUsize>,
+}
+
+impl MacosExtensionBrowserSurfaceHost {
+    pub(super) fn new(profile: ProfileId) -> Result<Self, BrowserSurfaceError> {
+        let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
+        #[cfg(feature = "native-web-extension-probes")]
+        let lifecycle_drops = Arc::new(AtomicUsize::new(0));
+        Ok(Self {
+            profile,
+            generation: None,
+            delegate: BrowserControllerDelegate::new(
+                mtm,
+                #[cfg(feature = "native-web-extension-probes")]
+                lifecycle_drops.clone(),
+            ),
+            windows: HashMap::new(),
+            tabs: HashMap::new(),
+            #[cfg(feature = "native-web-extension-probes")]
+            lifecycle_drops,
+        })
+    }
+
+    pub(super) fn attach(&self, controller: &WKWebExtensionController) {
+        let delegate = ProtocolObject::from_ref(&*self.delegate);
+        // SAFETY: the host retains the main-thread delegate for at least as
+        // long as the owning controller entry remains live.
+        unsafe { controller.setDelegate(Some(delegate)) };
+    }
+
+    pub(super) fn is_attached(&self, controller: &WKWebExtensionController) -> bool {
+        let expected = ProtocolObject::from_ref(&*self.delegate);
+        // SAFETY: delegate readback is a public main-thread WebKit property.
+        unsafe { controller.delegate() }.is_some_and(|actual| &*actual == expected)
+    }
+
+    pub(super) fn apply(
+        &mut self,
+        controller: &WKWebExtensionController,
+        surface: &ExtensionBrowserSurface,
+        mut webview_for: impl FnMut(ItemId) -> Option<Retained<WKWebView>>,
+    ) -> Result<(), BrowserSurfaceError> {
+        if surface.profile() != self.profile {
+            return Err(BrowserSurfaceError::ProfileMismatch);
+        }
+        if self
+            .generation
+            .is_some_and(|generation| surface.generation() <= generation)
+        {
+            return Err(BrowserSurfaceError::StaleGeneration);
+        }
+        let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
+        let old_windows = std::mem::take(&mut self.windows);
+        let old_tabs = std::mem::take(&mut self.tabs);
+        let old_focused = self
+            .delegate
+            .ivars()
+            .focused
+            .borrow()
+            .as_ref()
+            .map(|window| window.id());
+        let old_active = old_windows
+            .iter()
+            .map(|(id, window)| (*id, window.active_id()))
+            .collect::<HashMap<_, _>>();
+        let old_tab_positions = old_tabs
+            .iter()
+            .map(|(id, tab)| (*id, (tab.window().map(|window| window.id()), tab.index())))
+            .collect::<HashMap<_, _>>();
+
+        let mut windows = HashMap::with_capacity(surface.windows().len());
+        let mut tabs = HashMap::with_capacity(surface.tabs().count());
+        let mut ordered_windows = Vec::with_capacity(surface.windows().len());
+        for projected in surface.windows() {
+            let window = match old_windows.get(&projected.id()) {
+                Some(window) if window.private_class() == projected.is_private() => window.clone(),
+                Some(_) => return Err(BrowserSurfaceError::PrivacyClassChanged),
+                None => BrowserWindow::new(
+                    mtm,
+                    projected.id(),
+                    projected.is_private(),
+                    #[cfg(feature = "native-web-extension-probes")]
+                    self.lifecycle_drops.clone(),
+                ),
+            };
+            let mut ordered_tabs = Vec::with_capacity(projected.tabs().len());
+            for (index, projected_tab) in projected.tabs().iter().enumerate() {
+                let tab = old_tabs
+                    .get(&projected_tab.id())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        BrowserTab::new(
+                            mtm,
+                            projected_tab.id(),
+                            #[cfg(feature = "native-web-extension-probes")]
+                            self.lifecycle_drops.clone(),
+                        )
+                    });
+                let selected = projected.active() == Some(projected_tab.id());
+                let webview = projected_tab
+                    .resident()
+                    .then(|| webview_for(projected_tab.id()))
+                    .flatten();
+                tab.update(
+                    &window,
+                    index,
+                    selected,
+                    projected_tab.resident(),
+                    webview.as_ref(),
+                );
+                if tabs.insert(projected_tab.id(), tab.clone()).is_some() {
+                    return Err(BrowserSurfaceError::IntegrityFailed);
+                }
+                ordered_tabs.push(tab);
+            }
+            window.replace_tabs(ordered_tabs, projected.active());
+            if windows.insert(projected.id(), window.clone()).is_some() {
+                return Err(BrowserSurfaceError::IntegrityFailed);
+            }
+            ordered_windows.push(window);
+        }
+        let focused = surface
+            .focused()
+            .and_then(|focused| windows.get(&focused).cloned());
+
+        // Publish one internally consistent graph before any WebKit callback
+        // can synchronously query the delegate.
+        self.delegate.replace(ordered_windows, focused.clone());
+        self.windows = windows;
+        self.tabs = tabs;
+        self.generation = Some(surface.generation());
+
+        for (id, tab) in &old_tabs {
+            if !self.tabs.contains_key(id) {
+                let window_is_closing = tab
+                    .window()
+                    .is_some_and(|window| !self.windows.contains_key(&window.id()));
+                let protocol = ProtocolObject::from_ref(&**tab);
+                // SAFETY: old objects remain retained through this balanced
+                // close notification and the replacement graph is complete.
+                unsafe { controller.didCloseTab_windowIsClosing(protocol, window_is_closing) };
+            }
+        }
+        for (id, window) in &old_windows {
+            if !self.windows.contains_key(id) {
+                let protocol = ProtocolObject::from_ref(&**window);
+                // SAFETY: the removed window remains retained through the
+                // balanced close notification.
+                unsafe { controller.didCloseWindow(protocol) };
+            }
+        }
+        for projected in surface.windows() {
+            let window = self
+                .windows
+                .get(&projected.id())
+                .ok_or(BrowserSurfaceError::IntegrityFailed)?;
+            if !old_windows.contains_key(&projected.id()) {
+                let protocol = ProtocolObject::from_ref(&**window);
+                // SAFETY: the delegate graph already exposes this exact
+                // retained object.
+                unsafe { controller.didOpenWindow(protocol) };
+            }
+            for tab in projected.tabs() {
+                let native_tab = self
+                    .tabs
+                    .get(&tab.id())
+                    .ok_or(BrowserSurfaceError::IntegrityFailed)?;
+                let protocol = ProtocolObject::from_ref(&**native_tab);
+                if !old_tabs.contains_key(&tab.id()) {
+                    // SAFETY: the delegate graph already exposes this exact
+                    // retained object.
+                    unsafe { controller.didOpenTab(protocol) };
+                } else if old_tab_positions
+                    .get(&tab.id())
+                    .is_some_and(|(old_window, old_index)| {
+                        *old_window != Some(projected.id()) || *old_index != native_tab.index()
+                    })
+                {
+                    let (old_window_id, old_index) = old_tab_positions[&tab.id()];
+                    let old_window = old_window_id
+                        .and_then(|id| old_windows.get(&id))
+                        .map(|window| ProtocolObject::from_ref(&**window));
+                    // SAFETY: both old and new graph objects remain retained
+                    // for the duration of the move notification.
+                    unsafe {
+                        controller.didMoveTab_fromIndex_inWindow(protocol, old_index, old_window)
+                    };
+                }
+            }
+            let previous = old_active.get(&projected.id()).copied().flatten();
+            if projected.active() != previous {
+                if let Some(active) = projected.active() {
+                    let active = self
+                        .tabs
+                        .get(&active)
+                        .ok_or(BrowserSurfaceError::IntegrityFailed)?;
+                    let previous = previous
+                        .and_then(|id| old_tabs.get(&id))
+                        .map(|tab| ProtocolObject::from_ref(&**tab));
+                    // SAFETY: the active object belongs to the published
+                    // graph; a previous object remains retained by `old_tabs`.
+                    unsafe {
+                        controller.didActivateTab_previousActiveTab(
+                            ProtocolObject::from_ref(&**active),
+                            previous,
+                        )
+                    };
+                }
+            }
+        }
+        if surface.focused() != old_focused {
+            let focused = focused
+                .as_ref()
+                .map(|window| ProtocolObject::from_ref(&**window));
+            // SAFETY: the optional focused object belongs to the published
+            // retained delegate graph.
+            unsafe { controller.didFocusWindow(focused) };
+        }
+        Ok(())
+    }
+
+    pub(super) fn bind_webview(&self, id: ItemId, webview: Option<&Retained<WKWebView>>) {
+        if let Some(tab) = self.tabs.get(&id) {
+            tab.bind_webview(webview);
+        }
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(super) fn probe_identity(
+        &self,
+        window: WindowId,
+        tab: ItemId,
+    ) -> Option<ProbeBrowserSurfaceIdentity> {
+        Some((
+            ProtocolObject::from_retained(self.windows.get(&window)?.clone()),
+            ProtocolObject::from_retained(self.tabs.get(&tab)?.clone()),
+        ))
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(super) fn probe_lifecycle_drops(&self) -> Arc<AtomicUsize> {
+        self.lifecycle_drops.clone()
+    }
+
+    /// Removes the complete logical graph after every extension context for
+    /// this controller has retired. This is a native-lifecycle operation, not
+    /// a Shell generation: a tombstoned profile cannot publish another
+    /// surface, and shutdown has already sealed ingress.
+    pub(super) fn clear(&mut self, controller: &WKWebExtensionController) {
+        let old_windows = std::mem::take(&mut self.windows);
+        let old_tabs = std::mem::take(&mut self.tabs);
+        let had_focus = self.delegate.ivars().focused.borrow().is_some();
+
+        // Make every synchronous delegate query observe the terminal empty
+        // graph before notifying WebKit about its retired objects.
+        self.delegate.replace(Vec::new(), None);
+        for tab in old_tabs.values() {
+            let protocol = ProtocolObject::from_ref(&**tab);
+            // SAFETY: every old tab and its window remain retained by the
+            // local maps through this balanced terminal notification.
+            unsafe { controller.didCloseTab_windowIsClosing(protocol, true) };
+        }
+        for window in old_windows.values() {
+            let protocol = ProtocolObject::from_ref(&**window);
+            // SAFETY: the old window remains retained through the callback.
+            unsafe { controller.didCloseWindow(protocol) };
+        }
+        if had_focus {
+            // SAFETY: `nil` is the documented representation of no focused
+            // extension window.
+            unsafe { controller.didFocusWindow(None) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_delegate_graph_remains_main_thread_only() {
+        fn assert_main_thread_only<T: MainThreadOnly>() {}
+        assert_main_thread_only::<BrowserTab>();
+        assert_main_thread_only::<BrowserWindow>();
+        assert_main_thread_only::<BrowserControllerDelegate>();
+    }
+}
