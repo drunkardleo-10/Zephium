@@ -66,7 +66,7 @@ const _: () = assert!(
 /// remain joined to the reservation and authority that produced its source
 /// snapshot. It deliberately implements neither `Clone` nor Serde traits.
 #[must_use = "a native grant plan must remain joined to its runtime reservation"]
-struct MacosNativeGrantPlan {
+pub(super) struct MacosNativeGrantPlan {
     schema: MacosNativeGrantSchema,
     apply_mode: MacosNativeGrantApplyMode,
     runtime: ExtensionRuntimeInstance,
@@ -136,7 +136,7 @@ impl fmt::Debug for MacosNativeGrantPlan {
 
 /// Identity-free refusal from the pure macOS representability boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MacosNativeGrantPlanError {
+pub(super) enum MacosNativeGrantPlanError {
     PrivateRuntimeUnsupported,
     FileAccessUnproven,
     RequiredApiGrantDenied,
@@ -193,8 +193,8 @@ impl Error for MacosNativeGrantPlanError {}
 /// This remains private and disconnected until a reservation-level native
 /// backend proof can be joined without admitting a compatibility reservation;
 /// possession of the snapshot alone does not provide that proof.
-#[allow(dead_code)] // Intentionally disconnected until native apply/readback is implemented.
-fn compile_native_grant_plan(
+#[allow(dead_code)] // Consumed by the feature-gated native adapter slice.
+pub(super) fn compile_native_grant_plan(
     snapshot: &ExtensionNativeGrantSnapshot,
 ) -> Result<MacosNativeGrantPlan, MacosNativeGrantPlanError> {
     let runtime = snapshot.runtime();
@@ -363,7 +363,7 @@ where
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum MacosNativeApiPermission {
+pub(crate) enum MacosNativeApiPermission {
     ActiveTab,
     Alarms,
     ClipboardWrite,

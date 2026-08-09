@@ -584,6 +584,18 @@ own profile surface. The probe retires each namespace independently, reopens
 both to verify zero persistent extension bytes, and requires every native
 view/controller/context/store and routing object weak reference to release.
 
+Native grant replacement is an exact, bounded main-thread operation. The pure
+grant compiler supplies the complete allowed API/host set; the adapter clears
+all four WebKit permission dictionaries, revokes every bounded prior key
+through the per-key status API, applies every new key through that same API,
+and accepts the generation only after exact dictionary/status/private-access
+readback. This distinction is behavioral: bulk dictionary assignment alone
+does not recompute content-script eligibility for a loaded context. The live
+probe therefore proves host-grant activation, revocation, and restoration on
+subsequent navigations, then unloads the context before clearing and verifying
+final absence. Production native activation remains disabled until this
+boundary is joined to authenticated package and operation authority.
+
 An extension-origin page is not navigated in a normal profile view. WebKit
 requires the loaded context's customized
 [`webViewConfiguration`](https://developer.apple.com/documentation/webkit/wkwebextensioncontext/webviewconfiguration),

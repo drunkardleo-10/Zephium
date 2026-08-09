@@ -434,7 +434,7 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.persistent_all_type_removal_callbacks,
             teardown.baseline_script_count,
@@ -594,11 +594,10 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     assert_private_data_access(&peer_context, false, "peer default")?;
     assert_private_data_access(&secondary_context, false, "secondary default")?;
 
-    // The probe intentionally presents a private window backed by a
-    // non-persistent data store. WebKit excludes that surface from a context
-    // unless the embedder records an explicit private-data grant. Grant only
-    // the two contexts under test and prove the independent controller does
-    // not inherit that user decision.
+    // This content-injection surface intentionally uses a nonpersistent store.
+    // Grant private-data access only to the two contexts under test and prove
+    // the independent controller does not inherit that user decision. Regular
+    // profile/store isolation is exercised separately above.
     unsafe {
         primary_context.setHasAccessToPrivateData(true);
         peer_context.setHasAccessToPrivateData(true);
@@ -741,8 +740,23 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         ExpectedExtensions::None,
     )?;
 
-    grant_pattern(&primary_context, &match_pattern);
-    grant_pattern(&peer_context, &match_pattern);
+    // Product grants are complete native replacements. WebKit applies these
+    // dictionary mutations synchronously on the main thread; exact readback
+    // closes the mutation before the next page navigation can observe it.
+    let primary_applied_grants = super::extensions::apply_probe_grants(
+        &primary_context,
+        &[super::extensions::MacosNativeApiPermission::Storage],
+        &[HOST_MATCH_PATTERN],
+        true,
+    )
+    .map_err(|error| format!("primary native grant application failed: {error}"))?;
+    let peer_applied_grants = super::extensions::apply_probe_grants(
+        &peer_context,
+        &[super::extensions::MacosNativeApiPermission::Storage],
+        &[HOST_MATCH_PATTERN],
+        true,
+    )
+    .map_err(|error| format!("peer native grant application failed: {error}"))?;
     assert_granted(&primary_context, &match_pattern, "primary grant")?;
     assert_granted(&peer_context, &match_pattern, "peer grant")?;
     assert_not_granted(
@@ -789,6 +803,72 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         extension_script_delta(&native_view, &baseline_inventory, "both contexts granted")?;
     if both_delta.is_empty() {
         return Err("both loaded extension contexts produced no controller-owned scripts".into());
+    }
+
+    set_phase("primary-live-grant-revocation");
+    let primary_revoked_grants = super::extensions::apply_probe_grants(
+        &primary_context,
+        &[super::extensions::MacosNativeApiPermission::Storage],
+        &[],
+        true,
+    )
+    .map_err(|error| format!("primary live native grant revocation failed: {error}"))?;
+    drop(primary_applied_grants);
+    assert_not_granted(
+        &primary_context,
+        &match_pattern,
+        "primary live host revocation",
+    )?;
+    assert_context_access(
+        &primary_context,
+        &admitted_url,
+        false,
+        "primary live host revocation",
+    )?;
+    navigate_and_validate(
+        &view,
+        &state,
+        &run_loop,
+        &primary_server.url("/main", "primary-live-revoked"),
+        "primary-live-revoked",
+        ExpectedExtensions::PeerOnly,
+    )?;
+
+    set_phase("primary-live-grant-restoration");
+    let primary_applied_grants = super::extensions::apply_probe_grants(
+        &primary_context,
+        &[super::extensions::MacosNativeApiPermission::Storage],
+        &[HOST_MATCH_PATTERN],
+        true,
+    )
+    .map_err(|error| format!("primary live native grant restoration failed: {error}"))?;
+    drop(primary_revoked_grants);
+    assert_granted(
+        &primary_context,
+        &match_pattern,
+        "primary live host restoration",
+    )?;
+    assert_context_access(
+        &primary_context,
+        &admitted_url,
+        true,
+        "primary live host restoration",
+    )?;
+    navigate_and_validate(
+        &view,
+        &state,
+        &run_loop,
+        &primary_server.url("/main", "primary-live-restored"),
+        "primary-live-restored",
+        ExpectedExtensions::Both,
+    )?;
+    let live_restored_delta = extension_script_delta(
+        &native_view,
+        &baseline_inventory,
+        "primary live host restoration",
+    )?;
+    if live_restored_delta != both_delta {
+        return Err("live host-grant restoration changed controller-owned scripts".into());
     }
 
     set_phase("primary-context-unload");
@@ -905,6 +985,12 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         &secondary_context,
         "secondary cleanup",
     )?;
+    primary_applied_grants
+        .clear_and_verify(&primary_context)
+        .map_err(|error| format!("primary native grant cleanup failed: {error}"))?;
+    peer_applied_grants
+        .clear_and_verify(&peer_context)
+        .map_err(|error| format!("peer native grant cleanup failed: {error}"))?;
     assert_exact_inventory(&native_view, &baseline_inventory, "final context unload")?;
     let webview_request_count = webview_requests.load(Ordering::Relaxed);
     if !(1..=MAX_WEBVIEW_CALLBACKS).contains(&webview_request_count) {
@@ -1241,15 +1327,6 @@ fn assert_context_denied_outside_pattern(
         ));
     }
     Ok(())
-}
-
-fn grant_pattern(context: &WKWebExtensionContext, pattern: &WKWebExtensionMatchPattern) {
-    unsafe {
-        context.setPermissionStatus_forMatchPattern(
-            WKWebExtensionContextPermissionStatus::GrantedExplicitly,
-            pattern,
-        );
-    }
 }
 
 fn assert_granted(
@@ -1686,6 +1763,7 @@ fn write_primary_extension(path: &Path) -> Result<(), String> {
         "name": "Zephium WKWebExtension Primary Probe",
         "description": "Feature-gated native extension admission fixture.",
         "version": "1.0.0",
+        "permissions": ["storage"],
         "content_scripts": [
             {
                 "matches": [HOST_MATCH_PATTERN],
@@ -1734,6 +1812,7 @@ fn write_peer_extension(path: &Path) -> Result<(), String> {
         "name": "Zephium WKWebExtension Peer Probe",
         "description": "Feature-gated native peer-isolation fixture.",
         "version": "1.0.0",
+        "permissions": ["storage"],
         "content_scripts": [{
             "matches": [HOST_MATCH_PATTERN],
             "exclude_matches": [EXCLUDED_MATCH_PATTERN],
