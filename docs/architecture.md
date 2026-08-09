@@ -596,6 +596,23 @@ subsequent navigations, then unloads the context before clearing and verifying
 final absence. Production native activation remains disabled until this
 boundary is joined to authenticated package and operation authority.
 
+The next dormant boundary constructs one move-only macOS owner from a
+provider-validated package-root lease, a complete compiled grant snapshot, an
+exact catalog-authenticated 32-byte Chromium identifier, and the retained
+profile controller. The root path is borrowed exactly once; only a byte-for-byte
+read-back file URL crosses the callback boundary, while the package lease stays
+retained by the host reservation. Activation accepts only MV3 with zero parse
+errors, assigns and re-reads the exact native identifier, applies the complete
+grant set, and pointer-attests the context, extension, and controller after
+load. Teardown unloads the exact context, clears every bounded native key seen
+at cleanup (not merely keys from the last plan), and mints the macOS absence
+audit only after controller-membership and unloaded-state readback. A native
+exception while entering asynchronous parsing is ownership-uncertain, never a
+never-entered rejection. The live WebKit probe executes this construction and
+retirement seam, but the product factory remains disabled until it is joined to
+activation, retirement, and restart reconciliation as one recoverable
+lifecycle.
+
 An extension-origin page is not navigated in a normal profile view. WebKit
 requires the loaded context's customized
 [`webViewConfiguration`](https://developer.apple.com/documentation/webkit/wkwebextensioncontext/webviewconfiguration),

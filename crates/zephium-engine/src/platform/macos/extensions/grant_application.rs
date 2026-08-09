@@ -86,18 +86,33 @@ pub(crate) struct AppliedMacosGrantSet {
     patterns: Box<[Retained<WKWebExtensionMatchPattern>]>,
 }
 
+/// Opaque proof that every bounded permission key observed before a clear was
+/// re-read as non-granted and all four native dictionaries were re-read empty.
+///
+/// This is deliberately not the cross-crate absence witness: a caller must
+/// still prove that the context is unloaded and absent from its controller.
+pub(super) struct ClearedMacosGrantAudit {
+    _validated: (),
+}
+
 impl AppliedMacosGrantSet {
     pub(crate) fn clear_and_verify(
         &self,
         context: &WKWebExtensionContext,
     ) -> Result<(), MacosGrantApplicationError> {
-        if unsafe { context.isLoaded() } {
+        if catch_native(|| unsafe { Ok(context.isLoaded()) })? {
             return Err(MacosGrantApplicationError::ContextAlreadyLoaded);
         }
-        clear_permission_state(context)?;
-        verify_empty(context, &self.permissions, &self.patterns)
-            .map_err(|_| MacosGrantApplicationError::RollbackReadbackMismatch)
+        let (cleared, _audit) = clear_permission_state(context)?;
+        verify_empty(context, &self.permissions, &self.patterns)?;
+        verify_empty(context, &cleared.permissions, &cleared.patterns)
     }
+}
+
+pub(super) fn clear_all_grants_and_verify(
+    context: &WKWebExtensionContext,
+) -> Result<ClearedMacosGrantAudit, MacosGrantApplicationError> {
+    clear_permission_state(context).map(|(_captured, audit)| audit)
 }
 
 #[allow(dead_code)] // Consumed by the feature-gated native adapter slice.
@@ -171,6 +186,10 @@ fn apply_exact_grants<'a>(
         resolved_patterns.push(pattern);
     }
 
+    // Revoke every bounded prior key before applying the replacement. Bulk
+    // dictionary assignment canonicalizes persistence but does not notify a
+    // loaded runtime that an old capability disappeared.
+    clear_permission_state(context)?;
     let applied = apply_and_verify(
         context,
         &resolved_permissions,
@@ -178,8 +197,10 @@ fn apply_exact_grants<'a>(
         private_data_access,
     );
     if let Err(error) = applied {
-        let rollback = clear_permission_state(context)
-            .and_then(|()| verify_empty(context, &resolved_permissions, &resolved_patterns));
+        let rollback = clear_permission_state(context).and_then(|(cleared, _audit)| {
+            verify_empty(context, &resolved_permissions, &resolved_patterns)?;
+            verify_empty(context, &cleared.permissions, &cleared.patterns)
+        });
         return match rollback {
             Ok(()) => Err(error),
             Err(_) => Err(MacosGrantApplicationError::RollbackReadbackMismatch),
@@ -232,12 +253,17 @@ fn apply_and_verify(
     verify_applied(context, permissions, patterns, private_data_access)
 }
 
+struct ClearedMacosGrantState {
+    permissions: Box<[Retained<NSString>]>,
+    patterns: Box<[Retained<WKWebExtensionMatchPattern>]>,
+}
+
 fn clear_permission_state(
     context: &WKWebExtensionContext,
-) -> Result<(), MacosGrantApplicationError> {
+) -> Result<(ClearedMacosGrantState, ClearedMacosGrantAudit), MacosGrantApplicationError> {
     let empty_permissions = NSDictionary::<WKWebExtensionPermission, NSDate>::new();
     let empty_patterns = NSDictionary::<WKWebExtensionMatchPattern, NSDate>::new();
-    catch_native(|| unsafe {
+    let captured = catch_native(|| unsafe {
         let granted_permissions = context.grantedPermissions();
         let denied_permissions = context.deniedPermissions();
         let granted_patterns = context.grantedPermissionMatchPatterns();
@@ -259,26 +285,44 @@ fn clear_permission_state(
         // Snapshot bounded keys before mutation. Status setters are required
         // to notify a loaded runtime that old capabilities were revoked; the
         // bulk empty dictionaries then canonicalize persisted readback.
-        let granted_permission_keys = granted_permissions.allKeys();
-        let denied_permission_keys = denied_permissions.allKeys();
-        let granted_pattern_keys = granted_patterns.allKeys();
-        let denied_pattern_keys = denied_patterns.allKeys();
-        for permission in granted_permission_keys
+        let mut permissions = Vec::with_capacity(permission_count);
+        for permission in granted_permissions
+            .allKeys()
             .iter()
-            .chain(denied_permission_keys.iter())
+            .chain(denied_permissions.allKeys().iter())
         {
+            if !permissions
+                .iter()
+                .any(|existing: &Retained<NSString>| existing.isEqualToString(&permission))
+            {
+                permissions.push(permission);
+            }
+        }
+        let mut patterns = Vec::with_capacity(pattern_count);
+        for pattern in granted_patterns
+            .allKeys()
+            .iter()
+            .chain(denied_patterns.allKeys().iter())
+        {
+            if !patterns
+                .iter()
+                .any(|existing: &Retained<WKWebExtensionMatchPattern>| {
+                    existing.string().isEqualToString(&pattern.string())
+                })
+            {
+                patterns.push(pattern);
+            }
+        }
+        for permission in &permissions {
             context.setPermissionStatus_forPermission(
                 WKWebExtensionContextPermissionStatus::Unknown,
-                &permission,
+                permission,
             );
         }
-        for pattern in granted_pattern_keys
-            .iter()
-            .chain(denied_pattern_keys.iter())
-        {
+        for pattern in &patterns {
             context.setPermissionStatus_forMatchPattern(
                 WKWebExtensionContextPermissionStatus::Unknown,
-                &pattern,
+                pattern,
             );
         }
         context.setGrantedPermissions(&empty_permissions);
@@ -287,8 +331,13 @@ fn clear_permission_state(
         context.setDeniedPermissionMatchPatterns(&empty_patterns);
         context.setHasRequestedOptionalAccessToAllHosts(false);
         context.setHasAccessToPrivateData(false);
-        Ok(())
-    })
+        Ok(ClearedMacosGrantState {
+            permissions: permissions.into_boxed_slice(),
+            patterns: patterns.into_boxed_slice(),
+        })
+    })?;
+    verify_empty(context, &captured.permissions, &captured.patterns)?;
+    Ok((captured, ClearedMacosGrantAudit { _validated: () }))
 }
 
 fn verify_applied(

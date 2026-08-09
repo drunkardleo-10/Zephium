@@ -434,7 +434,7 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.persistent_all_type_removal_callbacks,
             teardown.baseline_script_count,
@@ -991,6 +991,62 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     peer_applied_grants
         .clear_and_verify(&peer_context)
         .map_err(|error| format!("peer native grant cleanup failed: {error}"))?;
+
+    // Exercise the product adapter's exact native-owner construction and
+    // retirement seam, independently of the manual capability probes above.
+    // The feature-only path supplies the already-authenticated fixture path;
+    // ordinary product code can enter the same constructor only through its
+    // move-only package-root lease.
+    set_phase("native-owner-adapter-activation");
+    let adapter_owner_id =
+        zephium_extension_runtime_api::ExtensionRuntimeNativeOwnerId::parse_exact(
+            "abcdefghijklmnopabcdefghijklmnop",
+        )
+        .map_err(|error| format!("invalid native-owner probe identity: {error}"))?;
+    let adapter_result = Rc::new(RefCell::new(None));
+    let callback_result = Rc::clone(&adapter_result);
+    super::extensions::begin_probe_native_runtime_activation(
+        &fixture.primary_path,
+        Box::new([super::extensions::MacosNativeApiPermission::Storage]),
+        Box::new([HOST_MATCH_PATTERN]),
+        true,
+        adapter_owner_id,
+        primary_bundle.controller.clone(),
+        move |settlement| {
+            *callback_result.borrow_mut() = Some(Ok(settlement));
+        },
+    )
+    .map_err(|error| format!("native-owner adapter could not start: {error}"))?;
+    let adapter_owner = match wait_for_result(
+        &adapter_result,
+        &run_loop,
+        "native-owner adapter activation",
+    )? {
+        super::extensions::MacosNativeRuntimeActivation::Activated(owner) => owner,
+        super::extensions::MacosNativeRuntimeActivation::Rejected(failure) => {
+            return Err(format!(
+                "native-owner adapter rejected activation: {failure}"
+            ));
+        }
+        super::extensions::MacosNativeRuntimeActivation::OwnershipUncertain { failure, owner } => {
+            // A failed admission probe must not run a possible owner's passive
+            // destructor while claiming cleanup. Retain it until process exit.
+            std::mem::forget(owner);
+            return Err(format!(
+                "native-owner adapter left activation ownership uncertain: {failure}"
+            ));
+        }
+    };
+    set_phase("native-owner-adapter-retirement");
+    match adapter_owner.retire() {
+        super::extensions::MacosNativeRuntimeRetirement::Absent(_audit) => {}
+        super::extensions::MacosNativeRuntimeRetirement::Retained { failure, owner } => {
+            std::mem::forget(owner);
+            return Err(format!(
+                "native-owner adapter could not prove retirement: {failure}"
+            ));
+        }
+    }
     assert_exact_inventory(&native_view, &baseline_inventory, "final context unload")?;
     let webview_request_count = webview_requests.load(Ordering::Relaxed);
     if !(1..=MAX_WEBVIEW_CALLBACKS).contains(&webview_request_count) {

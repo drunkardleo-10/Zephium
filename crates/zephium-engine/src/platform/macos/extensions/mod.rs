@@ -8,6 +8,7 @@ mod controller_registry;
 mod erasure;
 mod grant_application;
 mod grants;
+mod native_runtime;
 
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use controller_registry::ProbeControllerPreparation;
@@ -17,3 +18,8 @@ pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 pub(crate) use grant_application::apply_probe_grants;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grants::MacosNativeApiPermission;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use native_runtime::{
+    begin_probe_native_runtime_activation, MacosNativeRuntimeActivation,
+    MacosNativeRuntimeRetirement,
+};

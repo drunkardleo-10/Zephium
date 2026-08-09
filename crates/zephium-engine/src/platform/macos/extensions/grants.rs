@@ -136,7 +136,7 @@ impl fmt::Debug for MacosNativeGrantPlan {
 
 /// Identity-free refusal from the pure macOS representability boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MacosNativeGrantPlanError {
+pub(crate) enum MacosNativeGrantPlanError {
     PrivateRuntimeUnsupported,
     FileAccessUnproven,
     RequiredApiGrantDenied,
