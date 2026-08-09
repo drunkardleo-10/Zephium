@@ -20,6 +20,7 @@ use objc2_foundation::{
 };
 use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
 use zephium_core::blocker::ContentPolicyGeneration;
+use zephium_core::extensions::ExtensionBrowserRequest;
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::{
     ContentRuleSettlement, Engine, EngineEvent, UserContent, UserContentGeneration,
@@ -233,6 +234,10 @@ impl MacosEngineHarness {
         &mut self,
         item: ItemId,
         deadline: Instant,
+        mut handle_browser_request: impl FnMut(
+            &WebviewEngine,
+            ExtensionBrowserRequest,
+        ) -> Result<(), String>,
     ) -> Result<(), String> {
         let expected = format!(r#"{EXTENSION_MARKER}="{EXTENSION_MARKER_VALUE}""#);
         let failure_prefix = format!(r#"{EXTENSION_MARKER}=""#);
@@ -272,6 +277,9 @@ impl MacosEngineHarness {
                     }
                     Ok(EngineEvent::Crashed { id }) if id == item => {
                         return Err("profile view crashed during extension execution".to_owned())
+                    }
+                    Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                        handle_browser_request(&harness.engine, request)?;
                     }
                     Ok(_) => {}
                     Err(mpsc::TryRecvError::Empty) => break,

@@ -54,5 +54,34 @@ api.runtime.onMessage.addListener(async (message) => {
     return { state: "tabs-query-url-failed" };
   }
 
+  try {
+    const created = await api.tabs.create({ active: true });
+    if (typeof created?.id !== "number" || created.active !== true) {
+      return { state: "tabs-create-failed" };
+    }
+    const activated = await api.tabs.update(tab.id, {
+      active: true,
+      highlighted: true,
+    });
+    if (activated?.id !== tab.id || activated.active !== true) {
+      return { state: "tabs-activate-failed" };
+    }
+    const updated = await api.tabs.update(created.id, { url: "about:blank" });
+    if (updated?.id !== created.id) {
+      return { state: "tabs-update-url-failed" };
+    }
+    await api.tabs.remove(created.id);
+
+    const finalTabs = await api.tabs.query({ active: true, currentWindow: true });
+    if (finalTabs.length !== 1 || finalTabs[0]?.id !== tab.id) {
+      return { state: "tabs-remove-failed" };
+    }
+  } catch (error) {
+    const detail = String(error?.message ?? error ?? "unknown")
+      .replace(/[^A-Za-z0-9 .:_/-]/g, "?")
+      .slice(0, 72);
+    return { state: `tabs-mutation-error:${detail}` };
+  }
+
   return { count: value.count, state: "ready" };
 });

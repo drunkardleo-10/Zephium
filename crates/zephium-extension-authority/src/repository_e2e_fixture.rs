@@ -44,15 +44,15 @@ pub(crate) fn tree_file_bytes(path: &str) -> Option<&'static [u8]> {
 }
 
 /// Exact canonical three-file tree index bound into both package generations.
-pub(crate) const TREE_INDEX_BYTES: &[u8] = br#"{"schema_version":1,"files":[{"path":"background.js","length":1710,"sha256":"906344825ace250a60e8bbb3127021b22f58f9652ac78d62942ebbbac1ba1db7"},{"path":"content.js","length":1051,"sha256":"90eb72eb0af77610e8c29f014026141764eac0862cb2df9773f821c1aa16e2f6"},{"path":"manifest.json","length":713,"sha256":"31c8c0bdba9a847bddc60771933a558882d77d53f5a57669e17b6bfb9603756e"}]}"#;
+pub(crate) const TREE_INDEX_BYTES: &[u8] = br#"{"schema_version":1,"files":[{"path":"background.js","length":2748,"sha256":"11e7f8e678d3e86b9226a0ae300d4348b118bc073cf9bb1bf9e99e246844ffce"},{"path":"content.js","length":1051,"sha256":"90eb72eb0af77610e8c29f014026141764eac0862cb2df9773f821c1aa16e2f6"},{"path":"manifest.json","length":713,"sha256":"31c8c0bdba9a847bddc60771933a558882d77d53f5a57669e17b6bfb9603756e"}]}"#;
 /// Independently pinned byte length of [`TREE_INDEX_BYTES`].
 pub(crate) const TREE_INDEX_LENGTH: usize = 371;
 /// Independently pinned lowercase SHA-256 of [`TREE_INDEX_BYTES`].
 pub(crate) const TREE_INDEX_SHA256_HEX: &str =
-    "793d7df646ac556fbcb0f439fdfcd5b97a246afecf7fefda193524e50a8ee584";
+    "855b8d8768929d188b76ae4aedd696c17c743f624e5fff3d3050fbe6a6a11e02";
 /// Independently pinned lowercase SHA-256 of the canonical tree inventory.
 pub(crate) const TREE_SHA256_HEX: &str =
-    "7bc934678969a5b1cfbfbcd1347013214d2579d1386411e421808ddcfa1f5d92";
+    "4032f45fb94043dd94e62e4b9c5747bf5a157b9c8266817d5efdbbb87f3215b7";
 
 /// Exact one-byte legal-notice object bound into both package generations.
 pub(crate) const LEGAL_NOTICE_BYTES: &[u8] = b"L";
@@ -63,21 +63,21 @@ pub(crate) const LEGAL_NOTICE_SHA256_HEX: &str =
     "72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa";
 
 /// Exact canonical active catalog at revision two.
-pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"31c8c0bdba9a847bddc60771933a558882d77d53f5a57669e17b6bfb9603756e","tree_sha256":"7bc934678969a5b1cfbfbcd1347013214d2579d1386411e421808ddcfa1f5d92","tree_index_sha256":"793d7df646ac556fbcb0f439fdfcd5b97a246afecf7fefda193524e50a8ee584","tree_index_length":371,"tree_file_count":3,"tree_bytes":3474,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"31c8c0bdba9a847bddc60771933a558882d77d53f5a57669e17b6bfb9603756e","tree_sha256":"4032f45fb94043dd94e62e4b9c5747bf5a157b9c8266817d5efdbbb87f3215b7","tree_index_sha256":"855b8d8768929d188b76ae4aedd696c17c743f624e5fff3d3050fbe6a6a11e02","tree_index_length":371,"tree_file_count":3,"tree_bytes":4512,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned byte length of [`ACTIVE_CATALOG_BYTES`].
 pub(crate) const ACTIVE_CATALOG_LENGTH: usize = 1253;
 /// Independently pinned lowercase SHA-256 of [`ACTIVE_CATALOG_BYTES`].
 pub(crate) const ACTIVE_CATALOG_SHA256_HEX: &str =
-    "d90b7e1591e7ecaa3a67d045502cc35c489588b29e08772e6f522cf73bfdcbcc";
+    "6f94fad6f419adaaeaa92a8908e2b353d43db32ea479f704dc9f04c13d0441e9";
 
 /// Exact canonical explicitly approved rollback catalog at revision one.
-pub(crate) const ROLLBACK_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"31c8c0bdba9a847bddc60771933a558882d77d53f5a57669e17b6bfb9603756e","tree_sha256":"7bc934678969a5b1cfbfbcd1347013214d2579d1386411e421808ddcfa1f5d92","tree_index_sha256":"793d7df646ac556fbcb0f439fdfcd5b97a246afecf7fefda193524e50a8ee584","tree_index_length":371,"tree_file_count":3,"tree_bytes":3474,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ROLLBACK_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"31c8c0bdba9a847bddc60771933a558882d77d53f5a57669e17b6bfb9603756e","tree_sha256":"4032f45fb94043dd94e62e4b9c5747bf5a157b9c8266817d5efdbbb87f3215b7","tree_index_sha256":"855b8d8768929d188b76ae4aedd696c17c743f624e5fff3d3050fbe6a6a11e02","tree_index_length":371,"tree_file_count":3,"tree_bytes":4512,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned byte length of [`ROLLBACK_CATALOG_BYTES`].
 pub(crate) const ROLLBACK_CATALOG_LENGTH: usize = 1253;
 /// Independently pinned lowercase SHA-256 of [`ROLLBACK_CATALOG_BYTES`].
 pub(crate) const ROLLBACK_CATALOG_SHA256_HEX: &str =
-    "f33774975efcc0ed4b2a3c4aebf1d0e1b628b1660cd6f0bb7d8b5ddaa6ca8acf";
+    "9c06558a75af1e77e86958a4331aa7abd8a551b47be067d946291d3bd965e3d0";
 
 /// Independently pinned lowercase SHA-256 of the closed catalog inventory.
 pub(crate) const CATALOG_INVENTORY_SHA256_HEX: &str =
-    "33ed67b116295553573768b1e4c9ee13b49b7e94fb5479983e6017a0e3ca5f6d";
+    "1a443bef1532b8ecff8733ae97e5a9670845fa4ac115d570f351cecf1ae17ecd";

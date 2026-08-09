@@ -25,8 +25,9 @@ use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules};
 use zephium_core::extensions::{
-    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
-    ExtensionBrowserWindow,
+    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
+    ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
@@ -57,7 +58,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; authenticated_startup_ms={}; profile_view_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; authenticated_startup_ms={}; profile_view_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; tabs_create_activate_update_remove=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 measurements.authenticated_startup.as_millis(),
                 measurements.profile_view.as_millis(),
                 measurements.service_shutdown.as_millis(),
@@ -86,6 +87,285 @@ struct ProbeMeasurements {
     profile_view: Duration,
     service_shutdown: Duration,
     engine_shutdown: Duration,
+}
+
+struct ProductBrowserModel {
+    profile: zephium_core::ids::ProfileId,
+    page_url: url::Url,
+    generation: u64,
+    original: ItemId,
+    created: Option<ItemId>,
+    active: ItemId,
+    created_url: Option<url::Url>,
+    created_resident: bool,
+    saw_create: bool,
+    saw_activate: bool,
+    saw_load: bool,
+    saw_close: bool,
+}
+
+impl ProductBrowserModel {
+    fn new(profile: zephium_core::ids::ProfileId, page_url: url::Url, original: ItemId) -> Self {
+        Self {
+            profile,
+            page_url,
+            generation: ExtensionBrowserSurfaceGeneration::INITIAL.get(),
+            original,
+            created: None,
+            active: original,
+            created_url: None,
+            created_resident: false,
+            saw_create: false,
+            saw_activate: false,
+            saw_load: false,
+            saw_close: false,
+        }
+    }
+
+    fn handle(
+        &mut self,
+        engine: &zephium_engine::WebviewEngine,
+        request: ExtensionBrowserRequest,
+    ) -> Result<(), String> {
+        let request_id = request.id();
+        if request.profile() != self.profile {
+            self.reject(
+                engine,
+                request_id,
+                ExtensionBrowserRequestRejection::InvalidContext,
+            );
+            return Err("native mutation request crossed the product-probe profile".into());
+        }
+
+        let settlement = match request.action().clone() {
+            ExtensionBrowserRequestAction::CreateTab {
+                window,
+                url,
+                active,
+            } => {
+                if self.created.is_some() || window.is_some_and(|window| window != 1) || !active {
+                    return self.fail_request(
+                        engine,
+                        request_id,
+                        ExtensionBrowserRequestRejection::InvalidRequest,
+                        "tabs.create produced unsupported product-probe configuration",
+                    );
+                }
+                let created = ItemId::from(2);
+                self.created = Some(created);
+                self.active = created;
+                self.created_url = url
+                    .map(|url| url::Url::parse(&url))
+                    .transpose()
+                    .map_err(|error| format!("cannot parse created-tab URL: {error}"))?;
+                self.created_resident = self.created_url.is_some();
+                self.saw_create = true;
+                self.publish(engine)?;
+                if let Some(url) = self.created_url.as_ref() {
+                    if !engine.create_view(
+                        created,
+                        Partition::Default(self.profile),
+                        url.as_str(),
+                        Rect::new(0.0, 0.0, 720.0, 540.0),
+                    ) {
+                        return self.fail_request(
+                            engine,
+                            request_id,
+                            ExtensionBrowserRequestRejection::NativeAdmissionFailed,
+                            "created-tab native view was not admitted",
+                        );
+                    }
+                }
+                ExtensionBrowserRequestSettlement::Applied(
+                    ExtensionBrowserRequestResult::CreatedTab(created),
+                )
+            }
+            ExtensionBrowserRequestAction::ActivateTab { tab } => {
+                if tab != self.original && Some(tab) != self.created {
+                    return self.fail_request(
+                        engine,
+                        request_id,
+                        ExtensionBrowserRequestRejection::InvalidScope,
+                        "tabs.update attempted to activate an unknown tab",
+                    );
+                }
+                self.active = tab;
+                self.saw_activate = true;
+                self.publish(engine)?;
+                ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
+            }
+            ExtensionBrowserRequestAction::LoadTabUrl { tab, url } => {
+                if Some(tab) != self.created || url.as_ref() != "about:blank" {
+                    return self.fail_request(
+                        engine,
+                        request_id,
+                        ExtensionBrowserRequestRejection::InvalidRequest,
+                        "tabs.update produced the wrong product-probe navigation",
+                    );
+                }
+                let parsed = url::Url::parse(&url)
+                    .map_err(|error| format!("cannot parse updated-tab URL: {error}"))?;
+                let had_view = self.created_resident;
+                self.created_url = Some(parsed.clone());
+                self.created_resident = true;
+                self.saw_load = true;
+                self.publish(engine)?;
+                let admitted = if had_view {
+                    engine.navigate(
+                        tab,
+                        parsed.as_str(),
+                        zephium_core::ports::engine::NavigationRequestId(1),
+                    )
+                } else {
+                    engine.create_view(
+                        tab,
+                        Partition::Default(self.profile),
+                        parsed.as_str(),
+                        Rect::new(0.0, 0.0, 720.0, 540.0),
+                    )
+                };
+                if !admitted {
+                    return self.fail_request(
+                        engine,
+                        request_id,
+                        ExtensionBrowserRequestRejection::NativeAdmissionFailed,
+                        "updated-tab native navigation was not admitted",
+                    );
+                }
+                ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
+            }
+            ExtensionBrowserRequestAction::CloseTab { tab } => {
+                if Some(tab) != self.created {
+                    return self.fail_request(
+                        engine,
+                        request_id,
+                        ExtensionBrowserRequestRejection::InvalidScope,
+                        "tabs.remove attempted to close an unknown tab",
+                    );
+                }
+                self.created = None;
+                self.created_url = None;
+                self.created_resident = false;
+                self.active = self.original;
+                self.saw_close = true;
+                self.publish(engine)?;
+                if engine.close(tab) != NativeDispatch::Scheduled {
+                    return self.fail_request(
+                        engine,
+                        request_id,
+                        ExtensionBrowserRequestRejection::NativeAdmissionFailed,
+                        "removed-tab native close was not scheduled",
+                    );
+                }
+                ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
+            }
+        };
+        if engine.settle_extension_browser_request(self.profile, request_id, settlement)
+            != NativeDispatch::Scheduled
+        {
+            return Err("product-probe browser settlement was not scheduled".into());
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, engine: &zephium_engine::WebviewEngine) -> Result<(), String> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "product-probe surface generation overflowed".to_owned())?;
+        let mut tabs = vec![ExtensionBrowserTab::from_snapshot(
+            None,
+            self.original,
+            true,
+            "Zephium extension product probe",
+            Some(&self.page_url),
+            false,
+            false,
+        )
+        .map_err(|error| format!("cannot project original probe tab: {error:?}"))?];
+        if let Some(created) = self.created {
+            tabs.push(
+                ExtensionBrowserTab::from_snapshot(
+                    None,
+                    created,
+                    self.created_resident,
+                    "New Tab",
+                    self.created_url.as_ref(),
+                    self.created_resident,
+                    false,
+                )
+                .map_err(|error| format!("cannot project created probe tab: {error:?}"))?,
+            );
+        }
+        let window = ExtensionBrowserWindow::new(1, false, Some(self.active), tabs)
+            .map_err(|error| format!("cannot project mutation probe window: {error:?}"))?;
+        let surface = ExtensionBrowserSurface::new(
+            self.profile,
+            ExtensionBrowserSurfaceGeneration::new(self.generation)
+                .ok_or_else(|| "invalid mutation probe generation".to_owned())?,
+            Some(1),
+            vec![window],
+        )
+        .map_err(|error| format!("cannot project mutation probe surface: {error:?}"))?;
+        if engine.set_extension_browser_surface(surface) != NativeDispatch::Scheduled {
+            return Err("mutation probe browser surface was not scheduled".into());
+        }
+        Ok(())
+    }
+
+    fn fail_request(
+        &self,
+        engine: &zephium_engine::WebviewEngine,
+        request: zephium_core::extensions::ExtensionBrowserRequestId,
+        rejection: ExtensionBrowserRequestRejection,
+        message: &'static str,
+    ) -> Result<(), String> {
+        self.reject(engine, request, rejection);
+        Err(message.into())
+    }
+
+    fn reject(
+        &self,
+        engine: &zephium_engine::WebviewEngine,
+        request: zephium_core::extensions::ExtensionBrowserRequestId,
+        rejection: ExtensionBrowserRequestRejection,
+    ) {
+        let _ = engine.settle_extension_browser_request(
+            self.profile,
+            request,
+            ExtensionBrowserRequestSettlement::Rejected(rejection),
+        );
+    }
+
+    fn verify_complete(&self) -> Result<(), String> {
+        if self.created.is_some()
+            || self.active != self.original
+            || !(self.saw_create && self.saw_activate && self.saw_load && self.saw_close)
+        {
+            return Err(format!(
+                "authenticated mutation sequence was incomplete: create={}, activate={}, load={}, close={}, created={:?}, active={}",
+                self.saw_create,
+                self.saw_activate,
+                self.saw_load,
+                self.saw_close,
+                self.created,
+                self.active,
+            ));
+        }
+        Ok(())
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "mutation evidence: create={}, activate={}, load={}, close={}, created={:?}, active={}",
+            self.saw_create,
+            self.saw_activate,
+            self.saw_load,
+            self.saw_close,
+            self.created,
+            self.active,
+        )
+    }
 }
 
 fn run() -> Result<ProbeDisposition, String> {
@@ -208,8 +488,14 @@ fn run() -> Result<ProbeDisposition, String> {
         return Err("profile view request was not admitted".to_owned());
     }
     engine.wait_for_view_commit(item, page.url(), deadline())?;
+    let mut browser_model = ProductBrowserModel::new(profile, page_url, item);
     set_phase("executable-mv3");
-    engine.wait_for_executable_extension(item, deadline())?;
+    if let Err(error) = engine.wait_for_executable_extension(item, deadline(), |native, request| {
+        browser_model.handle(native, request)
+    }) {
+        return Err(format!("{error}; {}", browser_model.summary()));
+    }
+    browser_model.verify_complete()?;
     let profile_view = view_started.elapsed();
 
     // Service shutdown must run off the native main thread. It blocks until
