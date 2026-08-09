@@ -7,6 +7,7 @@
 //! Product trust is established only by `zephium-extension-authority`; native
 //! activation additionally requires a sealed materialization receipt and lease.
 
+mod browser_declarations;
 mod csp;
 mod execution;
 mod locale;
@@ -40,6 +41,7 @@ use crate::{
     MAX_EXTENSION_CONTENT_SCRIPT_GLOB_BYTES, MAX_EXTENSION_MANIFEST_PLAN_RETAINED_BYTES,
 };
 
+use self::browser_declarations::parse_browser_declarations;
 use self::csp::parse_effective_csp;
 use self::execution::{
     parse_action, parse_background, parse_content_scripts, parse_overrides, parse_sandbox,
@@ -342,6 +344,7 @@ pub fn admit_extension_manifest(
         parse_web_accessible(root.remove("web_accessible_resources"), binding)?;
 
     let metadata = parse_inert_metadata(&mut root, binding, name, version, action_title)?;
+    let additional = parse_browser_declarations(&mut root, binding, &mut auxiliary_resources)?;
     let unmodeled = preserve_unmodeled(root, binding, &mut auxiliary_resources)?;
     let csp = parse_effective_csp(csp_value, !sandbox_resources.is_empty())
         .map_err(|_| invalid("content_security_policy"))?;
@@ -369,6 +372,7 @@ pub fn admit_extension_manifest(
         web_accessible,
         web_accessible_resources,
         auxiliary_resources,
+        additional,
         unmodeled,
         csp,
         compatibility,
@@ -399,6 +403,7 @@ fn finish_admission(
     web_accessible: Vec<ExtensionWebAccessibleResourceDeclaration>,
     web_accessible_resources: Vec<ExtensionWebAccessibleResourceGroup>,
     auxiliary_resources: Vec<ExtensionManifestResource>,
+    additional: zephium_core::extensions::ExtensionManifestAdditionalDeclarations,
     unmodeled: Vec<ExtensionUnmodeledDeclarationName>,
     csp: csp::EffectiveCsp,
     compatibility: &impl ExtensionManifestCompatibilityPolicy,
@@ -420,7 +425,7 @@ fn finish_admission(
         sandbox,
         web_accessible,
     )?;
-    let declarations = ExtensionManifestDeclarations::new(
+    let declarations = ExtensionManifestDeclarations::new_with_additional(
         required_api,
         optional_api,
         required_hosts,
@@ -429,6 +434,7 @@ fn finish_admission(
         action,
         overrides,
         execution,
+        additional,
         unmodeled,
     )?;
     let resources = ExtensionManifestResourcePlan::new(

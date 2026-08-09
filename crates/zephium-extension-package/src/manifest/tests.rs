@@ -213,6 +213,112 @@ fn full_fixture() -> Fixture {
     )
 }
 
+fn bitwarden_2026_7_0_contract_fixture() -> Fixture {
+    let manifest = json!({
+        "manifest_version": 3,
+        "minimum_chrome_version": "102.0",
+        "name": "__MSG_extName__",
+        "short_name": "Bitwarden",
+        "version": "2026.7.0",
+        "description": "__MSG_extDesc__",
+        "default_locale": "en",
+        "author": "Bitwarden Inc.",
+        "homepage_url": "https://bitwarden.com",
+        "icons": {"16": "images/icon16.png"},
+        "content_scripts": [
+            {
+                "all_frames": false,
+                "js": ["content/content-message-handler.js"],
+                "matches": ["*://*/*", "file:///*"],
+                "exclude_matches": ["*://*/*.xml*", "file:///*.xml*"],
+                "run_at": "document_start"
+            },
+            {
+                "all_frames": true,
+                "css": ["content/autofill.css"],
+                "js": ["content/trigger-autofill-script-injection.js"],
+                "matches": ["*://*/*", "file:///*"],
+                "exclude_matches": ["*://*/*.xml*", "file:///*.xml*"],
+                "run_at": "document_start"
+            }
+        ],
+        "background": {"service_worker": "background.js"},
+        "action": {
+            "default_icon": {"19": "images/icon19.png"},
+            "default_title": "Bitwarden",
+            "default_popup": "popup/index.html"
+        },
+        "permissions": [
+            "activeTab", "alarms", "clipboardRead", "clipboardWrite", "contextMenus",
+            "idle", "offscreen", "scripting", "sidePanel", "storage", "tabs",
+            "unlimitedStorage", "webNavigation", "webRequest", "webRequestAuthProvider",
+            "notifications"
+        ],
+        "optional_permissions": ["nativeMessaging", "privacy"],
+        "host_permissions": ["https://*/*", "http://*/*"],
+        "content_security_policy": {
+            "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+            "sandbox": "sandbox allow-scripts; script-src 'self'"
+        },
+        "sandbox": {"pages": ["overlay/menu-button.html", "overlay/menu-list.html"]},
+        "side_panel": {"default_path": "sidepanel-disabled.html"},
+        "commands": {
+            "_execute_action": {
+                "suggested_key": {"default": "Ctrl+Shift+Y", "linux": "Ctrl+Shift+U"},
+                "description": "__MSG_commandOpenPopup__"
+            },
+            "autofill_login": {
+                "suggested_key": {"default": "Ctrl+Shift+L"},
+                "description": "__MSG_commandAutofillLoginDesc__"
+            },
+            "autofill_card": {"description": "__MSG_commandAutofillCardDesc__"},
+            "autofill_identity": {"description": "__MSG_commandAutofillIdentityDesc__"},
+            "generate_password": {
+                "suggested_key": {"default": "Ctrl+Shift+9"},
+                "description": "__MSG_commandGeneratePasswordDesc__"
+            },
+            "lock_vault": {"description": "__MSG_commandLockVaultDesc__"}
+        },
+        "web_accessible_resources": [{
+            "resources": [
+                "content/fido2-page-script.js", "notification/bar.html", "images/icon38.png",
+                "images/icon38_locked.png", "overlay/menu-button.html", "overlay/menu-list.html",
+                "overlay/menu.html", "popup/fonts/*"
+            ],
+            "matches": ["<all_urls>"],
+            "use_dynamic_url": true
+        }],
+        "storage": {"managed_schema": "managed_schema.json"}
+    });
+    make_fixture(
+        manifest,
+        &[
+            (
+                "_locales/en/messages.json",
+                br#"{"extName":{"message":"Bitwarden Password Manager"},"extDesc":{"message":"Password manager"}}"#,
+            ),
+            ("background.js", b"void 0"),
+            ("content/autofill.css", b"body{}"),
+            ("content/content-message-handler.js", b"void 0"),
+            ("content/fido2-page-script.js", b"void 0"),
+            ("content/trigger-autofill-script-injection.js", b"void 0"),
+            ("images/icon16.png", b"icon"),
+            ("images/icon19.png", b"icon"),
+            ("images/icon38.png", b"icon"),
+            ("images/icon38_locked.png", b"icon"),
+            ("managed_schema.json", b"{}"),
+            ("notification/bar.html", b"<main></main>"),
+            ("overlay/menu-button.html", b"<main></main>"),
+            ("overlay/menu-list.html", b"<main></main>"),
+            ("overlay/menu.html", b"<main></main>"),
+            ("popup/fonts/font.woff2", b"font"),
+            ("popup/index.html", b"<main></main>"),
+            ("sidepanel-disabled.html", b"<main></main>"),
+        ],
+        false,
+    )
+}
+
 #[test]
 fn admits_complete_mv3_authority_without_losing_runtime_paths() {
     let fixture = full_fixture();
@@ -264,14 +370,14 @@ fn admits_complete_mv3_authority_without_losing_runtime_paths() {
     assert_eq!(script.world(), ExtensionContentScriptWorld::Isolated);
     assert!(script.all_frames());
     assert!(script.matches().options().match_about_blank);
-    assert_eq!(declarations.unmodeled()[0].as_str(), "commands");
+    assert!(declarations.unmodeled().is_empty());
+    let commands = declarations.additional().commands().unwrap();
+    assert_eq!(commands.command_count(), 1);
     assert_eq!(
         admitted
             .descriptor()
-            .compatibility_for(&ExtensionManifestDeclaration::UnmodeledAuthority(
-                ExtensionUnmodeledDeclarationName::parse_exact("commands").unwrap(),
-            )),
-        Some(ExtensionCompatibilityLevel::Unsupported)
+            .compatibility_for(&ExtensionManifestDeclaration::Commands(commands)),
+        Some(ExtensionCompatibilityLevel::Compatible)
     );
     assert_eq!(
         admitted
@@ -325,6 +431,153 @@ fn admits_complete_mv3_authority_without_losing_runtime_paths() {
     );
     assert!(admitted.retained_bytes() >= admitted.descriptor().retained_bytes());
     assert!(resources.retained_bytes() <= MAX_EXTENSION_MANIFEST_PLAN_RETAINED_BYTES);
+}
+
+#[test]
+fn admits_the_pinned_bitwarden_manifest_shape_without_unmodeled_authority() {
+    let fixture = bitwarden_2026_7_0_contract_fixture();
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    let declarations = admitted.descriptor().declarations();
+
+    assert!(declarations.unmodeled().is_empty());
+    assert_eq!(declarations.required_api().len(), 16);
+    assert_eq!(declarations.optional_api().len(), 2);
+    assert_eq!(declarations.execution().content_scripts().len(), 2);
+    assert_eq!(
+        declarations
+            .additional()
+            .minimum_chromium_version()
+            .unwrap()
+            .components(),
+        &[102, 0]
+    );
+    assert_eq!(
+        declarations
+            .additional()
+            .commands()
+            .unwrap()
+            .command_count(),
+        6
+    );
+    assert!(declarations.additional().side_panel_resource().is_some());
+    assert!(declarations
+        .additional()
+        .managed_storage_schema_resource()
+        .is_some());
+    assert!(admitted
+        .resources()
+        .auxiliary_resources()
+        .iter()
+        .any(|resource| resource.path().as_str() == "sidepanel-disabled.html"));
+    assert!(admitted
+        .resources()
+        .auxiliary_resources()
+        .iter()
+        .any(|resource| resource.path().as_str() == "managed_schema.json"));
+}
+
+#[test]
+fn browser_declarations_are_strict_and_resource_bound() {
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    for manifest in [
+        json!({
+            "manifest_version": 3,
+            "name": "X",
+            "version": "1",
+            "minimum_chrome_version": "102.00"
+        }),
+        json!({
+            "manifest_version": 3,
+            "name": "X",
+            "version": "1",
+            "commands": {"open": {"unexpected": true}}
+        }),
+        json!({
+            "manifest_version": 3,
+            "name": "X",
+            "version": "1",
+            "side_panel": {"default_path": "panel.html", "unexpected": true}
+        }),
+        json!({
+            "manifest_version": 3,
+            "name": "X",
+            "version": "1",
+            "storage": {"managed_schema": "schema.json", "unexpected": true}
+        }),
+    ] {
+        let fixture = make_fixture(
+            manifest,
+            &[("panel.html", b"panel"), ("schema.json", b"{}")],
+            false,
+        );
+        assert!(matches!(
+            admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy),
+            Err(ExtensionManifestAdmissionError::InvalidField(_))
+        ));
+    }
+
+    let missing = make_fixture(
+        json!({
+            "manifest_version": 3,
+            "name": "X",
+            "version": "1",
+            "side_panel": {"default_path": "missing.html"}
+        }),
+        &[],
+        false,
+    );
+    assert!(matches!(
+        admit_extension_manifest(missing.binding(), &missing.manifest, &policy),
+        Err(ExtensionManifestAdmissionError::InvalidResource(_))
+    ));
+}
+
+#[test]
+fn command_semantics_change_the_typed_compatibility_identity() {
+    let fixture = |shortcut: &str| {
+        make_fixture(
+            json!({
+                "manifest_version": 3,
+                "name": "X",
+                "version": "1",
+                "commands": {
+                    "open": {
+                        "description": "Open",
+                        "suggested_key": {"default": shortcut}
+                    }
+                }
+            }),
+            &[],
+            false,
+        )
+    };
+    let first = fixture("Ctrl+Shift+Y");
+    let second = fixture("Ctrl+Shift+U");
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let first = admit_extension_manifest(first.binding(), &first.manifest, &policy).unwrap();
+    let second = admit_extension_manifest(second.binding(), &second.manifest, &policy).unwrap();
+
+    assert_ne!(
+        first
+            .descriptor()
+            .declarations()
+            .additional()
+            .commands()
+            .unwrap()
+            .descriptor_digest(),
+        second
+            .descriptor()
+            .declarations()
+            .additional()
+            .commands()
+            .unwrap()
+            .descriptor_digest()
+    );
+    assert_ne!(
+        first.descriptor().compatibility_digest(),
+        second.descriptor().compatibility_digest()
+    );
 }
 
 #[test]

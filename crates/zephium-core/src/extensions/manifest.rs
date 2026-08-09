@@ -35,6 +35,7 @@ pub const MAX_EXTENSION_CONTENT_SCRIPT_PATTERNS: usize = 256;
 pub const MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS: usize = 16;
 pub const MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES: usize = 128;
 pub const MAX_EXTENSION_SANDBOX_RESOURCES: usize = 32;
+pub const MAX_EXTENSION_COMMANDS: usize = 64;
 pub const MAX_EXTENSION_UNMODELED_DECLARATIONS: usize = 16;
 /// MV3 defines exactly the new-tab, bookmarks, and history override targets.
 pub const MAX_EXTENSION_OVERRIDES: usize = 3;
@@ -43,7 +44,7 @@ pub const MAX_EXTENSION_MANIFEST_DECLARATIONS: usize = MAX_EXTENSION_API_PERMISS
     + MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS
     + MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS
     + MAX_EXTENSION_UNMODELED_DECLARATIONS
-    + 11;
+    + 15;
 pub const MAX_EXTENSION_MANIFEST_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 
 const MANIFEST_ACCOUNTING_FIXED_BYTES: usize = 2 * 1024;
@@ -922,6 +923,123 @@ pub enum ExtensionOverrideTarget {
     History,
 }
 
+/// Canonical Chromium version floor declared by an MV3 package.
+///
+/// Native backends do not reinterpret this number as an operating-system or
+/// WebKit version. It is retained as an explicit compatibility input so a
+/// product profile must assess the declaration instead of silently dropping
+/// it while admitting a Chromium-targeted package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionMinimumChromiumVersion {
+    components: [u16; 4],
+    component_count: u8,
+}
+
+impl ExtensionMinimumChromiumVersion {
+    pub fn new(components: &[u16]) -> Option<Self> {
+        if components.is_empty() || components.len() > 4 {
+            return None;
+        }
+        let mut canonical = [0_u16; 4];
+        canonical[..components.len()].copy_from_slice(components);
+        Some(Self {
+            components: canonical,
+            component_count: components.len() as u8,
+        })
+    }
+
+    pub fn components(&self) -> &[u16] {
+        &self.components[..self.component_count as usize]
+    }
+}
+
+/// Bounded command declaration identity.
+///
+/// Command names, descriptions, and platform shortcuts are validated and
+/// canonicalized by package admission. Core retains only their count and
+/// semantic digest because the native runtime owns execution and localized UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionCommandsDeclaration {
+    command_count: u16,
+    descriptor_digest: ExtensionManifestResourceDigest,
+}
+
+impl ExtensionCommandsDeclaration {
+    pub fn new(
+        command_count: usize,
+        descriptor_digest: ExtensionManifestResourceDigest,
+    ) -> Option<Self> {
+        if command_count == 0 || command_count > MAX_EXTENSION_COMMANDS {
+            return None;
+        }
+        Some(Self {
+            command_count: command_count as u16,
+            descriptor_digest,
+        })
+    }
+
+    pub const fn command_count(self) -> usize {
+        self.command_count as usize
+    }
+
+    pub const fn descriptor_digest(self) -> ExtensionManifestResourceDigest {
+        self.descriptor_digest
+    }
+}
+
+/// Typed declarations that affect compatibility but are not execution roots.
+///
+/// Keeping these values together avoids widening the primary manifest
+/// constructor for every browser-owned surface while still making each one a
+/// first-class compatibility row. Every digest is derived from an
+/// authenticated, path-bound package resource or canonical declaration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionManifestAdditionalDeclarations {
+    minimum_chromium_version: Option<ExtensionMinimumChromiumVersion>,
+    commands: Option<ExtensionCommandsDeclaration>,
+    side_panel_resource: Option<ExtensionManifestResourceDigest>,
+    managed_storage_schema_resource: Option<ExtensionManifestResourceDigest>,
+}
+
+impl ExtensionManifestAdditionalDeclarations {
+    pub const fn new(
+        minimum_chromium_version: Option<ExtensionMinimumChromiumVersion>,
+        commands: Option<ExtensionCommandsDeclaration>,
+        side_panel_resource: Option<ExtensionManifestResourceDigest>,
+        managed_storage_schema_resource: Option<ExtensionManifestResourceDigest>,
+    ) -> Self {
+        Self {
+            minimum_chromium_version,
+            commands,
+            side_panel_resource,
+            managed_storage_schema_resource,
+        }
+    }
+
+    pub const fn minimum_chromium_version(self) -> Option<ExtensionMinimumChromiumVersion> {
+        self.minimum_chromium_version
+    }
+
+    pub const fn commands(self) -> Option<ExtensionCommandsDeclaration> {
+        self.commands
+    }
+
+    pub const fn side_panel_resource(self) -> Option<ExtensionManifestResourceDigest> {
+        self.side_panel_resource
+    }
+
+    pub const fn managed_storage_schema_resource(self) -> Option<ExtensionManifestResourceDigest> {
+        self.managed_storage_schema_resource
+    }
+
+    const fn declaration_count(self) -> usize {
+        self.minimum_chromium_version.is_some() as usize
+            + self.commands.is_some() as usize
+            + self.side_panel_resource.is_some() as usize
+            + self.managed_storage_schema_resource.is_some() as usize
+    }
+}
+
 /// Bounded name for an authority-bearing MV3 declaration that is preserved by
 /// admission but is not yet represented by a typed Zephium contract.
 /// Runtime planning always blocks these entries, regardless of classification.
@@ -949,6 +1067,7 @@ pub struct ExtensionManifestDeclarations {
     action: Option<ExtensionActionDeclaration>,
     overrides: Vec<ExtensionOverrideTarget>,
     execution: ExtensionManifestExecutionSurfaces,
+    additional: ExtensionManifestAdditionalDeclarations,
     unmodeled: Vec<ExtensionUnmodeledDeclarationName>,
     retained_bytes: usize,
 }
@@ -962,8 +1081,35 @@ impl ExtensionManifestDeclarations {
         optional_hosts: Option<ExtensionHostPermissionSet>,
         background: Option<ExtensionBackgroundDeclaration>,
         action: Option<ExtensionActionDeclaration>,
+        overrides: Vec<ExtensionOverrideTarget>,
+        execution: ExtensionManifestExecutionSurfaces,
+        unmodeled: Vec<ExtensionUnmodeledDeclarationName>,
+    ) -> Result<Self, ExtensionManifestError> {
+        Self::new_with_additional(
+            required_api,
+            optional_api,
+            required_hosts,
+            optional_hosts,
+            background,
+            action,
+            overrides,
+            execution,
+            ExtensionManifestAdditionalDeclarations::default(),
+            unmodeled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_additional(
+        required_api: ExtensionApiPermissionSet,
+        optional_api: ExtensionApiPermissionSet,
+        required_hosts: Option<ExtensionHostPermissionSet>,
+        optional_hosts: Option<ExtensionHostPermissionSet>,
+        background: Option<ExtensionBackgroundDeclaration>,
+        action: Option<ExtensionActionDeclaration>,
         mut overrides: Vec<ExtensionOverrideTarget>,
         execution: ExtensionManifestExecutionSurfaces,
+        additional: ExtensionManifestAdditionalDeclarations,
         mut unmodeled: Vec<ExtensionUnmodeledDeclarationName>,
     ) -> Result<Self, ExtensionManifestError> {
         if overrides.len() > MAX_EXTENSION_OVERRIDES {
@@ -1065,6 +1211,10 @@ impl ExtensionManifestDeclarations {
                 "content_security_policy" => true,
                 "sandbox" => execution.sandbox().is_some(),
                 "web_accessible_resources" => !execution.web_accessible_resources().is_empty(),
+                "minimum_chrome_version" => additional.minimum_chromium_version.is_some(),
+                "commands" => additional.commands.is_some(),
+                "side_panel" => additional.side_panel_resource.is_some(),
+                "storage" => additional.managed_storage_schema_resource.is_some(),
                 _ => false,
             };
             if duplicates_typed {
@@ -1123,6 +1273,7 @@ impl ExtensionManifestDeclarations {
             action,
             overrides,
             execution,
+            additional,
             unmodeled,
             retained_bytes,
         })
@@ -1158,6 +1309,10 @@ impl ExtensionManifestDeclarations {
 
     pub const fn execution(&self) -> &ExtensionManifestExecutionSurfaces {
         &self.execution
+    }
+
+    pub const fn additional(&self) -> ExtensionManifestAdditionalDeclarations {
+        self.additional
     }
 
     pub fn unmodeled(&self) -> &[ExtensionUnmodeledDeclarationName] {
@@ -1221,6 +1376,7 @@ impl ExtensionManifestDeclarations {
                 + usize::from(self.declares_offscreen())
                 + usize::from(self.declares_native_messaging())
                 + self.overrides.len()
+                + self.additional.declaration_count()
                 + 1
                 + usize::from(self.execution.sandbox().is_some())
                 + self.execution.content_scripts().len()
@@ -1269,6 +1425,20 @@ impl ExtensionManifestDeclarations {
                 .copied()
                 .map(ExtensionManifestDeclaration::Override),
         );
+        if let Some(version) = self.additional.minimum_chromium_version {
+            declarations.push(ExtensionManifestDeclaration::MinimumChromiumVersion(
+                version,
+            ));
+        }
+        if let Some(commands) = self.additional.commands {
+            declarations.push(ExtensionManifestDeclaration::Commands(commands));
+        }
+        if let Some(resource) = self.additional.side_panel_resource {
+            declarations.push(ExtensionManifestDeclaration::SidePanel { resource });
+        }
+        if let Some(resource) = self.additional.managed_storage_schema_resource {
+            declarations.push(ExtensionManifestDeclaration::ManagedStorageSchema { resource });
+        }
         declarations.push(ExtensionManifestDeclaration::ExtensionPagesCsp);
         if self.execution.sandbox().is_some() {
             declarations.push(ExtensionManifestDeclaration::Sandbox);
@@ -1363,6 +1533,14 @@ pub enum ExtensionManifestDeclaration {
         index: u16,
         resources_digest: ExtensionManifestResourceDigest,
     },
+    MinimumChromiumVersion(ExtensionMinimumChromiumVersion),
+    Commands(ExtensionCommandsDeclaration),
+    SidePanel {
+        resource: ExtensionManifestResourceDigest,
+    },
+    ManagedStorageSchema {
+        resource: ExtensionManifestResourceDigest,
+    },
     UnmodeledAuthority(ExtensionUnmodeledDeclarationName),
 }
 
@@ -1384,7 +1562,11 @@ impl ExtensionManifestDeclaration {
             | Self::ExtensionPagesCsp
             | Self::Sandbox
             | Self::ContentScript { .. }
-            | Self::WebAccessibleResources { .. } => None,
+            | Self::WebAccessibleResources { .. }
+            | Self::MinimumChromiumVersion(_)
+            | Self::Commands(_)
+            | Self::SidePanel { .. }
+            | Self::ManagedStorageSchema { .. } => None,
         }
     }
 
@@ -1406,6 +1588,10 @@ impl ExtensionManifestDeclaration {
             Self::ContentScript { .. } => 14,
             Self::WebAccessibleResources { .. } => 15,
             Self::UnmodeledAuthority(_) => 16,
+            Self::MinimumChromiumVersion(_) => 17,
+            Self::Commands(_) => 18,
+            Self::SidePanel { .. } => 19,
+            Self::ManagedStorageSchema { .. } => 20,
         }
     }
 
@@ -1424,6 +1610,19 @@ impl ExtensionManifestDeclaration {
             } => {
                 digest.update(index.to_be_bytes());
                 digest.update(resources_digest.as_bytes());
+            }
+            Self::MinimumChromiumVersion(version) => {
+                digest.update((version.components().len() as u64).to_be_bytes());
+                for component in version.components() {
+                    digest.update(component.to_be_bytes());
+                }
+            }
+            Self::Commands(commands) => {
+                digest.update((commands.command_count() as u64).to_be_bytes());
+                digest.update(commands.descriptor_digest().as_bytes());
+            }
+            Self::SidePanel { resource } | Self::ManagedStorageSchema { resource } => {
+                digest.update(resource.as_bytes());
             }
             _ => {}
         }
@@ -1463,6 +1662,15 @@ impl ExtensionManifestDeclaration {
             ) => left_index
                 .cmp(right_index)
                 .then_with(|| left_digest.cmp(right_digest)),
+            (Self::MinimumChromiumVersion(left), Self::MinimumChromiumVersion(right)) => {
+                left.cmp(right)
+            }
+            (Self::Commands(left), Self::Commands(right)) => left.cmp(right),
+            (Self::SidePanel { resource: left }, Self::SidePanel { resource: right })
+            | (
+                Self::ManagedStorageSchema { resource: left },
+                Self::ManagedStorageSchema { resource: right },
+            ) => left.cmp(right),
             _ => self
                 .canonical_value()
                 .unwrap_or("")
@@ -2268,6 +2476,40 @@ mod tests {
 
     fn target() -> ExtensionCompatibilityTargetId {
         ExtensionCompatibilityTargetId::parse_exact("macos.wkwebextension.v1").unwrap()
+    }
+
+    #[test]
+    fn additional_declaration_order_includes_semantic_payloads() {
+        let version_102 = ExtensionManifestDeclaration::MinimumChromiumVersion(
+            ExtensionMinimumChromiumVersion::new(&[102, 0]).unwrap(),
+        );
+        let version_103 = ExtensionManifestDeclaration::MinimumChromiumVersion(
+            ExtensionMinimumChromiumVersion::new(&[103, 0]).unwrap(),
+        );
+        let commands_a = ExtensionManifestDeclaration::Commands(
+            ExtensionCommandsDeclaration::new(
+                1,
+                ExtensionManifestResourceDigest::from_bytes([1; 32]),
+            )
+            .unwrap(),
+        );
+        let commands_b = ExtensionManifestDeclaration::Commands(
+            ExtensionCommandsDeclaration::new(
+                1,
+                ExtensionManifestResourceDigest::from_bytes([2; 32]),
+            )
+            .unwrap(),
+        );
+        let side_panel = ExtensionManifestDeclaration::SidePanel {
+            resource: ExtensionManifestResourceDigest::from_bytes([1; 32]),
+        };
+        let managed_storage = ExtensionManifestDeclaration::ManagedStorageSchema {
+            resource: ExtensionManifestResourceDigest::from_bytes([1; 32]),
+        };
+
+        assert_ne!(version_102.cmp(&version_103), Ordering::Equal);
+        assert_ne!(commands_a.cmp(&commands_b), Ordering::Equal);
+        assert_ne!(side_panel.cmp(&managed_storage), Ordering::Equal);
     }
 
     fn surfaces() -> ExtensionManifestExecutionSurfaces {
