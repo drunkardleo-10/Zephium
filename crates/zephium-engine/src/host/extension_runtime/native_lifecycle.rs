@@ -610,6 +610,16 @@ impl PlatformOwnerSet {
         !self.collision.is_vacant()
     }
 
+    #[cfg(target_os = "macos")]
+    fn retained_macos_mut(&mut self) -> Option<&mut MacosNativeRuntimeOwner> {
+        match &mut self.retained {
+            PlatformOwnerBundle::Macos(owner) => Some(owner),
+            PlatformOwnerBundle::Vacant => None,
+            #[cfg(test)]
+            PlatformOwnerBundle::Logical(_) => None,
+        }
+    }
+
     fn clear_after_proven_absence(&mut self) {
         *self = Self::empty();
     }
@@ -972,6 +982,32 @@ impl NativeLifecycleSlot {
             }
         };
         Ok(())
+    }
+
+    /// Borrows the exact retained macOS owner only while its reconciliation
+    /// ticket is the active native call. The owner never leaves the bounded
+    /// lifecycle slot, so a panic, timeout, or failed audit cannot substitute
+    /// or passively destroy it.
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_macos_reconciliation_owner<T>(
+        &mut self,
+        ticket: NativeCallTicket,
+        audit: impl FnOnce(&mut MacosNativeRuntimeOwner) -> T,
+    ) -> Result<Option<T>, NativeBeginError> {
+        if !self.accepts_ticket(ticket, NativeCallKind::Reconciliation)
+            || self.current_ticket() != Some(ticket)
+        {
+            return Err(NativeBeginError::StaleTicket);
+        }
+        if self.platform_owners.is_quarantined()
+            || !matches!(
+                self.state,
+                TypedNativeState::Activation(ActivationState::Reconciling(_))
+            )
+        {
+            return Err(NativeBeginError::WrongState);
+        }
+        Ok(self.platform_owners.retained_macos_mut().map(audit))
     }
 
     /// Retains every owner returned by a future activation disposition and

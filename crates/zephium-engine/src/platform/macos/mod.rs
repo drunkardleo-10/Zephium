@@ -14,8 +14,8 @@ pub(crate) use extensions::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
     ControllerErasureSettlement, ControllerErasureTicket, ControllerPreparation,
     ControllerRegistryError, MacosNativeRuntimeActivation, MacosNativeRuntimeFailure,
-    MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeRetirement,
-    PersistentControllerRegistry, ProfileControllerErasure,
+    MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
+    MacosNativeRuntimeRetirement, PersistentControllerRegistry, ProfileControllerErasure,
 };
 
 pub(crate) use content_filter::{

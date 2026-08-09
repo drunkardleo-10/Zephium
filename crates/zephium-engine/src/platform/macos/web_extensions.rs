@@ -1017,7 +1017,7 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         },
     )
     .map_err(|error| format!("native-owner adapter could not start: {error}"))?;
-    let adapter_owner = match wait_for_result(
+    let mut adapter_owner = match wait_for_result(
         &adapter_result,
         &run_loop,
         "native-owner adapter activation",
@@ -1046,6 +1046,21 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
             ));
         }
     };
+    set_phase("native-owner-adapter-reconciliation");
+    match adapter_owner.reconcile() {
+        super::extensions::MacosNativeRuntimeReconciliation::Owned => {}
+        super::extensions::MacosNativeRuntimeReconciliation::Absent(_) => {
+            return Err(
+                "native-owner adapter reported absence for its loaded retained owner".to_owned(),
+            );
+        }
+        super::extensions::MacosNativeRuntimeReconciliation::StillUncertain(failure) => {
+            std::mem::forget(adapter_owner);
+            return Err(format!(
+                "native-owner adapter could not reconcile its retained owner: {failure}"
+            ));
+        }
+    }
     set_phase("native-owner-adapter-retirement");
     match adapter_owner.retire() {
         super::extensions::MacosNativeRuntimeRetirement::Absent(_audit) => {}

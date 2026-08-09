@@ -197,6 +197,19 @@ pub(crate) enum MacosNativeRuntimeRetirement {
     },
 }
 
+/// Exact same-process settlement of one retained native owner.
+///
+/// The owner remains captive in the host lifecycle slot while this audit
+/// executes. `Absent` is returned only after the same unload, grant-clear, and
+/// controller-membership proof used by retirement; `Owned` requires exact
+/// pointer and identifier readback from the retained context.
+#[must_use = "same-process reconciliation must settle the host lifecycle ticket"]
+pub(crate) enum MacosNativeRuntimeReconciliation {
+    Owned,
+    Absent(ExtensionRuntimeMacosAbsenceAudit),
+    StillUncertain(MacosNativeRuntimeFailure),
+}
+
 /// Fully validated, main-thread-only input for the one native entry call.
 ///
 /// Package-root access, grant compilation, runtime availability, and URL
@@ -270,15 +283,33 @@ impl MacosNativeRuntimeOwner {
     }
 
     pub(crate) fn retire(mut self) -> MacosNativeRuntimeRetirement {
-        let initially_loaded = match context_is_loaded(&self.context) {
-            Ok(loaded) => loaded,
-            Err(failure) => {
-                return MacosNativeRuntimeRetirement::Retained {
-                    failure,
-                    owner: self,
-                };
-            }
-        };
+        match self.prove_absence() {
+            Ok(audit) => MacosNativeRuntimeRetirement::Absent(audit),
+            Err(failure) => MacosNativeRuntimeRetirement::Retained {
+                failure,
+                owner: self,
+            },
+        }
+    }
+
+    /// Audits the exact retained owner without transferring or duplicating its
+    /// native identity. A loaded, pointer-attested context is owned even when
+    /// its extension reports runtime errors; those errors affect usability,
+    /// not whether WebKit still owns the context.
+    pub(crate) fn reconcile(&mut self) -> MacosNativeRuntimeReconciliation {
+        if validate_loaded_owner_membership(self).is_ok() {
+            return MacosNativeRuntimeReconciliation::Owned;
+        }
+        match self.prove_absence() {
+            Ok(audit) => MacosNativeRuntimeReconciliation::Absent(audit),
+            Err(failure) => MacosNativeRuntimeReconciliation::StillUncertain(failure),
+        }
+    }
+
+    fn prove_absence(
+        &mut self,
+    ) -> Result<ExtensionRuntimeMacosAbsenceAudit, MacosNativeRuntimeFailure> {
+        let initially_loaded = context_is_loaded(&self.context)?;
         let unload_failed = initially_loaded
             && catch_native(|| unsafe {
                 self.controller
@@ -286,44 +317,23 @@ impl MacosNativeRuntimeOwner {
                     .map_err(|_| MacosNativeRuntimeFailure::ControllerUnloadFailed)
             })
             .is_err();
-        let remains_loaded = match context_is_loaded(&self.context) {
-            Ok(loaded) => loaded,
-            Err(failure) => {
-                return MacosNativeRuntimeRetirement::Retained {
-                    failure,
-                    owner: self,
-                };
-            }
-        };
+        let remains_loaded = context_is_loaded(&self.context)?;
         if remains_loaded {
-            return MacosNativeRuntimeRetirement::Retained {
-                failure: if unload_failed {
-                    MacosNativeRuntimeFailure::ControllerUnloadFailed
-                } else {
-                    MacosNativeRuntimeFailure::AbsenceReadbackMismatch
-                },
-                owner: self,
-            };
+            return Err(if unload_failed {
+                MacosNativeRuntimeFailure::ControllerUnloadFailed
+            } else {
+                MacosNativeRuntimeFailure::AbsenceReadbackMismatch
+            });
         }
 
         let grant_audit = match clear_all_grants_and_verify(&self.context) {
             Ok(audit) => audit,
-            Err(error) => {
-                return MacosNativeRuntimeRetirement::Retained {
-                    failure: MacosNativeRuntimeFailure::GrantCleanup(error),
-                    owner: self,
-                };
-            }
+            Err(error) => return Err(MacosNativeRuntimeFailure::GrantCleanup(error)),
         };
         self.applied_grants = None;
 
-        match exact_absence_audit(&self, grant_audit) {
-            Some(audit) => MacosNativeRuntimeRetirement::Absent(audit),
-            None => MacosNativeRuntimeRetirement::Retained {
-                failure: MacosNativeRuntimeFailure::AbsenceReadbackMismatch,
-                owner: self,
-            },
-        }
+        exact_absence_audit(self, grant_audit)
+            .ok_or(MacosNativeRuntimeFailure::AbsenceReadbackMismatch)
     }
 }
 
@@ -622,7 +632,9 @@ fn classify_failed_owner(
     }
 }
 
-fn validate_loaded_owner(owner: &MacosNativeRuntimeOwner) -> Result<(), MacosNativeRuntimeFailure> {
+fn validate_loaded_owner_membership(
+    owner: &MacosNativeRuntimeOwner,
+) -> Result<(), MacosNativeRuntimeFailure> {
     catch_native(|| unsafe {
         let identifier = owner.context.uniqueIdentifier();
         let expected_bytes = owner.owner_id.encoded_bytes();
@@ -653,6 +665,13 @@ fn validate_loaded_owner(owner: &MacosNativeRuntimeOwner) -> Result<(), MacosNat
         if !exact {
             return Err(MacosNativeRuntimeFailure::LoadedOwnerReadbackMismatch);
         }
+        Ok(())
+    })
+}
+
+fn validate_loaded_owner(owner: &MacosNativeRuntimeOwner) -> Result<(), MacosNativeRuntimeFailure> {
+    validate_loaded_owner_membership(owner)?;
+    catch_native(|| unsafe {
         if owner.context.errors().count() != 0 {
             return Err(MacosNativeRuntimeFailure::ContextRuntimeError);
         }

@@ -1953,6 +1953,22 @@ impl ExtensionRuntimeRegistry {
         self.publish_native_terminal(index, ticket, effect)
     }
 
+    #[cfg(target_os = "macos")]
+    fn with_macos_reconciliation_owner<T>(
+        &mut self,
+        ticket: NativeCallTicket,
+        audit: impl FnOnce(&mut crate::platform::imp::MacosNativeRuntimeOwner) -> T,
+    ) -> Result<Option<T>, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(ticket.owner(), ticket.registry_generation())?;
+        if !self.callback_is_pending(index, ticket)? {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        }
+        self.entries[index]
+            .native
+            .with_macos_reconciliation_owner(ticket, audit)
+            .map_err(|reason| self.transition_error(reason))
+    }
+
     fn publish_native_terminal(
         &mut self,
         index: usize,
@@ -3145,25 +3161,7 @@ fn ownership_reconciliation(
                             deadline,
                             recovery_native,
                         )?;
-                    let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
-                        let settled = host
-                            .extension_runtime_registry
-                            .complete_native_reconciliation(
-                                ticket,
-                                ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                                    failure: ExtensionRuntimeFailure::UnsupportedTarget,
-                                    evidence: None,
-                                },
-                                PlatformOwnerBundle::Vacant,
-                            );
-                        if settled.is_err() {
-                            fail_extension_native_terminal(
-                                host,
-                                "logical extension reconciliation terminal violated registry state",
-                            );
-                        }
-                    });
-                    let _terminal_transport_accepted = accepted;
+                    begin_reconciliation_adapter(host, Arc::clone(&reservation), ticket)?;
                     Ok(NativeCallRoute::Await(ticket))
                 }
                 route => Ok(route),
@@ -3184,6 +3182,46 @@ fn ownership_reconciliation(
             failure: ExtensionRuntimeFailure::Internal,
             evidence: None,
         },
+    }
+}
+
+fn begin_reconciliation_adapter(
+    host: &mut EngineHost,
+    reservation: Arc<ReservationControl>,
+    ticket: NativeCallTicket,
+) -> Result<(), ExtensionRuntimeHostBindError> {
+    match reservation.adapter {
+        AdapterAvailability::Unsupported => {
+            host.extension_runtime_registry.fail_invariant();
+            Err(ExtensionRuntimeHostBindError::InternalInvariant)
+        }
+        #[cfg(target_os = "macos")]
+        AdapterAvailability::MacosNativeActivationOnly => {
+            macos_adapter::begin_native_reconciliation(host, ticket)
+        }
+        #[cfg(test)]
+        AdapterAvailability::LogicalHarness => {
+            let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
+                let settled = host
+                    .extension_runtime_registry
+                    .complete_native_reconciliation(
+                        ticket,
+                        ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                            failure: ExtensionRuntimeFailure::UnsupportedTarget,
+                            evidence: None,
+                        },
+                        PlatformOwnerBundle::Vacant,
+                    );
+                if settled.is_err() {
+                    fail_extension_native_terminal(
+                        host,
+                        "logical extension reconciliation terminal violated registry state",
+                    );
+                }
+            });
+            let _terminal_transport_accepted = accepted;
+            Ok(())
+        }
     }
 }
 

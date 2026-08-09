@@ -12,13 +12,14 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeActivationDisposition,
     ExtensionRuntimeFailure, ExtensionRuntimeHostBindError, ExtensionRuntimeMacosAbsenceAudit,
     ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeNativeOwnerId,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeRetirementDisposition,
 };
 
 use crate::platform::imp::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
     ControllerPreparation, ControllerRegistryError, MacosNativeRuntimeActivation,
-    MacosNativeRuntimeFailure, MacosNativeRuntimeRetirement,
+    MacosNativeRuntimeFailure, MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement,
 };
 
 use super::super::EngineHost;
@@ -156,6 +157,66 @@ pub(super) fn begin_native_retirement(
         disposition,
         returned_owner,
     )? {
+        host.extension_runtime_registry.fail_invariant();
+        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+    }
+    Ok(())
+}
+
+pub(super) fn begin_native_reconciliation(
+    host: &mut EngineHost,
+    ticket: NativeCallTicket,
+) -> Result<(), ExtensionRuntimeHostBindError> {
+    let Some((observed_owner, outcome)) = host
+        .extension_runtime_registry
+        .with_macos_reconciliation_owner(ticket, |owner| (owner.owner_id(), owner.reconcile()))?
+    else {
+        // Native entry may have become uncertain before its parse callback
+        // supplied an exact owner. Controller-wide recovery is a separate
+        // boundary; do not infer absence from a missing process-local wrapper.
+        return complete_reconciliation(
+            host,
+            ticket,
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::BackendUnavailable,
+                evidence: None,
+            },
+        );
+    };
+    let disposition = match outcome {
+        MacosNativeRuntimeReconciliation::Owned => ExtensionRuntimeOwnershipDisposition::Owned(
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(observed_owner),
+        ),
+        MacosNativeRuntimeReconciliation::Absent(audit) => {
+            ExtensionRuntimeOwnershipDisposition::Absent(
+                host.extension_runtime_registry.mint_macos_absence(
+                    ticket,
+                    observed_owner,
+                    audit,
+                )?,
+            )
+        }
+        MacosNativeRuntimeReconciliation::StillUncertain(failure) => {
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: map_native_failure(failure),
+                evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
+                    observed_owner,
+                )),
+            }
+        }
+    };
+    complete_reconciliation(host, ticket, disposition)
+}
+
+fn complete_reconciliation(
+    host: &mut EngineHost,
+    ticket: NativeCallTicket,
+    disposition: ExtensionRuntimeOwnershipDisposition,
+) -> Result<(), ExtensionRuntimeHostBindError> {
+    if !host
+        .extension_runtime_registry
+        .complete_native_reconciliation(ticket, disposition, PlatformOwnerBundle::Vacant)?
+    {
         host.extension_runtime_registry.fail_invariant();
         return Err(ExtensionRuntimeHostBindError::InternalInvariant);
     }
