@@ -139,10 +139,9 @@ impl BundledReleaseByteSource for FixtureSource {
         }
         let bytes = match resource.kind() {
             BundledReleaseResourceKind::TreeIndex { .. } => fixture::TREE_INDEX_BYTES,
-            BundledReleaseResourceKind::TreeFile { target, .. }
-                if target.as_str() == "manifest.json" =>
-            {
-                fixture::MANIFEST_BYTES
+            BundledReleaseResourceKind::TreeFile { target, .. } => {
+                fixture::tree_file_bytes(target.as_str())
+                    .ok_or(BundledReleaseSourceError::UnsupportedResource)?
             }
             BundledReleaseResourceKind::LegalNotice { target, .. }
                 if target.as_str() == "licenses/fixture.txt" =>
@@ -491,7 +490,20 @@ impl EligibilityFixture {
                 Arc::clone(&manifest),
             )])
             .unwrap();
-        let grants = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+        let grants = ExtensionGrantAuthority::initialize(
+            &install,
+            manifest.declarations().required_api().names().to_vec(),
+            manifest
+                .declarations()
+                .required_host_authorities()
+                .into_iter()
+                .cloned()
+                .collect(),
+            false,
+            false,
+            &manifest,
+        )
+        .unwrap();
         let cohort =
             ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![grants]).unwrap();
         Self {
@@ -4159,8 +4171,22 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
             observation.runtime.instance().install_id(),
             ExtensionInstallId::from(263)
         );
-        assert!(observation.api.is_empty());
-        assert!(observation.hosts.is_empty());
+        assert_eq!(
+            observation.api,
+            vec![(
+                "storage".to_owned(),
+                ExtensionNativeGrantRequirement::Required,
+                ExtensionNativeGrantDecision::Granted,
+            )]
+        );
+        assert_eq!(
+            observation.hosts,
+            vec![(
+                "http://127.0.0.1/*".to_owned(),
+                ExtensionNativeGrantRequirement::Required,
+                ExtensionNativeGrantDecision::Granted,
+            )]
+        );
         assert!(!observation.file_scheme_access);
         assert!(!observation.private_context_access);
     }
@@ -4279,8 +4305,22 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
             observation.runtime.instance().install_id(),
             ExtensionInstallId::from(271)
         );
-        assert!(observation.api.is_empty());
-        assert!(observation.hosts.is_empty());
+        assert_eq!(
+            observation.api,
+            vec![(
+                "storage".to_owned(),
+                ExtensionNativeGrantRequirement::Required,
+                ExtensionNativeGrantDecision::Granted,
+            )]
+        );
+        assert_eq!(
+            observation.hosts,
+            vec![(
+                "http://127.0.0.1/*".to_owned(),
+                ExtensionNativeGrantRequirement::Required,
+                ExtensionNativeGrantDecision::Granted,
+            )]
+        );
         assert!(!observation.file_scheme_access);
         assert!(!observation.private_context_access);
     }

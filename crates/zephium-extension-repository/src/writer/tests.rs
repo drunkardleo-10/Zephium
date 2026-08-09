@@ -130,14 +130,11 @@ impl BundledReleaseByteSource for FixtureSource {
             BundledReleaseResourceKind::TreeIndex { .. } => {
                 (ServedResource::TreeIndex, fixture::TREE_INDEX_BYTES)
             }
-            BundledReleaseResourceKind::TreeFile { target, .. }
-                if target.as_str() == "manifest.json" =>
-            {
-                (
-                    ServedResource::TreeFile(target.as_str().to_owned()),
-                    fixture::MANIFEST_BYTES,
-                )
-            }
+            BundledReleaseResourceKind::TreeFile { target, .. } => (
+                ServedResource::TreeFile(target.as_str().to_owned()),
+                fixture::tree_file_bytes(target.as_str())
+                    .ok_or(BundledReleaseSourceError::UnsupportedResource)?,
+            ),
             BundledReleaseResourceKind::LegalNotice { target, .. }
                 if target.as_str() == "licenses/fixture.txt" =>
             {
@@ -364,7 +361,20 @@ impl PinBindingFixture {
                 Arc::clone(&manifest),
             )])
             .unwrap();
-        let grants = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
+        let grants = ExtensionGrantAuthority::initialize(
+            &install,
+            manifest.declarations().required_api().names().to_vec(),
+            manifest
+                .declarations()
+                .required_host_authorities()
+                .into_iter()
+                .cloned()
+                .collect(),
+            false,
+            false,
+            &manifest,
+        )
+        .unwrap();
         let cohort =
             ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![grants]).unwrap();
         Self {
@@ -523,7 +533,17 @@ fn preparation_requests() -> [ServedResource; 2] {
     ]
 }
 
-fn full_requests() -> [ServedResource; 3] {
+fn full_requests() -> [ServedResource; 5] {
+    [
+        ServedResource::TreeIndex,
+        ServedResource::TreeFile("manifest.json".to_owned()),
+        ServedResource::TreeFile("background.js".to_owned()),
+        ServedResource::TreeFile("content.js".to_owned()),
+        ServedResource::LegalNotice("licenses/fixture.txt".to_owned()),
+    ]
+}
+
+fn preparation_and_legal_requests() -> [ServedResource; 3] {
     [
         ServedResource::TreeIndex,
         ServedResource::TreeFile("manifest.json".to_owned()),
@@ -1000,7 +1020,7 @@ fn clean_post_callback_failure_aborts_and_exact_retry_reuses_inert_finals() {
     let (_authority, active, _rollback) = fixture_authority();
     let harness = Harness::new();
     let mut repository = harness.open();
-    let mut failing = FixtureSource::active(&active).fail_after_callback(3);
+    let mut failing = FixtureSource::active(&active).fail_after_callback(full_requests().len());
 
     assert_eq!(
         repository.materialize_active_bundled_package(
@@ -1027,7 +1047,7 @@ fn clean_post_callback_failure_aborts_and_exact_retry_reuses_inert_finals() {
         ),
         Ok(BundledPackageMaterializationOutcome::Materialized)
     );
-    retry.assert_requests(&full_requests());
+    retry.assert_requests(&preparation_and_legal_requests());
     drop(repository);
 
     let mut repository = harness.open();
@@ -2225,11 +2245,11 @@ fn every_object_publication_frontier_reuses_only_exact_inert_finals() {
     for (fault, expected_retry_requests) in [
         (
             ObjectPublicationFaultPoint::AfterTree,
-            full_requests().to_vec(),
+            preparation_and_legal_requests().to_vec(),
         ),
         (
             ObjectPublicationFaultPoint::AfterTreeIndex,
-            full_requests().to_vec(),
+            preparation_and_legal_requests().to_vec(),
         ),
         (
             ObjectPublicationFaultPoint::AfterLegal,

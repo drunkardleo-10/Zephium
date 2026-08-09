@@ -66,10 +66,9 @@ impl crate::BundledReleaseByteSource for FixtureSource {
         }
         let bytes = match resource.kind() {
             crate::BundledReleaseResourceKind::TreeIndex { .. } => fixture::TREE_INDEX_BYTES,
-            crate::BundledReleaseResourceKind::TreeFile { target, .. }
-                if target.as_str() == "manifest.json" =>
-            {
-                fixture::MANIFEST_BYTES
+            crate::BundledReleaseResourceKind::TreeFile { target, .. } => {
+                fixture::tree_file_bytes(target.as_str())
+                    .ok_or(crate::BundledReleaseSourceError::UnsupportedResource)?
             }
             crate::BundledReleaseResourceKind::LegalNotice { target, .. }
                 if target.as_str() == "licenses/fixture.txt" =>
@@ -486,9 +485,9 @@ fn install_maximum_cohort(repository: &mut ExtensionRepository) -> MaximumCohort
         template_set.packages[0].package_record_id,
         template_package_id
     );
-    assert_eq!(template_package.tree_index.file_count, 1);
+    assert_eq!(template_package.tree_index.file_count, 3);
     assert_eq!(template_package.tree_index.directory_count, 0);
-    assert_eq!(template_package.tree_index.total_entry_count, 1);
+    assert_eq!(template_package.tree_index.total_entry_count, 3);
 
     let mut trees = vec![MaximumCohortTree {
         tree_sha256: template_package.tree_index.tree_sha256,

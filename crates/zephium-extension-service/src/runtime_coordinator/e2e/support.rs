@@ -432,7 +432,20 @@ fn register_enabled_install(
     let installed_row = installed
         .install
         .expect("install must return its durable row");
-    let grants = ExtensionGrantAuthority::new(&installed_row, &manifest).unwrap();
+    let grants = ExtensionGrantAuthority::initialize(
+        &installed_row,
+        manifest.declarations().required_api().names().to_vec(),
+        manifest
+            .declarations()
+            .required_host_authorities()
+            .into_iter()
+            .cloned()
+            .collect(),
+        false,
+        false,
+        &manifest,
+    )
+    .unwrap();
     let ExtensionGrantMutationOutcome::Applied(initialized) = grant_mutation(
         store,
         profile,
@@ -564,10 +577,9 @@ impl BundledReleaseByteSource for FixtureSource {
     {
         let bytes = match resource.kind() {
             BundledReleaseResourceKind::TreeIndex { .. } => fixture::TREE_INDEX_BYTES,
-            BundledReleaseResourceKind::TreeFile { target, .. }
-                if target.as_str() == "manifest.json" =>
-            {
-                fixture::MANIFEST_BYTES
+            BundledReleaseResourceKind::TreeFile { target, .. } => {
+                fixture::tree_file_bytes(target.as_str())
+                    .ok_or(BundledReleaseSourceError::UnsupportedResource)?
             }
             BundledReleaseResourceKind::LegalNotice { target, .. }
                 if target.as_str() == "licenses/fixture.txt" =>

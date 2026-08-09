@@ -246,8 +246,20 @@ fn provision_store(
     let installed_row = installed
         .install
         .ok_or_else(|| "Store omitted installed extension row".to_owned())?;
-    let grants = ExtensionGrantAuthority::new(&installed_row, manifest)
-        .map_err(|error| format!("cannot initialize extension grant authority: {error:?}"))?;
+    let declarations = manifest.declarations();
+    let grants = ExtensionGrantAuthority::initialize(
+        &installed_row,
+        declarations.required_api().names().to_vec(),
+        declarations
+            .required_host_authorities()
+            .into_iter()
+            .cloned()
+            .collect(),
+        false,
+        false,
+        manifest,
+    )
+    .map_err(|error| format!("cannot initialize extension grant authority: {error:?}"))?;
     let ExtensionGrantMutationOutcome::Applied(initialized) = grant_mutation(
         store,
         profile,
@@ -433,10 +445,9 @@ impl BundledReleaseByteSource for FixtureSource {
     {
         let bytes = match resource.kind() {
             BundledReleaseResourceKind::TreeIndex { .. } => fixture::TREE_INDEX_BYTES,
-            BundledReleaseResourceKind::TreeFile { target, .. }
-                if target.as_str() == "manifest.json" =>
-            {
-                fixture::MANIFEST_BYTES
+            BundledReleaseResourceKind::TreeFile { target, .. } => {
+                fixture::tree_file_bytes(target.as_str())
+                    .ok_or(BundledReleaseSourceError::UnsupportedResource)?
             }
             BundledReleaseResourceKind::LegalNotice { target, .. }
                 if target.as_str() == "licenses/fixture.txt" =>
