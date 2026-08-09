@@ -8,9 +8,9 @@ license.workspace = true
 # Builds native, main-thread probe executables used only by platform CI. These
 # binaries are excluded from ordinary desktop builds unless explicitly enabled.
 native-isolation-probes = []
-# Builds the public macOS 15.4+ WKWebExtension feasibility probe. This remains
-# separate from native-isolation-probes so ordinary product and test builds do
-# not link or expose an extension runtime before its admission gates pass.
+# Builds the macOS 15.4+ WKWebExtension behavioral and lifecycle probe. This
+# remains separate from native-isolation-probes so ordinary builds do not carry
+# the probe fixture, delegate graph, HTTP harness, or diagnostic surfaces.
 native-web-extension-probes = [
     "dep:tempfile",
     "objc2-web-kit/objc2-app-kit",

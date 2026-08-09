@@ -563,10 +563,11 @@ Delivery is layered and measured:
   active principal in each eligible live content controller/view, plus an
   isolated JS context in each eligible frame/document; both cardinalities are
   explicitly capped; and
-- the macOS/Linux MV3 compatibility subset requires a bounded Zephium-owned
+- the Linux MV3 compatibility subset requires a bounded Zephium-owned
   event-runtime view/context plus any chosen extension-UI or capability-specific
-  offscreen resources; WebView2-native extension workers are engine-managed and
-  require separate count admission and measured process-resource gates.
+  offscreen resources; WKWebExtension and WebView2-native extension workers are
+  engine-managed and require separate count admission and measured
+  process-resource gates.
 
 On macOS 15.4 and newer, Apple's public `WKWebExtensionController` stack is the
 preferred native MV3 candidate. A feature-gated live probe proves controller
@@ -575,7 +576,7 @@ per-extension isolated worlds, frame matching, exact context unload/reload,
 preservation of Zephium's protected scripts, MV3 background execution, and
 same-principal extension-storage isolation across two persistent controller
 namespaces and fresh controller instances. A second behavioral gate constructs
-two regular profiles through the exact dormant product registry and one
+two regular profiles through the exact product registry and one
 nonpersistent private session. It pointer-attests each view/controller/store
 binding, proves mutually exclusive cookie and extension-storage state, proves
 regular reconstruction and private noninheritance, and publishes distinct
@@ -593,8 +594,9 @@ readback. This distinction is behavioral: bulk dictionary assignment alone
 does not recompute content-script eligibility for a loaded context. The live
 probe therefore proves host-grant activation, revocation, and restoration on
 subsequent navigations, then unloads the context before clearing and verifying
-final absence. Production native activation remains disabled until this
-boundary is joined to authenticated package and operation authority.
+final absence. The production macOS adapter reaches this boundary only through
+authenticated package, grant, ownership-journal, and operation authority
+reconstructed inside the serialized extension service.
 
 The controller registry now separates persistent namespace identity from
 quiescence. View construction and exact controller borrowing revalidate the
@@ -607,7 +609,7 @@ not a startup side effect: the native lifecycle must supply the exact durable
 ceiling and idempotently reuses an existing entry, and a borrow never creates a
 missing namespace.
 
-The next dormant boundary constructs one move-only macOS owner from a
+The native activation boundary constructs one move-only macOS owner from a
 provider-validated package-root lease, a complete compiled grant snapshot, an
 exact catalog-authenticated 32-byte Chromium identifier, and the retained
 profile controller. The root path is borrowed exactly once; only a byte-for-byte
@@ -619,10 +621,14 @@ load. Teardown unloads the exact context, clears every bounded native key seen
 at cleanup (not merely keys from the last plan), and mints the macOS absence
 audit only after controller-membership and unloaded-state readback. A native
 exception while entering asynchronous parsing is ownership-uncertain, never a
-never-entered rejection. The live WebKit probe executes this construction and
-retirement seam, but the product factory remains disabled until it is joined to
-activation, retirement, and restart reconciliation as one recoverable
-lifecycle.
+never-entered rejection. The ordinary macOS factory joins activation,
+retirement, same-process reconciliation, restart reconciliation, and shutdown
+drain as one recoverable lifecycle. Startup first settles cleanup, then loads a
+bounded canonical inventory of enabled regular runtimes and replays the same
+authority transaction before Shell may construct any profile webview. Hydration
+retries resume monotonically without re-entering cleanup around a runtime
+already acquired by the same worker; strict runtime-capacity deferrals and
+exact rejections are retained and counted in readiness evidence.
 
 An extension-origin page is not navigated in a normal profile view. WebKit
 requires the loaded context's customized
@@ -633,10 +639,14 @@ per installed extension lives for the private-session lifetime; its UI views
 may be recreated from that context, while destroying the session context,
 controller, and nonpersistent store is the storage-erasure boundary.
 
-These probes do not prove authenticated package admission, production
-delegate/API mediation, product extension UI, quotas/endurance, or product
-startup/crash reconciliation, so ordinary builds still expose no extension
-runtime. Older admitted macOS versions and Linux require a Zephium
+The repository/service tests prove authenticated package admission and
+startup/crash reconciliation against a bounded native fake, while the live
+WebKit probe proves the platform adapter. A single product-shaped test has not
+yet joined those two evidence chains, and production provisioning remains
+deliberately empty; ordinary release builds therefore expose no extension
+runtime. The remaining release gaps include delegate/API mediation, extension
+UI, quotas, endurance, and the pinned compatibility contract. Older admitted
+macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
 pass. Windows has two separate candidates: curated MV3 packages through a
@@ -683,8 +693,9 @@ native-host authority, profile retirement, and shutdown drain. It refuses clean
 worker evidence while a worker-owned runtime or attached authority remains
 unresolved or accepted/completed command counts differ. That evidence proves
 only worker/resource drain, not durable-journal or native-owner absence.
-Production native adapters and product activation remain disabled, so this
-coordinator is not a release-enablement claim. Reconstruction also rejects
+The macOS native adapter is enabled, but sealed product provisioning remains
+empty and the Windows/Linux adapters remain unavailable, so this coordinator
+is not a release-enablement claim. Reconstruction also rejects
 unreachable clock histories: operation and incarnation high-water
 marks are equal, every row binds the same operation/incarnation, phase and row
 revision agree, and with `C = high_water - live_rows` plus

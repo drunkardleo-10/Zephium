@@ -1,9 +1,9 @@
 //! Live admission probe for Apple's public macOS browser-extension API.
 //!
 //! This module is compiled only for the `native-web-extension-probes` feature.
-//! It deliberately has no product-facing registration or construction entry
-//! point: passing the probe is evidence for a future platform backend, not an
-//! extension-support enablement decision.
+//! Its fixture, delegates, HTTP harness, and diagnostics have no product entry
+//! point. Passing it proves the native backend behavior, but does not provision
+//! a product extension catalog or complete the user-facing extension feature.
 
 mod persistent_runtime;
 mod profile_isolation;
