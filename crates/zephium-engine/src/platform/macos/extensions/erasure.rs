@@ -29,7 +29,7 @@ use zephium_core::extensions::{
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::ProfileDataErasureOutcome;
 
-use super::controller_registry::{validate_entry, PersistentControllerEntry};
+use super::controller_registry::{validate_quiescent_entry, PersistentControllerEntry};
 
 const MAX_RECORD_ERRORS: usize = 3;
 const MAX_PERSISTENT_READBACK_POLLS: usize = 512;
@@ -237,7 +237,7 @@ impl PersistentControllerErasure {
                 .try_borrow()
                 .map_err(|_| ErasureFailure::ReentrantState)?;
             let owner = owner.as_ref().ok_or(ErasureFailure::OwnerMissing)?;
-            validate_entry(owner).map_err(|_| ErasureFailure::InvalidOwner)?;
+            validate_quiescent_entry(owner).map_err(|_| ErasureFailure::InvalidOwner)?;
             let mtm = MainThreadMarker::new().ok_or(ErasureFailure::MainThreadRequired)?;
             NativeDataTypes::discover(mtm)
         });
@@ -442,7 +442,7 @@ impl ErasureMachine {
         }
         let deadline = new_poll_deadline(Instant::now())?;
         let owner = self.witness.take_owner()?;
-        validate_entry(&owner).map_err(|_| ErasureFailure::InvalidOwner)?;
+        validate_quiescent_entry(&owner).map_err(|_| ErasureFailure::InvalidOwner)?;
         let weak = Weak::from_retained(&owner.controller);
         drop(owner);
         self.schedule_controller_release_poll(weak, 1, deadline)

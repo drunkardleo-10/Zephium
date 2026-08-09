@@ -596,6 +596,17 @@ subsequent navigations, then unloads the context before clearing and verifying
 final absence. Production native activation remains disabled until this
 boundary is joined to authenticated package and operation authority.
 
+The controller registry now separates persistent namespace identity from
+quiescence. View construction and exact controller borrowing revalidate the
+profile identifier, persistent controller configuration, and the exact
+`WKWebsiteDataStore` pointer while allowing that controller to contain active
+contexts. Creation, profile erasure, and clean shutdown additionally require
+the controller to contain no contexts or extensions. Controller preparation is
+not a startup side effect: the native lifecycle must supply the exact durable
+`MacosControllerV1` namespace scope, preparation is bounded to the profile
+ceiling and idempotently reuses an existing entry, and a borrow never creates a
+missing namespace.
+
 The next dormant boundary constructs one move-only macOS owner from a
 provider-validated package-root lease, a complete compiled grant snapshot, an
 exact catalog-authenticated 32-byte Chromium identifier, and the retained

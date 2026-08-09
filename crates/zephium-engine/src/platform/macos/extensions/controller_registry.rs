@@ -1,11 +1,9 @@
-//! Dormant, bounded ownership of profile-scoped WebKit extension controllers.
+//! Bounded ownership of profile-scoped WebKit extension controllers.
 //!
-//! Ordinary product code can only consume an entry that already exists. The
-//! sole constructor is compiled for tests and the native feasibility probe,
-//! so adding this registry cannot enable native extensions or allocate a
-//! controller during host installation/view construction. A later adapter
-//! must first join package admission, grants, erasure, and lifecycle evidence
-//! before exposing a production preparation authority.
+//! Construction remains explicit and lifecycle-authorized: startup and view
+//! construction never allocate a controller. The native runtime adapter may
+//! prepare one only after the Store has durably entered the macOS namespace,
+//! and must supply that exact namespace scope on every preparation or borrow.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -16,16 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use objc2::rc::Retained;
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 use objc2::runtime::{AnyClass, Sel};
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 use objc2::sel;
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 use objc2::MainThreadOnly;
 use objc2_foundation::MainThreadMarker;
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUUID};
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
 use objc2_web_kit::{WKWebExtensionController, WKWebViewConfiguration, WKWebsiteDataStore};
 use zephium_core::extensions::ExtensionNativeNamespaceScope;
@@ -45,9 +38,7 @@ pub(crate) enum ControllerRegistryError {
     Sealed,
     IntegrityFailed,
     MainThreadRequired,
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     InvalidRuntimeVersion,
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     IncompleteRuntime,
     NativeException,
     NonPersistentStore,
@@ -55,9 +46,7 @@ pub(crate) enum ControllerRegistryError {
     NonPersistentController,
     ControllerIdentifierMismatch,
     ControllerStoreMismatch,
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     ControllerAlias,
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     StoreAlias,
     UnexpectedLoadedContext,
     UnexpectedLoadedExtension,
@@ -81,9 +70,7 @@ impl fmt::Display for ControllerRegistryError {
             Self::MainThreadRequired => {
                 "macOS extension-controller work requires the application main thread"
             }
-            #[cfg(any(test, feature = "native-web-extension-probes"))]
             Self::InvalidRuntimeVersion => "macOS returned an invalid operating-system version",
-            #[cfg(any(test, feature = "native-web-extension-probes"))]
             Self::IncompleteRuntime => "macOS is missing a required public WebKit extension API",
             Self::NativeException => {
                 "WebKit raised an exception at the extension-controller boundary"
@@ -103,15 +90,13 @@ impl fmt::Display for ControllerRegistryError {
             Self::ControllerStoreMismatch => {
                 "an extension controller did not retain its exact profile website data store"
             }
-            #[cfg(any(test, feature = "native-web-extension-probes"))]
             Self::ControllerAlias => "two extension profiles shared one native controller",
-            #[cfg(any(test, feature = "native-web-extension-probes"))]
             Self::StoreAlias => "two extension profiles shared one native website data store",
             Self::UnexpectedLoadedContext => {
-                "a dormant extension controller unexpectedly contains a loaded context"
+                "a quiescent extension controller unexpectedly contains a loaded context"
             }
             Self::UnexpectedLoadedExtension => {
-                "a dormant extension controller unexpectedly contains a loaded extension"
+                "a quiescent extension controller unexpectedly contains a loaded extension"
             }
             Self::EntryChanged => {
                 "the prepared extension-controller entry changed during view construction"
@@ -183,7 +168,6 @@ impl<T> RegistrySlots<T> {
         Ok(SlotAdmission::Vacant)
     }
 
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     fn insert_vacant(
         &mut self,
         profile: ProfileId,
@@ -227,10 +211,8 @@ impl<T> RegistrySlots<T> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeAvailability {
     Unprobed,
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     Unavailable,
     Supported,
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
     Broken,
 }
 
@@ -272,9 +254,8 @@ impl PreparedDurableViewConfiguration {
     }
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProbeControllerPreparation {
+pub(crate) enum ControllerPreparation {
     RuntimeUnavailable,
     Prepared,
 }
@@ -306,8 +287,8 @@ impl PersistentControllerRegistry {
     }
 
     /// Return a fresh custom configuration only for an exact entry previously
-    /// admitted by the test/probe seam. A missing entry is deliberately not a
-    /// request to allocate one, preserving dormant product behavior.
+    /// admitted by the native-runtime seam. A missing entry is deliberately
+    /// not a request to allocate one.
     pub(crate) fn configuration_for_durable_profile(
         &mut self,
         profile: ProfileId,
@@ -320,7 +301,7 @@ impl PersistentControllerRegistry {
             return Err(ControllerRegistryError::ErasureInFlight);
         };
         let prepared = catch_native(|| {
-            validate_entry(entry)?;
+            validate_entry_identity(entry)?;
             let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
             // Every Wry view gets a fresh configuration/user-content
             // controller. Wry is allowed to install per-view scripts and
@@ -382,7 +363,7 @@ impl PersistentControllerRegistry {
                     {
                         return Err(ControllerRegistryError::EntryChanged);
                     }
-                    validate_entry(entry)?;
+                    validate_entry_identity(entry)?;
                     validate_view_configuration(&configuration, &proof.store, &proof.controller)
                 }
                 None => {
@@ -433,7 +414,7 @@ impl PersistentControllerRegistry {
 
         match slot {
             PersistentControllerSlot::Prepared(entry) => {
-                if let Err(error) = catch_native(|| validate_entry(entry)) {
+                if let Err(error) = catch_native(|| validate_quiescent_entry(entry)) {
                     self.slots.poison();
                     return Err(error);
                 }
@@ -525,16 +506,15 @@ impl PersistentControllerRegistry {
     }
 
     /// Called only after every Wry view and warm spare has been dropped.
-    /// Loaded contexts are impossible in this slice; observing one makes the
-    /// clean-shutdown proof permanently false, while native roots are still
-    /// released rather than leaked.
+    /// A loaded context makes the clean-shutdown proof permanently false,
+    /// while native roots are still released rather than leaked.
     pub(crate) fn release_all_after_views(&mut self) -> bool {
         if !self.slots.sealed {
             self.slots.poison();
         }
         let entries_are_inert = self.slots.entries.values().all(|slot| match slot {
             PersistentControllerSlot::Prepared(entry) => {
-                catch_native(|| validate_entry(entry)).is_ok()
+                catch_native(|| validate_quiescent_entry(entry)).is_ok()
             }
             PersistentControllerSlot::Erasing(_) => false,
         });
@@ -545,17 +525,25 @@ impl PersistentControllerRegistry {
         self.slots.is_quiescent()
     }
 
-    #[cfg(any(test, feature = "native-web-extension-probes"))]
-    #[allow(dead_code)] // Wired only by the main-thread native product-path probe.
-    pub(crate) fn prepare_for_native_probe(
+    /// Prepares one persistent controller only after durable native ownership
+    /// has established the exact namespace obligation.
+    ///
+    /// Replays return the existing controller. They never replace a native
+    /// object, and ordinary startup/view construction cannot call this seam.
+    #[allow(dead_code)] // Consumed when the complete macOS host lifecycle is enabled.
+    pub(crate) fn prepare_for_native_runtime(
         &mut self,
         profile: ProfileId,
-    ) -> Result<ProbeControllerPreparation, ControllerRegistryError> {
+        namespace_scope: ExtensionNativeNamespaceScope,
+    ) -> Result<ControllerPreparation, ControllerRegistryError> {
+        if namespace_scope != ExtensionNativeNamespaceScope::MacosControllerV1 {
+            return Err(ControllerRegistryError::UnsupportedNamespaceScope);
+        }
         match self.ensure_runtime_available()? {
-            ProbeControllerPreparation::RuntimeUnavailable => {
-                return Ok(ProbeControllerPreparation::RuntimeUnavailable)
+            ControllerPreparation::RuntimeUnavailable => {
+                return Ok(ControllerPreparation::RuntimeUnavailable)
             }
-            ProbeControllerPreparation::Prepared => {}
+            ControllerPreparation::Prepared => {}
         }
         match self.slots.admission(profile)? {
             SlotAdmission::Existing => {
@@ -565,13 +553,13 @@ impl PersistentControllerRegistry {
                     else {
                         return Err(ControllerRegistryError::ErasureInFlight);
                     };
-                    validate_entry(entry)
+                    validate_entry_identity(entry)
                 });
                 if result.is_err() {
                     self.slots.poison();
-                    return result.map(|()| ProbeControllerPreparation::Prepared);
+                    return result.map(|()| ControllerPreparation::Prepared);
                 }
-                return Ok(ProbeControllerPreparation::Prepared);
+                return Ok(ControllerPreparation::Prepared);
             }
             SlotAdmission::Vacant => {}
         }
@@ -610,17 +598,51 @@ impl PersistentControllerRegistry {
             self.slots.poison();
             return Err(error);
         }
-        Ok(ProbeControllerPreparation::Prepared)
+        Ok(ControllerPreparation::Prepared)
+    }
+
+    /// Borrows an already-prepared exact controller without allocating a
+    /// namespace as a side effect.
+    #[allow(dead_code)] // Consumed when the complete macOS host lifecycle is enabled.
+    pub(crate) fn controller_for_native_runtime(
+        &mut self,
+        profile: ProfileId,
+        namespace_scope: ExtensionNativeNamespaceScope,
+    ) -> Result<Retained<WKWebExtensionController>, ControllerRegistryError> {
+        if namespace_scope != ExtensionNativeNamespaceScope::MacosControllerV1 {
+            return Err(ControllerRegistryError::UnsupportedNamespaceScope);
+        }
+        self.slots.admission(profile)?;
+        let result = catch_native(|| {
+            let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+            else {
+                return Err(ControllerRegistryError::EntryChanged);
+            };
+            validate_entry_identity(entry)?;
+            Ok(entry.controller.clone())
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
     }
 
     #[cfg(any(test, feature = "native-web-extension-probes"))]
+    #[allow(dead_code)] // Product-path probes consume this through feature-gated modules.
+    pub(crate) fn prepare_for_native_probe(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<ControllerPreparation, ControllerRegistryError> {
+        self.prepare_for_native_runtime(profile, ExtensionNativeNamespaceScope::MacosControllerV1)
+    }
+
     fn ensure_runtime_available(
         &mut self,
-    ) -> Result<ProbeControllerPreparation, ControllerRegistryError> {
+    ) -> Result<ControllerPreparation, ControllerRegistryError> {
         match self.runtime {
-            RuntimeAvailability::Supported => return Ok(ProbeControllerPreparation::Prepared),
+            RuntimeAvailability::Supported => return Ok(ControllerPreparation::Prepared),
             RuntimeAvailability::Unavailable => {
-                return Ok(ProbeControllerPreparation::RuntimeUnavailable)
+                return Ok(ControllerPreparation::RuntimeUnavailable)
             }
             RuntimeAvailability::Broken => return Err(ControllerRegistryError::IntegrityFailed),
             RuntimeAvailability::Unprobed => {}
@@ -628,11 +650,11 @@ impl PersistentControllerRegistry {
         match discover_runtime() {
             Ok(RuntimeAvailability::Unavailable) => {
                 self.runtime = RuntimeAvailability::Unavailable;
-                Ok(ProbeControllerPreparation::RuntimeUnavailable)
+                Ok(ControllerPreparation::RuntimeUnavailable)
             }
             Ok(RuntimeAvailability::Supported) => {
                 self.runtime = RuntimeAvailability::Supported;
-                Ok(ProbeControllerPreparation::Prepared)
+                Ok(ControllerPreparation::Prepared)
             }
             Ok(RuntimeAvailability::Unprobed | RuntimeAvailability::Broken) => {
                 self.runtime = RuntimeAvailability::Broken;
@@ -670,7 +692,7 @@ fn validate_store(
     Ok(())
 }
 
-pub(super) fn validate_entry(
+pub(super) fn validate_entry_identity(
     entry: &PersistentControllerEntry,
 ) -> Result<(), ControllerRegistryError> {
     validate_store(&entry.store, entry.profile)?;
@@ -695,6 +717,13 @@ pub(super) fn validate_entry(
         return Err(ControllerRegistryError::ControllerStoreMismatch);
     }
     validate_store(&basis_store, entry.profile)?;
+    Ok(())
+}
+
+pub(super) fn validate_quiescent_entry(
+    entry: &PersistentControllerEntry,
+) -> Result<(), ControllerRegistryError> {
+    validate_entry_identity(entry)?;
     if unsafe { entry.controller.extensionContexts() }.count() != 0 {
         return Err(ControllerRegistryError::UnexpectedLoadedContext);
     }
@@ -718,16 +747,9 @@ fn validate_view_configuration(
     if !std::ptr::eq(Retained::as_ptr(&actual_controller), controller) {
         return Err(ControllerRegistryError::ViewControllerMismatch);
     }
-    if unsafe { controller.extensionContexts() }.count() != 0 {
-        return Err(ControllerRegistryError::UnexpectedLoadedContext);
-    }
-    if unsafe { controller.extensions() }.count() != 0 {
-        return Err(ControllerRegistryError::UnexpectedLoadedExtension);
-    }
     Ok(())
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 fn create_entry(profile: ProfileId) -> Result<PersistentControllerEntry, ControllerRegistryError> {
     let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
     let identifier = NSUUID::from_bytes(profile.bytes());
@@ -754,11 +776,10 @@ fn create_entry(profile: ProfileId) -> Result<PersistentControllerEntry, Control
         store,
         controller,
     };
-    validate_entry(&entry)?;
+    validate_quiescent_entry(&entry)?;
     Ok(entry)
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
     if version.majorVersion < 0 || version.minorVersion < 0 || version.patchVersion < 0 {
@@ -822,17 +843,14 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
     Ok(RuntimeAvailability::Supported)
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 fn runtime_supports_controllers(major: isize, minor: isize) -> bool {
     major > 15 || (major == 15 && minor >= 4)
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 fn required_class(name: &str) -> Result<&'static AnyClass, ControllerRegistryError> {
     NSClassFromString(&NSString::from_str(name)).ok_or(ControllerRegistryError::IncompleteRuntime)
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 fn require_instance_selectors(
     class: &AnyClass,
     selectors: &[Sel],
@@ -847,7 +865,6 @@ fn require_instance_selectors(
     }
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
 fn require_class_selectors(
     class: &AnyClass,
     selectors: &[Sel],
@@ -933,6 +950,21 @@ mod tests {
         ));
         assert!(registry.slots.entries.is_empty());
         assert_eq!(registry.next_erasure_generation, 0);
+    }
+
+    #[test]
+    fn native_controller_borrow_never_creates_a_missing_namespace() {
+        let profile = ProfileId::from(42);
+        let mut registry = PersistentControllerRegistry::new();
+        assert!(matches!(
+            registry.controller_for_native_runtime(
+                profile,
+                ExtensionNativeNamespaceScope::MacosControllerV1,
+            ),
+            Err(ControllerRegistryError::EntryChanged)
+        ));
+        assert!(registry.slots.entries.is_empty());
+        assert_eq!(registry.runtime, RuntimeAvailability::Unprobed);
     }
 
     #[test]

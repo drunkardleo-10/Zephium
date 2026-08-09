@@ -1,8 +1,8 @@
-//! macOS native-extension policy and dormant native ownership foundations.
+//! macOS native-extension policy and native ownership foundations.
 //!
-//! The grant compiler is side-effect-free. The controller registry can retain
-//! only entries explicitly created by its test/probe seam; ordinary product
-//! code has no preparation authority and the runtime adapter remains disabled.
+//! The grant compiler is side-effect-free. Controller allocation is explicit,
+//! bounded, and requires the durable namespace scope; the product runtime
+//! adapter remains disabled until its complete lifecycle is joined.
 
 mod controller_registry;
 mod erasure;
@@ -11,7 +11,7 @@ mod grants;
 mod native_runtime;
 
 #[cfg(feature = "native-web-extension-probes")]
-pub(crate) use controller_registry::ProbeControllerPreparation;
+pub(crate) use controller_registry::ControllerPreparation as ProbeControllerPreparation;
 pub(crate) use controller_registry::{ControllerErasureSettlement, PersistentControllerRegistry};
 pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 #[cfg(feature = "native-web-extension-probes")]
