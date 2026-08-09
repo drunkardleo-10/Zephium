@@ -92,6 +92,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 // already-accepted user FIFO.
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
     + zephium_core::session::MAX_SESSION_PROFILES * 6
+    + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + 3;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
@@ -979,6 +980,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::RuntimeRestartRequired
                     | EngineEvent::ContentRulesSettled { .. }
                     | EngineEvent::UserContentSettled { .. }
+                    | EngineEvent::ExtensionBrowserRequested { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }

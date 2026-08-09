@@ -4,6 +4,7 @@ mod blocker;
 mod bootstrap;
 mod effects;
 mod engine_events;
+mod extension_browser_requests;
 mod extension_browser_surface;
 mod favicons;
 mod operations;
@@ -63,9 +64,13 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+use zephium_core::extensions::ExtensionBrowserRequestId;
 use zephium_core::extensions::{
-    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
-    ExtensionBrowserWindow, ExtensionNativeNamespaceScope,
+    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
+    ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
+    ExtensionNativeNamespaceScope,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};

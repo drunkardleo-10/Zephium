@@ -21,6 +21,129 @@ pub const MAX_EXTENSION_BROWSER_WINDOWS: usize = crate::session::MAX_SESSION_PRO
 /// session aggregate can retain process-wide.
 pub const MAX_EXTENSION_BROWSER_TABS: usize = crate::session::MAX_SESSION_ITEMS;
 
+/// Maximum native browser mutations that may await Shell settlement across
+/// the complete active runtime pool. Requests are never coalesced because
+/// every WebExtension completion handler must settle exactly once.
+pub const MAX_PENDING_EXTENSION_BROWSER_REQUESTS: usize = 48;
+pub const MAX_PENDING_EXTENSION_BROWSER_REQUESTS_PER_PROFILE: usize = 16;
+pub const MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES: usize = 8 * 1024;
+
+/// Process-local correlation identity for one native WebExtension browser
+/// mutation. It is neither persisted nor accepted from extension JavaScript.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ExtensionBrowserRequestId(u64);
+
+impl ExtensionBrowserRequestId {
+    pub const fn new(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// One validated native request against Shell-owned logical browser state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionBrowserRequest {
+    profile: ProfileId,
+    id: ExtensionBrowserRequestId,
+    action: ExtensionBrowserRequestAction,
+}
+
+impl ExtensionBrowserRequest {
+    pub fn new(
+        profile: ProfileId,
+        id: ExtensionBrowserRequestId,
+        action: ExtensionBrowserRequestAction,
+    ) -> Result<Self, ExtensionBrowserRequestError> {
+        if action.url().is_some_and(|url| {
+            url.len() > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES
+                || !crate::navigation::is_allowed_str(url)
+        }) {
+            return Err(ExtensionBrowserRequestError::InvalidUrl);
+        }
+        Ok(Self {
+            profile,
+            id,
+            action,
+        })
+    }
+
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    pub const fn id(&self) -> ExtensionBrowserRequestId {
+        self.id
+    }
+
+    pub const fn action(&self) -> &ExtensionBrowserRequestAction {
+        &self.action
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExtensionBrowserRequestAction {
+    CreateTab {
+        window: Option<WindowId>,
+        url: Option<Arc<str>>,
+        active: bool,
+    },
+    ActivateTab {
+        tab: ItemId,
+    },
+    CloseTab {
+        tab: ItemId,
+    },
+    LoadTabUrl {
+        tab: ItemId,
+        url: Arc<str>,
+    },
+}
+
+impl ExtensionBrowserRequestAction {
+    fn url(&self) -> Option<&str> {
+        match self {
+            Self::CreateTab { url, .. } => url.as_deref(),
+            Self::LoadTabUrl { url, .. } => Some(url),
+            Self::ActivateTab { .. } | Self::CloseTab { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionBrowserRequestError {
+    InvalidUrl,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionBrowserRequestResult {
+    Complete,
+    CreatedTab(ItemId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionBrowserRequestRejection {
+    InvalidContext,
+    InvalidRequest,
+    InvalidScope,
+    Unsupported,
+    CapacityExceeded,
+    NativeAdmissionFailed,
+    ShuttingDown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionBrowserRequestSettlement {
+    Applied(ExtensionBrowserRequestResult),
+    Rejected(ExtensionBrowserRequestRejection),
+}
+
 /// Strictly positive, monotonically increasing browser-surface generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ExtensionBrowserSurfaceGeneration(u64);
@@ -450,5 +573,47 @@ mod tests {
             ),
             Err(ExtensionBrowserSurfaceError::InvalidTabUrl)
         );
+    }
+
+    #[test]
+    fn browser_mutation_request_validates_urls_at_construction() {
+        let profile = ProfileId::from(1);
+        let id = ExtensionBrowserRequestId::new(1).unwrap();
+        let valid = ExtensionBrowserRequest::new(
+            profile,
+            id,
+            ExtensionBrowserRequestAction::CreateTab {
+                window: Some(7),
+                url: Some(Arc::from("https://example.test/")),
+                active: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(valid.profile(), profile);
+        assert_eq!(valid.id(), id);
+
+        assert_eq!(
+            ExtensionBrowserRequest::new(
+                profile,
+                id,
+                ExtensionBrowserRequestAction::LoadTabUrl {
+                    tab: ItemId::from(2),
+                    url: Arc::from("file:///private/secret"),
+                },
+            ),
+            Err(ExtensionBrowserRequestError::InvalidUrl)
+        );
+        assert_eq!(
+            ExtensionBrowserRequest::new(
+                profile,
+                id,
+                ExtensionBrowserRequestAction::LoadTabUrl {
+                    tab: ItemId::from(2),
+                    url: Arc::from("x".repeat(MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES + 1)),
+                },
+            ),
+            Err(ExtensionBrowserRequestError::InvalidUrl)
+        );
+        assert_eq!(ExtensionBrowserRequestId::new(0), None);
     }
 }

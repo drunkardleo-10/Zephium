@@ -21,9 +21,13 @@ mod runtime;
 mod transient;
 
 pub use browser_surface::{
-    ExtensionBrowserSurface, ExtensionBrowserSurfaceError, ExtensionBrowserSurfaceGeneration,
-    ExtensionBrowserTab, ExtensionBrowserWindow, MAX_EXTENSION_BROWSER_TABS,
-    MAX_EXTENSION_BROWSER_WINDOWS,
+    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestError,
+    ExtensionBrowserRequestId, ExtensionBrowserRequestRejection, ExtensionBrowserRequestResult,
+    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceError,
+    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
+    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES, MAX_EXTENSION_BROWSER_TABS,
+    MAX_EXTENSION_BROWSER_WINDOWS, MAX_PENDING_EXTENSION_BROWSER_REQUESTS,
+    MAX_PENDING_EXTENSION_BROWSER_REQUESTS_PER_PROFILE,
 };
 pub use cohort::{
     ExtensionGrantCohort, ExtensionGrantCohortError, ExtensionGrantInitializationState,

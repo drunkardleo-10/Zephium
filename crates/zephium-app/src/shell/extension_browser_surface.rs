@@ -53,6 +53,10 @@ impl ExtensionBrowserSurfaceState {
         self.active_profiles
     }
 
+    pub(super) fn is_active(&self, profile: ProfileId) -> bool {
+        self.active_profiles.contains(profile)
+    }
+
     fn published(&self, profile: ProfileId) -> Option<&ExtensionBrowserSurface> {
         self.published.get(&profile)
     }

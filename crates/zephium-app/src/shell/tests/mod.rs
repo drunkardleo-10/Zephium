@@ -326,6 +326,13 @@ pub(super) fn extension_lifecycle_with_startup_outcomes(
 pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
+    extension_browser_settlements: Mutex<
+        Vec<(
+            ProfileId,
+            ExtensionBrowserRequestId,
+            ExtensionBrowserRequestSettlement,
+        )>,
+    >,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -410,6 +417,16 @@ impl FakeEngine {
         self.extension_browser_surfaces.lock().unwrap().clone()
     }
 
+    fn extension_browser_settlements(
+        &self,
+    ) -> Vec<(
+        ProfileId,
+        ExtensionBrowserRequestId,
+        ExtensionBrowserRequestSettlement,
+    )> {
+        self.extension_browser_settlements.lock().unwrap().clone()
+    }
+
     fn push_erasure_outcomes(&self, outcomes: impl IntoIterator<Item = ProfileDataErasureOutcome>) {
         self.erasure_outcomes.lock().unwrap().extend(outcomes);
     }
@@ -465,6 +482,18 @@ impl Engine for FakeEngine {
                 .push(surface);
         }
         admission
+    }
+    fn settle_extension_browser_request(
+        &self,
+        profile: ProfileId,
+        request: ExtensionBrowserRequestId,
+        settlement: ExtensionBrowserRequestSettlement,
+    ) -> NativeDispatch {
+        self.extension_browser_settlements
+            .lock()
+            .unwrap()
+            .push((profile, request, settlement));
+        self.native_admission()
     }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
         if self
@@ -1376,6 +1405,7 @@ mod actor_integration;
 mod blocker;
 mod bootstrap;
 mod engine_events;
+mod extension_browser_requests;
 mod extension_browser_surface;
 mod favicons;
 #[path = "navigation.rs"]

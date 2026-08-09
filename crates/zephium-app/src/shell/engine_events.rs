@@ -31,9 +31,18 @@ impl Shell {
         // cohort until bootstrap has completed: loading completion can warm a
         // renderer, while crash/process-exit recovery can create replacement
         // views. Neither is safe before extension startup has settled Ready.
-        if !self.bootstrapped && !matches!(&event, EngineEvent::RuntimeRestartRequired) {
-            crate::diagnostic!("engine: ignored native event before bootstrap");
-            return;
+        if !self.bootstrapped {
+            match &event {
+                EngineEvent::RuntimeRestartRequired => {}
+                EngineEvent::ExtensionBrowserRequested { request } => {
+                    self.on_extension_browser_request(request.clone());
+                    return;
+                }
+                _ => {
+                    crate::diagnostic!("engine: ignored native event before bootstrap");
+                    return;
+                }
+            }
         }
         // Retirement may already have installed a permanent extension-worker
         // fence even when its caller observed only a retryable result. From
@@ -97,6 +106,9 @@ impl Shell {
                         "engine: contradictory or over-capacity user-content settlement"
                     );
                 }
+            }
+            EngineEvent::ExtensionBrowserRequested { request } => {
+                self.on_extension_browser_request(request)
             }
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
@@ -309,6 +321,9 @@ impl Shell {
                 scope: ContentScope::Global,
                 ..
             } => None,
+            // Requests must reach their handler even during retirement so the
+            // retained native completion receives an explicit rejection.
+            EngineEvent::ExtensionBrowserRequested { .. } => None,
             EngineEvent::SplitChanged { window, .. } => {
                 self.windows.get(*window).map(|window| window.profile)
             }

@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
-use crate::extensions::{ExtensionBrowserSurface, ExtensionNativeNamespaceScope};
+use crate::extensions::{
+    ExtensionBrowserRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
+    ExtensionBrowserSurface, ExtensionNativeNamespaceScope,
+};
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
@@ -586,6 +589,17 @@ pub trait Engine {
     fn set_extension_browser_surface(&self, _surface: ExtensionBrowserSurface) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Settles one exact native WebExtension browser mutation. The native
+    /// adapter retains the platform completion handler behind the
+    /// `(profile, request)` correlation pair and invokes it exactly once.
+    fn settle_extension_browser_request(
+        &self,
+        _profile: ProfileId,
+        _request: ExtensionBrowserRequestId,
+        _settlement: ExtensionBrowserRequestSettlement,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Installs one exact, immutable profile-scoped content policy.
     ///
     /// Queue admission is not native application. The terminal result arrives
@@ -733,6 +747,13 @@ pub enum EngineEvent {
         scope: ContentScope,
         requested: UserContentGeneration,
         settlement: UserContentSettlement,
+    },
+    /// A native WebExtension context requested a mutation of Shell-owned
+    /// browser state. The engine retains and times out the exact platform
+    /// completion; the Shell must answer through
+    /// [`Engine::settle_extension_browser_request`].
+    ExtensionBrowserRequested {
+        request: ExtensionBrowserRequest,
     },
     TitleChanged {
         id: ItemId,
