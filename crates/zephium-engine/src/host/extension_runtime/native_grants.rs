@@ -51,8 +51,11 @@ impl EngineNativeGrantSnapshot {
         self.grants.runtime()
     }
 
-    #[cfg(test)]
-    pub(super) const fn grants(&self) -> &ExtensionNativeGrantSnapshot {
+    /// Borrows the complete, already-validated native projection for the
+    /// selected platform adapter. This is structural authority only; the
+    /// operation-authority capability remains separately captive until native
+    /// ownership is durably published.
+    pub(super) const fn native_snapshot(&self) -> &ExtensionNativeGrantSnapshot {
         &self.grants
     }
 

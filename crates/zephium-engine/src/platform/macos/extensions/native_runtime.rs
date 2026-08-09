@@ -197,6 +197,22 @@ pub(crate) enum MacosNativeRuntimeRetirement {
     },
 }
 
+/// Fully validated, main-thread-only input for the one native entry call.
+///
+/// Package-root access, grant compilation, runtime availability, and URL
+/// readback all finish before this value is constructed. Once it exists, the
+/// host can atomically mark its lifecycle ticket as native-entered and call
+/// [`begin_prepared_native_runtime_activation`] without conflating a clean
+/// pre-entry refusal with an exception raised while entering WebKit.
+#[must_use = "prepared native activation must be entered or discarded before native entry"]
+pub(crate) struct PreparedMacosNativeRuntimeActivation {
+    resource_url: Retained<NSURL>,
+    grants: MacosNativeGrantPlan,
+    expected_owner_id: ExtensionRuntimeNativeOwnerId,
+    controller: Retained<WKWebExtensionController>,
+    mtm: MainThreadMarker,
+}
+
 /// Copy-only exact identity retained while the move-only owner is inside a
 /// native teardown call.
 ///
@@ -237,7 +253,7 @@ pub(crate) struct MacosNativeRuntimeOwner {
 }
 
 impl MacosNativeRuntimeOwner {
-    pub(super) const fn owner_id(&self) -> ExtensionRuntimeNativeOwnerId {
+    pub(crate) const fn owner_id(&self) -> ExtensionRuntimeNativeOwnerId {
         self.owner_id
     }
 
@@ -338,15 +354,51 @@ pub(super) fn begin_native_runtime_activation(
     controller: Retained<WKWebExtensionController>,
     completion: impl FnOnce(MacosNativeRuntimeActivation) + 'static,
 ) -> Result<(), MacosNativeRuntimeStartFailure> {
-    let mtm = admit_runtime().map_err(MacosNativeRuntimeStartFailure::RejectedBeforeNative)?;
-    let grant_plan = compile_native_grant_plan(grants)
-        .map_err(MacosNativeRuntimeFailure::GrantPlan)
-        .map_err(MacosNativeRuntimeStartFailure::RejectedBeforeNative)?;
-    let resource_url = verified_resource_url(native_root)
-        .map_err(MacosNativeRuntimeStartFailure::RejectedBeforeNative)?;
+    let prepared =
+        prepare_native_runtime_activation(native_root, grants, expected_owner_id, controller)
+            .map_err(MacosNativeRuntimeStartFailure::RejectedBeforeNative)?;
+    begin_prepared_native_runtime_activation(prepared, completion)
+        .map_err(MacosNativeRuntimeStartFailure::OwnershipUncertain)
+}
+
+/// Completes every fallible pre-entry check without asking WebKit to parse or
+/// retain an extension.
+pub(crate) fn prepare_native_runtime_activation(
+    native_root: &mut ExtensionRuntimeNativeRootLease,
+    grants: &ExtensionNativeGrantSnapshot,
+    expected_owner_id: ExtensionRuntimeNativeOwnerId,
+    controller: Retained<WKWebExtensionController>,
+) -> Result<PreparedMacosNativeRuntimeActivation, MacosNativeRuntimeFailure> {
+    let mtm = admit_runtime()?;
+    let grants = compile_native_grant_plan(grants).map_err(MacosNativeRuntimeFailure::GrantPlan)?;
+    let resource_url = verified_resource_url(native_root)?;
+    Ok(PreparedMacosNativeRuntimeActivation {
+        resource_url,
+        grants,
+        expected_owner_id,
+        controller,
+        mtm,
+    })
+}
+
+/// Enters WebKit with an already-validated activation plan.
+///
+/// Every returned error is ownership-uncertain: the Objective-C call was
+/// attempted and may have copied its callback before raising an exception.
+pub(crate) fn begin_prepared_native_runtime_activation(
+    prepared: PreparedMacosNativeRuntimeActivation,
+    completion: impl FnOnce(MacosNativeRuntimeActivation) + 'static,
+) -> Result<(), MacosNativeRuntimeFailure> {
+    let PreparedMacosNativeRuntimeActivation {
+        resource_url,
+        grants,
+        expected_owner_id,
+        controller,
+        mtm,
+    } = prepared;
     begin_with_grants(
         resource_url,
-        NativeGrantSource::Compiled(grant_plan),
+        NativeGrantSource::Compiled(grants),
         expected_owner_id,
         controller,
         completion,
@@ -380,6 +432,7 @@ pub(crate) fn begin_probe_native_runtime_activation(
         completion,
         mtm,
     )
+    .map_err(MacosNativeRuntimeStartFailure::OwnershipUncertain)
 }
 
 enum NativeGrantSource {
@@ -416,7 +469,7 @@ fn begin_with_grants(
     controller: Retained<WKWebExtensionController>,
     completion: impl FnOnce(MacosNativeRuntimeActivation) + 'static,
     mtm: MainThreadMarker,
-) -> Result<(), MacosNativeRuntimeStartFailure> {
+) -> Result<(), MacosNativeRuntimeFailure> {
     let completion = Rc::new(RefCell::new(Some(completion)));
     let callback_completion = Rc::clone(&completion);
     let callback_url = resource_url.clone();
@@ -446,7 +499,6 @@ fn begin_with_grants(
         );
         Ok(())
     })
-    .map_err(MacosNativeRuntimeStartFailure::OwnershipUncertain)
 }
 
 fn settle_parse_callback(

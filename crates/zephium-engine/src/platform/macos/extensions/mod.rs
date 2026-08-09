@@ -12,15 +12,19 @@ mod native_runtime;
 
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use controller_registry::ControllerPreparation as ProbeControllerPreparation;
-pub(crate) use controller_registry::{ControllerErasureSettlement, PersistentControllerRegistry};
+pub(crate) use controller_registry::{
+    ControllerErasureSettlement, ControllerPreparation, ControllerRegistryError,
+    PersistentControllerRegistry,
+};
 pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grant_application::apply_probe_grants;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grants::MacosNativeApiPermission;
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use native_runtime::begin_probe_native_runtime_activation;
 pub(crate) use native_runtime::{
-    begin_probe_native_runtime_activation, MacosNativeRuntimeActivation,
-    MacosNativeRuntimeRetirement,
+    begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
+    MacosNativeRuntimeActivation, MacosNativeRuntimeFailure, MacosNativeRuntimeOwner,
+    MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeRetirement,
 };
-pub(crate) use native_runtime::{MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity};

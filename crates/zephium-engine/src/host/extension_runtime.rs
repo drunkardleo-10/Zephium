@@ -10,6 +10,8 @@
 #[cfg(test)]
 #[path = "extension_runtime/activation_issuer_test_support.rs"]
 mod activation_issuer_test_support;
+#[cfg(target_os = "macos")]
+mod macos_adapter;
 mod native_grants;
 mod native_lifecycle;
 
@@ -19,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use crate::MainThreadDispatch;
 use zephium_core::extensions::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
     ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
@@ -44,8 +47,6 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
     ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
 };
-
-use crate::MainThreadDispatch;
 
 use super::resources::NativeResourceClass;
 use super::EngineHost;
@@ -152,9 +153,18 @@ impl ExtensionRuntimeFactoryGate {
         }
     }
 
+    #[cfg(test)]
     fn reserve(
         &self,
         binding: ReservationBinding,
+    ) -> Result<Arc<ReservationControl>, ExtensionRuntimeHostBindError> {
+        self.reserve_with_adapter(binding, AdapterAvailability::LogicalHarness)
+    }
+
+    fn reserve_with_adapter(
+        &self,
+        binding: ReservationBinding,
+        adapter: AdapterAvailability,
     ) -> Result<Arc<ReservationControl>, ExtensionRuntimeHostBindError> {
         if self.inner.invariant_failed.load(Ordering::Acquire) {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
@@ -217,6 +227,7 @@ impl ExtensionRuntimeFactoryGate {
         Ok(Arc::new(ReservationControl {
             gate: self.clone(),
             binding,
+            adapter,
             generation,
             phase: AtomicU8::new(RESERVATION_UNATTACHED),
             authority_state: Mutex::new(authority_state),
@@ -622,6 +633,7 @@ impl ReservationBinding {
 struct ReservationControl {
     gate: ExtensionRuntimeFactoryGate,
     binding: ReservationBinding,
+    adapter: AdapterAvailability,
     generation: ExtensionRuntimeHostRegistryGeneration,
     phase: AtomicU8,
     // The serialized service publishes through this shared state while the UI
@@ -2616,11 +2628,41 @@ where
     completion.wait(deadline, mode)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterAvailability {
     Unsupported,
+    #[cfg(target_os = "macos")]
+    MacosNativeActivationOnly,
     #[cfg(test)]
     LogicalHarness,
+}
+
+impl AdapterAvailability {
+    fn accepts_activation(self, expectation: ExtensionRuntimeNativeIdentityExpectation) -> bool {
+        match self {
+            Self::Unsupported => false,
+            #[cfg(target_os = "macos")]
+            Self::MacosNativeActivationOnly => matches!(
+                expectation,
+                ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(_)
+            ),
+            #[cfg(test)]
+            Self::LogicalHarness => true,
+        }
+    }
+
+    fn accepts_recovery(self, _expectation: ExtensionRuntimeRecoveryExpectation) -> bool {
+        match self {
+            Self::Unsupported => false,
+            // Restart reconciliation is intentionally not admitted by the
+            // activation-only adapter. Product enablement must never create a
+            // native owner that a fresh process cannot reconcile.
+            #[cfg(target_os = "macos")]
+            Self::MacosNativeActivationOnly => false,
+            #[cfg(test)]
+            Self::LogicalHarness => true,
+        }
+    }
 }
 
 struct EngineFactoryPort {
@@ -2636,19 +2678,25 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
         context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
         self.gate.preflight()?;
-        if matches!(self.adapters, AdapterAvailability::Unsupported) {
+        if !self
+            .adapters
+            .accepts_activation(context.identity_expectation())
+        {
             return Err(ExtensionRuntimeHostBindError::UnsupportedBackend);
         }
         let owner = OwnerKey::from_address(context.owner());
         let expectation = context.identity_expectation();
         let absence_issuer = context.absence_evidence_issuer();
         let grants = Box::new(EngineNativeGrantSnapshot::try_from_context(context)?);
-        let reservation = self.gate.reserve(ReservationBinding::Activation {
-            owner,
-            grants,
-            expectation,
-            absence_issuer,
-        })?;
+        let reservation = self.gate.reserve_with_adapter(
+            ReservationBinding::Activation {
+                owner,
+                grants,
+                expectation,
+                absence_issuer,
+            },
+            self.adapters,
+        )?;
         Ok(ExtensionRuntimeHostActivationPorts::new(
             reservation.generation,
             Box::new(EngineLifecyclePort {
@@ -2664,14 +2712,17 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
         context: ExtensionRuntimeHostRecoveryContext,
     ) -> Result<Box<dyn ExtensionRuntimeHostOwnershipPort>, ExtensionRuntimeHostBindError> {
         self.gate.preflight()?;
-        if matches!(self.adapters, AdapterAvailability::Unsupported) {
+        if !self.adapters.accepts_recovery(context.expectation()) {
             return Err(ExtensionRuntimeHostBindError::UnsupportedBackend);
         }
-        let reservation = self.gate.reserve(ReservationBinding::Recovery {
-            owner: OwnerKey::from_address(context.owner()),
-            expectation: context.expectation(),
-            absence_issuer: context.absence_evidence_issuer(),
-        })?;
+        let reservation = self.gate.reserve_with_adapter(
+            ReservationBinding::Recovery {
+                owner: OwnerKey::from_address(context.owner()),
+                expectation: context.expectation(),
+                absence_issuer: context.absence_evidence_issuer(),
+            },
+            self.adapters,
+        )?;
         Ok(Box::new(EngineOwnershipPort {
             dispatch: Arc::clone(&self.dispatch),
             reservation,
@@ -2856,32 +2907,7 @@ impl zephium_extension_runtime_api::ExtensionRuntimeLifecyclePort for EngineLife
                                 return Err(reason);
                             }
                         };
-                        let absence = host
-                            .extension_runtime_registry
-                            .mint_activation_never_entered(ticket)?;
-                        let accepted = super::dispatch::with_extension_runtime_terminal(
-                            move |host| {
-                                let settled =
-                                    host.extension_runtime_registry.complete_native_activation(
-                                        ticket,
-                                        ExtensionRuntimeActivationDisposition::Rejected {
-                                            failure: ExtensionRuntimeFailure::UnsupportedTarget,
-                                            absence,
-                                        },
-                                        PlatformOwnerBundle::Vacant,
-                                    );
-                                if settled.is_err() {
-                                    fail_extension_native_terminal(
-                                        host,
-                                        "logical extension activation terminal violated registry state",
-                                    );
-                                }
-                            },
-                        );
-                        // On refusal, the terminal transport itself owns the
-                        // sticky fail-stop. This exact attempt remains pending;
-                        // inventing uncertainty would admit a late native effect.
-                        let _terminal_transport_accepted = accepted;
+                        begin_activation_adapter(host, Arc::clone(&reservation), ticket)?;
                         Ok(NativeCallRoute::Await(ticket))
                     }
                     route => Ok(route),
@@ -2913,6 +2939,50 @@ impl zephium_extension_runtime_api::ExtensionRuntimeLifecyclePort for EngineLife
 }
 
 impl ExtensionRuntimeHostLifecyclePort for EngineLifecyclePort {}
+
+fn begin_activation_adapter(
+    host: &mut EngineHost,
+    reservation: Arc<ReservationControl>,
+    ticket: NativeCallTicket,
+) -> Result<(), ExtensionRuntimeHostBindError> {
+    match reservation.adapter {
+        AdapterAvailability::Unsupported => {
+            host.extension_runtime_registry.fail_invariant();
+            Err(ExtensionRuntimeHostBindError::InternalInvariant)
+        }
+        #[cfg(target_os = "macos")]
+        AdapterAvailability::MacosNativeActivationOnly => {
+            macos_adapter::begin_native_activation(host, reservation, ticket)
+        }
+        #[cfg(test)]
+        AdapterAvailability::LogicalHarness => {
+            let absence = host
+                .extension_runtime_registry
+                .mint_activation_never_entered(ticket)?;
+            let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
+                let settled = host.extension_runtime_registry.complete_native_activation(
+                    ticket,
+                    ExtensionRuntimeActivationDisposition::Rejected {
+                        failure: ExtensionRuntimeFailure::UnsupportedTarget,
+                        absence,
+                    },
+                    PlatformOwnerBundle::Vacant,
+                );
+                if settled.is_err() {
+                    fail_extension_native_terminal(
+                        host,
+                        "logical extension activation terminal violated registry state",
+                    );
+                }
+            });
+            // On refusal, the terminal transport owns the sticky fail-stop.
+            // The exact ticket remains pending, so no late native effect can be
+            // mistaken for a clean absence settlement.
+            let _terminal_transport_accepted = accepted;
+            Ok(())
+        }
+    }
+}
 
 struct EngineOwnershipPort {
     dispatch: MainThreadDispatch,
@@ -2963,22 +3033,12 @@ fn ownership_retirement(
                     let (ticket, platform_owner) = host
                         .extension_runtime_registry
                         .begin_native_retirement(owner, generation, deadline)?;
-                    let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
-                        let settled = host.extension_runtime_registry.complete_native_retirement(
-                            ticket,
-                            ExtensionRuntimeRetirementDisposition::Retained(
-                                ExtensionRuntimeFailure::UnsupportedTarget,
-                            ),
-                            platform_owner,
-                        );
-                        if settled.is_err() {
-                            fail_extension_native_terminal(
-                                host,
-                                "logical extension retirement terminal violated registry state",
-                            );
-                        }
-                    });
-                    let _terminal_transport_accepted = accepted;
+                    begin_retirement_adapter(
+                        host,
+                        Arc::clone(&reservation),
+                        ticket,
+                        platform_owner,
+                    )?;
                     Ok(NativeCallRoute::Await(ticket))
                 }
                 route => Ok(route),
@@ -3004,6 +3064,45 @@ fn ownership_retirement(
                 failure: ExtensionRuntimeFailure::Internal,
                 evidence: None,
             }
+        }
+    }
+}
+
+fn begin_retirement_adapter(
+    host: &mut EngineHost,
+    reservation: Arc<ReservationControl>,
+    ticket: NativeCallTicket,
+    platform_owner: PlatformOwnerBundle,
+) -> Result<(), ExtensionRuntimeHostBindError> {
+    match reservation.adapter {
+        AdapterAvailability::Unsupported => {
+            platform_owner.quarantine_unattributed();
+            host.extension_runtime_registry.fail_invariant();
+            Err(ExtensionRuntimeHostBindError::InternalInvariant)
+        }
+        #[cfg(target_os = "macos")]
+        AdapterAvailability::MacosNativeActivationOnly => {
+            macos_adapter::begin_native_retirement(host, ticket, platform_owner)
+        }
+        #[cfg(test)]
+        AdapterAvailability::LogicalHarness => {
+            let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
+                let settled = host.extension_runtime_registry.complete_native_retirement(
+                    ticket,
+                    ExtensionRuntimeRetirementDisposition::Retained(
+                        ExtensionRuntimeFailure::UnsupportedTarget,
+                    ),
+                    platform_owner,
+                );
+                if settled.is_err() {
+                    fail_extension_native_terminal(
+                        host,
+                        "logical extension retirement terminal violated registry state",
+                    );
+                }
+            });
+            let _terminal_transport_accepted = accepted;
+            Ok(())
         }
     }
 }
@@ -3414,6 +3513,18 @@ pub(crate) struct ExtensionRuntimeHostFactorySlot {
 impl ExtensionRuntimeHostFactorySlot {
     pub(crate) fn new(dispatch: MainThreadDispatch) -> Self {
         Self::with_adapters(dispatch, AdapterAvailability::Unsupported)
+    }
+
+    /// Dormant product-shaped macOS activation adapter.
+    ///
+    /// Recovery binding remains refused, so ordinary construction must not
+    /// select this factory. The live product-path probe uses it to exercise
+    /// authenticated activation and exact teardown before restart support is
+    /// allowed to enable the complete adapter.
+    #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
+    pub(crate) fn macos_native_activation_probe(dispatch: MainThreadDispatch) -> Self {
+        Self::with_adapters(dispatch, AdapterAvailability::MacosNativeActivationOnly)
     }
 
     fn with_adapters(dispatch: MainThreadDispatch, adapters: AdapterAvailability) -> Self {
@@ -4112,6 +4223,32 @@ mod tests {
         assert_eq!(gate.reservation_count(), Some(0));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_activation_only_adapter_never_claims_restart_recovery() {
+        let adapter = AdapterAvailability::MacosNativeActivationOnly;
+        let macos_owner = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
+            .expect("canonical macOS owner");
+        let windows_owner = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'b'; 32])
+            .expect("canonical Windows owner");
+
+        assert!(adapter.accepts_activation(
+            ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(macos_owner)
+        ));
+        assert!(!adapter.accepts_activation(
+            ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(windows_owner)
+        ));
+        assert!(
+            !adapter.accepts_activation(ExtensionRuntimeNativeIdentityExpectation::Compatibility)
+        );
+        assert!(!adapter.accepts_recovery(
+            ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                catalog_expected: Some(macos_owner),
+                adapter_observed: None,
+            }
+        ));
+    }
+
     #[test]
     fn recovery_reservation_retains_expected_and_observed_native_identities_independently() {
         let expected_core = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
@@ -4529,8 +4666,8 @@ mod tests {
         let ReservationBinding::Activation { grants, .. } = &activation.binding else {
             panic!("activation reservation must retain native grants");
         };
-        assert_eq!(grants.grants().api_grant_count(), 2);
-        assert_eq!(grants.grants().host_grant_count(), 1);
+        assert_eq!(grants.native_snapshot().api_grant_count(), 2);
+        assert_eq!(grants.native_snapshot().host_grant_count(), 1);
         let activation_companion = activation
             .binding
             .operation_authority_companion_retained_bytes();
@@ -5331,10 +5468,10 @@ mod tests {
             panic!("activation reservation must retain native grants");
         };
         assert_eq!(grants.runtime(), &fingerprint);
-        assert_eq!(grants.grants().api_grant_count(), 2);
-        assert_eq!(grants.grants().host_grant_count(), 1);
-        assert!(!grants.grants().file_scheme_access_granted());
-        assert!(!grants.grants().private_context_access_granted());
+        assert_eq!(grants.native_snapshot().api_grant_count(), 2);
+        assert_eq!(grants.native_snapshot().host_grant_count(), 1);
+        assert!(!grants.native_snapshot().file_scheme_access_granted());
+        assert!(!grants.native_snapshot().private_context_access_granted());
         registry
             .attach(Arc::clone(&reservation))
             .expect("activation attachment");
