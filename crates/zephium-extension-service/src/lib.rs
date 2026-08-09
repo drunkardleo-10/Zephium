@@ -12,12 +12,13 @@
 //! the Store's unique service capability for exact runtime snapshots and
 //! native ownership, and the engine's unique native-host factory into the
 //! worker. Before publishing readiness, that worker settles interrupted
-//! package builds, reconciles possible native
-//! owners one exact lineage at a time, retires owners that still exist, and
-//! releases package pins only after durable native absence. The unique owner
-//! exposes bounded activation and exact-runtime retirement commands whose
-//! inputs are identity selectors only; the worker reconstructs and revalidates
-//! Store, repository, grant, and native authority inside its serialized turn.
+//! package builds, reconciles possible native owners one exact lineage at a
+//! time, retires owners that still exist, releases package pins only after
+//! durable native absence, and revalidates every enabled runtime before
+//! activation. The unique owner exposes bounded activation and exact-runtime
+//! retirement commands whose inputs are identity selectors only; the worker
+//! reconstructs and revalidates Store, repository, grant, and native authority
+//! inside its serialized turn.
 //! Returned runtime and profile-retirement values are ordinary path-free,
 //! non-authorizing control-flow settlements.
 //!
@@ -56,6 +57,7 @@ mod profile_retirement;
 mod repository;
 mod runtime_coordinator;
 mod startup;
+mod startup_hydration;
 mod status;
 
 const _: () = assert!(MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES > 0);

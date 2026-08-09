@@ -19,6 +19,9 @@ pub enum ExtensionServicePhase {
     LoadingOwnershipJournal,
     /// The worker is reconciling cleanup-only ownership and package state.
     ReconcilingCleanup,
+    /// Cleanup is complete and enabled runtimes are being revalidated and
+    /// activated before any profile webview may be constructed.
+    HydratingRuntimes,
     /// Startup recovery completed with no unresolved native-owner rows.
     Ready,
     /// Durable possible-owner rows remain and extension activation is disabled.

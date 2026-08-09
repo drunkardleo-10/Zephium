@@ -208,6 +208,11 @@ pub enum ExtensionServiceStartupFailureReason {
     /// Store's applied projection differed from the locally validated CAS
     /// prediction.
     OwnershipMutationProjectionMismatch,
+    /// The complete bounded enabled-runtime selector inventory could not be
+    /// loaded after cleanup.
+    RuntimeInventoryLoadFailed,
+    /// Revalidating or activating the enabled runtime cohort failed closed.
+    RuntimeHydrationFailed,
     /// An internal worker/startup protocol invariant was violated.
     InternalProtocolViolation,
 }

@@ -86,6 +86,10 @@ impl ExtensionServiceShutdownEvidence {
 pub struct ExtensionServiceReadyEvidence {
     worker: ExtensionServiceWorkerIdentity,
     journal_revision: ExtensionNativeOwnershipJournalRevision,
+    active_runtime_count: u16,
+    rejected_runtime_count: u16,
+    capacity_deferred_runtime_count: u16,
+    degraded_profile_count: u16,
 }
 
 impl ExtensionServiceReadyEvidence {
@@ -96,7 +100,29 @@ impl ExtensionServiceReadyEvidence {
         Self {
             worker,
             journal_revision,
+            active_runtime_count: 0,
+            rejected_runtime_count: 0,
+            capacity_deferred_runtime_count: 0,
+            degraded_profile_count: 0,
         }
+    }
+
+    pub(crate) fn after_hydration(
+        worker: ExtensionServiceWorkerIdentity,
+        journal_revision: ExtensionNativeOwnershipJournalRevision,
+        active_runtime_count: usize,
+        rejected_runtime_count: usize,
+        capacity_deferred_runtime_count: usize,
+        degraded_profile_count: usize,
+    ) -> Option<Self> {
+        Some(Self {
+            worker,
+            journal_revision,
+            active_runtime_count: u16::try_from(active_runtime_count).ok()?,
+            rejected_runtime_count: u16::try_from(rejected_runtime_count).ok()?,
+            capacity_deferred_runtime_count: u16::try_from(capacity_deferred_runtime_count).ok()?,
+            degraded_profile_count: u16::try_from(degraded_profile_count).ok()?,
+        })
     }
 
     /// Returns the exact process-local worker that completed startup.
@@ -104,9 +130,29 @@ impl ExtensionServiceReadyEvidence {
         self.worker
     }
 
-    /// Returns the complete journal revision observed after cleanup.
+    /// Returns the complete journal revision observed after startup hydration.
     pub const fn journal_revision(self) -> ExtensionNativeOwnershipJournalRevision {
         self.journal_revision
+    }
+
+    /// Runtimes active when startup readiness was published.
+    pub const fn active_runtime_count(self) -> u16 {
+        self.active_runtime_count
+    }
+
+    /// Enabled runtimes rejected by exact package, grant, or native policy.
+    pub const fn rejected_runtime_count(self) -> u16 {
+        self.rejected_runtime_count
+    }
+
+    /// Enabled runtimes deferred by the strict background-runtime ceiling.
+    pub const fn capacity_deferred_runtime_count(self) -> u16 {
+        self.capacity_deferred_runtime_count
+    }
+
+    /// Profiles whose exact ancillary extension catalog was degraded.
+    pub const fn degraded_profile_count(self) -> u16 {
+        self.degraded_profile_count
     }
 }
 
@@ -187,12 +233,32 @@ mod startup_tests {
     }
 
     #[test]
-    fn ready_evidence_retains_only_worker_and_revision() {
+    fn ready_evidence_reports_bounded_hydration_settlement() {
         let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
         let revision = ExtensionNativeOwnershipJournalRevision::INITIAL;
         let evidence = ExtensionServiceReadyEvidence::new(worker, revision);
 
         assert_eq!(evidence.worker(), worker);
         assert_eq!(evidence.journal_revision(), revision);
+        assert_eq!(evidence.active_runtime_count(), 0);
+        assert_eq!(evidence.rejected_runtime_count(), 0);
+        assert_eq!(evidence.capacity_deferred_runtime_count(), 0);
+        assert_eq!(evidence.degraded_profile_count(), 0);
+
+        let hydrated =
+            ExtensionServiceReadyEvidence::after_hydration(worker, revision, 1, 2, 3, 4).unwrap();
+        assert_eq!(hydrated.active_runtime_count(), 1);
+        assert_eq!(hydrated.rejected_runtime_count(), 2);
+        assert_eq!(hydrated.capacity_deferred_runtime_count(), 3);
+        assert_eq!(hydrated.degraded_profile_count(), 4);
+        assert!(ExtensionServiceReadyEvidence::after_hydration(
+            worker,
+            revision,
+            usize::from(u16::MAX) + 1,
+            0,
+            0,
+            0,
+        )
+        .is_none());
     }
 }

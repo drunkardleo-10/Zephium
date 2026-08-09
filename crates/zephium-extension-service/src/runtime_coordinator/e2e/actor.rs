@@ -1,10 +1,91 @@
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 
+use super::host::PublicationMode;
 use super::support::{deadline, ActorAuthorityHarness};
 use crate::{
     ExtensionServiceProfileRetirementOutcome, ExtensionServiceRuntimeActivationOutcome,
     ExtensionServiceRuntimeRetirementOutcome, ExtensionServiceShutdownOutcome,
+    ExtensionServiceStartupOutcome, ExtensionServiceStartupUnavailableReason,
+    ExtensionServiceStartupWait,
 };
+
+#[test]
+fn actor_hydration_retry_resumes_without_reentering_cleanup() {
+    let (harness, mut owner, first) =
+        ActorAuthorityHarness::launch_with_publication_mode(1, PublicationMode::RefuseFirst);
+    let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Unavailable(
+        unavailable,
+    )) = first
+    else {
+        panic!("first publication refusal was not a retryable startup settlement");
+    };
+    assert_eq!(
+        unavailable.reason(),
+        ExtensionServiceStartupUnavailableReason::ReconciliationPending
+    );
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 1);
+
+    let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) =
+        owner.retry_startup_until(deadline())
+    else {
+        panic!("hydration retry did not publish readiness");
+    };
+    assert_eq!(evidence.active_runtime_count(), 1);
+    assert_eq!(evidence.rejected_runtime_count(), 0);
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 2);
+
+    let ExtensionServiceShutdownOutcome::Complete(shutdown) = owner.shutdown_until(deadline())
+    else {
+        panic!("hydration-retry actor did not prove clean shutdown");
+    };
+    assert_eq!(shutdown.accepted_commands(), 1);
+    assert_eq!(shutdown.completed_commands(), 1);
+    harness.finish(shutdown);
+}
+
+#[test]
+fn actor_hydration_reports_capacity_without_evicting_or_overcommitting() {
+    let profile_count = crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES + 1;
+    let (harness, owner, startup) = ActorAuthorityHarness::launch_with_publication_mode(
+        profile_count,
+        PublicationMode::Immediate,
+    );
+    let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) =
+        startup
+    else {
+        panic!("capacity-bounded hydration did not publish readiness");
+    };
+    assert_eq!(
+        usize::from(evidence.active_runtime_count()),
+        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+    );
+    assert_eq!(evidence.capacity_deferred_runtime_count(), 1);
+    assert_eq!(evidence.rejected_runtime_count(), 0);
+    assert_eq!(
+        harness.probe.bind_calls(),
+        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+    );
+    assert_eq!(
+        harness.probe.activation_calls(),
+        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+    );
+    assert_eq!(
+        harness.probe.publication_calls(),
+        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+    );
+
+    let ExtensionServiceShutdownOutcome::Complete(shutdown) = owner.shutdown_until(deadline())
+    else {
+        panic!("capacity-bounded actor did not prove clean shutdown");
+    };
+    assert_eq!(shutdown.accepted_commands(), 0);
+    assert_eq!(shutdown.completed_commands(), 0);
+    harness.finish(shutdown);
+}
 
 #[test]
 fn actor_real_authority_activation_exact_retirement_and_shutdown_are_clean() {
@@ -13,7 +94,9 @@ fn actor_real_authority_activation_exact_retirement_and_shutdown_are_clean() {
 
     assert_eq!(
         owner.activate_runtime_until(key, deadline()),
-        ExtensionServiceRuntimeActivationOutcome::Activated(ExtensionRuntimeGeneration::INITIAL)
+        ExtensionServiceRuntimeActivationOutcome::AlreadyActive(
+            ExtensionRuntimeGeneration::INITIAL
+        )
     );
     assert_eq!(
         owner.retire_runtime_until(key, deadline()),
@@ -43,7 +126,9 @@ fn actor_profile_retirement_drains_runtime_and_permanently_fences_ingress() {
 
     assert_eq!(
         owner.activate_runtime_until(key, deadline()),
-        ExtensionServiceRuntimeActivationOutcome::Activated(ExtensionRuntimeGeneration::INITIAL)
+        ExtensionServiceRuntimeActivationOutcome::AlreadyActive(
+            ExtensionRuntimeGeneration::INITIAL
+        )
     );
     assert_eq!(
         owner.retire_profile_until(profile, deadline()),
@@ -76,7 +161,9 @@ fn actor_shutdown_drains_live_runtime_before_minting_exact_evidence() {
 
     assert_eq!(
         owner.activate_runtime_until(key, deadline()),
-        ExtensionServiceRuntimeActivationOutcome::Activated(ExtensionRuntimeGeneration::INITIAL)
+        ExtensionServiceRuntimeActivationOutcome::AlreadyActive(
+            ExtensionRuntimeGeneration::INITIAL
+        )
     );
 
     let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())

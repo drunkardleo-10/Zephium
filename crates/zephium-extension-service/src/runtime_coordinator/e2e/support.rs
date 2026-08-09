@@ -222,6 +222,25 @@ pub(super) struct ActorAuthorityHarness {
 
 impl ActorAuthorityHarness {
     pub(super) fn launch(profile_count: usize) -> (Self, ExtensionServiceOwner) {
+        let (harness, owner, startup) =
+            Self::launch_with_publication_mode(profile_count, PublicationMode::Immediate);
+        let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) =
+            startup
+        else {
+            panic!("real-authority actor startup did not hydrate enabled runtimes");
+        };
+        assert_eq!(evidence.worker(), harness.worker);
+        assert_eq!(evidence.active_runtime_count(), profile_count as u16);
+        assert_eq!(evidence.rejected_runtime_count(), 0);
+        assert_eq!(evidence.capacity_deferred_runtime_count(), 0);
+        assert_eq!(evidence.degraded_profile_count(), 0);
+        (harness, owner)
+    }
+
+    pub(super) fn launch_with_publication_mode(
+        profile_count: usize,
+        publication_mode: PublicationMode,
+    ) -> (Self, ExtensionServiceOwner, ExtensionServiceStartupWait) {
         let temporary = RepositoryTemporary::new();
         let manifest = provision_authenticated_repository(&temporary);
         let store = Arc::new(SqliteStore::open(temporary.path()).unwrap());
@@ -229,18 +248,14 @@ impl ActorAuthorityHarness {
         let authority = store.claim_extension_service_store_authority().unwrap();
         let repository_root =
             ExtensionRepositoryRoot::from_app_data_directory(temporary.path()).unwrap();
-        let (host_factory, probe) = scripted_host_factory(PublicationMode::Immediate);
+        let (host_factory, probe) = scripted_host_factory(publication_mode);
         let owner = ExtensionServiceOwner::launch(
             ExtensionServiceLaunchInput::new(authority, repository_root, host_factory),
             deadline(),
         )
         .unwrap();
         let worker = owner.handle().worker_identity();
-        assert!(matches!(
-            owner.wait_for_startup_until(deadline()),
-            ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence))
-                if evidence.worker() == worker
-        ));
+        let startup = owner.wait_for_startup_until(deadline());
 
         (
             Self {
@@ -252,6 +267,7 @@ impl ActorAuthorityHarness {
                 temporary,
             },
             owner,
+            startup,
         )
     }
 
@@ -317,7 +333,7 @@ fn provision_store(
     profile_count: usize,
     manifest: &Arc<ExtensionManifestDescriptor>,
 ) -> (Vec<ProfileId>, Vec<ExtensionNativeOwnershipKey>) {
-    assert!((1..=2).contains(&profile_count));
+    assert!((1..=crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES + 1).contains(&profile_count));
     let profiles = (1..=profile_count)
         .map(|value| ProfileId::from(value as u128))
         .collect::<Vec<_>>();

@@ -39,6 +39,10 @@ use crate::startup::{
     ExtensionServiceStartupWait, SharedStartupOutcome, StartupAttempt, StartupAttemptWait,
     StartupRetryReservation,
 };
+use crate::startup_hydration::{
+    hydrate_startup_runtimes, StartupRuntimeHydrationFailure, StartupRuntimeHydrationOutcome,
+    StartupRuntimeHydrationReport, StartupRuntimeHydrationUnavailable,
+};
 use crate::status::{
     ExtensionServicePhase, ExtensionServiceStatusSnapshot, ExtensionServiceStatusWait, SharedStatus,
 };
@@ -1109,23 +1113,110 @@ impl WorkerState {
         let Some(startup) = self.startup.as_mut() else {
             return false;
         };
-        status.publish_startup(ExtensionServicePhase::OpeningRepository);
-        let outcome = reconcile_startup(
+        if startup.frontier == WorkerStartupFrontier::Cleanup {
+            status.publish_startup(ExtensionServicePhase::OpeningRepository);
+            let cleanup = reconcile_startup(
+                &startup.store,
+                &mut startup.projection,
+                &mut startup.repository,
+                Some(&mut startup.native_recovery),
+                CleanupAttempt::new(CleanupScope::All, cancellation, deadline),
+                |progress| match progress {
+                    CleanupProgress::LoadingOwnershipJournal => {
+                        status.publish_startup(ExtensionServicePhase::LoadingOwnershipJournal);
+                    }
+                    CleanupProgress::ReconcilingCleanup => {
+                        status.publish_startup(ExtensionServicePhase::ReconcilingCleanup);
+                    }
+                },
+            );
+            match cleanup {
+                CleanupStartupOutcome::Ready { journal_revision }
+                    if startup
+                        .projection
+                        .known()
+                        .is_some_and(|journal| journal.revision() == journal_revision) =>
+                {
+                    // This transition is monotonic for the worker lifetime.
+                    // Hydration retries must never re-enter crash recovery
+                    // around owners acquired by an earlier hydration attempt.
+                    startup.frontier = WorkerStartupFrontier::Hydration;
+                }
+                CleanupStartupOutcome::Ready { .. } => {
+                    return publish_startup_settlement(
+                        status,
+                        startup_outcome,
+                        attempt,
+                        ExtensionServiceStartupOutcome::FailedClosed(
+                            ExtensionServiceStartupFailure::new(
+                                worker,
+                                ExtensionServiceStartupFailureReason::InternalProtocolViolation,
+                            ),
+                        ),
+                        || {},
+                    );
+                }
+                outcome => {
+                    let outcome = public_startup_outcome(worker, outcome);
+                    return publish_startup_settlement(
+                        status,
+                        startup_outcome,
+                        attempt,
+                        outcome,
+                        || {},
+                    );
+                }
+            }
+        }
+
+        status.publish_startup(ExtensionServicePhase::HydratingRuntimes);
+        let outcome = match hydrate_startup_runtimes(
             &startup.store,
             &mut startup.projection,
             &mut startup.repository,
-            Some(&mut startup.native_recovery),
-            CleanupAttempt::new(CleanupScope::All, cancellation, deadline),
-            |progress| match progress {
-                CleanupProgress::LoadingOwnershipJournal => {
-                    status.publish_startup(ExtensionServicePhase::LoadingOwnershipJournal);
+            &mut startup.native_recovery,
+            &mut self.runtime,
+            cancellation,
+            deadline,
+        ) {
+            StartupRuntimeHydrationOutcome::Ready {
+                journal_revision,
+                report,
+            } => {
+                let evidence = ExtensionServiceReadyEvidence::after_hydration(
+                    worker,
+                    journal_revision,
+                    usize::from(report.active_count()),
+                    report.rejected_count(),
+                    report.capacity_deferred_count(),
+                    report.degraded_profile_count(),
+                );
+                startup.hydration_report = Some(report);
+                match evidence {
+                    Some(evidence) => ExtensionServiceStartupOutcome::Ready(evidence),
+                    None => ExtensionServiceStartupOutcome::FailedClosed(
+                        ExtensionServiceStartupFailure::new(
+                            worker,
+                            ExtensionServiceStartupFailureReason::InternalProtocolViolation,
+                        ),
+                    ),
                 }
-                CleanupProgress::ReconcilingCleanup => {
-                    status.publish_startup(ExtensionServicePhase::ReconcilingCleanup);
-                }
-            },
-        );
-        let outcome = public_startup_outcome(worker, outcome);
+            }
+            StartupRuntimeHydrationOutcome::Unavailable(reason) => {
+                ExtensionServiceStartupOutcome::Unavailable(
+                    ExtensionServiceStartupUnavailable::new(
+                        worker,
+                        public_hydration_unavailable_reason(reason),
+                    ),
+                )
+            }
+            StartupRuntimeHydrationOutcome::Failed(reason) => {
+                ExtensionServiceStartupOutcome::FailedClosed(ExtensionServiceStartupFailure::new(
+                    worker,
+                    public_hydration_failure_reason(reason),
+                ))
+            }
+        };
         publish_startup_settlement(status, startup_outcome, attempt, outcome, || {})
     }
 
@@ -1444,6 +1535,14 @@ struct WorkerStartupState {
     repository: ServiceRepository,
     projection: JournalProjection,
     native_recovery: NativeRecoveryState,
+    frontier: WorkerStartupFrontier,
+    hydration_report: Option<StartupRuntimeHydrationReport>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerStartupFrontier {
+    Cleanup,
+    Hydration,
 }
 
 impl WorkerStartupState {
@@ -1453,6 +1552,8 @@ impl WorkerStartupState {
             repository: ServiceRepository::new(input.repository_root),
             projection: JournalProjection::unknown(),
             native_recovery: NativeRecoveryState::new(input.host_factory),
+            frontier: WorkerStartupFrontier::Cleanup,
+            hydration_report: None,
         }
     }
 }
@@ -1585,6 +1686,43 @@ const fn public_failure_reason(reason: CleanupFailure) -> ExtensionServiceStartu
         | CleanupFailure::NativeHostInvariant
         | CleanupFailure::FrontierLimitExceeded => {
             ExtensionServiceStartupFailureReason::InternalProtocolViolation
+        }
+    }
+}
+
+const fn public_hydration_unavailable_reason(
+    reason: StartupRuntimeHydrationUnavailable,
+) -> ExtensionServiceStartupUnavailableReason {
+    match reason {
+        StartupRuntimeHydrationUnavailable::Cancelled => {
+            ExtensionServiceStartupUnavailableReason::CancellationRequested
+        }
+        StartupRuntimeHydrationUnavailable::DeadlineReached
+        | StartupRuntimeHydrationUnavailable::Runtime(
+            crate::runtime_coordinator::RuntimeActivationUnavailableReason::DeadlineReached,
+        ) => ExtensionServiceStartupUnavailableReason::DeadlineReached,
+        StartupRuntimeHydrationUnavailable::StoreNotAdmitted
+        | StartupRuntimeHydrationUnavailable::Runtime(
+            crate::runtime_coordinator::RuntimeActivationUnavailableReason::StoreNotAdmitted,
+        ) => ExtensionServiceStartupUnavailableReason::StoreNotAdmitted,
+        StartupRuntimeHydrationUnavailable::StoreObservationPending
+        | StartupRuntimeHydrationUnavailable::Runtime(_) => {
+            ExtensionServiceStartupUnavailableReason::ReconciliationPending
+        }
+    }
+}
+
+const fn public_hydration_failure_reason(
+    reason: StartupRuntimeHydrationFailure,
+) -> ExtensionServiceStartupFailureReason {
+    match reason {
+        StartupRuntimeHydrationFailure::InventoryLoadFailed => {
+            ExtensionServiceStartupFailureReason::RuntimeInventoryLoadFailed
+        }
+        StartupRuntimeHydrationFailure::ProjectionMissing
+        | StartupRuntimeHydrationFailure::ProfileFenced
+        | StartupRuntimeHydrationFailure::Coordinator(_) => {
+            ExtensionServiceStartupFailureReason::RuntimeHydrationFailed
         }
     }
 }
