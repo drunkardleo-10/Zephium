@@ -1,11 +1,49 @@
 //! Host-side ownership of Shell-projected extension window/tab routing.
 
-use zephium_core::extensions::{ExtensionBrowserSurface, MAX_EXTENSION_BROWSER_WINDOWS};
+use zephium_core::extensions::{
+    ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    MAX_EXTENSION_BROWSER_WINDOWS,
+};
 use zephium_core::ids::{ItemId, ProfileId};
 
 use super::EngineHost;
 
 impl EngineHost {
+    pub(crate) fn settle_extension_browser_request(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionBrowserRequestId,
+        settlement: ExtensionBrowserRequestSettlement,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            matches!(
+                self.macos_extension_controllers
+                    .settle_browser_request(profile, request, settlement,),
+                Ok(
+                    crate::platform::imp::ControllerBrowserRequestSettlement::Settled
+                        | crate::platform::imp::ControllerBrowserRequestSettlement::Stale
+                )
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (profile, request, settlement);
+            false
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn timeout_extension_browser_request(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionBrowserRequestId,
+    ) {
+        let _ = self
+            .macos_extension_controllers
+            .timeout_browser_request(profile, request);
+    }
+
     pub(crate) fn set_extension_browser_surface(
         &mut self,
         surface: ExtensionBrowserSurface,

@@ -4,6 +4,7 @@
 //! bounded, and requires the durable namespace scope; the product runtime
 //! adapter remains disabled until its complete lifecycle is joined.
 
+mod browser_request_broker;
 mod browser_surface;
 mod controller_registry;
 mod erasure;
@@ -14,8 +15,9 @@ mod native_runtime;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use controller_registry::ControllerPreparation as ProbeControllerPreparation;
 pub(crate) use controller_registry::{
-    ControllerErasureSettlement, ControllerNamespaceRecoveryAudit, ControllerPreparation,
-    ControllerRegistryError, PersistentControllerRegistry,
+    ControllerBrowserRequestSettlement, ControllerErasureSettlement,
+    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
+    PersistentControllerRegistry,
 };
 pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 #[cfg(feature = "native-web-extension-probes")]

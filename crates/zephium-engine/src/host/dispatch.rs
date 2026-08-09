@@ -24,6 +24,13 @@ thread_local! {
         const { Cell::new(ExtensionRuntimeTerminalSlots::EMPTY) };
     static EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
     static EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS: Cell<ExtensionBrowserRequestTerminalSlots> =
+        const { Cell::new(ExtensionBrowserRequestTerminalSlots::EMPTY) };
+    #[cfg(target_os = "macos")]
+    static EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(not(target_os = "windows"))]
     static PENDING_CONTENT_POLICY_TERMINALS: Cell<ContentPolicyTerminalSlots> =
         const { Cell::new(ContentPolicyTerminalSlots::EMPTY) };
@@ -40,14 +47,22 @@ type HostTask = Box<dyn FnOnce(&mut EngineHost)>;
 
 const EXTENSION_RUNTIME_TERMINAL_CAPACITY: usize =
     2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
+#[cfg(target_os = "macos")]
+const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize =
+    2 * zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS;
+
+type ExtensionRuntimeTerminalSlots = ExactTerminalSlots<EXTENSION_RUNTIME_TERMINAL_CAPACITY>;
+#[cfg(target_os = "macos")]
+type ExtensionBrowserRequestTerminalSlots =
+    ExactTerminalSlots<EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY>;
 
 /// Inline, noncoalescing terminal ring.
 ///
 /// Native callbacks and their independently scheduled cancellation barriers
 /// can contribute at most two exact tasks per logical reservation. The ring
 /// never allocates, grows, replaces, or silently drops an accepted terminal.
-struct ExtensionRuntimeTerminalSlots {
-    slots: [Option<HostTask>; EXTENSION_RUNTIME_TERMINAL_CAPACITY],
+struct ExactTerminalSlots<const CAPACITY: usize> {
+    slots: [Option<HostTask>; CAPACITY],
     head: usize,
     len: usize,
     // The normal capacity is proven from the logical reservation ceiling. If
@@ -59,9 +74,9 @@ struct ExtensionRuntimeTerminalSlots {
     overflow_predecessors: usize,
 }
 
-impl ExtensionRuntimeTerminalSlots {
+impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
     const EMPTY: Self = Self {
-        slots: [const { None }; EXTENSION_RUNTIME_TERMINAL_CAPACITY],
+        slots: [const { None }; CAPACITY],
         head: 0,
         len: 0,
         overflow_quarantine: None,
@@ -69,10 +84,10 @@ impl ExtensionRuntimeTerminalSlots {
     };
 
     fn push_back(&mut self, task: HostTask) -> Result<(), HostTask> {
-        if self.len >= EXTENSION_RUNTIME_TERMINAL_CAPACITY {
+        if self.len >= CAPACITY {
             return Err(task);
         }
-        let index = (self.head + self.len) % EXTENSION_RUNTIME_TERMINAL_CAPACITY;
+        let index = (self.head + self.len) % CAPACITY;
         debug_assert!(self.slots[index].is_none());
         self.slots[index] = Some(task);
         self.len += 1;
@@ -89,7 +104,7 @@ impl ExtensionRuntimeTerminalSlots {
         }
         let index = self.head;
         let task = self.slots[index].take();
-        self.head = (self.head + 1) % EXTENSION_RUNTIME_TERMINAL_CAPACITY;
+        self.head = (self.head + 1) % CAPACITY;
         self.len -= 1;
         if self.overflow_quarantine.is_some() {
             debug_assert!(self.overflow_predecessors > 0);
@@ -118,7 +133,7 @@ impl ExtensionRuntimeTerminalSlots {
     }
 }
 
-impl Default for ExtensionRuntimeTerminalSlots {
+impl<const CAPACITY: usize> Default for ExactTerminalSlots<CAPACITY> {
     fn default() -> Self {
         Self::EMPTY
     }
@@ -326,6 +341,14 @@ pub(crate) fn install(
     });
     EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionBrowserRequestTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -385,7 +408,9 @@ pub(crate) fn install(
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(target_os = "macos")]
             macos_extension_controllers:
-                crate::platform::imp::PersistentControllerRegistry::new(),
+                crate::platform::imp::PersistentControllerRegistry::with_browser_request_sink(
+                    sink.clone(),
+                ),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
@@ -466,6 +491,14 @@ pub(crate) fn make_unavailable_for_test() {
     });
     EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionBrowserRequestTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -644,6 +677,93 @@ pub(super) fn extension_runtime_terminals_are_quiescent() -> bool {
         pending.set(slots);
         empty
     })
+}
+
+/// Admit a Shell settlement or watchdog for an already-retained native
+/// browser-request completion. The fixed FIFO is sized from the global
+/// request ceiling, so WebKit re-entry cannot crowd it out with renderer work.
+#[cfg(target_os = "macos")]
+pub(crate) fn with_extension_browser_request_terminal<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let task: HostTask = Box::new(f);
+    enum Admission {
+        Accepted,
+        Quarantined,
+        Exhausted,
+    }
+    let admission = PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS.with(|pending| {
+        let mut slots = pending.take();
+        let admission = match slots.push_back(task) {
+            Ok(()) => Admission::Accepted,
+            Err(task) => match slots.quarantine_overflow(task) {
+                Ok(()) => Admission::Quarantined,
+                Err(_task) => Admission::Exhausted,
+            },
+        };
+        pending.set(slots);
+        admission
+    });
+    match admission {
+        Admission::Accepted => drain_extension_browser_request_terminals(),
+        Admission::Quarantined | Admission::Exhausted => {
+            EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            let _ = drain_extension_browser_request_terminals();
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_extension_browser_request_terminals() -> bool {
+    enum Drain {
+        Complete(bool),
+        Deferred,
+        Unavailable,
+    }
+    let drain = HOST.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return Drain::Deferred;
+        };
+        let Some(host) = slot.as_mut() else {
+            return Drain::Unavailable;
+        };
+        Drain::Complete(drain_extension_browser_request_terminals_with_host(host))
+    });
+    match drain {
+        Drain::Complete(clean) => clean,
+        Drain::Deferred => true,
+        Drain::Unavailable => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_extension_browser_request_terminals_with_host(host: &mut EngineHost) -> bool {
+    loop {
+        let task = PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            let task = slots.pop_front();
+            pending.set(slots);
+            task
+        });
+        let Some(task) = task else {
+            break;
+        };
+        task(host);
+    }
+    if !EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        return true;
+    }
+    let report = EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED
+        .with(|reported| !reported.replace(true));
+    if report {
+        (host.native_terminal_failure)(
+            "extension browser request terminals exceeded their proven exact capacity",
+        );
+    }
+    false
 }
 
 /// Admit the sole read-only extension profile-absence fence.
@@ -883,6 +1003,10 @@ where
                 if !drain_extension_runtime_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
+                #[cfg(target_os = "macos")]
+                if !drain_extension_browser_request_terminals_with_host(host) {
+                    return Access::TerminalFailed;
+                }
                 // The host exists and the barrier is about to execute. Seal
                 // before native teardown so a callback pumped by teardown
                 // cannot recreate a controller behind it.
@@ -948,6 +1072,12 @@ where
         return false;
     }
 
+    #[cfg(target_os = "macos")]
+    if !drain_extension_browser_request_terminals() {
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        return false;
+    }
+
     #[cfg(not(target_os = "windows"))]
     if !drain_content_policy_terminal_debts() {
         // An exact native compiler terminal is a lifecycle debt, not a
@@ -1006,6 +1136,11 @@ where
             return false;
         }
         if !drain_extension_runtime_terminals() {
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if !drain_extension_browser_request_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }

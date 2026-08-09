@@ -41,7 +41,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
-use zephium_core::extensions::{ExtensionBrowserSurface, ExtensionNativeNamespaceScope};
+use zephium_core::extensions::{
+    ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionNativeNamespaceScope,
+};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::ports::engine::{
@@ -507,6 +510,10 @@ impl RetirementGate {
             event @ EngineEvent::UserContentSettled { scope, .. } => {
                 self.allows_scope(scope).then_some(event)
             }
+            // This is an untrusted request, not a native-state fact. Deliver
+            // it after profile retirement so Shell can explicitly reject the
+            // retained native completion instead of waiting for its timeout.
+            event @ EngineEvent::ExtensionBrowserRequested { .. } => Some(event),
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
             | event @ EngineEvent::PresentationPending { id, .. }
@@ -1185,6 +1192,30 @@ impl Engine for WebviewEngine {
                 );
             }
         }))
+    }
+
+    fn settle_extension_browser_request(
+        &self,
+        profile: ProfileId,
+        request: ExtensionBrowserRequestId,
+        settlement: ExtensionBrowserRequestSettlement,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            // Settlement is cleanup of an already-authorized native callback,
+            // so it must remain admissible after retirement. The registry
+            // treats a cleared/timed-out correlation as an inert stale reply.
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::with_extension_browser_request_terminal(move |host| {
+                    let _ = host.settle_extension_browser_request(profile, request, settlement);
+                });
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (profile, request, settlement);
+            NativeDispatch::Unsupported
+        }
     }
 
     fn reload(&self, id: ItemId) -> NativeDispatch {

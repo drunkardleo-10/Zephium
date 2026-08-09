@@ -5,19 +5,20 @@
 //! It also binds a private view to one non-persistent controller/store pair.
 //! Fixed persistent namespaces are serialized and cleaned on every exit.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieMaximumAge,
+    MainThreadMarker, NSArray, NSError, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieMaximumAge,
     NSHTTPCookieName, NSHTTPCookiePath, NSHTTPCookiePropertyKey, NSHTTPCookieValue,
-    NSHTTPCookieVersion, NSMutableDictionary, NSRunLoop, NSString,
+    NSHTTPCookieVersion, NSMutableDictionary, NSRunLoop, NSString, NSURL,
 };
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab, WKWebView,
@@ -25,15 +26,18 @@ use objc2_web_kit::{
 };
 use wry::WebViewBuilderExtMacos;
 use zephium_core::extensions::{
-    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
-    ExtensionBrowserWindow, ExtensionNativeNamespaceScope,
+    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestResult,
+    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
+    ExtensionBrowserTab, ExtensionBrowserWindow, ExtensionNativeNamespaceScope,
 };
 use zephium_core::ids::ItemId;
+use zephium_core::ports::engine::EngineEvent;
 
 use super::persistent_runtime::{NamespaceLock, EXTENSION_PRINCIPAL};
 use super::{persistent_probe_profiles, ProbeHostView, PROBE_TIMEOUT, PROFILE_ROUTING_PRINCIPALS};
 use crate::platform::macos::{
-    ControllerNamespaceRecoveryAudit, PersistentControllerRegistry, ProbeControllerPreparation,
+    ControllerBrowserRequestSettlement, ControllerNamespaceRecoveryAudit,
+    PersistentControllerRegistry, ProbeControllerPreparation,
 };
 
 const COOKIE_NAME: &str = "zephium_profile_isolation_probe";
@@ -66,6 +70,7 @@ struct ProfileGeneration {
     regular_contexts: Vec<Weak<WKWebExtensionContext>>,
     regular_controllers: [Retained<WKWebExtensionController>; EXPECTED_REGULAR_PROFILES],
     regular_stores: [Retained<WKWebsiteDataStore>; EXPECTED_REGULAR_PROFILES],
+    browser_requests: Arc<Mutex<VecDeque<ExtensionBrowserRequest>>>,
 }
 
 impl ProfileIsolationEvidence {
@@ -252,7 +257,17 @@ fn exercise_profile_isolation(
 impl ProfileGeneration {
     fn new(mtm: MainThreadMarker) -> Result<Self, String> {
         let [profile_a, profile_b] = persistent_probe_profiles();
-        let mut registry = PersistentControllerRegistry::new();
+        let browser_requests = Arc::new(Mutex::new(VecDeque::new()));
+        let request_sink = browser_requests.clone();
+        let sink: crate::EngineEventIngressSink = Arc::new(move |ingress| {
+            if let EngineEvent::ExtensionBrowserRequested { request } = ingress.event {
+                request_sink
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(request);
+            }
+        });
+        let mut registry = PersistentControllerRegistry::with_browser_request_sink(sink);
         for profile in [profile_a, profile_b] {
             match registry
                 .prepare_for_native_probe(profile)
@@ -320,6 +335,7 @@ impl ProfileGeneration {
             regular_contexts: Vec::new(),
             regular_controllers,
             regular_stores,
+            browser_requests,
         })
     }
 
@@ -461,9 +477,19 @@ impl ProfileGeneration {
                 &tab_a,
                 "profile B foreign tab route",
             )?;
+            let updated_surface_a = self.validate_tab_mutation_broker(
+                profile_a,
+                WINDOW_A,
+                item_a,
+                &tab_a,
+                &context_a,
+                &context_b,
+                native_a.clone(),
+            )?;
             let empty_a = ExtensionBrowserSurface::new(
                 profile_a,
-                ExtensionBrowserSurfaceGeneration::new(2).unwrap(),
+                ExtensionBrowserSurfaceGeneration::new(updated_surface_a.generation().get() + 1)
+                    .unwrap(),
                 None,
                 Vec::new(),
             )
@@ -532,6 +558,167 @@ impl ProfileGeneration {
         drop(context_a);
         drop(context_b);
         combine_gate_and_cleanup_failures(gate, cleanup_failures, "profile routing")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_tab_mutation_broker(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        window: u64,
+        item: ItemId,
+        tab: &ProtocolObject<dyn WKWebExtensionTab>,
+        context: &WKWebExtensionContext,
+        foreign_context: &WKWebExtensionContext,
+        webview: Retained<WKWebView>,
+    ) -> Result<ExtensionBrowserSurface, String> {
+        let target = "https://profile-a.invalid/updated";
+        let target_url = NSURL::URLWithString(&NSString::from_str(target))
+            .ok_or_else(|| "cannot construct browser-mutation probe URL".to_owned())?;
+        let completion_count = Rc::new(Cell::new(0));
+        let completion_error = Rc::new(Cell::new(false));
+        let callback_count = completion_count.clone();
+        let callback_error = completion_error.clone();
+        let completion: block2::RcBlock<dyn Fn(*mut NSError)> =
+            block2::RcBlock::new(move |error: *mut NSError| {
+                callback_count.set(callback_count.get() + 1);
+                callback_error.set(!error.is_null());
+            });
+        // SAFETY: the live context owns this exact projected tab, and the
+        // callback is retained by the broker until explicit settlement.
+        unsafe {
+            tab.loadURL_forWebExtensionContext_completionHandler(&target_url, context, &completion)
+        };
+        if completion_count.get() != 0 {
+            return Err("browser mutation completed before Shell settlement".into());
+        }
+        let request = self.take_browser_request()?;
+        if request.profile() != profile
+            || request.action()
+                != &(ExtensionBrowserRequestAction::LoadTabUrl {
+                    tab: item,
+                    url: Arc::from(target),
+                })
+        {
+            return Err(format!(
+                "native browser mutation produced the wrong typed request: {request:?}"
+            ));
+        }
+
+        let updated = ExtensionBrowserSurface::new(
+            profile,
+            ExtensionBrowserSurfaceGeneration::new(2).unwrap(),
+            Some(window),
+            vec![ExtensionBrowserWindow::new(
+                window,
+                false,
+                Some(item),
+                vec![ExtensionBrowserTab::from_snapshot(
+                    None,
+                    item,
+                    true,
+                    "Profile A updated",
+                    Some(
+                        &url::Url::parse(target)
+                            .map_err(|error| format!("cannot parse mutation URL: {error}"))?,
+                    ),
+                    false,
+                    true,
+                )
+                .map_err(|error| format!("cannot build updated mutation tab: {error:?}"))?],
+            )
+            .map_err(|error| format!("cannot build updated mutation window: {error:?}"))?],
+        )
+        .map_err(|error| format!("cannot build updated mutation surface: {error:?}"))?;
+        self.registry
+            .apply_browser_surface(&updated, |id| (id == item).then(|| webview.clone()))
+            .map_err(|error| format!("cannot publish browser mutation surface: {error}"))?;
+        let settlement = self
+            .registry
+            .settle_browser_request(
+                profile,
+                request.id(),
+                ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
+            )
+            .map_err(|error| format!("cannot settle browser mutation: {error}"))?;
+        if settlement != ControllerBrowserRequestSettlement::Settled
+            || completion_count.get() != 1
+            || completion_error.get()
+        {
+            return Err(format!(
+                "browser mutation did not settle exactly once: settlement={settlement:?}, count={}, error={} ",
+                completion_count.get(),
+                completion_error.get()
+            ));
+        }
+
+        let foreign_count = Rc::new(Cell::new(0));
+        let foreign_failed = Rc::new(Cell::new(false));
+        let callback_count = foreign_count.clone();
+        let callback_failed = foreign_failed.clone();
+        let foreign_completion: block2::RcBlock<dyn Fn(*mut NSError)> =
+            block2::RcBlock::new(move |error: *mut NSError| {
+                callback_count.set(callback_count.get() + 1);
+                callback_failed.set(!error.is_null());
+            });
+        // SAFETY: deliberately supply another controller's context to prove
+        // the principal/controller boundary fails closed.
+        unsafe {
+            tab.loadURL_forWebExtensionContext_completionHandler(
+                &target_url,
+                foreign_context,
+                &foreign_completion,
+            )
+        };
+        if foreign_count.get() != 1 || !foreign_failed.get() || !self.browser_requests_is_empty() {
+            return Err("foreign extension context crossed the browser mutation broker".into());
+        }
+
+        let unsupported_count = Rc::new(Cell::new(0));
+        let unsupported_failed = Rc::new(Cell::new(false));
+        let callback_count = unsupported_count.clone();
+        let callback_failed = unsupported_failed.clone();
+        let unsupported_completion: block2::RcBlock<dyn Fn(*mut NSError)> =
+            block2::RcBlock::new(move |error: *mut NSError| {
+                callback_count.set(callback_count.get() + 1);
+                callback_failed.set(!error.is_null());
+            });
+        // SAFETY: reload is intentionally represented as an explicit refusal
+        // so WebKit cannot fall back to mutating the WKWebView directly.
+        unsafe {
+            tab.reloadFromOrigin_forWebExtensionContext_completionHandler(
+                false,
+                context,
+                &unsupported_completion,
+            )
+        };
+        if unsupported_count.get() != 1
+            || !unsupported_failed.get()
+            || !self.browser_requests_is_empty()
+        {
+            return Err("unsupported native mutation did not fail closed".into());
+        }
+        Ok(updated)
+    }
+
+    fn take_browser_request(&self) -> Result<ExtensionBrowserRequest, String> {
+        let mut requests = self
+            .browser_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request = requests
+            .pop_front()
+            .ok_or_else(|| "native browser mutation emitted no typed request".to_owned())?;
+        if !requests.is_empty() {
+            return Err("native browser mutation emitted duplicate typed requests".into());
+        }
+        Ok(request)
+    }
+
+    fn browser_requests_is_empty(&self) -> bool {
+        self.browser_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     fn run_private_storage_sequence(
