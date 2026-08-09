@@ -11,8 +11,8 @@ mod web_extensions;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::ProbeControllerPreparation;
 pub(crate) use extensions::{
-    ControllerErasureSettlement, ControllerErasureTicket, PersistentControllerRegistry,
-    ProfileControllerErasure,
+    ControllerErasureSettlement, ControllerErasureTicket, MacosNativeRuntimeOwner,
+    MacosNativeRuntimeOwnerIdentity, PersistentControllerRegistry, ProfileControllerErasure,
 };
 
 pub(crate) use content_filter::{

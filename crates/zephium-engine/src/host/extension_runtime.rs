@@ -1765,23 +1765,33 @@ impl ExtensionRuntimeRegistry {
         owner: OwnerKey,
         generation: ExtensionRuntimeHostRegistryGeneration,
         deadline: Instant,
-    ) -> Result<NativeCallTicket, ExtensionRuntimeHostBindError> {
+    ) -> Result<(NativeCallTicket, PlatformOwnerBundle), ExtensionRuntimeHostBindError> {
         let index = self.entry_index(owner, generation)?;
         let ticket = self.mint_native_ticket(index, NativeCallKind::Retirement)?;
+        // Install notification ownership before moving the platform object out
+        // of the registry. If notification admission is corrupt, the exact
+        // native owner remains retained in place instead of being exposed to a
+        // passive destructor on this error path.
         if self.entries[index]
-            .native
-            .begin_retirement(ticket, deadline)
+            .reservation
+            .native_call
+            .begin(ticket)
             .is_err()
-            || self.entries[index]
-                .reservation
-                .native_call
-                .begin(ticket)
-                .is_err()
         {
             self.fail_invariant();
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
-        Ok(ticket)
+        let platform_owner = match self.entries[index]
+            .native
+            .begin_retirement(ticket, deadline)
+        {
+            Ok(platform_owner) => platform_owner,
+            Err(_) => {
+                self.fail_invariant();
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+        };
+        Ok((ticket, platform_owner))
     }
 
     fn begin_native_reconciliation(
@@ -1822,15 +1832,23 @@ impl ExtensionRuntimeRegistry {
     ) -> Result<bool, ExtensionRuntimeHostBindError> {
         let index = match self.entry_index(ticket.owner(), ticket.registry_generation()) {
             Ok(index) => index,
-            Err(ExtensionRuntimeHostBindError::OwnerConflict) => return Ok(false),
-            Err(reason) => return Err(reason),
+            Err(ExtensionRuntimeHostBindError::OwnerConflict) => {
+                platform_owner.quarantine_unattributed();
+                return Ok(false);
+            }
+            Err(reason) => {
+                platform_owner.quarantine_unattributed();
+                return Err(reason);
+            }
         };
         if !self.callback_is_pending(index, ticket)? {
+            platform_owner.quarantine_unattributed();
             return Ok(false);
         }
         let expectation = match &self.entries[index].reservation.binding {
             ReservationBinding::Activation { expectation, .. } => *expectation,
             ReservationBinding::Recovery { .. } => {
+                platform_owner.quarantine_unattributed();
                 self.fail_invariant();
                 return Err(ExtensionRuntimeHostBindError::InternalInvariant);
             }
@@ -1853,13 +1871,21 @@ impl ExtensionRuntimeRegistry {
         &mut self,
         ticket: NativeCallTicket,
         disposition: ExtensionRuntimeRetirementDisposition,
+        platform_owner: PlatformOwnerBundle,
     ) -> Result<bool, ExtensionRuntimeHostBindError> {
         let index = match self.entry_index(ticket.owner(), ticket.registry_generation()) {
             Ok(index) => index,
-            Err(ExtensionRuntimeHostBindError::OwnerConflict) => return Ok(false),
-            Err(reason) => return Err(reason),
+            Err(ExtensionRuntimeHostBindError::OwnerConflict) => {
+                platform_owner.quarantine_unattributed();
+                return Ok(false);
+            }
+            Err(reason) => {
+                platform_owner.quarantine_unattributed();
+                return Err(reason);
+            }
         };
         if !self.callback_is_pending(index, ticket)? {
+            platform_owner.quarantine_unattributed();
             return Ok(false);
         }
         let expectation =
@@ -1870,6 +1896,7 @@ impl ExtensionRuntimeRegistry {
             .settle_retirement(
                 ticket,
                 disposition,
+                platform_owner,
                 |evidence| expectation.accepts(evidence),
                 |absence| reservation.accepts_absence_candidate(ticket, absence),
             )
@@ -1885,10 +1912,17 @@ impl ExtensionRuntimeRegistry {
     ) -> Result<bool, ExtensionRuntimeHostBindError> {
         let index = match self.entry_index(ticket.owner(), ticket.registry_generation()) {
             Ok(index) => index,
-            Err(ExtensionRuntimeHostBindError::OwnerConflict) => return Ok(false),
-            Err(reason) => return Err(reason),
+            Err(ExtensionRuntimeHostBindError::OwnerConflict) => {
+                platform_owner.quarantine_unattributed();
+                return Ok(false);
+            }
+            Err(reason) => {
+                platform_owner.quarantine_unattributed();
+                return Err(reason);
+            }
         };
         if !self.callback_is_pending(index, ticket)? {
+            platform_owner.quarantine_unattributed();
             return Ok(false);
         }
         let expectation =
@@ -2926,7 +2960,7 @@ fn ownership_retirement(
                 .route_native_call(Arc::clone(&reservation), NativeCallKind::Retirement)?
             {
                 NativeCallRoute::Begin => {
-                    let ticket = host
+                    let (ticket, platform_owner) = host
                         .extension_runtime_registry
                         .begin_native_retirement(owner, generation, deadline)?;
                     let accepted = super::dispatch::with_extension_runtime_terminal(move |host| {
@@ -2935,6 +2969,7 @@ fn ownership_retirement(
                             ExtensionRuntimeRetirementDisposition::Retained(
                                 ExtensionRuntimeFailure::UnsupportedTarget,
                             ),
+                            platform_owner,
                         );
                         if settled.is_err() {
                             fail_extension_native_terminal(
@@ -4980,7 +5015,7 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(1),
             )
             .expect("activation observed");
-        let retirement = registry
+        let (retirement, platform_owner) = registry
             .begin_native_retirement(
                 fixture.owner,
                 generation,
@@ -4993,6 +5028,7 @@ mod tests {
                 ExtensionRuntimeRetirementDisposition::Retained(
                     ExtensionRuntimeFailure::BackendUnavailable,
                 ),
+                platform_owner,
             ),
             Ok(true)
         );
@@ -5013,18 +5049,22 @@ mod tests {
         );
         assert!(!ledger.is_quiescent());
 
-        let final_retirement = registry
+        let (final_retirement, platform_owner) = registry
             .begin_native_retirement(
                 fixture.owner,
                 generation,
                 Instant::now() + std::time::Duration::from_secs(5),
             )
             .expect("second exact retirement");
+        // The logical harness stands in for a successful consuming native
+        // teardown, which returns no platform owner alongside exact absence.
+        drop(platform_owner);
         let final_absence = compatibility_absence_for(&reservation, final_retirement);
         assert_eq!(
             registry.complete_native_retirement(
                 final_retirement,
                 ExtensionRuntimeRetirementDisposition::Retired(final_absence),
+                PlatformOwnerBundle::Vacant,
             ),
             Ok(true)
         );
@@ -5494,7 +5534,7 @@ mod tests {
             )
             .is_ok());
 
-        let retirement = registry
+        let (retirement, platform_owner) = registry
             .begin_native_retirement(
                 owner,
                 generation,
@@ -5508,6 +5548,7 @@ mod tests {
                     failure: ExtensionRuntimeFailure::TimedOut,
                     evidence: Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
                 },
+                platform_owner,
             ),
             Ok(true)
         );

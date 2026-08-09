@@ -15,6 +15,9 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeRetirementDisposition,
 };
 
+#[cfg(target_os = "macos")]
+use crate::platform::imp::{MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity};
+
 use super::super::resources::{
     NativeResourceAdmissionError, NativeResourceClass, NativeResourceLease,
 };
@@ -449,8 +452,19 @@ impl EvidenceHistory {
 /// Placeholder for the platform objects retained beside an exact owner.
 pub(super) enum PlatformOwnerBundle {
     Vacant,
+    #[cfg(target_os = "macos")]
+    #[allow(dead_code)] // Constructed when the guarded product adapter is enabled.
+    Macos(MacosNativeRuntimeOwner),
     #[cfg(test)]
     Logical(LogicalPlatformOwner),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlatformOwnerIdentity {
+    #[cfg(target_os = "macos")]
+    Macos(MacosNativeRuntimeOwnerIdentity),
+    #[cfg(test)]
+    Logical(NonZeroU64),
 }
 
 impl PlatformOwnerBundle {
@@ -461,11 +475,45 @@ impl PlatformOwnerBundle {
     fn is_exactly(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Vacant, Self::Vacant) => true,
+            #[cfg(target_os = "macos")]
+            (Self::Macos(left), Self::Macos(right)) => left.is_exactly(right),
             #[cfg(test)]
             (Self::Logical(left), Self::Logical(right)) => left.token == right.token,
-            #[cfg(test)]
-            (Self::Vacant | Self::Logical(_), Self::Vacant | Self::Logical(_)) => false,
+            _ => false,
         }
+    }
+
+    fn identity(&self) -> Option<PlatformOwnerIdentity> {
+        match self {
+            Self::Vacant => None,
+            #[cfg(target_os = "macos")]
+            Self::Macos(owner) => Some(PlatformOwnerIdentity::Macos(owner.identity())),
+            #[cfg(test)]
+            Self::Logical(owner) => Some(PlatformOwnerIdentity::Logical(owner.token)),
+        }
+    }
+
+    fn matches_identity(&self, identity: PlatformOwnerIdentity) -> bool {
+        match (self, identity) {
+            #[cfg(target_os = "macos")]
+            (Self::Macos(owner), PlatformOwnerIdentity::Macos(expected)) => {
+                owner.identity() == expected
+            }
+            #[cfg(test)]
+            (Self::Logical(owner), PlatformOwnerIdentity::Logical(expected)) => {
+                owner.token == expected
+            }
+            _ => false,
+        }
+    }
+
+    /// Retains an owner-bearing callback that cannot be attributed to a live
+    /// registry attempt. There is deliberately no process-global recovery
+    /// container: losing the exact lineage is already a fail-stop condition,
+    /// and leaking the bounded object is safer than running a passive native
+    /// destructor while reporting an ABA-safe no-op.
+    pub(super) fn quarantine_unattributed(self) {
+        let _retained_until_process_exit = std::mem::ManuallyDrop::new(self);
     }
 }
 
@@ -516,6 +564,41 @@ impl PlatformOwnerSet {
         // branch therefore requires direct state corruption. Do not run an
         // unknown native owner's destructor while reporting that invariant.
         let _leaked_owner = std::mem::ManuallyDrop::new(observed);
+        PlatformOwnerMerge::DistinctOwnerQuarantined
+    }
+
+    fn take_retained_for_retirement(
+        &mut self,
+    ) -> Option<(PlatformOwnerBundle, PlatformOwnerIdentity)> {
+        if self.is_quarantined() {
+            return None;
+        }
+        let identity = self.retained.identity()?;
+        let owner = std::mem::replace(&mut self.retained, PlatformOwnerBundle::Vacant);
+        Some((owner, identity))
+    }
+
+    fn observe_retirement_return(
+        &mut self,
+        observed: PlatformOwnerBundle,
+        expected: PlatformOwnerIdentity,
+    ) -> PlatformOwnerMerge {
+        if observed.is_vacant() {
+            return PlatformOwnerMerge::VacantObservation;
+        }
+        if observed.matches_identity(expected) {
+            return self.observe(observed);
+        }
+
+        // The exact owner that entered teardown was not returned. Retain the
+        // substituted object in the collision slot and permanently quarantine
+        // this lineage; accepting it as the primary owner would erase the only
+        // process-local evidence of substitution.
+        if self.collision.is_vacant() {
+            self.collision = observed;
+        } else {
+            let _leaked_owner = std::mem::ManuallyDrop::new(observed);
+        }
         PlatformOwnerMerge::DistinctOwnerQuarantined
     }
 
@@ -610,11 +693,18 @@ struct PendingRecovery {
     resources: RecoveryResources,
 }
 
+struct PendingRetirement<Resources> {
+    ticket: NativeCallTicket,
+    _deadline: Instant,
+    owner_identity: PlatformOwnerIdentity,
+    resources: Resources,
+}
+
 enum ActivationState {
     Reserved,
     Activating(PendingActivation),
     Owned(ActivationResources),
-    Retiring(PendingActivation),
+    Retiring(PendingRetirement<ActivationResources>),
     Uncertain(ActivationResources),
     Reconciling(PendingActivation),
 }
@@ -623,7 +713,7 @@ enum RecoveryState {
     Uncertain(Option<RecoveryResources>),
     Reconciling(PendingRecovery),
     Owned(RecoveryResources),
-    Retiring(PendingRecovery),
+    Retiring(PendingRetirement<RecoveryResources>),
 }
 
 enum TypedNativeState {
@@ -780,39 +870,53 @@ impl NativeLifecycleSlot {
         &mut self,
         ticket: NativeCallTicket,
         deadline: Instant,
-    ) -> Result<(), NativeBeginError> {
+    ) -> Result<PlatformOwnerBundle, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Retirement) {
             return Err(NativeBeginError::StaleTicket);
         }
         if self.platform_owners.is_quarantined() {
             return Err(NativeBeginError::WrongState);
         }
+        if !matches!(
+            self.state,
+            TypedNativeState::Activation(ActivationState::Owned(_))
+                | TypedNativeState::Recovery(RecoveryState::Owned(_))
+        ) {
+            return Err(NativeBeginError::WrongState);
+        }
+        let Some((platform_owner, owner_identity)) =
+            self.platform_owners.take_retained_for_retirement()
+        else {
+            return Err(NativeBeginError::WrongState);
+        };
         let previous = std::mem::replace(
             &mut self.state,
             TypedNativeState::Activation(ActivationState::Reserved),
         );
         self.state = match previous {
             TypedNativeState::Activation(ActivationState::Owned(resources)) => {
-                TypedNativeState::Activation(ActivationState::Retiring(PendingActivation {
+                TypedNativeState::Activation(ActivationState::Retiring(PendingRetirement {
                     ticket,
                     _deadline: deadline,
-                    native_entry: ActivationNativeEntry::Available,
+                    owner_identity,
                     resources,
                 }))
             }
             TypedNativeState::Recovery(RecoveryState::Owned(resources)) => {
-                TypedNativeState::Recovery(RecoveryState::Retiring(PendingRecovery {
+                TypedNativeState::Recovery(RecoveryState::Retiring(PendingRetirement {
                     ticket,
                     _deadline: deadline,
+                    owner_identity,
                     resources,
                 }))
             }
             previous => {
+                self.platform_owners.observe(platform_owner);
                 self.state = previous;
                 return Err(NativeBeginError::WrongState);
             }
         };
-        Ok(())
+        Ok(platform_owner)
     }
 
     pub(super) fn begin_reconciliation(
@@ -927,6 +1031,7 @@ impl NativeLifecycleSlot {
         accepts_absence: impl FnOnce(ExtensionRuntimeAbsenceEvidence) -> bool,
     ) -> Result<NativeTerminalEffect, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Activation) {
+            platform_owner.quarantine_unattributed();
             return Err(NativeBeginError::StaleTicket);
         }
         let previous = std::mem::replace(
@@ -934,10 +1039,12 @@ impl NativeLifecycleSlot {
             TypedNativeState::Activation(ActivationState::Reserved),
         );
         let TypedNativeState::Activation(ActivationState::Activating(active)) = previous else {
+            self.platform_owners.observe(platform_owner);
             self.state = previous;
             return Err(NativeBeginError::WrongState);
         };
         if active.ticket != ticket {
+            self.platform_owners.observe(platform_owner);
             self.state = TypedNativeState::Activation(ActivationState::Activating(active));
             return Err(NativeBeginError::StaleTicket);
         }
@@ -1048,13 +1155,16 @@ impl NativeLifecycleSlot {
         &mut self,
         ticket: NativeCallTicket,
         disposition: ExtensionRuntimeRetirementDisposition,
+        platform_owner: PlatformOwnerBundle,
         accepts_evidence: impl FnOnce(ExtensionRuntimeOwnershipEvidence) -> bool,
         accepts_absence: impl FnOnce(ExtensionRuntimeAbsenceEvidence) -> bool,
     ) -> Result<NativeTerminalEffect, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Retirement) {
+            platform_owner.quarantine_unattributed();
             return Err(NativeBeginError::StaleTicket);
         }
         if self.current_ticket() != Some(ticket) {
+            platform_owner.quarantine_unattributed();
             return Err(NativeBeginError::StaleTicket);
         }
         let previous = std::mem::replace(
@@ -1066,7 +1176,14 @@ impl NativeLifecycleSlot {
                 TypedNativeState::Activation(ActivationState::Retiring(active)),
                 ExtensionRuntimeRetirementDisposition::Retired(absence),
             ) => {
-                if accepts_absence(absence) {
+                let owner_observation = self
+                    .platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity);
+                if owner_observation == PlatformOwnerMerge::VacantObservation
+                    && !self.platform_owners.has_retained_owner()
+                    && !self.platform_owners.is_quarantined()
+                    && accepts_absence(absence)
+                {
                     self.state = TypedNativeState::Activation(ActivationState::Retiring(active));
                     return Ok(NativeTerminalEffect::DefiniteAbsence(
                         NativeTerminalDisposition::Retirement(
@@ -1087,7 +1204,14 @@ impl NativeLifecycleSlot {
                 TypedNativeState::Recovery(RecoveryState::Retiring(active)),
                 ExtensionRuntimeRetirementDisposition::Retired(absence),
             ) => {
-                if accepts_absence(absence) {
+                let owner_observation = self
+                    .platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity);
+                if owner_observation == PlatformOwnerMerge::VacantObservation
+                    && !self.platform_owners.has_retained_owner()
+                    && !self.platform_owners.is_quarantined()
+                    && accepts_absence(absence)
+                {
                     self.state = TypedNativeState::Recovery(RecoveryState::Retiring(active));
                     return Ok(NativeTerminalEffect::DefiniteAbsence(
                         NativeTerminalDisposition::Retirement(
@@ -1108,30 +1232,69 @@ impl NativeLifecycleSlot {
                 TypedNativeState::Activation(ActivationState::Retiring(active)),
                 ExtensionRuntimeRetirementDisposition::Retained(failure),
             ) => {
-                self.state = TypedNativeState::Activation(ActivationState::Owned(active.resources));
-                NativeTerminalDisposition::Retirement(
-                    ExtensionRuntimeRetirementDisposition::Retained(failure),
-                )
+                let owner_ok = self
+                    .platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity)
+                    == PlatformOwnerMerge::ExactOwnerRetained
+                    && !self.platform_owners.is_quarantined();
+                if owner_ok {
+                    self.state =
+                        TypedNativeState::Activation(ActivationState::Owned(active.resources));
+                    NativeTerminalDisposition::Retirement(
+                        ExtensionRuntimeRetirementDisposition::Retained(failure),
+                    )
+                } else {
+                    self.state =
+                        TypedNativeState::Activation(ActivationState::Uncertain(active.resources));
+                    NativeTerminalDisposition::Retirement(
+                        ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                            failure: ExtensionRuntimeFailure::Internal,
+                            evidence: self.evidence.positive(),
+                        },
+                    )
+                }
             }
             (
                 TypedNativeState::Recovery(RecoveryState::Retiring(active)),
                 ExtensionRuntimeRetirementDisposition::Retained(failure),
             ) => {
-                self.state = TypedNativeState::Recovery(RecoveryState::Owned(active.resources));
-                NativeTerminalDisposition::Retirement(
-                    ExtensionRuntimeRetirementDisposition::Retained(failure),
-                )
+                let owner_ok = self
+                    .platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity)
+                    == PlatformOwnerMerge::ExactOwnerRetained
+                    && !self.platform_owners.is_quarantined();
+                if owner_ok {
+                    self.state = TypedNativeState::Recovery(RecoveryState::Owned(active.resources));
+                    NativeTerminalDisposition::Retirement(
+                        ExtensionRuntimeRetirementDisposition::Retained(failure),
+                    )
+                } else {
+                    self.state = TypedNativeState::Recovery(RecoveryState::Uncertain(Some(
+                        active.resources,
+                    )));
+                    NativeTerminalDisposition::Retirement(
+                        ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                            failure: ExtensionRuntimeFailure::Internal,
+                            evidence: self.evidence.positive(),
+                        },
+                    )
+                }
             }
             (
                 TypedNativeState::Activation(ActivationState::Retiring(active)),
                 ExtensionRuntimeRetirementDisposition::OwnershipUncertain { failure, evidence },
             ) => {
                 let evidence_ok = self.evidence.merge(evidence, accepts_evidence);
+                let owner_ok = self
+                    .platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity)
+                    == PlatformOwnerMerge::ExactOwnerRetained
+                    && !self.platform_owners.is_quarantined();
                 self.state =
                     TypedNativeState::Activation(ActivationState::Uncertain(active.resources));
                 NativeTerminalDisposition::Retirement(
                     ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
-                        failure: if evidence_ok {
+                        failure: if evidence_ok && owner_ok {
                             failure
                         } else {
                             ExtensionRuntimeFailure::Internal
@@ -1145,11 +1308,16 @@ impl NativeLifecycleSlot {
                 ExtensionRuntimeRetirementDisposition::OwnershipUncertain { failure, evidence },
             ) => {
                 let evidence_ok = self.evidence.merge(evidence, accepts_evidence);
+                let owner_ok = self
+                    .platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity)
+                    == PlatformOwnerMerge::ExactOwnerRetained
+                    && !self.platform_owners.is_quarantined();
                 self.state =
                     TypedNativeState::Recovery(RecoveryState::Uncertain(Some(active.resources)));
                 NativeTerminalDisposition::Retirement(
                     ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
-                        failure: if evidence_ok {
+                        failure: if evidence_ok && owner_ok {
                             failure
                         } else {
                             ExtensionRuntimeFailure::Internal
@@ -1158,7 +1326,32 @@ impl NativeLifecycleSlot {
                     },
                 )
             }
+            (TypedNativeState::Activation(ActivationState::Retiring(active)), _) => {
+                self.platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity);
+                self.state =
+                    TypedNativeState::Activation(ActivationState::Uncertain(active.resources));
+                NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: self.evidence.positive(),
+                    },
+                )
+            }
+            (TypedNativeState::Recovery(RecoveryState::Retiring(active)), _) => {
+                self.platform_owners
+                    .observe_retirement_return(platform_owner, active.owner_identity);
+                self.state =
+                    TypedNativeState::Recovery(RecoveryState::Uncertain(Some(active.resources)));
+                NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: self.evidence.positive(),
+                    },
+                )
+            }
             (previous, _) => {
+                self.platform_owners.observe(platform_owner);
                 self.state = previous;
                 return Err(NativeBeginError::WrongState);
             }
@@ -1175,9 +1368,11 @@ impl NativeLifecycleSlot {
         accepts_absence: impl FnOnce(ExtensionRuntimeAbsenceEvidence) -> bool,
     ) -> Result<NativeTerminalEffect, NativeBeginError> {
         if !self.accepts_ticket(ticket, NativeCallKind::Reconciliation) {
+            platform_owner.quarantine_unattributed();
             return Err(NativeBeginError::StaleTicket);
         }
         if self.current_ticket() != Some(ticket) {
+            platform_owner.quarantine_unattributed();
             return Err(NativeBeginError::StaleTicket);
         }
         let previous = std::mem::replace(
@@ -1407,12 +1602,12 @@ impl NativeLifecycleSlot {
     pub(super) fn current_ticket(&self) -> Option<NativeCallTicket> {
         match &self.state {
             TypedNativeState::Activation(ActivationState::Activating(active))
-            | TypedNativeState::Activation(ActivationState::Retiring(active))
             | TypedNativeState::Activation(ActivationState::Reconciling(active)) => {
                 Some(active.ticket)
             }
-            TypedNativeState::Recovery(RecoveryState::Retiring(active))
-            | TypedNativeState::Recovery(RecoveryState::Reconciling(active)) => Some(active.ticket),
+            TypedNativeState::Activation(ActivationState::Retiring(active)) => Some(active.ticket),
+            TypedNativeState::Recovery(RecoveryState::Retiring(active)) => Some(active.ticket),
+            TypedNativeState::Recovery(RecoveryState::Reconciling(active)) => Some(active.ticket),
             TypedNativeState::Activation(
                 ActivationState::Reserved
                 | ActivationState::Owned(_)
@@ -1456,12 +1651,14 @@ impl NativeLifecycleSlot {
     fn deadline(&self) -> Option<Instant> {
         match &self.state {
             TypedNativeState::Activation(ActivationState::Activating(active))
-            | TypedNativeState::Activation(ActivationState::Retiring(active))
             | TypedNativeState::Activation(ActivationState::Reconciling(active)) => {
                 Some(active._deadline)
             }
-            TypedNativeState::Recovery(RecoveryState::Retiring(active))
-            | TypedNativeState::Recovery(RecoveryState::Reconciling(active)) => {
+            TypedNativeState::Activation(ActivationState::Retiring(active)) => {
+                Some(active._deadline)
+            }
+            TypedNativeState::Recovery(RecoveryState::Retiring(active)) => Some(active._deadline),
+            TypedNativeState::Recovery(RecoveryState::Reconciling(active)) => {
                 Some(active._deadline)
             }
             _ => None,
@@ -1473,6 +1670,8 @@ impl NativeLifecycleSlot {
         match &self.platform_owners.retained {
             PlatformOwnerBundle::Logical(owner) => Some(owner.token),
             PlatformOwnerBundle::Vacant => None,
+            #[cfg(target_os = "macos")]
+            PlatformOwnerBundle::Macos(_) => None,
         }
     }
 
@@ -1481,6 +1680,8 @@ impl NativeLifecycleSlot {
         match &self.platform_owners.collision {
             PlatformOwnerBundle::Logical(owner) => Some(owner.token),
             PlatformOwnerBundle::Vacant => None,
+            #[cfg(target_os = "macos")]
+            PlatformOwnerBundle::Macos(_) => None,
         }
     }
 }
@@ -1889,7 +2090,8 @@ mod tests {
         assert_eq!(slot.logical_owner_token().map(NonZeroU64::get), Some(9));
         assert!(!ledger.is_quiescent());
 
-        slot.begin_retirement(retirement, Instant::now() + Duration::from_secs(5))
+        let returned_owner = slot
+            .begin_retirement(retirement, Instant::now() + Duration::from_secs(5))
             .expect("retirement begins");
         assert!(matches!(
             slot.settle_retirement(
@@ -1897,6 +2099,7 @@ mod tests {
                 ExtensionRuntimeRetirementDisposition::Retained(
                     ExtensionRuntimeFailure::BackendUnavailable,
                 ),
+                returned_owner,
                 |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
                 |_| false,
             ),
@@ -1917,6 +2120,119 @@ mod tests {
         assert!(!ledger.is_quiescent());
         drop(slot);
         assert!(ledger.is_quiescent());
+    }
+
+    #[test]
+    fn retirement_absence_with_returned_owner_is_never_accepted() {
+        let ledger = NativeResourceLedger::default();
+        let exact_owner = owner(1);
+        let exact_generation = generation(1);
+        let activation = ticket(exact_owner, exact_generation, NativeCallKind::Activation, 1);
+        let retirement = ticket(exact_owner, exact_generation, NativeCallKind::Retirement, 2);
+        let mut slot = NativeLifecycleSlot::activation(exact_owner, exact_generation);
+        assert!(slot
+            .begin_activation(
+                activation,
+                Instant::now() + Duration::from_secs(5),
+                activation_lease(&ledger),
+            )
+            .is_ok());
+        slot.settle_activation(
+            activation,
+            ExtensionRuntimeActivationDisposition::Activated(
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+            ),
+            logical_owner(19),
+            |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+            |_| false,
+        )
+        .expect("activation settles");
+
+        let returned_owner = slot
+            .begin_retirement(retirement, Instant::now() + Duration::from_secs(5))
+            .expect("retirement begins");
+        let absence = absence_for(retirement);
+        assert_eq!(
+            slot.settle_retirement(
+                retirement,
+                ExtensionRuntimeRetirementDisposition::Retired(absence),
+                returned_owner,
+                |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |candidate| candidate == absence,
+            ),
+            Ok(NativeTerminalEffect::Publish(
+                NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
+                    }
+                )
+            ))
+        );
+        assert_eq!(slot.phase(), NativeLifecyclePhase::Uncertain);
+        assert_eq!(slot.logical_owner_token().map(NonZeroU64::get), Some(19));
+        assert!(!ledger.is_quiescent());
+    }
+
+    #[test]
+    fn retirement_substitution_quarantines_the_returned_owner() {
+        let ledger = NativeResourceLedger::default();
+        let exact_owner = owner(1);
+        let exact_generation = generation(1);
+        let activation = ticket(exact_owner, exact_generation, NativeCallKind::Activation, 1);
+        let retirement = ticket(exact_owner, exact_generation, NativeCallKind::Retirement, 2);
+        let mut slot = NativeLifecycleSlot::activation(exact_owner, exact_generation);
+        assert!(slot
+            .begin_activation(
+                activation,
+                Instant::now() + Duration::from_secs(5),
+                activation_lease(&ledger),
+            )
+            .is_ok());
+        slot.settle_activation(
+            activation,
+            ExtensionRuntimeActivationDisposition::Activated(
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+            ),
+            logical_owner(23),
+            |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+            |_| false,
+        )
+        .expect("activation settles");
+
+        let original_owner = slot
+            .begin_retirement(retirement, Instant::now() + Duration::from_secs(5))
+            .expect("retirement begins");
+        let _unattributed_original = std::mem::ManuallyDrop::new(original_owner);
+        assert!(matches!(
+            slot.settle_retirement(
+                retirement,
+                ExtensionRuntimeRetirementDisposition::Retained(
+                    ExtensionRuntimeFailure::BackendUnavailable,
+                ),
+                logical_owner(29),
+                |evidence| evidence == ExtensionRuntimeOwnershipEvidence::Compatibility,
+                |_| false,
+            ),
+            Ok(NativeTerminalEffect::Publish(
+                NativeTerminalDisposition::Retirement(
+                    ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
+                    }
+                )
+            ))
+        ));
+        assert_eq!(
+            slot.phase(),
+            NativeLifecyclePhase::OwnerCollisionQuarantined
+        );
+        assert_eq!(slot.logical_owner_token(), None);
+        assert_eq!(
+            slot.quarantined_logical_owner_token().map(NonZeroU64::get),
+            Some(29)
+        );
+        assert!(!ledger.is_quiescent());
     }
 
     #[test]

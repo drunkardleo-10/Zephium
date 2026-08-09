@@ -23,3 +23,4 @@ pub(crate) use native_runtime::{
     begin_probe_native_runtime_activation, MacosNativeRuntimeActivation,
     MacosNativeRuntimeRetirement,
 };
+pub(crate) use native_runtime::{MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity};

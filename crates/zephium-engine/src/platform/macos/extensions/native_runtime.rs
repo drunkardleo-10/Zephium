@@ -197,6 +197,30 @@ pub(crate) enum MacosNativeRuntimeRetirement {
     },
 }
 
+/// Copy-only exact identity retained while the move-only owner is inside a
+/// native teardown call.
+///
+/// Pointer values are compared but never dereferenced. They remain valid as
+/// identity anchors because a failed teardown must return the same retained
+/// owner before the call settles; successful teardown returns no owner.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct MacosNativeRuntimeOwnerIdentity {
+    owner_id: ExtensionRuntimeNativeOwnerId,
+    context: *const WKWebExtensionContext,
+    controller: *const WKWebExtensionController,
+}
+
+impl fmt::Debug for MacosNativeRuntimeOwnerIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MacosNativeRuntimeOwnerIdentity")
+            .field("owner_id", &"<redacted>")
+            .field("context", &"<native>")
+            .field("controller", &"<native>")
+            .finish()
+    }
+}
+
 /// Move-only native objects for one exact catalog-authenticated extension ID.
 ///
 /// This object performs no work in `Drop`: passive destruction cannot prove
@@ -217,10 +241,16 @@ impl MacosNativeRuntimeOwner {
         self.owner_id
     }
 
-    pub(super) fn is_exactly(&self, other: &Self) -> bool {
-        self.owner_id == other.owner_id
-            && Retained::as_ptr(&self.context) == Retained::as_ptr(&other.context)
-            && Retained::as_ptr(&self.controller) == Retained::as_ptr(&other.controller)
+    pub(crate) fn is_exactly(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+
+    pub(crate) fn identity(&self) -> MacosNativeRuntimeOwnerIdentity {
+        MacosNativeRuntimeOwnerIdentity {
+            owner_id: self.owner_id,
+            context: Retained::as_ptr(&self.context),
+            controller: Retained::as_ptr(&self.controller),
+        }
     }
 
     pub(crate) fn retire(mut self) -> MacosNativeRuntimeRetirement {
