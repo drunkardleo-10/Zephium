@@ -1683,6 +1683,111 @@ fn recovery_issuer_cannot_mint_or_accept_activation_never_entered() {
 }
 
 #[test]
+fn controller_namespace_absence_preserves_lineage_without_guessing_identity() {
+    let generation = ExtensionRuntimeHostRegistryGeneration::new(4).expect("nonzero generation");
+    let attempt = std::num::NonZeroU64::new(6).expect("nonzero attempt");
+    let audit = ExtensionRuntimeMacosControllerAbsenceAudit::try_from_observations(
+        true, true, true, true, true,
+    )
+    .expect("complete empty-controller audit");
+    let native = ActivationFixture::macos(63);
+
+    let catalog_only = native.initial.clone();
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(catalog_only.clone())
+        .expect("catalog-only macOS row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    let evidence = issuer
+        .mint_macos_controller_namespace_absent(attempt, audit)
+        .expect("empty exact controller proves catalog-only owner absent");
+    assert_eq!(
+        evidence.expected_native_identity(),
+        Some(
+            ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+                .expect("canonical expected ID")
+        )
+    );
+    assert_eq!(evidence.observed_native_identity(), None);
+    assert!(issuer.accepts(evidence, attempt));
+    assert!(evidence.structurally_matches_entry(&catalog_only));
+
+    let observed_only = native
+        .template
+        .owned(Some(native.native_identity.expect("native identity")));
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(observed_only.clone())
+        .expect("observed-only macOS row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    let evidence = issuer
+        .mint_macos_controller_namespace_absent(attempt, audit)
+        .expect("empty exact controller proves observed-only owner absent");
+    assert_eq!(evidence.expected_native_identity(), None);
+    assert_eq!(
+        evidence.observed_native_identity(),
+        Some(
+            ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+                .expect("canonical observed ID")
+        )
+    );
+    assert!(issuer.accepts(evidence, attempt));
+    assert!(evidence.structurally_matches_entry(&observed_only));
+
+    let identityless = native.template.may_own();
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(identityless.clone())
+        .expect("identityless legacy macOS row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    let evidence = issuer
+        .mint_macos_controller_namespace_absent(attempt, audit)
+        .expect("profile-wide empty controller needs no guessed identity");
+    assert_eq!(evidence.expected_native_identity(), None);
+    assert_eq!(evidence.observed_native_identity(), None);
+    assert!(issuer.accepts(evidence, attempt));
+    assert!(evidence.structurally_matches_entry(&identityless));
+    assert_eq!(
+        issuer.mint_macos_zero_grants_and_unloaded(
+            attempt,
+            ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+                .expect("canonical native ID"),
+            ExtensionRuntimeMacosAbsenceAudit::try_from_observations(
+                true, true, true, true, false, false, true, true, true, true,
+            )
+            .expect("complete context audit"),
+        ),
+        None,
+        "context-scoped proof must remain unavailable without an identity anchor"
+    );
+
+    let conflicting_observed = ExtensionNativeOwnershipIdentity::parse(
+        ExtensionRuntimeBackendTarget::MacosNative,
+        OTHER_NATIVE_ID,
+    )
+    .expect("canonical conflicting observed ID");
+    let conflicting = native.template.entry_with_identities(
+        3,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeMayOwn,
+        native.expected_native_identity,
+        Some(conflicting_observed),
+    );
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(conflicting)
+        .expect("conflicting durable row remains cleanup-capable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    assert_eq!(
+        issuer.mint_macos_controller_namespace_absent(attempt, audit),
+        None,
+        "empty namespace cannot silently reconcile conflicting identity claims"
+    );
+
+    let compatibility = ActivationFixture::compatibility(64);
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(compatibility.initial)
+        .expect("compatibility row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    assert_eq!(
+        issuer.mint_macos_controller_namespace_absent(attempt, audit),
+        None,
+        "a macOS native proof cannot cross backend families"
+    );
+}
+
+#[test]
 fn absence_evidence_structural_matcher_checks_every_representable_lineage_dimension() {
     #[allow(clippy::too_many_arguments)]
     fn try_rebuild(

@@ -23,6 +23,7 @@ use objc2_web_kit::WKWebExtensionControllerConfiguration;
 use objc2_web_kit::{WKWebExtensionController, WKWebViewConfiguration, WKWebsiteDataStore};
 use zephium_core::extensions::ExtensionNativeNamespaceScope;
 use zephium_core::ids::ProfileId;
+use zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit;
 
 use super::erasure::{
     ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
@@ -258,6 +259,13 @@ impl PreparedDurableViewConfiguration {
 pub(crate) enum ControllerPreparation {
     RuntimeUnavailable,
     Prepared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerNamespaceRecoveryAudit {
+    RuntimeUnavailable,
+    OwnersPresent,
+    Absent(ExtensionRuntimeMacosControllerAbsenceAudit),
 }
 
 /// UI-thread-owned registry for dormant persistent controller namespaces.
@@ -599,6 +607,52 @@ impl PersistentControllerRegistry {
             return Err(error);
         }
         Ok(ControllerPreparation::Prepared)
+    }
+
+    /// Reopens and audits the exact deterministic profile namespace without
+    /// loading an extension package.
+    ///
+    /// This is the crash-recovery boundary: an empty controller inventory can
+    /// prove runtime-owner absence even though persistent extension storage is
+    /// intentionally retained for a later authorized activation. A nonempty
+    /// inventory is reported as possible ownership, not treated as corruption
+    /// and never unloaded by identity guesswork.
+    pub(crate) fn audit_native_runtime_recovery(
+        &mut self,
+        profile: ProfileId,
+        namespace_scope: ExtensionNativeNamespaceScope,
+    ) -> Result<ControllerNamespaceRecoveryAudit, ControllerRegistryError> {
+        match self.prepare_for_native_runtime(profile, namespace_scope)? {
+            ControllerPreparation::RuntimeUnavailable => {
+                return Ok(ControllerNamespaceRecoveryAudit::RuntimeUnavailable)
+            }
+            ControllerPreparation::Prepared => {}
+        }
+        let result = catch_native(|| {
+            let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+            else {
+                return Err(ControllerRegistryError::EntryChanged);
+            };
+            validate_entry_identity(entry)?;
+            let contexts_empty = unsafe { entry.controller.extensionContexts() }.count() == 0;
+            let extensions_empty = unsafe { entry.controller.extensions() }.count() == 0;
+            if !contexts_empty || !extensions_empty {
+                return Ok(ControllerNamespaceRecoveryAudit::OwnersPresent);
+            }
+            let audit = ExtensionRuntimeMacosControllerAbsenceAudit::try_from_observations(
+                true,
+                true,
+                true,
+                contexts_empty,
+                extensions_empty,
+            )
+            .ok_or(ControllerRegistryError::IntegrityFailed)?;
+            Ok(ControllerNamespaceRecoveryAudit::Absent(audit))
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
     }
 
     /// Borrows an already-prepared exact controller without allocating a

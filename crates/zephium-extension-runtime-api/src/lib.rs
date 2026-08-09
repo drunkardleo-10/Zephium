@@ -72,9 +72,9 @@ pub use lifecycle::{
 pub use ownership_evidence::{
     ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeAbsenceProofKind,
     ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeMacosAbsenceAudit,
-    ExtensionRuntimeNativeOwnerId, ExtensionRuntimeNativeOwnerIdError,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
-    EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
+    ExtensionRuntimeMacosControllerAbsenceAudit, ExtensionRuntimeNativeOwnerId,
+    ExtensionRuntimeNativeOwnerIdError, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeRecoveryExpectation, EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
 };
 pub use resource_plan::{
     ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,

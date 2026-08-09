@@ -1436,6 +1436,12 @@ impl RecoveryEvidenceObservation {
                                     absence.observed_native_identity() == Some(observed)
                                 })
                         }
+                        crate::ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent => {
+                            catalog_expected
+                                .zip(adapter_observed)
+                                .is_none_or(|(expected, observed)| expected == observed)
+                                && absence.observed_native_identity() == adapter_observed
+                        }
                         crate::ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered
                         | crate::ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent => false,
                     }
@@ -2547,6 +2553,22 @@ mod tests {
         )
     }
 
+    fn test_macos_controller_recovery_absence(
+        catalog_expected: Option<crate::ExtensionRuntimeNativeOwnerId>,
+        adapter_observed: Option<crate::ExtensionRuntimeNativeOwnerId>,
+    ) -> ExtensionRuntimeAbsenceEvidence {
+        ExtensionRuntimeAbsenceEvidence::for_test_lineage(
+            NonZeroU64::new(1).expect("nonzero test lineage"),
+            zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative,
+            ExtensionRuntimeTarget::NativeWebExtension,
+            ExtensionRuntimeHostRegistryGeneration::new(1).expect("nonzero test generation"),
+            NonZeroU64::new(1).expect("nonzero test attempt"),
+            crate::ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent,
+            catalog_expected,
+            adapter_observed,
+        )
+    }
+
     fn recovery_absent(
         expectation: ExtensionRuntimeRecoveryExpectation,
     ) -> ExtensionRuntimeOwnershipDisposition {
@@ -2949,6 +2971,37 @@ mod tests {
             };
             assert_eq!(owner.ownership_evidence(), evidence);
             drop(owner);
+            assert_eq!(*dropped.lock().expect("lock"), vec![identity]);
+        }
+    }
+
+    #[test]
+    fn empty_macos_controller_settles_restart_recovery_without_inventing_identity() {
+        let expected = native_owner_id(b'p');
+        for (identity, catalog_expected, adapter_observed) in [
+            (89, Some(expected), None),
+            (90, None, Some(expected)),
+            (91, None, None),
+        ] {
+            let expectation = ExtensionRuntimeRecoveryExpectation::MacosWebExtension {
+                catalog_expected,
+                adapter_observed,
+            };
+            let absence =
+                test_macos_controller_recovery_absence(catalog_expected, adapter_observed);
+            let (ownership, _, dropped) = scripted_ownership(
+                identity,
+                [],
+                [ExtensionRuntimeOwnershipDisposition::Absent(absence)],
+                1024,
+            );
+            let request = recovery_request_for(ownership, expectation)
+                .expect("macOS restart recovery must fit the owner budget");
+            assert!(matches!(
+                request.reconcile_until(future_deadline()),
+                ExtensionRuntimeRecoverySettlement::Absent(proof)
+                    if proof == absence
+            ));
             assert_eq!(*dropped.lock().expect("lock"), vec![identity]);
         }
     }

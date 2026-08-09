@@ -121,6 +121,12 @@ pub enum ExtensionRuntimeAbsenceProofKind {
     /// false, captured permission and pattern statuses non-granted,
     /// `isLoaded == false`, and exact controller-context absence.
     MacosZeroGrantsAndUnloaded,
+    /// macOS re-opened the deterministic persistent profile controller,
+    /// pointer-attested its controller/store identity, and observed both the
+    /// complete context and extension inventories empty. With no context in
+    /// the namespace, no per-context grant surface or native runtime owner
+    /// exists to clear.
+    MacosControllerNamespaceAbsent,
     /// The compatibility-runtime registry proved the exact owner absent, all
     /// owned native resources and injected content removed, and every owned
     /// callback/task drained.
@@ -169,6 +175,41 @@ impl ExtensionRuntimeCompatibilityAbsenceAudit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensionRuntimeMacosAbsenceAudit {
     _validated: (),
+}
+
+/// Validated raw observations for controller-wide macOS owner absence.
+///
+/// This proof is deliberately distinct from [`ExtensionRuntimeMacosAbsenceAudit`]:
+/// crash recovery has no context from which it could honestly read grant
+/// dictionaries or an independent identifier. Instead, the adapter reopens
+/// the exact deterministic persistent controller/store pair and proves that
+/// its complete context and extension inventories are empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionRuntimeMacosControllerAbsenceAudit {
+    _validated: (),
+}
+
+impl ExtensionRuntimeMacosControllerAbsenceAudit {
+    /// Validates the complete controller-namespace observation set.
+    #[must_use]
+    pub const fn try_from_observations(
+        persistent_store_identity_exact: bool,
+        persistent_controller_identity_exact: bool,
+        controller_store_binding_exact: bool,
+        extension_contexts_empty: bool,
+        extensions_empty: bool,
+    ) -> Option<Self> {
+        if persistent_store_identity_exact
+            && persistent_controller_identity_exact
+            && controller_store_binding_exact
+            && extension_contexts_empty
+            && extensions_empty
+        {
+            Some(Self { _validated: () })
+        } else {
+            None
+        }
+    }
 }
 
 impl ExtensionRuntimeMacosAbsenceAudit {
@@ -424,6 +465,18 @@ impl ExtensionRuntimeAbsenceEvidence {
                         self.observed_native_identity
                             .is_some_and(|observed| observed.encoded_bytes() == identity.bytes())
                     })
+            }
+            ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent => {
+                self.backend == ExtensionRuntimeBackendTarget::MacosNative
+                    && self.target == ExtensionRuntimeTarget::NativeWebExtension
+                    && self
+                        .expected_native_identity
+                        .zip(self.observed_native_identity)
+                        .is_none_or(|(expected, observed)| expected == observed)
+                    && self
+                        .observed_native_identity
+                        .map(|identity| identity.encoded_bytes())
+                        == entry.native_identity().map(|identity| identity.bytes())
             }
             ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent => {
                 self.target == ExtensionRuntimeTarget::Compatibility
@@ -1024,6 +1077,33 @@ mod tests {
                 )
                 .is_none(),
                 "macOS observation {flipped} must be mandatory"
+            );
+        }
+
+        let controller = [true; 5];
+        assert!(
+            ExtensionRuntimeMacosControllerAbsenceAudit::try_from_observations(
+                controller[0],
+                controller[1],
+                controller[2],
+                controller[3],
+                controller[4],
+            )
+            .is_some()
+        );
+        for flipped in 0..controller.len() {
+            let mut observations = controller;
+            observations[flipped] = false;
+            assert!(
+                ExtensionRuntimeMacosControllerAbsenceAudit::try_from_observations(
+                    observations[0],
+                    observations[1],
+                    observations[2],
+                    observations[3],
+                    observations[4],
+                )
+                .is_none(),
+                "macOS controller observation {flipped} must be mandatory"
             );
         }
     }

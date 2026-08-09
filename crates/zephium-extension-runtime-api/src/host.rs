@@ -32,10 +32,10 @@ use crate::{
     ExtensionPackageAccess, ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeAbsenceProofKind,
     ExtensionRuntimeActivationBuildError, ExtensionRuntimeActivationRequest,
     ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeLifecyclePort,
-    ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeNativeOwnerId,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeOwnershipPort,
-    ExtensionRuntimeRecoveryBuildError, ExtensionRuntimeRecoveryExpectation,
-    ExtensionRuntimeRecoveryRequest, ExtensionRuntimeTarget,
+    ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeMacosControllerAbsenceAudit,
+    ExtensionRuntimeNativeOwnerId, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeOwnershipPort, ExtensionRuntimeRecoveryBuildError,
+    ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRecoveryRequest, ExtensionRuntimeTarget,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
@@ -423,6 +423,41 @@ impl ExtensionRuntimeBoundAbsenceEvidenceIssuer {
         ))
     }
 
+    /// Mints a macOS proof from an empty deterministic controller namespace.
+    ///
+    /// Unlike context teardown, this proof never invents an adapter-observed
+    /// identity. It preserves the durable expected and previously observed
+    /// fields exactly and refuses conflicting anchors. An identityless legacy
+    /// row is admissible because an empty profile controller proves that no
+    /// owner exists at all; it does not guess which owner might have existed.
+    #[must_use]
+    pub fn mint_macos_controller_namespace_absent(
+        self,
+        attempt: NonZeroU64,
+        _audit: ExtensionRuntimeMacosControllerAbsenceAudit,
+    ) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        if self.lineage.owner.backend() != ExtensionRuntimeBackendTarget::MacosNative
+            || self.lineage.target != ExtensionRuntimeTarget::NativeWebExtension
+            || self
+                .lineage
+                .expected_native_identity
+                .zip(self.lineage.previously_observed_native_identity)
+                .is_some_and(|(expected, observed)| expected != observed)
+        {
+            return None;
+        }
+        Some(ExtensionRuntimeAbsenceEvidence::from_trusted_host(
+            self.lineage.owner.cas(),
+            self.lineage.owner.backend(),
+            self.lineage.target,
+            self.generation,
+            attempt,
+            ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent,
+            self.lineage.expected_native_identity,
+            self.lineage.previously_observed_native_identity,
+        ))
+    }
+
     /// Revalidates complete evidence lineage and exact native attempt.
     #[must_use]
     pub fn accepts(self, evidence: ExtensionRuntimeAbsenceEvidence, attempt: NonZeroU64) -> bool {
@@ -457,6 +492,18 @@ impl ExtensionRuntimeBoundAbsenceEvidenceIssuer {
                         .is_none_or(|previous| {
                             evidence.observed_native_identity() == Some(previous)
                         })
+            }
+            ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent => {
+                self.lineage.owner.backend() == ExtensionRuntimeBackendTarget::MacosNative
+                    && self.lineage.target == ExtensionRuntimeTarget::NativeWebExtension
+                    && evidence.expected_native_identity() == self.lineage.expected_native_identity
+                    && evidence.observed_native_identity()
+                        == self.lineage.previously_observed_native_identity
+                    && self
+                        .lineage
+                        .expected_native_identity
+                        .zip(self.lineage.previously_observed_native_identity)
+                        .is_none_or(|(expected, observed)| expected == observed)
             }
             ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent => {
                 self.lineage.target == ExtensionRuntimeTarget::Compatibility

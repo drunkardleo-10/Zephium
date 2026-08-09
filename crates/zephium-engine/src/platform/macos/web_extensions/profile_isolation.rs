@@ -23,10 +23,13 @@ use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
 };
 use wry::WebViewBuilderExtMacos;
+use zephium_core::extensions::ExtensionNativeNamespaceScope;
 
 use super::persistent_runtime::{NamespaceLock, EXTENSION_PRINCIPAL};
 use super::{persistent_probe_profiles, ProbeHostView, PROBE_TIMEOUT, PROFILE_ROUTING_PRINCIPALS};
-use crate::platform::macos::{PersistentControllerRegistry, ProbeControllerPreparation};
+use crate::platform::macos::{
+    ControllerNamespaceRecoveryAudit, PersistentControllerRegistry, ProbeControllerPreparation,
+};
 
 const COOKIE_NAME: &str = "zephium_profile_isolation_probe";
 const COOKIE_DOMAIN: &str = "zephium-profile-isolation.invalid";
@@ -863,6 +866,26 @@ fn cleanup_regular_probe_state(run_loop: &NSRunLoop, mtm: MainThreadMarker) -> R
             drop(proof);
             drop(configuration);
             drop(store);
+            match registry
+                .audit_native_runtime_recovery(
+                    profile,
+                    ExtensionNativeNamespaceScope::MacosControllerV1,
+                )
+                .map_err(|error| {
+                    format!("cannot audit reconstructed {description} controller: {error}")
+                })? {
+                ControllerNamespaceRecoveryAudit::Absent(_) => {}
+                ControllerNamespaceRecoveryAudit::OwnersPresent => {
+                    return Err(format!(
+                        "reconstructed {description} controller retained a native owner"
+                    ))
+                }
+                ControllerNamespaceRecoveryAudit::RuntimeUnavailable => {
+                    return Err(format!(
+                        "supported runtime refused reconstructed {description} controller audit"
+                    ))
+                }
+            }
         }
         Ok(())
     })();

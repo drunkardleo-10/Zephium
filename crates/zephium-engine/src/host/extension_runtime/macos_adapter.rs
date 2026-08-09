@@ -1,6 +1,6 @@
 //! Product-shaped macOS native-extension activation and teardown.
 //!
-//! This module is deliberately selected only by the dormant activation-only
+//! This module is deliberately selected only by the dormant macOS lifecycle
 //! factory. It owns platform classification and native sequencing; the parent
 //! module remains the platform-neutral registry, ticket, and authority layer.
 
@@ -18,8 +18,9 @@ use zephium_extension_runtime_api::{
 
 use crate::platform::imp::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    ControllerPreparation, ControllerRegistryError, MacosNativeRuntimeActivation,
-    MacosNativeRuntimeFailure, MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement,
+    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
+    MacosNativeRuntimeActivation, MacosNativeRuntimeFailure, MacosNativeRuntimeReconciliation,
+    MacosNativeRuntimeRetirement,
 };
 
 use super::super::EngineHost;
@@ -165,45 +166,81 @@ pub(super) fn begin_native_retirement(
 
 pub(super) fn begin_native_reconciliation(
     host: &mut EngineHost,
+    reservation: Arc<ReservationControl>,
     ticket: NativeCallTicket,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
-    let Some((observed_owner, outcome)) = host
-        .extension_runtime_registry
-        .with_macos_reconciliation_owner(ticket, |owner| (owner.owner_id(), owner.reconcile()))?
-    else {
-        // Native entry may have become uncertain before its parse callback
-        // supplied an exact owner. Controller-wide recovery is a separate
-        // boundary; do not infer absence from a missing process-local wrapper.
-        return complete_reconciliation(
-            host,
-            ticket,
-            ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: ExtensionRuntimeFailure::BackendUnavailable,
-                evidence: None,
-            },
-        );
+    if matches!(&reservation.binding, ReservationBinding::Activation { .. }) {
+        if let Some((observed_owner, outcome)) = host
+            .extension_runtime_registry
+            .with_macos_reconciliation_owner(ticket, |owner| {
+                (owner.owner_id(), owner.reconcile())
+            })?
+        {
+            let disposition = match outcome {
+                MacosNativeRuntimeReconciliation::Owned => {
+                    ExtensionRuntimeOwnershipDisposition::Owned(
+                        ExtensionRuntimeOwnershipEvidence::MacosWebExtension(observed_owner),
+                    )
+                }
+                MacosNativeRuntimeReconciliation::Absent(audit) => {
+                    ExtensionRuntimeOwnershipDisposition::Absent(
+                        host.extension_runtime_registry.mint_macos_absence(
+                            ticket,
+                            observed_owner,
+                            audit,
+                        )?,
+                    )
+                }
+                MacosNativeRuntimeReconciliation::StillUncertain(failure) => {
+                    ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                        failure: map_native_failure(failure),
+                        evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
+                            observed_owner,
+                        )),
+                    }
+                }
+            };
+            return complete_reconciliation(host, ticket, disposition);
+        }
+    }
+
+    let known_evidence = match &reservation.binding {
+        // A catalog-authenticated expectation constrains which native owner
+        // may be accepted, but it is not evidence that the adapter observed
+        // that owner. Only recovery rows can carry previously observed native
+        // ownership into this controller-wide audit.
+        ReservationBinding::Activation { .. } => None,
+        ReservationBinding::Recovery { expectation, .. } => (*expectation).known_evidence(),
     };
-    let disposition = match outcome {
-        MacosNativeRuntimeReconciliation::Owned => ExtensionRuntimeOwnershipDisposition::Owned(
-            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(observed_owner),
-        ),
-        MacosNativeRuntimeReconciliation::Absent(audit) => {
+    let audit = host
+        .macos_extension_controllers
+        .audit_native_runtime_recovery(
+            reservation.owner().key.profile(),
+            ExtensionNativeNamespaceScope::MacosControllerV1,
+        );
+    let disposition = match audit {
+        Ok(ControllerNamespaceRecoveryAudit::Absent(audit)) => {
             ExtensionRuntimeOwnershipDisposition::Absent(
-                host.extension_runtime_registry.mint_macos_absence(
-                    ticket,
-                    observed_owner,
-                    audit,
-                )?,
+                host.extension_runtime_registry
+                    .mint_macos_controller_absence(ticket, audit)?,
             )
         }
-        MacosNativeRuntimeReconciliation::StillUncertain(failure) => {
+        Ok(ControllerNamespaceRecoveryAudit::OwnersPresent) => {
             ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                failure: map_native_failure(failure),
-                evidence: Some(ExtensionRuntimeOwnershipEvidence::MacosWebExtension(
-                    observed_owner,
-                )),
+                failure: ExtensionRuntimeFailure::BackendUnavailable,
+                evidence: known_evidence,
             }
         }
+        Ok(ControllerNamespaceRecoveryAudit::RuntimeUnavailable) => {
+            ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                failure: ExtensionRuntimeFailure::UnsupportedTarget,
+                evidence: known_evidence,
+            }
+        }
+        Err(failure) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
+            failure: map_controller_failure(failure),
+            evidence: known_evidence,
+        },
     };
     complete_reconciliation(host, ticket, disposition)
 }
@@ -246,6 +283,34 @@ impl ExtensionRuntimeRegistry {
             .reservation
             .absence_issuer()
             .mint_macos_zero_grants_and_unloaded(ticket.attempt(), observed_owner, audit)
+        else {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        };
+        Ok(absence)
+    }
+
+    fn mint_macos_controller_absence(
+        &mut self,
+        ticket: NativeCallTicket,
+        audit: zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit,
+    ) -> Result<ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(ticket.owner(), ticket.registry_generation())?;
+        if !matches!(
+            self.entries[index]
+                .reservation
+                .native_call
+                .notification_for(ticket),
+            Ok(NativeCallNotification::Pending)
+        ) || self.entries[index].native.current_ticket() != Some(ticket)
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let Some(absence) = self.entries[index]
+            .reservation
+            .absence_issuer()
+            .mint_macos_controller_namespace_absent(ticket.attempt(), audit)
         else {
             self.fail_invariant();
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
