@@ -58,6 +58,7 @@ pub(super) fn begin_native_activation(
             );
         }
         Err(error) => {
+            report_product_probe_failure("controller preparation", error);
             return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
         }
     }
@@ -67,6 +68,7 @@ pub(super) fn begin_native_activation(
     {
         Ok(controller) => controller,
         Err(error) => {
+            report_product_probe_failure("controller acquisition", error);
             return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
         }
     };
@@ -98,6 +100,7 @@ pub(super) fn begin_native_activation(
         match prepare_native_runtime_activation(native_root, grants, expected_owner, controller) {
             Ok(prepared) => prepared,
             Err(failure) => {
+                report_product_probe_failure("native package preparation", failure);
                 drop(root_slot);
                 return complete_pre_entry_failure(host, ticket, map_native_failure(failure));
             }
@@ -117,7 +120,8 @@ pub(super) fn begin_native_activation(
         });
         let _terminal_transport_accepted = accepted;
     });
-    if start.is_err() {
+    if let Err(failure) = start {
+        report_product_probe_failure("native activation entry", failure);
         // The native entry raised after WebKit may have copied the callback.
         // Leave the exact ticket pending: the waiter times out conservatively,
         // while a late callback can still settle the one authoritative owner.
@@ -352,18 +356,22 @@ fn settle_native_activation(
     outcome: MacosNativeRuntimeActivation,
 ) -> Result<bool, ExtensionRuntimeHostBindError> {
     let (disposition, owner) = match outcome {
-        MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(failure) => (
-            ExtensionRuntimeActivationDisposition::OwnershipUncertain {
-                failure: map_native_failure(failure),
-                evidence: None,
-            },
-            PlatformOwnerBundle::Vacant,
-        ),
+        MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(failure) => {
+            report_product_probe_failure("native activation settlement", failure);
+            (
+                ExtensionRuntimeActivationDisposition::OwnershipUncertain {
+                    failure: map_native_failure(failure),
+                    evidence: None,
+                },
+                PlatformOwnerBundle::Vacant,
+            )
+        }
         MacosNativeRuntimeActivation::RejectedAfterCleanup {
             failure,
             owner_id,
             audit,
         } => {
+            report_product_probe_failure("native activation settlement after cleanup", failure);
             let failure = map_native_failure(failure);
             let absence = host
                 .extension_runtime_registry
@@ -387,6 +395,7 @@ fn settle_native_activation(
             )
         }
         MacosNativeRuntimeActivation::OwnershipUncertain { failure, owner } => {
+            report_product_probe_failure("native activation ownership settlement", failure);
             let evidence = ExtensionRuntimeOwnershipEvidence::MacosWebExtension(owner.owner_id());
             (
                 ExtensionRuntimeActivationDisposition::OwnershipUncertain {
@@ -400,6 +409,16 @@ fn settle_native_activation(
     host.extension_runtime_registry
         .complete_native_activation(ticket, disposition, owner)
 }
+
+#[cfg(feature = "native-extension-product-probes")]
+fn report_product_probe_failure(phase: &'static str, failure: impl std::fmt::Display) {
+    // The native/controller failure enums are closed, path-free classes. Keep
+    // raw NSError strings and package paths out of this probe diagnostic.
+    eprintln!("extension-product-probe-native-phase: {phase}: {failure}");
+}
+
+#[cfg(not(feature = "native-extension-product-probes"))]
+fn report_product_probe_failure(_phase: &'static str, _failure: impl std::fmt::Display) {}
 
 fn map_controller_failure(error: ControllerRegistryError) -> ExtensionRuntimeFailure {
     match error {

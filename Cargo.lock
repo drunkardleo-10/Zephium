@@ -6282,6 +6282,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-extension-product-probe"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "raw-window-handle",
+ "sha2",
+ "tempfile",
+ "zephium-core",
+ "zephium-engine",
+ "zephium-extension-authority",
+ "zephium-extension-package",
+ "zephium-extension-repository",
+ "zephium-extension-runtime-api",
+ "zephium-extension-service",
+ "zephium-private-fs",
+ "zephium-store",
+]
+
+[[package]]
 name = "zephium-extension-repository"
 version = "0.1.0"
 dependencies = [

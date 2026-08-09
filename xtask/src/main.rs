@@ -592,6 +592,8 @@ fn ci() {
     run_macos_principal_isolation_probe();
     #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
+    #[cfg(target_os = "macos")]
+    run_macos_extension_product_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
 }
 
@@ -1070,6 +1072,28 @@ fn run_macos_web_extension_probe() {
     let mut execute = vec!["run"];
     execute.extend(COMMON);
     run("cargo", &execute);
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_extension_product_probe() {
+    const COMMON: [&str; 7] = [
+        "--locked",
+        "-p",
+        "zephium-extension-product-probe",
+        "--features",
+        "macos-native",
+        "--bin",
+        "macos-extension-product-probe",
+    ];
+
+    let mut clippy = vec!["clippy"];
+    clippy.extend(COMMON);
+    clippy.extend(["--", "-D", "warnings"]);
+    run_with_internal_repository_cfg(&clippy);
+
+    let mut execute = vec!["run"];
+    execute.extend(COMMON);
+    run_with_internal_repository_cfg(&execute);
 }
 
 fn check_blocker_security_fork() {

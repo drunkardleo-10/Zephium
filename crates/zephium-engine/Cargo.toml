@@ -28,6 +28,10 @@ native-web-extension-probes = [
     "objc2-web-kit/WKHTTPCookieStore",
     "objc2-web-kit/WKWebView",
 ]
+# Adds only redacted native-adapter phase diagnostics consumed by the separate
+# authenticated product-path probe. Ordinary engine and desktop builds do not
+# compile these diagnostics.
+native-extension-product-probes = []
 # Compiles the intentionally non-product Windows CDP feasibility harness. The
 # default product must not contain this path until Phase 0a's live gates pass.
 windows-cdp-spike = []

@@ -1,0 +1,39 @@
+[package]
+name = "zephium-extension-product-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Enables the non-shipping, main-thread macOS product-path probe. The binary
+# additionally requires the internal sealed repository authority through the
+# `zephium_internal_repository_e2e` compiler cfg installed only by xtask.
+macos-native = []
+
+[[bin]]
+name = "macos-extension-product-probe"
+path = "src/main.rs"
+required-features = ["macos-native"]
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = [
+    "cfg(zephium_internal_repository_e2e)",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+raw-window-handle.workspace = true
+sha2 = "=0.10.9"
+tempfile.workspace = true
+zephium-core.workspace = true
+zephium-engine = { workspace = true, features = ["native-extension-product-probes"] }
+zephium-extension-authority.workspace = true
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
+zephium-extension-repository.workspace = true
+zephium-extension-runtime-api.workspace = true
+zephium-extension-service.workspace = true
+zephium-private-fs.workspace = true
+zephium-store.workspace = true

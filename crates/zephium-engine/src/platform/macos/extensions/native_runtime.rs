@@ -534,6 +534,7 @@ fn construct_loaded_owner(
         Ok(extension.errors().count() == 0 && extension.manifestVersion() == 3.0)
     });
     if extension_valid != Ok(true) {
+        report_product_probe_manifest_errors(&extension);
         return Err((
             extension_valid
                 .err()
@@ -590,6 +591,26 @@ fn construct_loaded_owner(
         Err(failure) => Err((failure, Some(owner))),
     }
 }
+
+#[cfg(feature = "native-extension-product-probes")]
+fn report_product_probe_manifest_errors(extension: &WKWebExtension) {
+    // This feature is linked only into the sealed, debug-only product probe;
+    // its manifest bytes are checked-in authenticated fixture data. Never
+    // enable this raw framework diagnostic for user-installed packages.
+    let errors = unsafe { extension.errors() };
+    for index in 0..errors.count() {
+        let error = errors.objectAtIndex(index);
+        eprintln!(
+            "extension-product-probe-manifest-error: domain={}; code={}; description={}",
+            error.domain(),
+            error.code(),
+            error.localizedDescription(),
+        );
+    }
+}
+
+#[cfg(not(feature = "native-extension-product-probes"))]
+fn report_product_probe_manifest_errors(_extension: &WKWebExtension) {}
 
 fn classify_failed_owner(
     failure: MacosNativeRuntimeFailure,
