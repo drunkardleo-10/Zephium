@@ -5,6 +5,7 @@
 //! point. Passing it proves the native backend behavior, but does not provision
 //! a product extension catalog or complete the user-facing extension feature.
 
+mod bitwarden_contract;
 mod persistent_runtime;
 mod profile_isolation;
 
@@ -56,8 +57,8 @@ const HTTP_RESPONSE_LIMIT: usize = 256 * 1024;
 const MAX_HTTP_REQUESTS: usize = 128;
 const MAX_EXTENSION_SCRIPT_DELTA: usize = 16;
 const MAX_WEBVIEW_CALLBACKS: usize = 1_024;
-const EXPECTED_NATIVE_CONTROLLERS: usize = 2;
-const EXPECTED_NATIVE_CONTEXTS: usize = 3;
+const EXPECTED_NATIVE_CONTROLLERS: usize = 3;
+const EXPECTED_NATIVE_CONTEXTS: usize = 4;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
 const PERSISTENT_PROFILE_A: u128 = 0xf0cc_44f2_4355_4cf9_a74f_27fe_6cb3_7eda;
 const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
@@ -325,6 +326,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     primary_path: std::path::PathBuf,
     peer_path: std::path::PathBuf,
+    bitwarden_contract_path: std::path::PathBuf,
     runtime_paths: persistent_runtime::RuntimeFixturePaths,
 }
 
@@ -343,11 +345,13 @@ impl Fixture {
 
         write_primary_extension(&primary_path)?;
         write_peer_extension(&peer_path)?;
+        let bitwarden_contract_path = bitwarden_contract::write_fixture(temp.path())?;
         let runtime_paths = persistent_runtime::write_runtime_extensions(temp.path())?;
         Ok(Self {
             _temp: temp,
             primary_path,
             peer_path,
+            bitwarden_contract_path,
             runtime_paths,
         })
     }
@@ -537,6 +541,22 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     let primary_extension = load_extension(&fixture.primary_path, &run_loop, mtm)?;
     set_phase("peer-extension-parse");
     let peer_extension = load_extension(&fixture.peer_path, &run_loop, mtm)?;
+    set_phase("bitwarden-contract-parse");
+    let bitwarden_contract_extension =
+        load_extension(&fixture.bitwarden_contract_path, &run_loop, mtm)?;
+    let bitwarden_contract_evidence = bitwarden_contract::inspect(&bitwarden_contract_extension)?;
+    eprintln!(
+        "native-probe-bitwarden-contract: errors={}; required={:?}; optional={:?}; requested_hosts={:?}; all_requested_matches={:?}",
+        bitwarden_contract_evidence.error_count,
+        bitwarden_contract_evidence.requested_permissions,
+        bitwarden_contract_evidence.optional_permissions,
+        bitwarden_contract_evidence.requested_host_patterns,
+        bitwarden_contract_evidence.all_requested_match_patterns,
+    );
+    set_phase("bitwarden-contract-native-grants");
+    let bitwarden_contract_teardown =
+        bitwarden_contract::validate_native_grant_round_trip(&bitwarden_contract_extension, mtm)?;
+    drop(bitwarden_contract_extension);
     set_phase("runtime-extension-parse");
     let runtime_writer = load_extension(&fixture.runtime_paths.writer, &run_loop, mtm)?;
     let runtime_verifier_one = load_extension(&fixture.runtime_paths.verifier_one, &run_loop, mtm)?;
@@ -575,6 +595,7 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     let primary_bundle = new_nonpersistent_controller(mtm)?;
     let secondary_bundle = new_nonpersistent_controller(mtm)?;
     let controller_weaks = vec![
+        bitwarden_contract_teardown.controller,
         Weak::from_retained(&primary_bundle.controller),
         Weak::from_retained(&secondary_bundle.controller),
     ];
@@ -605,9 +626,12 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     assert_private_data_access(&primary_context, true, "primary explicit grant")?;
     assert_private_data_access(&peer_context, true, "peer explicit grant")?;
     assert_private_data_access(&secondary_context, false, "secondary separation")?;
-    let context_weaks = [&primary_context, &peer_context, &secondary_context]
-        .map(Weak::from_retained)
-        .into();
+    let context_weaks = vec![
+        bitwarden_contract_teardown.context,
+        Weak::from_retained(&primary_context),
+        Weak::from_retained(&peer_context),
+        Weak::from_retained(&secondary_context),
+    ];
 
     // A WKWebView receives extension content wiring from the controller in
     // its immutable construction configuration. Load contexts before Wry
