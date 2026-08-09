@@ -1,8 +1,8 @@
 //! Product-shaped macOS native-extension activation and teardown.
 //!
-//! This module is deliberately selected only by the dormant macOS lifecycle
-//! factory. It owns platform classification and native sequencing; the parent
-//! module remains the platform-neutral registry, ticket, and authority layer.
+//! This module owns platform classification and native sequencing for the
+//! macOS lifecycle factory; the parent module remains the platform-neutral
+//! registry, ticket, and authority layer.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;

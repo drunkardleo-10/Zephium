@@ -2646,19 +2646,32 @@ where
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterAvailability {
+    #[cfg(not(target_os = "macos"))]
     Unsupported,
     #[cfg(target_os = "macos")]
-    MacosNativeDormant,
+    MacosNative,
     #[cfg(test)]
     LogicalHarness,
 }
 
 impl AdapterAvailability {
+    const fn product() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::MacosNative
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::Unsupported
+        }
+    }
+
     fn accepts_activation(self, expectation: ExtensionRuntimeNativeIdentityExpectation) -> bool {
         match self {
+            #[cfg(not(target_os = "macos"))]
             Self::Unsupported => false,
             #[cfg(target_os = "macos")]
-            Self::MacosNativeDormant => matches!(
+            Self::MacosNative => matches!(
                 expectation,
                 ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(_)
             ),
@@ -2669,9 +2682,10 @@ impl AdapterAvailability {
 
     fn accepts_recovery(self, expectation: ExtensionRuntimeRecoveryExpectation) -> bool {
         match self {
+            #[cfg(not(target_os = "macos"))]
             Self::Unsupported => false,
             #[cfg(target_os = "macos")]
-            Self::MacosNativeDormant => matches!(
+            Self::MacosNative => matches!(
                 expectation,
                 ExtensionRuntimeRecoveryExpectation::MacosWebExtension { .. }
             ),
@@ -2962,12 +2976,13 @@ fn begin_activation_adapter(
     ticket: NativeCallTicket,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
     match reservation.adapter {
+        #[cfg(not(target_os = "macos"))]
         AdapterAvailability::Unsupported => {
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
         }
         #[cfg(target_os = "macos")]
-        AdapterAvailability::MacosNativeDormant => {
+        AdapterAvailability::MacosNative => {
             macos_adapter::begin_native_activation(host, reservation, ticket)
         }
         #[cfg(test)]
@@ -3091,13 +3106,14 @@ fn begin_retirement_adapter(
     platform_owner: PlatformOwnerBundle,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
     match reservation.adapter {
+        #[cfg(not(target_os = "macos"))]
         AdapterAvailability::Unsupported => {
             platform_owner.quarantine_unattributed();
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
         }
         #[cfg(target_os = "macos")]
-        AdapterAvailability::MacosNativeDormant => {
+        AdapterAvailability::MacosNative => {
             macos_adapter::begin_native_retirement(host, ticket, platform_owner)
         }
         #[cfg(test)]
@@ -3191,12 +3207,13 @@ fn begin_reconciliation_adapter(
     ticket: NativeCallTicket,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
     match reservation.adapter {
+        #[cfg(not(target_os = "macos"))]
         AdapterAvailability::Unsupported => {
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
         }
         #[cfg(target_os = "macos")]
-        AdapterAvailability::MacosNativeDormant => {
+        AdapterAvailability::MacosNative => {
             macos_adapter::begin_native_reconciliation(host, reservation, ticket)
         }
         #[cfg(test)]
@@ -3550,19 +3567,7 @@ pub(crate) struct ExtensionRuntimeHostFactorySlot {
 
 impl ExtensionRuntimeHostFactorySlot {
     pub(crate) fn new(dispatch: MainThreadDispatch) -> Self {
-        Self::with_adapters(dispatch, AdapterAvailability::Unsupported)
-    }
-
-    /// Dormant product-shaped macOS lifecycle adapter.
-    ///
-    /// Ordinary construction must not select this factory until product
-    /// startup has joined its activation, same-process reconciliation,
-    /// restart reconciliation, and teardown paths. Native probes may exercise
-    /// that complete engine boundary without enabling it in release builds.
-    #[cfg(target_os = "macos")]
-    #[allow(dead_code)]
-    pub(crate) fn macos_native_activation_probe(dispatch: MainThreadDispatch) -> Self {
-        Self::with_adapters(dispatch, AdapterAvailability::MacosNativeDormant)
+        Self::with_adapters(dispatch, AdapterAvailability::product())
     }
 
     fn with_adapters(dispatch: MainThreadDispatch, adapters: AdapterAvailability) -> Self {
@@ -4263,8 +4268,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn dormant_macos_adapter_accepts_only_the_exact_native_family() {
-        let adapter = AdapterAvailability::MacosNativeDormant;
+    fn macos_adapter_accepts_only_the_exact_native_family() {
+        let adapter = AdapterAvailability::MacosNative;
         let macos_owner = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
             .expect("canonical macOS owner");
         let windows_owner = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'b'; 32])

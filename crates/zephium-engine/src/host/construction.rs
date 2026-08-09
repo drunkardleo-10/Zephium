@@ -769,7 +769,7 @@ impl EngineHost {
                         Ok(None) => (builder, None, None),
                         Err(error) => {
                             eprintln!(
-                                "security: cannot prepare dormant macOS extension controller: {error}"
+                                "security: cannot attach macOS extension controller: {error}"
                             );
                             if report_failure {
                                 event_permit.emit(

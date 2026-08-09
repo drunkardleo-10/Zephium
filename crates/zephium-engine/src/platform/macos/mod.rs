@@ -1,6 +1,5 @@
 mod content_filter;
-// Pure policy translation only. The native extension adapter remains
-// disconnected until ownership, readback, and live-runtime gates are closed.
+// Pure policy translation and the profile-scoped native extension lifecycle.
 mod extensions;
 mod native;
 mod navigation;

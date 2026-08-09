@@ -268,10 +268,11 @@ pub(crate) enum ControllerNamespaceRecoveryAudit {
     Absent(ExtensionRuntimeMacosControllerAbsenceAudit),
 }
 
-/// UI-thread-owned registry for dormant persistent controller namespaces.
+/// UI-thread-owned registry for persistent controller namespaces.
 ///
 /// `new` performs no runtime lookup and allocates neither Rust nor native
-/// storage. Ordinary product code has no operation that inserts an entry.
+/// storage. Entries are inserted only by the authority-bound native runtime
+/// activation path; view construction can borrow but never create a namespace.
 pub(crate) struct PersistentControllerRegistry {
     slots: RegistrySlots<PersistentControllerSlot>,
     runtime: RuntimeAvailability,
@@ -537,8 +538,7 @@ impl PersistentControllerRegistry {
     /// has established the exact namespace obligation.
     ///
     /// Replays return the existing controller. They never replace a native
-    /// object, and ordinary startup/view construction cannot call this seam.
-    #[allow(dead_code)] // Consumed when the complete macOS host lifecycle is enabled.
+    /// object, and ordinary view construction cannot call this seam.
     pub(crate) fn prepare_for_native_runtime(
         &mut self,
         profile: ProfileId,
@@ -657,7 +657,6 @@ impl PersistentControllerRegistry {
 
     /// Borrows an already-prepared exact controller without allocating a
     /// namespace as a side effect.
-    #[allow(dead_code)] // Consumed when the complete macOS host lifecycle is enabled.
     pub(crate) fn controller_for_native_runtime(
         &mut self,
         profile: ProfileId,

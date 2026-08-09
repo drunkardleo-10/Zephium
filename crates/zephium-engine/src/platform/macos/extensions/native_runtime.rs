@@ -1,15 +1,11 @@
-//! Dormant construction and exact teardown of one native macOS extension.
+//! Construction and exact teardown of one native macOS extension.
 //!
-//! The product factory does not call this module yet. It is the narrow native
-//! seam between an authenticated package-root lease, one complete Core grant
-//! snapshot, the profile-owned controller, and the host lifecycle registry.
-//! Keeping this seam dormant until restart reconciliation is wired prevents a
-//! release build from creating ownership it cannot subsequently recover.
+//! This is the narrow native seam between an authenticated package-root lease,
+//! one complete Core grant snapshot, the profile-owned controller, and the
+//! host lifecycle registry. Product entry is fenced behind startup cleanup and
+//! hydration so every owner it creates remains recoverable.
 
-// The production entry point and exact-owner comparison remain intentionally
-// dormant until host activation, retirement, and restart reconciliation are
-// enabled as one lifecycle slice. The native probe consumes the rest.
-#![allow(dead_code)]
+// Probe-only helpers remain compiled beside the production lifecycle.
 
 use std::cell::RefCell;
 use std::error::Error;
@@ -136,11 +132,13 @@ impl Error for MacosNativeRuntimeFailure {}
 /// may have copied the callback or begun work, so lifecycle code must not mint
 /// never-entered absence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) enum MacosNativeRuntimeStartFailure {
     RejectedBeforeNative(MacosNativeRuntimeFailure),
     OwnershipUncertain(MacosNativeRuntimeFailure),
 }
 
+#[cfg(feature = "native-web-extension-probes")]
 impl fmt::Display for MacosNativeRuntimeStartFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -160,6 +158,7 @@ impl fmt::Display for MacosNativeRuntimeStartFailure {
     }
 }
 
+#[cfg(feature = "native-web-extension-probes")]
 impl Error for MacosNativeRuntimeStartFailure {}
 
 /// Settlement of an activation attempt after WebKit has accepted the async
@@ -349,26 +348,6 @@ impl fmt::Debug for MacosNativeRuntimeOwner {
             .field("has_applied_grants", &self.applied_grants.is_some())
             .finish()
     }
-}
-
-/// Begins asynchronous native construction from an exact authenticated root.
-///
-/// The callback is invoked at most once. `Ok(())` means WebKit owns the copied
-/// completion block and the caller must keep its lifecycle ticket pending until
-/// the callback settles it. The typed start failure distinguishes a clean
-/// pre-entry refusal from an Objective-C exception after native entry.
-pub(super) fn begin_native_runtime_activation(
-    native_root: &mut ExtensionRuntimeNativeRootLease,
-    grants: &ExtensionNativeGrantSnapshot,
-    expected_owner_id: ExtensionRuntimeNativeOwnerId,
-    controller: Retained<WKWebExtensionController>,
-    completion: impl FnOnce(MacosNativeRuntimeActivation) + 'static,
-) -> Result<(), MacosNativeRuntimeStartFailure> {
-    let prepared =
-        prepare_native_runtime_activation(native_root, grants, expected_owner_id, controller)
-            .map_err(MacosNativeRuntimeStartFailure::RejectedBeforeNative)?;
-    begin_prepared_native_runtime_activation(prepared, completion)
-        .map_err(MacosNativeRuntimeStartFailure::OwnershipUncertain)
 }
 
 /// Completes every fallible pre-entry check without asking WebKit to parse or

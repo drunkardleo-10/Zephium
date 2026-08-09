@@ -401,10 +401,10 @@ pub(crate) struct EngineHost {
     // at this retained store; distinct profile ids can never share one.
     #[cfg(target_os = "macos")]
     macos_ephemeral_data_stores: HashMap<ProfileId, crate::platform::imp::WebsiteDataStore>,
-    // Dormant native-extension controllers are independently bounded and
-    // profile-scoped. Ordinary product code cannot populate this registry;
-    // retaining it here establishes exact construction, erasure, and shutdown
-    // ownership for the native test/probe path without enabling activation.
+    // Native-extension controllers are independently bounded and
+    // profile-scoped. Startup hydration is the only product path that may
+    // populate this registry before Shell constructs profile views; retaining
+    // it here establishes exact construction, erasure, and shutdown ownership.
     #[cfg(target_os = "macos")]
     macos_extension_controllers: crate::platform::imp::PersistentControllerRegistry,
     // Off-screen views carrying the low-memory hint, and the subset the
