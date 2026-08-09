@@ -22,7 +22,8 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostPublicationPort,
     ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
     ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeLifecyclePort,
-    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeOwnerAddress,
+    ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeNativeIdentityExpectation,
+    ExtensionRuntimeNativeRootLease, ExtensionRuntimeOwnerAddress,
     ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
     ExtensionRuntimeOwnershipPort, ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
@@ -532,12 +533,17 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
         &mut self,
         context: ExtensionRuntimeHostActivationContext<'_>,
     ) -> Result<ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError> {
-        if context.target() != ExtensionRuntimeTarget::Compatibility
-            || context.identity_expectation()
-                != ExtensionRuntimeNativeIdentityExpectation::Compatibility
-        {
-            return Err(ExtensionRuntimeHostBindError::UnsupportedBackend);
-        }
+        let evidence = match (context.target(), context.identity_expectation()) {
+            (
+                ExtensionRuntimeTarget::Compatibility,
+                ExtensionRuntimeNativeIdentityExpectation::Compatibility,
+            ) => ExtensionRuntimeOwnershipEvidence::Compatibility,
+            (
+                ExtensionRuntimeTarget::NativeWebExtension,
+                ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(owner),
+            ) => ExtensionRuntimeOwnershipEvidence::MacosWebExtension(owner),
+            _ => return Err(ExtensionRuntimeHostBindError::UnsupportedBackend),
+        };
         let grants = context.native_grants();
         if grants.runtime() != context.fingerprint()
             || grants.api_grants().any(|grant| {
@@ -578,12 +584,15 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
             Box::new(ScriptedLifecycle {
                 reservation: Arc::clone(&reservation),
                 absence_issuer,
+                evidence,
+                native_root_lease: None,
                 next_attempt: Some(1),
                 last_absence: None,
             }),
             Box::new(ScriptedPublication {
                 mode: self.publication_mode,
                 reservation,
+                evidence,
             }),
         ))
     }
@@ -629,6 +638,8 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
 struct ScriptedLifecycle {
     reservation: Arc<ReservationControl>,
     absence_issuer: ExtensionRuntimeBoundAbsenceEvidenceIssuer,
+    evidence: ExtensionRuntimeOwnershipEvidence,
+    native_root_lease: Option<ExtensionRuntimeNativeRootLease>,
     next_attempt: Option<u64>,
     last_absence: Option<ExtensionRuntimeAbsenceEvidence>,
 }
@@ -671,15 +682,31 @@ impl ScriptedLifecycle {
     }
 
     fn mint_owner_absence(&mut self, attempt: NonZeroU64) -> ExtensionRuntimeAbsenceEvidence {
-        let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
-            true, true, true, true,
-        )
-        .expect("scripted compatibility owner is fully quiescent");
-        let evidence = self
-            .absence_issuer
-            .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
-            .expect("exact compatibility issuer accepts the complete audit");
+        let evidence = match self.evidence {
+            ExtensionRuntimeOwnershipEvidence::Compatibility => {
+                let audit = ExtensionRuntimeCompatibilityAbsenceAudit::try_from_observations(
+                    true, true, true, true,
+                )
+                .expect("scripted compatibility owner is fully quiescent");
+                self.absence_issuer
+                    .mint_compatibility_registry_absent_and_quiescent(attempt, audit)
+            }
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(owner) => {
+                let audit = ExtensionRuntimeMacosAbsenceAudit::try_from_observations(
+                    true, true, true, true, false, false, true, true, true, true,
+                )
+                .expect("scripted macOS owner has complete post-native absence observations");
+                self.absence_issuer
+                    .mint_macos_zero_grants_and_unloaded(attempt, owner, audit)
+            }
+            _ => None,
+        }
+        .expect("scripted owner evidence matches its exact absence issuer");
         self.retain_absence(evidence)
+    }
+
+    fn release_native_root_lease(&mut self) {
+        self.native_root_lease = None;
     }
 
     fn uncertain_activation(
@@ -705,6 +732,7 @@ impl ScriptedLifecycle {
                     .finalize_absent_without_authority(&self.reservation)
             }) {
             Ok(()) => {
+                self.release_native_root_lease();
                 let absence = self.mint_activation_absence(attempt);
                 match kind {
                     ScriptedActivationAbsence::Retryable => {
@@ -759,24 +787,28 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
             .fetch_add(1, Ordering::AcqRel);
         match self.reservation.probe.mark_absent(&self.reservation) {
             Ok(()) if Instant::now() >= deadline => {
+                self.release_native_root_lease();
                 ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
                     failure: ExtensionRuntimeFailure::TimedOut,
                     evidence: None,
                 }
             }
-            Ok(()) => match self
-                .reservation
-                .probe
-                .finalize_absent_without_authority(&self.reservation)
-            {
-                Ok(()) => {
-                    ExtensionRuntimeRetirementDisposition::Retired(self.mint_owner_absence(attempt))
+            Ok(()) => {
+                self.release_native_root_lease();
+                match self
+                    .reservation
+                    .probe
+                    .finalize_absent_without_authority(&self.reservation)
+                {
+                    Ok(()) => ExtensionRuntimeRetirementDisposition::Retired(
+                        self.mint_owner_absence(attempt),
+                    ),
+                    Err(_) => ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
+                        failure: ExtensionRuntimeFailure::Internal,
+                        evidence: None,
+                    },
                 }
-                Err(_) => ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
-                    failure: ExtensionRuntimeFailure::Internal,
-                    evidence: None,
-                },
-            },
+            }
             Err(_) => ExtensionRuntimeRetirementDisposition::OwnershipUncertain {
                 failure: ExtensionRuntimeFailure::Internal,
                 evidence: None,
@@ -814,17 +846,14 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
         };
         let phase = self.reservation.probe.phase(&self.reservation);
         if Instant::now() >= deadline {
-            let evidence = matches!(phase, Ok(RegistryPhase::Active))
-                .then_some(ExtensionRuntimeOwnershipEvidence::Compatibility);
+            let evidence = matches!(phase, Ok(RegistryPhase::Active)).then_some(self.evidence);
             return ExtensionRuntimeOwnershipDisposition::StillUncertain {
                 failure: ExtensionRuntimeFailure::TimedOut,
                 evidence,
             };
         }
         match phase {
-            Ok(RegistryPhase::Active) => ExtensionRuntimeOwnershipDisposition::Owned(
-                ExtensionRuntimeOwnershipEvidence::Compatibility,
-            ),
+            Ok(RegistryPhase::Active) => ExtensionRuntimeOwnershipDisposition::Owned(self.evidence),
             Ok(RegistryPhase::Attached) => {
                 match self.reservation.probe.mark_absent(&self.reservation) {
                     Ok(()) if Instant::now() >= deadline => {
@@ -833,19 +862,22 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                             evidence: None,
                         }
                     }
-                    Ok(()) => match self
-                        .reservation
-                        .probe
-                        .finalize_absent_without_authority(&self.reservation)
-                    {
-                        Ok(()) => ExtensionRuntimeOwnershipDisposition::Absent(
-                            self.mint_owner_absence(attempt),
-                        ),
-                        Err(_) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
-                            failure: ExtensionRuntimeFailure::Internal,
-                            evidence: None,
-                        },
-                    },
+                    Ok(()) => {
+                        self.release_native_root_lease();
+                        match self
+                            .reservation
+                            .probe
+                            .finalize_absent_without_authority(&self.reservation)
+                        {
+                            Ok(()) => ExtensionRuntimeOwnershipDisposition::Absent(
+                                self.mint_owner_absence(attempt),
+                            ),
+                            Err(_) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
+                                failure: ExtensionRuntimeFailure::Internal,
+                                evidence: None,
+                            },
+                        }
+                    }
                     Err(_) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
                         failure: ExtensionRuntimeFailure::Internal,
                         evidence: None,
@@ -858,6 +890,7 @@ impl ExtensionRuntimeOwnershipPort for ScriptedLifecycle {
                 .finalize_absent_without_authority(&self.reservation)
             {
                 Ok(()) => {
+                    self.release_native_root_lease();
                     ExtensionRuntimeOwnershipDisposition::Absent(self.mint_owner_absence(attempt))
                 }
                 Err(_) => ExtensionRuntimeOwnershipDisposition::StillUncertain {
@@ -901,41 +934,57 @@ impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
                 ExtensionRuntimeFailure::TimedOut,
             );
         }
-        if access.target() != ExtensionRuntimeTarget::Compatibility
-            || !matches!(
-                access.take_native_root_lease(),
-                Err(ExtensionPackageAccessError::NativeRootUnavailable)
-            )
-        {
+        let package_ready = match self.evidence {
+            ExtensionRuntimeOwnershipEvidence::Compatibility => {
+                access.target() == ExtensionRuntimeTarget::Compatibility
+                    && matches!(
+                        access.take_native_root_lease(),
+                        Err(ExtensionPackageAccessError::NativeRootUnavailable)
+                    )
+                    && matches!(
+                        access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())),
+                        Ok(Ok(()))
+                    )
+            }
+            ExtensionRuntimeOwnershipEvidence::MacosWebExtension(_) => {
+                if access.target() != ExtensionRuntimeTarget::NativeWebExtension {
+                    false
+                } else if let Ok(mut lease) = access.take_native_root_lease() {
+                    let mut visitor = |_root: &std::path::Path| Ok(());
+                    if matches!(lease.with_verified_path(&mut visitor), Ok(Ok(()))) {
+                        self.native_root_lease = Some(lease);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if !package_ready {
             return self.settle_definite_activation_absence(
                 attempt,
                 ScriptedActivationAbsence::Rejected,
                 ExtensionRuntimeFailure::PackageRejected,
             );
         }
-        match access.visit_manifest(&mut |_reader: &mut dyn Read| Ok(())) {
-            Ok(Ok(())) if Instant::now() >= deadline => self.settle_definite_activation_absence(
+        if Instant::now() >= deadline {
+            return self.settle_definite_activation_absence(
                 attempt,
                 ScriptedActivationAbsence::Retryable,
                 ExtensionRuntimeFailure::TimedOut,
-            ),
-            Ok(Ok(())) => match self.reservation.probe.mark_active(&self.reservation) {
-                Ok(()) if Instant::now() < deadline => {
-                    ExtensionRuntimeActivationDisposition::Activated(
-                        ExtensionRuntimeOwnershipEvidence::Compatibility,
-                    )
-                }
-                Ok(()) => Self::uncertain_activation(
-                    ExtensionRuntimeFailure::TimedOut,
-                    Some(ExtensionRuntimeOwnershipEvidence::Compatibility),
-                ),
-                Err(_) => Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None),
-            },
-            Ok(Err(_)) | Err(_) => self.settle_definite_activation_absence(
-                attempt,
-                ScriptedActivationAbsence::Rejected,
-                ExtensionRuntimeFailure::PackageRejected,
-            ),
+            );
+        }
+        match self.reservation.probe.mark_active(&self.reservation) {
+            Ok(()) if Instant::now() < deadline => {
+                ExtensionRuntimeActivationDisposition::Activated(self.evidence)
+            }
+            Ok(()) => {
+                Self::uncertain_activation(ExtensionRuntimeFailure::TimedOut, Some(self.evidence))
+            }
+            Err(_) => Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None),
         }
     }
 }
@@ -945,6 +994,7 @@ impl ExtensionRuntimeHostLifecyclePort for ScriptedLifecycle {}
 struct ScriptedPublication {
     mode: PublicationMode,
     reservation: Arc<ReservationControl>,
+    evidence: ExtensionRuntimeOwnershipEvidence,
 }
 
 const SCRIPTED_PUBLICATION_RETAINED_BYTES: usize = size_of::<ScriptedPublication>()
@@ -985,7 +1035,7 @@ impl ExtensionRuntimeHostPublicationPort for ScriptedPublication {
             || !entry_matches_reservation(owned_entry, &self.reservation)
             || owned_entry.intent() != ExtensionNativeOwnershipIntent::Acquire
             || owned_entry.phase() != ExtensionNativeOwnershipPhase::NativeOwned
-            || evidence != ExtensionRuntimeOwnershipEvidence::Compatibility
+            || evidence != self.evidence
             || !authority.matches_native_ownership_lineage(owned_entry)
         {
             return Err(ExtensionRuntimeHostPublicationPortRefusal::new(

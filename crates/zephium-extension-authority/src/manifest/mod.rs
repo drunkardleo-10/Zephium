@@ -1103,11 +1103,27 @@ fn sealed_product_manifest_provisioning(
 #[cfg(zephium_internal_repository_e2e)]
 fn sealed_product_manifest_provisioning(
 ) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
-    let active = repository_e2e_manifest_profile(ACTIVE_CATALOG_BYTES)?;
-    let rollback = repository_e2e_manifest_profile(ROLLBACK_CATALOG_BYTES)?;
-    let active_catalog = active.catalog;
-    let rollback_catalogs = vec![rollback.catalog].into_boxed_slice();
-    let mut profiles = vec![active, rollback];
+    let targets = repository_e2e_runtime_targets();
+    let mut profiles = Vec::with_capacity(targets.len() * 2);
+    for target in targets {
+        profiles.push(repository_e2e_manifest_profile(
+            ACTIVE_CATALOG_BYTES,
+            *target,
+        )?);
+        profiles.push(repository_e2e_manifest_profile(
+            ROLLBACK_CATALOG_BYTES,
+            *target,
+        )?);
+    }
+    let active_catalog = profiles
+        .first()
+        .map(|profile| profile.catalog)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let rollback_catalog = profiles
+        .get(1)
+        .map(|profile| profile.catalog)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let rollback_catalogs = vec![rollback_catalog].into_boxed_slice();
     profiles.sort_unstable_by(|left, right| {
         (left.catalog, left.runtime_target, left.package.key).cmp(&(
             right.catalog,
@@ -1144,6 +1160,7 @@ impl ExtensionManifestCompatibilityPolicy for RepositoryE2eCompatibilityPolicy {
 #[cfg(zephium_internal_repository_e2e)]
 fn repository_e2e_manifest_profile(
     catalog_bytes: &[u8],
+    runtime_target: ProductExtensionRuntimeTarget,
 ) -> Result<SealedManifestProfile, ProductExtensionManifestAuthorityError> {
     let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
         .map_err(invalid_repository_e2e_configuration)?;
@@ -1156,7 +1173,6 @@ fn repository_e2e_manifest_profile(
     let package = catalog
         .package(package_key)
         .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
-    let runtime_target = repository_e2e_runtime_target();
     let compatibility_target =
         ExtensionCompatibilityTargetId::parse_exact(runtime_target.compatibility_target_id())
             .map_err(invalid_repository_e2e_configuration)?;
@@ -1218,18 +1234,21 @@ fn invalid_repository_e2e_configuration<Error>(
 }
 
 #[cfg(all(zephium_internal_repository_e2e, target_os = "macos"))]
-const fn repository_e2e_runtime_target() -> ProductExtensionRuntimeTarget {
-    ProductExtensionRuntimeTarget::MacosCompatibility
+const fn repository_e2e_runtime_targets() -> &'static [ProductExtensionRuntimeTarget] {
+    &[
+        ProductExtensionRuntimeTarget::MacosNative,
+        ProductExtensionRuntimeTarget::MacosCompatibility,
+    ]
 }
 
 #[cfg(all(zephium_internal_repository_e2e, target_os = "linux"))]
-const fn repository_e2e_runtime_target() -> ProductExtensionRuntimeTarget {
-    ProductExtensionRuntimeTarget::LinuxCompatibility
+const fn repository_e2e_runtime_targets() -> &'static [ProductExtensionRuntimeTarget] {
+    &[ProductExtensionRuntimeTarget::LinuxCompatibility]
 }
 
 #[cfg(all(zephium_internal_repository_e2e, target_os = "windows"))]
-const fn repository_e2e_runtime_target() -> ProductExtensionRuntimeTarget {
-    ProductExtensionRuntimeTarget::WindowsNative
+const fn repository_e2e_runtime_targets() -> &'static [ProductExtensionRuntimeTarget] {
+    &[ProductExtensionRuntimeTarget::WindowsNative]
 }
 
 const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION == 32);

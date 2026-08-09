@@ -275,6 +275,8 @@ const fn runtime_target() -> ProductExtensionRuntimeTarget {
     return ProductExtensionRuntimeTarget::MacosCompatibility;
     #[cfg(target_os = "linux")]
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
+    #[cfg(target_os = "windows")]
+    return ProductExtensionRuntimeTarget::WindowsNative;
     #[allow(unreachable_code)]
     ProductExtensionRuntimeTarget::MacosCompatibility
 }

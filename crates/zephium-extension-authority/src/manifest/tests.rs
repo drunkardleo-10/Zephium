@@ -355,32 +355,33 @@ fn internal_repository_fixture_admits_active_and_rollback_manifests() {
     let tree = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES).unwrap();
     let package_key = ExtensionPackageKey::from_bytes(PACKAGE_KEY_BYTES);
     let authority = ProductExtensionManifestAuthority::product().unwrap();
-    let runtime_target = repository_e2e_runtime_target();
     assert_eq!(
         ProductExtensionManifestAuthority::product_status(),
         ProductExtensionManifestAuthorityStatus::Configured
     );
 
-    let active_manifest = authority
-        .admit_manifest(&active, runtime_target, package_key, &tree, MANIFEST_BYTES)
-        .unwrap();
-    let rollback_manifest = authority
-        .admit_rollback_manifest(
-            &rollback,
-            runtime_target,
-            package_key,
-            &tree,
-            MANIFEST_BYTES,
-        )
-        .unwrap();
-    assert_eq!(active_manifest.catalog_revision().get(), 2);
-    assert_eq!(rollback_manifest.catalog_revision().get(), 1);
-    assert_eq!(active_manifest.runtime_target(), runtime_target);
-    assert_eq!(rollback_manifest.runtime_target(), runtime_target);
+    for runtime_target in repository_e2e_runtime_targets() {
+        let active_manifest = authority
+            .admit_manifest(&active, *runtime_target, package_key, &tree, MANIFEST_BYTES)
+            .unwrap();
+        let rollback_manifest = authority
+            .admit_rollback_manifest(
+                &rollback,
+                *runtime_target,
+                package_key,
+                &tree,
+                MANIFEST_BYTES,
+            )
+            .unwrap();
+        assert_eq!(active_manifest.catalog_revision().get(), 2);
+        assert_eq!(rollback_manifest.catalog_revision().get(), 1);
+        assert_eq!(active_manifest.runtime_target(), *runtime_target);
+        assert_eq!(rollback_manifest.runtime_target(), *runtime_target);
+    }
     assert!(matches!(
         authority.admit_manifest(
             &active,
-            unavailable_repository_e2e_runtime_target(runtime_target),
+            unavailable_repository_e2e_runtime_target(),
             package_key,
             &tree,
             MANIFEST_BYTES,
@@ -390,19 +391,15 @@ fn internal_repository_fixture_admits_active_and_rollback_manifests() {
 }
 
 #[cfg(zephium_internal_repository_e2e)]
-const fn unavailable_repository_e2e_runtime_target(
-    configured: ProductExtensionRuntimeTarget,
-) -> ProductExtensionRuntimeTarget {
-    match configured {
-        ProductExtensionRuntimeTarget::MacosCompatibility => {
-            ProductExtensionRuntimeTarget::LinuxCompatibility
-        }
-        ProductExtensionRuntimeTarget::LinuxCompatibility
-        | ProductExtensionRuntimeTarget::WindowsNative
-        | ProductExtensionRuntimeTarget::MacosNative => {
-            ProductExtensionRuntimeTarget::MacosCompatibility
-        }
-    }
+const fn unavailable_repository_e2e_runtime_target() -> ProductExtensionRuntimeTarget {
+    #[cfg(target_os = "macos")]
+    return ProductExtensionRuntimeTarget::LinuxCompatibility;
+    #[cfg(target_os = "linux")]
+    return ProductExtensionRuntimeTarget::MacosNative;
+    #[cfg(target_os = "windows")]
+    return ProductExtensionRuntimeTarget::MacosCompatibility;
+    #[allow(unreachable_code)]
+    ProductExtensionRuntimeTarget::WindowsNative
 }
 
 #[test]

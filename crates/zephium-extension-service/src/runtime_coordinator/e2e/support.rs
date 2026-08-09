@@ -587,7 +587,7 @@ impl BundledReleaseByteSource for FixtureSource {
 
 const fn runtime_target() -> ProductExtensionRuntimeTarget {
     #[cfg(target_os = "macos")]
-    return ProductExtensionRuntimeTarget::MacosCompatibility;
+    return ProductExtensionRuntimeTarget::MacosNative;
     #[cfg(target_os = "linux")]
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
     #[allow(unreachable_code)]
