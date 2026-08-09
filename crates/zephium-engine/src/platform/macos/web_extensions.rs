@@ -1023,9 +1023,18 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         "native-owner adapter activation",
     )? {
         super::extensions::MacosNativeRuntimeActivation::Activated(owner) => owner,
-        super::extensions::MacosNativeRuntimeActivation::Rejected(failure) => {
+        super::extensions::MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(failure) => {
             return Err(format!(
-                "native-owner adapter rejected activation: {failure}"
+                "native-owner adapter rejected activation without absence proof: {failure}"
+            ));
+        }
+        super::extensions::MacosNativeRuntimeActivation::RejectedAfterCleanup {
+            failure,
+            owner_id: _,
+            audit: _,
+        } => {
+            return Err(format!(
+                "native-owner adapter rejected activation after exact cleanup: {failure}"
             ));
         }
         super::extensions::MacosNativeRuntimeActivation::OwnershipUncertain { failure, owner } => {

@@ -166,7 +166,20 @@ impl Error for MacosNativeRuntimeStartFailure {}
 /// parse request.
 #[must_use = "native activation settlement owns any possible WebKit owner"]
 pub(crate) enum MacosNativeRuntimeActivation {
-    Rejected(MacosNativeRuntimeFailure),
+    /// Activation failed without constructing an exact owner and without a
+    /// complete native absence audit. The host must retain cleanup debt: the
+    /// parse request crossed the native boundary, so this outcome cannot mint
+    /// never-entered absence.
+    RejectedWithoutAbsenceProof(MacosNativeRuntimeFailure),
+    /// Activation failed after constructing an exact owner, and exact teardown
+    /// proved that all grants were cleared and the owner was unloaded from its
+    /// controller. These observations are sufficient for the reservation-bound
+    /// host issuer to mint macOS absence evidence.
+    RejectedAfterCleanup {
+        failure: MacosNativeRuntimeFailure,
+        owner_id: ExtensionRuntimeNativeOwnerId,
+        audit: ExtensionRuntimeMacosAbsenceAudit,
+    },
     Activated(MacosNativeRuntimeOwner),
     OwnershipUncertain {
         failure: MacosNativeRuntimeFailure,
@@ -415,12 +428,12 @@ fn settle_parse_callback(
     controller: Retained<WKWebExtensionController>,
 ) -> MacosNativeRuntimeActivation {
     let Some(extension) = (unsafe { Retained::retain(extension) }) else {
-        return MacosNativeRuntimeActivation::Rejected(
+        return MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(
             MacosNativeRuntimeFailure::ExtensionParseFailed,
         );
     };
     if !error.is_null() {
-        return MacosNativeRuntimeActivation::Rejected(
+        return MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(
             MacosNativeRuntimeFailure::ExtensionParseFailed,
         );
     }
@@ -434,7 +447,7 @@ fn settle_parse_callback(
         Ok(owner) => MacosNativeRuntimeActivation::Activated(owner),
         Err((failure, owner)) => match owner {
             Some(owner) => classify_failed_owner(failure, owner),
-            None => MacosNativeRuntimeActivation::Rejected(failure),
+            None => MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(failure),
         },
     }
 }
@@ -511,9 +524,14 @@ fn classify_failed_owner(
     failure: MacosNativeRuntimeFailure,
     owner: MacosNativeRuntimeOwner,
 ) -> MacosNativeRuntimeActivation {
+    let owner_id = owner.owner_id();
     match owner.retire() {
-        MacosNativeRuntimeRetirement::Absent(_audit) => {
-            MacosNativeRuntimeActivation::Rejected(failure)
+        MacosNativeRuntimeRetirement::Absent(audit) => {
+            MacosNativeRuntimeActivation::RejectedAfterCleanup {
+                failure,
+                owner_id,
+                audit,
+            }
         }
         MacosNativeRuntimeRetirement::Retained {
             failure: _cleanup_failure,
