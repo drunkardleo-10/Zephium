@@ -4173,11 +4173,18 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
         );
         assert_eq!(
             observation.api,
-            vec![(
-                "storage".to_owned(),
-                ExtensionNativeGrantRequirement::Required,
-                ExtensionNativeGrantDecision::Granted,
-            )]
+            vec![
+                (
+                    "storage".to_owned(),
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "tabs".to_owned(),
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+            ]
         );
         assert_eq!(
             observation.hosts,
@@ -4307,11 +4314,18 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
         );
         assert_eq!(
             observation.api,
-            vec![(
-                "storage".to_owned(),
-                ExtensionNativeGrantRequirement::Required,
-                ExtensionNativeGrantDecision::Granted,
-            )]
+            vec![
+                (
+                    "storage".to_owned(),
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "tabs".to_owned(),
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+            ]
         );
         assert_eq!(
             observation.hosts,
