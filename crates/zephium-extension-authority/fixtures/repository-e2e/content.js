@@ -1,5 +1,9 @@
 const marker = "data-zephium-extension-product-probe";
-const message = { kind: "zephium-product-probe" };
+const message = {
+  kind: "zephium-product-probe",
+  pageTitle: document.title,
+  pageUrl: globalThis.location.href,
+};
 
 function settle(response) {
   const value =

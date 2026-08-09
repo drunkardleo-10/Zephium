@@ -36,5 +36,23 @@ api.runtime.onMessage.addListener(async (message) => {
     return { state: "storage-readback-failed" };
   }
 
+  const tabs = await api.tabs.query({ active: true, currentWindow: true });
+  if (tabs.length !== 1) {
+    return { state: "tabs-query-count-failed" };
+  }
+  const [tab] = tabs;
+  if (tab.active !== true) {
+    return { state: "tabs-query-active-failed" };
+  }
+  if (tab.pinned !== false) {
+    return { state: "tabs-query-pinned-failed" };
+  }
+  if (tab.title !== message.pageTitle) {
+    return { state: "tabs-query-title-failed" };
+  }
+  if (tab.url !== message.pageUrl) {
+    return { state: "tabs-query-url-failed" };
+  }
+
   return { count: value.count, state: "ready" };
 });
