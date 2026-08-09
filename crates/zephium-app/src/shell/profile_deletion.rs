@@ -233,6 +233,7 @@ impl Shell {
     /// Native `Close` effects are deliberately suppressed: the engine's
     /// profile erasure owns closure and exact retirement of every view.
     pub(super) fn apply_profile_tombstone(&mut self, profile: ProfileId) {
+        self.extension_browser_surfaces.retire_profile(profile);
         // Retire compiler admission and erase any callback result before the
         // native erasure boundary. A late list build can never reinstall
         // policy state for a journal-authorized profile.

@@ -24,6 +24,10 @@ pub(crate) use outcome::{
 use slot::RuntimeSlot;
 
 const _: () = assert!(MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES == 3);
+const _: () = assert!(
+    MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+        == zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES
+);
 
 pub(crate) struct RuntimeCoordinatorResources<'worker> {
     store: &'worker ExtensionServiceStoreAuthority,

@@ -55,7 +55,9 @@ impl ExtensionServiceLifecycle for ProbeLifecycle {
         self.0
             .startup_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready
+        zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready(
+            zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+        )
     }
 
     fn shutdown_until(

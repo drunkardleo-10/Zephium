@@ -120,8 +120,8 @@ fn project_lifecycle_startup_outcome(
     outcome: ExtensionServiceStartupWait,
 ) -> CoreExtensionServiceStartupOutcome {
     match outcome {
-        ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(_)) => {
-            CoreExtensionServiceStartupOutcome::Ready
+        ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) => {
+            CoreExtensionServiceStartupOutcome::Ready(evidence.active_profiles())
         }
         ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::CleanupRequired(
             _,
@@ -207,13 +207,24 @@ mod tests {
     fn startup_settlement_projection_preserves_every_authorizing_class() {
         let worker = ExtensionServiceWorkerIdentity::mint().unwrap();
         let revision = ExtensionNativeOwnershipJournalRevision::INITIAL;
+        let mut active_profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+        assert!(active_profiles.try_insert(ProfileId::from(7)));
         assert_eq!(
             project_lifecycle_startup_outcome(ExtensionServiceStartupWait::Settled(
-                ExtensionServiceStartupOutcome::Ready(ExtensionServiceReadyEvidence::new(
-                    worker, revision,
-                )),
+                ExtensionServiceStartupOutcome::Ready(
+                    ExtensionServiceReadyEvidence::after_hydration(
+                        worker,
+                        revision,
+                        active_profiles,
+                        1,
+                        0,
+                        0,
+                        0,
+                    )
+                    .unwrap(),
+                ),
             )),
-            CoreExtensionServiceStartupOutcome::Ready
+            CoreExtensionServiceStartupOutcome::Ready(active_profiles)
         );
         assert_eq!(
             project_lifecycle_startup_outcome(ExtensionServiceStartupWait::Settled(

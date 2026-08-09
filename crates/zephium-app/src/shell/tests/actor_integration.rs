@@ -619,8 +619,10 @@ fn real_timer_thread_retries_transient_extension_startup_once() {
     use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{Ready, Unavailable};
 
     let store = Arc::new(FakeStore::default());
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_startup_outcomes([Unavailable, Ready]);
+    let (extension_service, extension_state) = extension_lifecycle_with_startup_outcomes([
+        Unavailable,
+        Ready(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+    ]);
     let handle = spawn(
         Arc::new(FakeEngine::default()),
         store.clone(),

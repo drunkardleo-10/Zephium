@@ -80,4 +80,9 @@ impl Windows {
     pub fn focused_mut(&mut self) -> Option<&mut Window> {
         self.focused.and_then(|id| self.map.get_mut(&id))
     }
+
+    /// Iterates logical windows in stable creation order.
+    pub fn iter(&self) -> impl Iterator<Item = &Window> {
+        self.order.iter().filter_map(|id| self.map.get(id))
+    }
 }

@@ -1186,6 +1186,7 @@ impl WorkerState {
                 let evidence = ExtensionServiceReadyEvidence::after_hydration(
                     worker,
                     journal_revision,
+                    report.active_profiles(),
                     usize::from(report.active_count()),
                     report.rejected_count(),
                     report.capacity_deferred_count(),
@@ -2941,7 +2942,9 @@ mod tests {
                 &mut owner,
                 Instant::now() + Duration::from_secs(5),
             ),
-            zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready
+            zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready(
+                zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+            )
         );
         assert!(matches!(
             owner.shutdown(),

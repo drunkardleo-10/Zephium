@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use zephium_core::extensions::{
     ExtensionNativeOwnershipJournalRevision, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
 };
+use zephium_core::ports::extensions::ExtensionActiveProfiles;
 
 const _: () = assert!(MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES <= u16::MAX as usize);
 
@@ -86,6 +87,7 @@ impl ExtensionServiceShutdownEvidence {
 pub struct ExtensionServiceReadyEvidence {
     worker: ExtensionServiceWorkerIdentity,
     journal_revision: ExtensionNativeOwnershipJournalRevision,
+    active_profiles: ExtensionActiveProfiles,
     active_runtime_count: u16,
     rejected_runtime_count: u16,
     capacity_deferred_runtime_count: u16,
@@ -100,6 +102,7 @@ impl ExtensionServiceReadyEvidence {
         Self {
             worker,
             journal_revision,
+            active_profiles: ExtensionActiveProfiles::EMPTY,
             active_runtime_count: 0,
             rejected_runtime_count: 0,
             capacity_deferred_runtime_count: 0,
@@ -110,14 +113,22 @@ impl ExtensionServiceReadyEvidence {
     pub(crate) fn after_hydration(
         worker: ExtensionServiceWorkerIdentity,
         journal_revision: ExtensionNativeOwnershipJournalRevision,
+        active_profiles: ExtensionActiveProfiles,
         active_runtime_count: usize,
         rejected_runtime_count: usize,
         capacity_deferred_runtime_count: usize,
         degraded_profile_count: usize,
     ) -> Option<Self> {
+        if active_runtime_count > zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES
+            || active_profiles.len() > active_runtime_count
+            || (active_runtime_count == 0) != active_profiles.is_empty()
+        {
+            return None;
+        }
         Some(Self {
             worker,
             journal_revision,
+            active_profiles,
             active_runtime_count: u16::try_from(active_runtime_count).ok()?,
             rejected_runtime_count: u16::try_from(rejected_runtime_count).ok()?,
             capacity_deferred_runtime_count: u16::try_from(capacity_deferred_runtime_count).ok()?,
@@ -133,6 +144,12 @@ impl ExtensionServiceReadyEvidence {
     /// Returns the complete journal revision observed after startup hydration.
     pub const fn journal_revision(self) -> ExtensionNativeOwnershipJournalRevision {
         self.journal_revision
+    }
+
+    /// Exact profiles with at least one active startup runtime. This compact
+    /// routing projection is not package, grant, Store, or native authority.
+    pub const fn active_profiles(self) -> ExtensionActiveProfiles {
+        self.active_profiles
     }
 
     /// Runtimes active when startup readiness was published.
@@ -240,13 +257,25 @@ mod startup_tests {
 
         assert_eq!(evidence.worker(), worker);
         assert_eq!(evidence.journal_revision(), revision);
+        assert!(evidence.active_profiles().is_empty());
         assert_eq!(evidence.active_runtime_count(), 0);
         assert_eq!(evidence.rejected_runtime_count(), 0);
         assert_eq!(evidence.capacity_deferred_runtime_count(), 0);
         assert_eq!(evidence.degraded_profile_count(), 0);
 
-        let hydrated =
-            ExtensionServiceReadyEvidence::after_hydration(worker, revision, 1, 2, 3, 4).unwrap();
+        let mut active_profiles = ExtensionActiveProfiles::EMPTY;
+        assert!(active_profiles.try_insert(zephium_core::ids::ProfileId::from(7)));
+        let hydrated = ExtensionServiceReadyEvidence::after_hydration(
+            worker,
+            revision,
+            active_profiles,
+            1,
+            2,
+            3,
+            4,
+        )
+        .unwrap();
+        assert_eq!(hydrated.active_profiles(), active_profiles);
         assert_eq!(hydrated.active_runtime_count(), 1);
         assert_eq!(hydrated.rejected_runtime_count(), 2);
         assert_eq!(hydrated.capacity_deferred_runtime_count(), 3);
@@ -254,7 +283,18 @@ mod startup_tests {
         assert!(ExtensionServiceReadyEvidence::after_hydration(
             worker,
             revision,
+            ExtensionActiveProfiles::EMPTY,
             usize::from(u16::MAX) + 1,
+            0,
+            0,
+            0,
+        )
+        .is_none());
+        assert!(ExtensionServiceReadyEvidence::after_hydration(
+            worker,
+            revision,
+            ExtensionActiveProfiles::EMPTY,
+            1,
             0,
             0,
             0,

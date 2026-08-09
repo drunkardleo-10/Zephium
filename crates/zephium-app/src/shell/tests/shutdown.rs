@@ -360,8 +360,10 @@ fn retryable_shutdown_restores_a_startup_wake_rejected_while_sealed() {
 
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);
-    let (extension_service, _extension_state) =
-        extension_lifecycle_with_startup_outcomes([Unavailable, Ready]);
+    let (extension_service, _extension_state) = extension_lifecycle_with_startup_outcomes([
+        Unavailable,
+        Ready(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+    ]);
     let mut shell = Shell::new_with_extension_lifecycle(
         Arc::new(FakeEngine::default()),
         store.clone(),

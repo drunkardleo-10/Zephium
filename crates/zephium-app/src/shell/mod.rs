@@ -4,6 +4,7 @@ mod blocker;
 mod bootstrap;
 mod effects;
 mod engine_events;
+mod extension_browser_surface;
 mod favicons;
 mod operations;
 mod persistence;
@@ -19,6 +20,7 @@ mod window_layout;
 mod zoom;
 
 use effects::{mutation_result, operation_result, NativeWork};
+use extension_browser_surface::ExtensionBrowserSurfaceState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
@@ -61,7 +63,10 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 
-use zephium_core::extensions::ExtensionNativeNamespaceScope;
+use zephium_core::extensions::{
+    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+    ExtensionBrowserWindow, ExtensionNativeNamespaceScope,
+};
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::item::{ItemKind, Lifecycle, Placement, SpaceSection, TabState};
@@ -155,6 +160,7 @@ pub struct Shell {
     blocker: blocker::BlockerCoordinator,
     extension_service: Option<ExtensionLifecycle>,
     extension_startup_ready: bool,
+    extension_browser_surfaces: ExtensionBrowserSurfaceState,
     /// Any terminal extension lifecycle failure permanently closes bootstrap
     /// and profile-deletion progress for this process while the desktop
     /// composition root converges on orderly shutdown.
@@ -355,6 +361,7 @@ impl Shell {
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
             extension_service: Some(extension_service),
             extension_startup_ready: false,
+            extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
@@ -915,7 +922,14 @@ impl Shell {
             service.settle_startup_until(deadline)
         }));
         match outcome {
-            Ok(ExtensionServiceStartupOutcome::Ready) => {
+            Ok(ExtensionServiceStartupOutcome::Ready(active_profiles)) => {
+                if !self.extension_browser_surfaces.activate(active_profiles) {
+                    crate::diagnostic!(
+                        "bootstrap: extension-service active profile projection changed after settlement"
+                    );
+                    self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupFailedClosed);
+                    return false;
+                }
                 self.extension_startup_ready = true;
                 self.extension_startup_retry_exponent = 0;
                 self.extension_startup_not_before = None;

@@ -33,6 +33,10 @@ fn actor_hydration_retry_resumes_without_reentering_cleanup() {
         panic!("hydration retry did not publish readiness");
     };
     assert_eq!(evidence.active_runtime_count(), 1);
+    assert_eq!(
+        evidence.active_profiles().iter().collect::<Vec<_>>(),
+        harness.profiles
+    );
     assert_eq!(evidence.rejected_runtime_count(), 0);
     assert_eq!(harness.probe.bind_calls(), 1);
     assert_eq!(harness.probe.activation_calls(), 1);
@@ -65,6 +69,10 @@ fn actor_hydration_reports_capacity_without_evicting_or_overcommitting() {
     );
     assert_eq!(evidence.capacity_deferred_runtime_count(), 1);
     assert_eq!(evidence.rejected_runtime_count(), 0);
+    assert_eq!(
+        evidence.active_profiles().iter().collect::<Vec<_>>(),
+        harness.profiles[..crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES]
+    );
     assert_eq!(
         harness.probe.bind_calls(),
         crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES

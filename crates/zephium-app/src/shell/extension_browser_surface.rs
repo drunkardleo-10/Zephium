@@ -1,0 +1,223 @@
+//! Shell-owned logical browser routing for authorized extension profiles.
+
+use std::collections::HashMap;
+
+use super::*;
+
+#[derive(Default)]
+pub(super) struct ExtensionBrowserSurfaceState {
+    active_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    published: HashMap<ProfileId, ExtensionBrowserSurface>,
+}
+
+#[derive(Default)]
+pub(super) struct ExtensionBrowserSurfaceSync {
+    pub(super) native: NativeWork,
+    failed_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+}
+
+impl ExtensionBrowserSurfaceSync {
+    pub(super) fn failed(&self, profile: ProfileId) -> bool {
+        self.failed_profiles.contains(profile)
+    }
+
+    fn record_failure(&mut self, profile: ProfileId) {
+        // The active profile set is already bounded by the same constant, so
+        // insertion cannot fail unless internal state lost its invariant.
+        if !self.failed_profiles.try_insert(profile) {
+            self.native.rejected = true;
+        }
+    }
+}
+
+impl ExtensionBrowserSurfaceState {
+    pub(super) fn activate(
+        &mut self,
+        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    ) -> bool {
+        if !self.active_profiles.is_empty() && self.active_profiles != profiles {
+            return false;
+        }
+        self.active_profiles = profiles;
+        true
+    }
+
+    pub(super) fn retire_profile(&mut self, profile: ProfileId) {
+        self.active_profiles.remove(profile);
+        self.published.remove(&profile);
+    }
+
+    fn active_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+        self.active_profiles
+    }
+
+    fn published(&self, profile: ProfileId) -> Option<&ExtensionBrowserSurface> {
+        self.published.get(&profile)
+    }
+
+    fn record_published(&mut self, surface: ExtensionBrowserSurface) {
+        self.published.insert(surface.profile(), surface);
+    }
+}
+
+impl Shell {
+    /// Publishes only changed logical routing state and never constructs a
+    /// native view. With no active runtime profile this is an allocation-free
+    /// branch over one fixed-size value and an empty `HashMap`.
+    pub(super) fn sync_extension_browser_surfaces(&mut self) -> ExtensionBrowserSurfaceSync {
+        let profiles = self.extension_browser_surfaces.active_profiles();
+        if profiles.is_empty() {
+            return ExtensionBrowserSurfaceSync::default();
+        }
+
+        let mut settlement = ExtensionBrowserSurfaceSync::default();
+        for profile in profiles.iter() {
+            let generation = match self
+                .extension_browser_surfaces
+                .published(profile)
+                .map(ExtensionBrowserSurface::generation)
+            {
+                Some(current) => match current.next() {
+                    Some(next) => next,
+                    None => {
+                        settlement.native.rejected = true;
+                        settlement.record_failure(profile);
+                        continue;
+                    }
+                },
+                None => ExtensionBrowserSurfaceGeneration::INITIAL,
+            };
+            let surface = match self.build_extension_browser_surface(profile, generation) {
+                Ok(surface) => surface,
+                Err(reason) => {
+                    crate::diagnostic!(
+                        "extensions: logical browser surface is unavailable: {reason}"
+                    );
+                    settlement.native.rejected = true;
+                    settlement.record_failure(profile);
+                    continue;
+                }
+            };
+            if self
+                .extension_browser_surfaces
+                .published(profile)
+                .is_some_and(|current| same_logical_surface(current, &surface))
+            {
+                continue;
+            }
+            let admission = self.engine.set_extension_browser_surface(surface.clone());
+            settlement.native.record(admission);
+            match admission {
+                NativeDispatch::Scheduled => {
+                    self.extension_browser_surfaces.record_published(surface)
+                }
+                NativeDispatch::Rejected | NativeDispatch::Unsupported => {
+                    settlement.record_failure(profile)
+                }
+            }
+        }
+        settlement
+    }
+
+    fn build_extension_browser_surface(
+        &self,
+        profile: ProfileId,
+        generation: ExtensionBrowserSurfaceGeneration,
+    ) -> Result<ExtensionBrowserSurface, &'static str> {
+        let mut windows = self
+            .windows
+            .iter()
+            .filter(|window| window.profile == profile);
+        let first = windows.next();
+        if windows.next().is_some() {
+            // Items are currently profile/space-owned rather than window-owned.
+            // Duplicating one ItemId across native windows would be an unsafe
+            // lie; keep this explicit until the product model gains ownership.
+            return Err("multiple windows share one profile without tab ownership");
+        }
+        let Some(window) = first else {
+            return ExtensionBrowserSurface::new(profile, generation, None, Vec::new())
+                .map_err(|_| "empty browser surface failed validation");
+        };
+        if self
+            .spaces
+            .get(window.space)
+            .is_none_or(|space| space.profile != profile)
+        {
+            return Err("window space crossed profile ownership");
+        }
+
+        let mut tabs = Vec::new();
+        self.append_extension_placement_tabs(Placement::Favorites { profile }, &mut tabs);
+        for space in self.spaces.iter().filter(|space| space.profile == profile) {
+            for section in [SpaceSection::Pinned, SpaceSection::Today] {
+                self.append_extension_placement_tabs(
+                    Placement::Space {
+                        space: space.id,
+                        section,
+                    },
+                    &mut tabs,
+                );
+            }
+        }
+
+        let private = self
+            .profiles
+            .get(profile)
+            .ok_or("active extension profile is absent from the session")?
+            .kind
+            == ProfileKind::Incognito;
+        let logical = ExtensionBrowserWindow::new(window.id, private, window.active, tabs)
+            .map_err(|_| "logical extension window failed validation")?;
+        let focused = self
+            .windows
+            .focused()
+            .filter(|focused| focused.id == window.id)
+            .map(|focused| focused.id);
+        ExtensionBrowserSurface::new(profile, generation, focused, vec![logical])
+            .map_err(|_| "logical extension surface failed validation")
+    }
+
+    fn append_extension_placement_tabs(
+        &self,
+        placement: Placement,
+        tabs: &mut Vec<ExtensionBrowserTab>,
+    ) {
+        for &id in self.items.roots(placement) {
+            self.append_extension_node_tabs(id, None, placement, tabs);
+        }
+    }
+
+    fn append_extension_node_tabs(
+        &self,
+        id: ItemId,
+        parent: Option<ItemId>,
+        placement: Placement,
+        tabs: &mut Vec<ExtensionBrowserTab>,
+    ) {
+        let Some(item) = self
+            .items
+            .get(id)
+            .filter(|item| item.parent == parent && item.placement == placement)
+        else {
+            return;
+        };
+        match &item.kind {
+            ItemKind::Tab(tab) => tabs.push(ExtensionBrowserTab::new(id, tab.has_view())),
+            ItemKind::Folder { .. } => {
+                for &child in self.items.children(id) {
+                    self.append_extension_node_tabs(child, Some(id), placement, tabs);
+                }
+            }
+        }
+    }
+}
+
+fn same_logical_surface(
+    current: &ExtensionBrowserSurface,
+    candidate: &ExtensionBrowserSurface,
+) -> bool {
+    current.profile() == candidate.profile()
+        && current.focused() == candidate.focused()
+        && current.windows() == candidate.windows()
+}

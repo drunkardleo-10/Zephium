@@ -407,8 +407,10 @@ fn transient_extension_startup_retries_then_bootstraps_once() {
 
     let store = Arc::new(FakeStore::default());
     let engine = Arc::new(FakeEngine::default());
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_startup_outcomes([Unavailable, Ready]);
+    let (extension_service, extension_state) = extension_lifecycle_with_startup_outcomes([
+        Unavailable,
+        Ready(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+    ]);
     let failures = Arc::new(Mutex::new(Vec::new()));
     let mut shell = Shell::new_with_extension_lifecycle_and_failure(
         engine.clone(),

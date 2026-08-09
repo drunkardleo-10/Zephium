@@ -11,6 +11,7 @@ use zephium_core::extensions::{
     ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
 };
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::extensions::ExtensionActiveProfiles;
 use zephium_store::{
     ExtensionRuntimeStartupInventoryLoadOutcome, ExtensionServiceStoreAuthority,
     ExtensionServiceStoreCallOutcome,
@@ -30,6 +31,7 @@ use crate::runtime_coordinator::{
 #[derive(Debug, Default)]
 pub(crate) struct StartupRuntimeHydrationReport {
     active_count: u16,
+    active_profiles: ExtensionActiveProfiles,
     rejected: Vec<(
         ExtensionNativeOwnershipKey,
         RuntimeActivationRejectionReason,
@@ -41,6 +43,10 @@ pub(crate) struct StartupRuntimeHydrationReport {
 impl StartupRuntimeHydrationReport {
     pub(crate) const fn active_count(&self) -> u16 {
         self.active_count
+    }
+
+    pub(crate) const fn active_profiles(&self) -> ExtensionActiveProfiles {
+        self.active_profiles
     }
 
     pub(crate) fn rejected_count(&self) -> usize {
@@ -156,6 +162,11 @@ pub(crate) fn hydrate_startup_runtimes(
                     );
                 };
                 report.active_count = next;
+                if !report.active_profiles.try_insert(key.profile()) {
+                    return StartupRuntimeHydrationOutcome::Failed(
+                        StartupRuntimeHydrationFailure::ProjectionMissing,
+                    );
+                }
             }
             RuntimeActivationOutcome::Rejected(reason) => report.rejected.push((key, reason)),
             RuntimeActivationOutcome::CapacityExceeded => report.capacity_deferred.push(key),

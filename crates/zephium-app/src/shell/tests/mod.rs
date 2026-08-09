@@ -207,7 +207,11 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready)
+            .unwrap_or(
+                zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready(
+                    zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+                ),
+            )
     }
 
     fn with_profile_retired_until(
@@ -321,6 +325,7 @@ pub(super) fn extension_lifecycle_with_startup_outcomes(
 #[derive(Default)]
 pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,
+    extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -401,6 +406,10 @@ impl FakeEngine {
         }
     }
 
+    fn extension_browser_surfaces(&self) -> Vec<ExtensionBrowserSurface> {
+        self.extension_browser_surfaces.lock().unwrap().clone()
+    }
+
     fn push_erasure_outcomes(&self, outcomes: impl IntoIterator<Item = ProfileDataErasureOutcome>) {
         self.erasure_outcomes.lock().unwrap().extend(outcomes);
     }
@@ -441,6 +450,21 @@ impl Engine for FakeEngine {
         };
         self.log(format!("create {id} {url} [{kind}]"));
         true
+    }
+    fn set_extension_browser_surface(&self, surface: ExtensionBrowserSurface) -> NativeDispatch {
+        let admission = self.native_admission();
+        if admission == NativeDispatch::Scheduled {
+            self.log(format!(
+                "extension-surface {} {}",
+                surface.profile(),
+                surface.generation().get()
+            ));
+            self.extension_browser_surfaces
+                .lock()
+                .unwrap()
+                .push(surface);
+        }
+        admission
     }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
         if self
@@ -1352,6 +1376,7 @@ mod actor_integration;
 mod blocker;
 mod bootstrap;
 mod engine_events;
+mod extension_browser_surface;
 mod favicons;
 #[path = "navigation.rs"]
 mod navigation_tests;

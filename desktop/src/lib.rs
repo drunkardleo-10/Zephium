@@ -4040,7 +4040,9 @@ mod tests {
             &mut self,
             _deadline: std::time::Instant,
         ) -> ExtensionServiceStartupOutcome {
-            ExtensionServiceStartupOutcome::Ready
+            ExtensionServiceStartupOutcome::Ready(
+                zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+            )
         }
 
         fn shutdown_until(

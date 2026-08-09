@@ -231,6 +231,10 @@ impl ActorAuthorityHarness {
         };
         assert_eq!(evidence.worker(), harness.worker);
         assert_eq!(evidence.active_runtime_count(), profile_count as u16);
+        assert_eq!(
+            evidence.active_profiles().iter().collect::<Vec<_>>(),
+            harness.profiles
+        );
         assert_eq!(evidence.rejected_runtime_count(), 0);
         assert_eq!(evidence.capacity_deferred_runtime_count(), 0);
         assert_eq!(evidence.degraded_profile_count(), 0);

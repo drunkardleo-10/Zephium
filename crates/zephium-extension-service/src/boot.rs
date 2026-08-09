@@ -146,7 +146,9 @@ struct InertExtensionServiceLifecycle {
 
 impl ExtensionServiceLifecycle for InertExtensionServiceLifecycle {
     fn settle_startup_until(&mut self, _deadline: Instant) -> ExtensionServiceStartupOutcome {
-        ExtensionServiceStartupOutcome::Ready
+        ExtensionServiceStartupOutcome::Ready(
+            zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+        )
     }
 
     fn with_profile_retired_until(
@@ -238,7 +240,9 @@ mod tests {
         assert!(!repository_path.exists());
         assert_eq!(
             lifecycle.settle_startup_until(Instant::now()),
-            ExtensionServiceStartupOutcome::Ready
+            ExtensionServiceStartupOutcome::Ready(
+                zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+            )
         );
         let continued = std::cell::Cell::new(false);
         assert_eq!(

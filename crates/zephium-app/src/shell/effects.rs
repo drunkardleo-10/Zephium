@@ -76,12 +76,16 @@ impl Shell {
     }
 
     pub(super) fn apply(&mut self, effects: Vec<Effect>) -> NativeWork {
+        // Publish the post-mutation logical graph before any Create/Close
+        // effect reaches the native FIFO. This lets WebKit resolve a content
+        // script's tab without making discarded-tab enumeration create views.
+        let extension_surfaces = self.sync_extension_browser_surfaces();
         // Deletion quarantine dominates every other profile policy. Filter
         // before the blocker gate so an effect can never be retained there
         // and replayed after the extension worker has installed its monotonic
         // retirement fence.
         let mut admitted = Vec::with_capacity(effects.len());
-        let mut native = NativeWork::default();
+        let mut native = extension_surfaces.native;
         for effect in effects {
             match effect {
                 Effect::CreateView { id, .. } if self.profile_deletion_quarantines_item(id) => {
@@ -138,6 +142,14 @@ impl Shell {
         for effect in effects {
             match effect {
                 Effect::CreateView { id, url } => {
+                    let profile = self.profile_of_item(id);
+                    if profile.is_some_and(|profile| extension_surfaces.failed(profile)) {
+                        self.zoom.pending.remove(&id);
+                        self.items.view_creation_failed(id);
+                        rejected_creates.insert(id);
+                        native.rejected = true;
+                        continue;
+                    }
                     if logical_residents >= LIVE_VIEW_ABSOLUTE_LIMIT {
                         self.zoom.pending.remove(&id);
                         self.items.view_creation_failed(id);
