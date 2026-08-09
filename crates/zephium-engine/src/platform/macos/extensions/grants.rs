@@ -293,10 +293,7 @@ where
         if seen_api > input.api_count {
             return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
         }
-        let permission = input
-            .identity
-            .schema
-            .permission_from_declared_name(grant.name)?;
+        let disposition = input.identity.schema.permission_disposition(grant.name)?;
         if !grant.decision.is_granted()
             && grant.requirement == ExtensionNativeGrantRequirement::Required
         {
@@ -304,8 +301,20 @@ where
         }
         // A Core denial is absence of effective authority, not evidence that
         // the user explicitly denied this permission in WebKit.
-        if grant.decision.is_granted() {
-            granted_api_permissions.push(permission);
+        match disposition {
+            MacosNativeApiPermissionDisposition::Native(permission)
+                if grant.decision.is_granted() =>
+            {
+                granted_api_permissions.push(permission);
+            }
+            MacosNativeApiPermissionDisposition::ProductProhibited
+                if grant.decision.is_granted() =>
+            {
+                return Err(MacosNativeGrantPlanError::ProhibitedApiPermission);
+            }
+            MacosNativeApiPermissionDisposition::Native(_)
+            | MacosNativeApiPermissionDisposition::NotInNativePermissionSet
+            | MacosNativeApiPermissionDisposition::ProductProhibited => {}
         }
     }
     if seen_api != input.api_count {
@@ -373,11 +382,26 @@ pub(crate) enum MacosNativeApiPermission {
     DeclarativeNetRequestFeedback,
     DeclarativeNetRequestWithHostAccess,
     Menus,
+    Notifications,
     Scripting,
     Storage,
     Tabs,
+    UnlimitedStorage,
     WebNavigation,
     WebRequest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacosNativeApiPermissionDisposition {
+    Native(MacosNativeApiPermission),
+    /// WebKit accepts the manifest token but does not publish it in
+    /// `requestedPermissions`. Compatibility remains an explicit manifest
+    /// policy decision; there is no native permission-dictionary entry to
+    /// apply or read back.
+    NotInNativePermissionSet,
+    /// The native runtime recognizes this permission, but Zephium does not
+    /// expose the corresponding privileged product integration.
+    ProductProhibited,
 }
 
 /// Exact policy vocabulary used to interpret one compiled native plan.
@@ -402,10 +426,10 @@ pub(super) enum MacosNativeGrantApplyMode {
 }
 
 impl MacosNativeGrantSchema {
-    fn permission_from_declared_name(
+    fn permission_disposition(
         self,
         name: &str,
-    ) -> Result<MacosNativeApiPermission, MacosNativeGrantPlanError> {
+    ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
         match self {
             Self::WkWebExtensionV1 => Self::wk_web_extension_v1_permission(name),
         }
@@ -413,29 +437,38 @@ impl MacosNativeGrantSchema {
 
     fn wk_web_extension_v1_permission(
         name: &str,
-    ) -> Result<MacosNativeApiPermission, MacosNativeGrantPlanError> {
+    ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
+        use MacosNativeApiPermissionDisposition::{
+            Native, NotInNativePermissionSet, ProductProhibited,
+        };
         match name {
-            "activeTab" => Ok(MacosNativeApiPermission::ActiveTab),
-            "alarms" => Ok(MacosNativeApiPermission::Alarms),
-            "clipboardWrite" => Ok(MacosNativeApiPermission::ClipboardWrite),
-            "contextMenus" => Ok(MacosNativeApiPermission::ContextMenus),
-            "cookies" => Ok(MacosNativeApiPermission::Cookies),
-            "declarativeNetRequest" => Ok(MacosNativeApiPermission::DeclarativeNetRequest),
-            "declarativeNetRequestFeedback" => {
-                Ok(MacosNativeApiPermission::DeclarativeNetRequestFeedback)
-            }
-            "declarativeNetRequestWithHostAccess" => {
-                Ok(MacosNativeApiPermission::DeclarativeNetRequestWithHostAccess)
-            }
-            "menus" => Ok(MacosNativeApiPermission::Menus),
-            "scripting" => Ok(MacosNativeApiPermission::Scripting),
-            "storage" => Ok(MacosNativeApiPermission::Storage),
-            "tabs" => Ok(MacosNativeApiPermission::Tabs),
-            "webNavigation" => Ok(MacosNativeApiPermission::WebNavigation),
-            "webRequest" => Ok(MacosNativeApiPermission::WebRequest),
-            "nativeMessaging" | "offscreen" | "unlimitedStorage" | "webRequestAuthProvider" => {
-                Err(MacosNativeGrantPlanError::ProhibitedApiPermission)
-            }
+            "activeTab" => Ok(Native(MacosNativeApiPermission::ActiveTab)),
+            "alarms" => Ok(Native(MacosNativeApiPermission::Alarms)),
+            "clipboardWrite" => Ok(Native(MacosNativeApiPermission::ClipboardWrite)),
+            "contextMenus" => Ok(Native(MacosNativeApiPermission::ContextMenus)),
+            "cookies" => Ok(Native(MacosNativeApiPermission::Cookies)),
+            "declarativeNetRequest" => Ok(Native(MacosNativeApiPermission::DeclarativeNetRequest)),
+            "declarativeNetRequestFeedback" => Ok(Native(
+                MacosNativeApiPermission::DeclarativeNetRequestFeedback,
+            )),
+            "declarativeNetRequestWithHostAccess" => Ok(Native(
+                MacosNativeApiPermission::DeclarativeNetRequestWithHostAccess,
+            )),
+            "menus" => Ok(Native(MacosNativeApiPermission::Menus)),
+            "notifications" => Ok(Native(MacosNativeApiPermission::Notifications)),
+            "scripting" => Ok(Native(MacosNativeApiPermission::Scripting)),
+            "storage" => Ok(Native(MacosNativeApiPermission::Storage)),
+            "tabs" => Ok(Native(MacosNativeApiPermission::Tabs)),
+            "unlimitedStorage" => Ok(Native(MacosNativeApiPermission::UnlimitedStorage)),
+            "webNavigation" => Ok(Native(MacosNativeApiPermission::WebNavigation)),
+            "webRequest" => Ok(Native(MacosNativeApiPermission::WebRequest)),
+            "clipboardRead"
+            | "idle"
+            | "offscreen"
+            | "privacy"
+            | "sidePanel"
+            | "webRequestAuthProvider" => Ok(NotInNativePermissionSet),
+            "nativeMessaging" => Ok(ProductProhibited),
             _ => Err(MacosNativeGrantPlanError::UnsupportedApiPermission),
         }
     }
@@ -453,9 +486,11 @@ impl MacosNativeApiPermission {
             Self::DeclarativeNetRequestFeedback => "declarativeNetRequestFeedback",
             Self::DeclarativeNetRequestWithHostAccess => "declarativeNetRequestWithHostAccess",
             Self::Menus => "menus",
+            Self::Notifications => "notifications",
             Self::Scripting => "scripting",
             Self::Storage => "storage",
             Self::Tabs => "tabs",
+            Self::UnlimitedStorage => "unlimitedStorage",
             Self::WebNavigation => "webNavigation",
             Self::WebRequest => "webRequest",
         }

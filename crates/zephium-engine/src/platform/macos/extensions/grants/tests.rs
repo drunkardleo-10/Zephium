@@ -108,7 +108,9 @@ fn supported_api_table_is_closed_canonical_and_complete() {
         "webRequest",
         "tabs",
         "storage",
+        "unlimitedStorage",
         "scripting",
+        "notifications",
         "menus",
         "webNavigation",
         "declarativeNetRequestWithHostAccess",
@@ -139,9 +141,11 @@ fn supported_api_table_is_closed_canonical_and_complete() {
             "declarativeNetRequestFeedback",
             "declarativeNetRequestWithHostAccess",
             "menus",
+            "notifications",
             "scripting",
             "storage",
             "tabs",
+            "unlimitedStorage",
             "webNavigation",
             "webRequest",
         ]
@@ -149,20 +153,44 @@ fn supported_api_table_is_closed_canonical_and_complete() {
 }
 
 #[test]
-fn prohibited_and_unknown_api_tokens_fail_closed_for_both_statuses_without_identity() {
+fn prohibited_unknown_and_manifest_only_api_tokens_remain_distinct() {
+    let prohibited = regular(&[api("nativeMessaging", OPTIONAL, GRANTED)], &[])
+        .expect_err("effective native messaging is product-prohibited");
+    assert_eq!(
+        prohibited,
+        MacosNativeGrantPlanError::ProhibitedApiPermission
+    );
+    assert!(!format!("{prohibited:?}").contains("nativeMessaging"));
+    assert!(!prohibited.to_string().contains("nativeMessaging"));
+    assert!(compiled_api_permissions(
+        &regular(&[api("nativeMessaging", OPTIONAL, DENIED)], &[])
+            .expect("an unrequested optional prohibited capability is absent")
+    )
+    .is_empty());
+
     for name in [
-        "nativeMessaging",
+        "clipboardRead",
+        "idle",
         "offscreen",
-        "unlimitedStorage",
+        "privacy",
+        "sidePanel",
         "webRequestAuthProvider",
     ] {
         for decision in [GRANTED, DENIED] {
-            let error = regular(&[api(name, OPTIONAL, decision)], &[])
-                .expect_err("prohibited declaration must fail regardless of status");
-            assert_eq!(error, MacosNativeGrantPlanError::ProhibitedApiPermission);
-            assert!(!format!("{error:?}").contains(name));
-            assert!(!error.to_string().contains(name));
+            let plan = regular(&[api(name, OPTIONAL, decision)], &[])
+                .expect("WebKit-accepted manifest-only token has no native grant key");
+            assert!(compiled_api_permissions(&plan).is_empty());
         }
+        assert!(compiled_api_permissions(
+            &regular(&[api(name, REQUIRED, GRANTED)], &[])
+                .expect("granted required manifest-only capability")
+        )
+        .is_empty());
+        assert_eq!(
+            regular(&[api(name, REQUIRED, DENIED)], &[])
+                .expect_err("required manifest-only authority remains mandatory"),
+            MacosNativeGrantPlanError::RequiredApiGrantDenied
+        );
     }
 
     let name = "futurePermission";
@@ -173,6 +201,52 @@ fn prohibited_and_unknown_api_tokens_fail_closed_for_both_statuses_without_ident
         assert!(!format!("{error:?}").contains(name));
         assert!(!error.to_string().contains(name));
     }
+}
+
+#[test]
+fn pinned_bitwarden_contract_compiles_to_the_exact_native_permission_subset() {
+    let required = [
+        "activeTab",
+        "alarms",
+        "clipboardRead",
+        "clipboardWrite",
+        "contextMenus",
+        "idle",
+        "offscreen",
+        "scripting",
+        "sidePanel",
+        "storage",
+        "tabs",
+        "unlimitedStorage",
+        "webNavigation",
+        "webRequest",
+        "webRequestAuthProvider",
+        "notifications",
+    ];
+    let optional = ["nativeMessaging", "privacy"];
+    let grants = required
+        .iter()
+        .map(|name| api(name, REQUIRED, GRANTED))
+        .chain(optional.iter().map(|name| api(name, OPTIONAL, DENIED)))
+        .collect::<Vec<_>>();
+
+    let plan = regular(&grants, &[]).expect("pinned Bitwarden permission contract");
+    assert_eq!(
+        compiled_api_permissions(&plan),
+        [
+            "activeTab",
+            "alarms",
+            "clipboardWrite",
+            "contextMenus",
+            "notifications",
+            "scripting",
+            "storage",
+            "tabs",
+            "unlimitedStorage",
+            "webNavigation",
+            "webRequest",
+        ]
+    );
 }
 
 #[test]

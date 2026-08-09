@@ -359,20 +359,89 @@ fn verify_applied(
             && context.hasAccessToPrivateData() == private_data_access
             && permissions.iter().all(|permission| {
                 granted_permissions.objectForKey(permission).is_some()
-                    && context.permissionStatusForPermission(permission)
-                        == WKWebExtensionContextPermissionStatus::GrantedExplicitly
+                    && is_granted_status(context.permissionStatusForPermission(permission))
             })
             && patterns.iter().all(|pattern| {
                 granted_patterns.objectForKey(pattern).is_some()
-                    && context.permissionStatusForMatchPattern(pattern)
-                        == WKWebExtensionContextPermissionStatus::GrantedExplicitly
+                    && is_granted_status(context.permissionStatusForMatchPattern(pattern))
             }))
     })?;
     if exact {
         Ok(())
     } else {
+        #[cfg(feature = "native-web-extension-probes")]
+        emit_applied_readback_diagnostic(context, permissions, patterns, private_data_access);
         Err(MacosGrantApplicationError::AppliedReadbackMismatch)
     }
+}
+
+fn is_granted_status(status: WKWebExtensionContextPermissionStatus) -> bool {
+    matches!(
+        status,
+        WKWebExtensionContextPermissionStatus::GrantedExplicitly
+            | WKWebExtensionContextPermissionStatus::GrantedImplicitly
+    )
+}
+
+#[cfg(feature = "native-web-extension-probes")]
+fn emit_applied_readback_diagnostic(
+    context: &WKWebExtensionContext,
+    expected_permissions: &[Retained<NSString>],
+    expected_patterns: &[Retained<WKWebExtensionMatchPattern>],
+    expected_private_data_access: bool,
+) {
+    let diagnostic = catch_native(|| unsafe {
+        let granted_permissions = context
+            .grantedPermissions()
+            .allKeys()
+            .iter()
+            .map(|permission| permission.to_string())
+            .collect::<Vec<_>>();
+        let denied_permissions = context
+            .deniedPermissions()
+            .allKeys()
+            .iter()
+            .map(|permission| permission.to_string())
+            .collect::<Vec<_>>();
+        let granted_patterns = context
+            .grantedPermissionMatchPatterns()
+            .allKeys()
+            .iter()
+            .map(|pattern| pattern.string().to_string())
+            .collect::<Vec<_>>();
+        let denied_patterns = context
+            .deniedPermissionMatchPatterns()
+            .allKeys()
+            .iter()
+            .map(|pattern| pattern.string().to_string())
+            .collect::<Vec<_>>();
+        let permission_statuses = expected_permissions
+            .iter()
+            .map(|permission| format!("{:?}", context.permissionStatusForPermission(permission)))
+            .collect::<Vec<_>>();
+        let pattern_statuses = expected_patterns
+            .iter()
+            .map(|pattern| format!("{:?}", context.permissionStatusForMatchPattern(pattern)))
+            .collect::<Vec<_>>();
+        Ok(format!(
+            "expected_permissions={:?}; permission_statuses={permission_statuses:?}; granted_permissions={granted_permissions:?}; denied_permissions={denied_permissions:?}; expected_patterns={:?}; pattern_statuses={pattern_statuses:?}; granted_patterns={granted_patterns:?}; denied_patterns={denied_patterns:?}; private={}/{}; optional_all_hosts={}",
+            expected_permissions
+                .iter()
+                .map(|permission| permission.to_string())
+                .collect::<Vec<_>>(),
+            expected_patterns
+                .iter()
+                .map(|pattern| pattern.string().to_string())
+                .collect::<Vec<_>>(),
+            context.hasAccessToPrivateData(),
+            expected_private_data_access,
+            context.hasRequestedOptionalAccessToAllHosts(),
+        ))
+    });
+    eprintln!(
+        "native-probe-grant-readback: {}",
+        diagnostic.unwrap_or_else(|error| format!("diagnostic unavailable: {error}"))
+    );
 }
 
 fn verify_empty(
@@ -419,6 +488,14 @@ fn catch_native<T>(
 fn resolve_permission(
     permission: MacosNativeApiPermission,
 ) -> Result<Retained<NSString>, MacosGrantApplicationError> {
+    if permission == MacosNativeApiPermission::Notifications {
+        // `WKWebExtensionPermission` is an extensible NSString enum. WebKit
+        // publishes `notifications` in the exact Bitwarden contract's
+        // requested-permission set but exposes no public data symbol for it.
+        // The feature-gated live gate proves this exact literal and readback;
+        // every symbol-backed permission continues through `dlsym` below.
+        return Ok(NSString::from_str(permission.as_str()));
+    }
     let symbol = match permission {
         MacosNativeApiPermission::ActiveTab => b"WKWebExtensionPermissionActiveTab\0".as_slice(),
         MacosNativeApiPermission::Alarms => b"WKWebExtensionPermissionAlarms\0".as_slice(),
@@ -439,9 +516,13 @@ fn resolve_permission(
             b"WKWebExtensionPermissionDeclarativeNetRequestWithHostAccess\0".as_slice()
         }
         MacosNativeApiPermission::Menus => b"WKWebExtensionPermissionMenus\0".as_slice(),
+        MacosNativeApiPermission::Notifications => unreachable!("handled as extensible literal"),
         MacosNativeApiPermission::Scripting => b"WKWebExtensionPermissionScripting\0".as_slice(),
         MacosNativeApiPermission::Storage => b"WKWebExtensionPermissionStorage\0".as_slice(),
         MacosNativeApiPermission::Tabs => b"WKWebExtensionPermissionTabs\0".as_slice(),
+        MacosNativeApiPermission::UnlimitedStorage => {
+            b"WKWebExtensionPermissionUnlimitedStorage\0".as_slice()
+        }
         MacosNativeApiPermission::WebNavigation => {
             b"WKWebExtensionPermissionWebNavigation\0".as_slice()
         }
@@ -476,13 +557,15 @@ mod tests {
             MacosNativeApiPermission::DeclarativeNetRequestFeedback,
             MacosNativeApiPermission::DeclarativeNetRequestWithHostAccess,
             MacosNativeApiPermission::Menus,
+            MacosNativeApiPermission::Notifications,
             MacosNativeApiPermission::Scripting,
             MacosNativeApiPermission::Storage,
             MacosNativeApiPermission::Tabs,
+            MacosNativeApiPermission::UnlimitedStorage,
             MacosNativeApiPermission::WebNavigation,
             MacosNativeApiPermission::WebRequest,
         ];
-        assert_eq!(permissions.len(), 14);
+        assert_eq!(permissions.len(), 16);
         assert!(permissions.len() <= MAX_NATIVE_PERMISSION_ENTRIES);
         for permission in permissions {
             assert!(permission.as_str().len() <= 64);
@@ -490,6 +573,25 @@ mod tests {
                 .as_str()
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn exact_readback_accepts_only_effective_grant_statuses() {
+        assert!(is_granted_status(
+            WKWebExtensionContextPermissionStatus::GrantedExplicitly
+        ));
+        assert!(is_granted_status(
+            WKWebExtensionContextPermissionStatus::GrantedImplicitly
+        ));
+        for status in [
+            WKWebExtensionContextPermissionStatus::DeniedExplicitly,
+            WKWebExtensionContextPermissionStatus::DeniedImplicitly,
+            WKWebExtensionContextPermissionStatus::RequestedImplicitly,
+            WKWebExtensionContextPermissionStatus::Unknown,
+            WKWebExtensionContextPermissionStatus::RequestedExplicitly,
+        ] {
+            assert!(!is_granted_status(status));
         }
     }
 }
