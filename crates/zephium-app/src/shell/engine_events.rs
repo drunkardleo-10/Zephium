@@ -198,6 +198,7 @@ impl Shell {
                 self.crash.presentations.remove(&id);
                 self.items.set_title(id, title);
                 self.project_tab(id);
+                self.sync_extension_browser_surface_metadata(id);
             }
             EngineEvent::LoadingChanged { id, loading } => {
                 // Loading callbacks belong to an exact live native view. A
@@ -221,6 +222,7 @@ impl Shell {
                     self.favicon_load_completed(id);
                     self.engine.warm_spare(self.partition_of(id));
                 }
+                self.sync_extension_browser_surface_metadata(id);
             }
             EngineEvent::UrlChanged { id, url } => {
                 self.cancel_discard_probe(id);
@@ -276,7 +278,20 @@ impl Shell {
                 } else {
                     self.project_tab(id);
                 }
+                self.sync_extension_browser_surface_metadata(id);
             }
+        }
+    }
+
+    fn sync_extension_browser_surface_metadata(&mut self, id: ItemId) {
+        let Some(profile) = self.profile_of_item(id) else {
+            return;
+        };
+        let settlement = self.sync_extension_browser_surface(profile);
+        if settlement.failed(profile) {
+            crate::diagnostic!(
+                "extensions: native browser metadata projection was not admitted; retaining the prior generation"
+            );
         }
     }
 

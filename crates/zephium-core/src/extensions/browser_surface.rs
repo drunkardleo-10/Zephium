@@ -7,8 +7,10 @@
 //! work and cannot defeat the browser's native-view residency policy.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::ids::{ItemId, ProfileId, WindowId};
+use crate::item::page_title_is_sanitized;
 
 /// One browser window per admitted profile remains a common configuration;
 /// this independent ceiling also permits multiple windows without allowing a
@@ -47,30 +49,91 @@ impl ExtensionBrowserSurfaceGeneration {
 }
 
 /// One logical tab identity and its native-document residency expectation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionBrowserTab {
     id: ItemId,
     resident: bool,
+    title: Arc<str>,
+    url: Option<Arc<str>>,
+    loading: bool,
+    pinned: bool,
 }
 
 impl ExtensionBrowserTab {
-    pub const fn new(id: ItemId, resident: bool) -> Self {
-        Self { id, resident }
+    /// Builds one bounded extension-visible tab snapshot.
+    ///
+    /// Passing the same logical tab as `previous` reuses its immutable title
+    /// and URL allocations when those values did not change. Shell may rebuild
+    /// the lightweight surface on every committed mutation without copying all
+    /// retained tab strings, while the returned value remains an owned fact
+    /// with no borrow into mutable session state.
+    pub fn from_snapshot(
+        previous: Option<&Self>,
+        id: ItemId,
+        resident: bool,
+        title: &str,
+        url: Option<&url::Url>,
+        loading: bool,
+        pinned: bool,
+    ) -> Result<Self, ExtensionBrowserSurfaceError> {
+        if !page_title_is_sanitized(title) {
+            return Err(ExtensionBrowserSurfaceError::InvalidTabTitle);
+        }
+        if url.is_some_and(|url| !crate::navigation::is_allowed(url)) {
+            return Err(ExtensionBrowserSurfaceError::InvalidTabUrl);
+        }
+        let title = previous
+            .filter(|previous| previous.title() == title)
+            .map_or_else(
+                || Arc::<str>::from(title),
+                |previous| previous.title.clone(),
+            );
+        let url = match (previous, url) {
+            (Some(previous), Some(url)) if previous.url() == Some(url.as_str()) => {
+                previous.url.clone()
+            }
+            (_, Some(url)) => Some(Arc::<str>::from(url.as_str())),
+            _ => None,
+        };
+        Ok(Self {
+            id,
+            resident,
+            title,
+            url,
+            loading,
+            pinned,
+        })
     }
 
-    pub const fn id(self) -> ItemId {
+    pub const fn id(&self) -> ItemId {
         self.id
     }
 
     /// Whether the Shell currently expects this logical tab to own a native
     /// document. The engine still resolves the physical view independently;
     /// this bit can never mint or recover a native pointer.
-    pub const fn resident(self) -> bool {
+    pub const fn resident(&self) -> bool {
         self.resident
     }
 
-    pub const fn discarded(self) -> bool {
+    pub const fn discarded(&self) -> bool {
         !self.resident
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    pub const fn loading(&self) -> bool {
+        self.loading
+    }
+
+    pub const fn pinned(&self) -> bool {
+        self.pinned
     }
 }
 
@@ -211,6 +274,8 @@ impl ExtensionBrowserSurface {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionBrowserSurfaceError {
     InvalidWindowIdentity,
+    InvalidTabTitle,
+    InvalidTabUrl,
     TooManyWindows,
     TooManyTabs,
     DuplicateWindow,
@@ -225,7 +290,16 @@ mod tests {
     use super::*;
 
     fn tab(value: u128, resident: bool) -> ExtensionBrowserTab {
-        ExtensionBrowserTab::new(ItemId::from(value), resident)
+        ExtensionBrowserTab::from_snapshot(
+            None,
+            ItemId::from(value),
+            resident,
+            "Example",
+            Some(&url::Url::parse("https://example.test/").unwrap()),
+            false,
+            false,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -314,6 +388,67 @@ mod tests {
                 .unwrap()
                 .next(),
             None
+        );
+    }
+
+    #[test]
+    fn tab_metadata_is_bounded_and_reuses_unchanged_strings() {
+        let url = url::Url::parse("https://example.test/login").unwrap();
+        let first = ExtensionBrowserTab::from_snapshot(
+            None,
+            ItemId::from(1),
+            true,
+            "Sign in",
+            Some(&url),
+            true,
+            true,
+        )
+        .unwrap();
+        let second = ExtensionBrowserTab::from_snapshot(
+            Some(&first),
+            ItemId::from(1),
+            false,
+            "Sign in",
+            Some(&url),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&first.title, &second.title));
+        assert!(Arc::ptr_eq(
+            first.url.as_ref().unwrap(),
+            second.url.as_ref().unwrap()
+        ));
+        assert!(second.discarded());
+        assert!(!second.loading());
+        assert!(second.pinned());
+        assert_eq!(second.url(), Some(url.as_str()));
+
+        assert_eq!(
+            ExtensionBrowserTab::from_snapshot(
+                None,
+                ItemId::from(2),
+                true,
+                "\u{202e}spoofed",
+                Some(&url),
+                false,
+                false,
+            ),
+            Err(ExtensionBrowserSurfaceError::InvalidTabTitle)
+        );
+        let file = url::Url::parse("file:///private/secret").unwrap();
+        assert_eq!(
+            ExtensionBrowserTab::from_snapshot(
+                None,
+                ItemId::from(2),
+                true,
+                "Local",
+                Some(&file),
+                false,
+                false,
+            ),
+            Err(ExtensionBrowserSurfaceError::InvalidTabUrl)
         );
     }
 }

@@ -20,7 +20,8 @@ use objc2_foundation::{
     NSHTTPCookieVersion, NSMutableDictionary, NSRunLoop, NSString,
 };
 use objc2_web_kit::{
-    WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
+    WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab, WKWebView,
+    WKWebsiteDataStore,
 };
 use wry::WebViewBuilderExtMacos;
 use zephium_core::extensions::{
@@ -340,6 +341,10 @@ impl ProfileGeneration {
         ]);
         let native_a = super::super::native::webkit(&self.regular_views[0]);
         let native_b = super::super::native::webkit(&self.regular_views[1]);
+        let url_a = url::Url::parse("https://profile-a.invalid/account")
+            .map_err(|error| format!("cannot parse profile A probe URL: {error}"))?;
+        let url_b = url::Url::parse("https://profile-b.invalid/vault")
+            .map_err(|error| format!("cannot parse profile B probe URL: {error}"))?;
         let surface_a = ExtensionBrowserSurface::new(
             profile_a,
             ExtensionBrowserSurfaceGeneration::INITIAL,
@@ -348,7 +353,16 @@ impl ProfileGeneration {
                 WINDOW_A,
                 false,
                 Some(item_a),
-                vec![ExtensionBrowserTab::new(item_a, true)],
+                vec![ExtensionBrowserTab::from_snapshot(
+                    None,
+                    item_a,
+                    true,
+                    "Profile A",
+                    Some(&url_a),
+                    true,
+                    true,
+                )
+                .map_err(|error| format!("cannot build profile A probe tab: {error:?}"))?],
             )
             .map_err(|error| format!("cannot build profile A probe window: {error:?}"))?],
         )
@@ -361,7 +375,16 @@ impl ProfileGeneration {
                 WINDOW_B,
                 false,
                 Some(item_b),
-                vec![ExtensionBrowserTab::new(item_b, true)],
+                vec![ExtensionBrowserTab::from_snapshot(
+                    None,
+                    item_b,
+                    true,
+                    "Profile B",
+                    Some(&url_b),
+                    false,
+                    false,
+                )
+                .map_err(|error| format!("cannot build profile B probe tab: {error:?}"))?],
             )
             .map_err(|error| format!("cannot build profile B probe window: {error:?}"))?],
         )
@@ -407,6 +430,24 @@ impl ProfileGeneration {
                 &tab_b,
                 true,
                 "profile B own tab route",
+            )?;
+            assert_tab_metadata(
+                &tab_a,
+                &context_a,
+                "Profile A",
+                url_a.as_str(),
+                false,
+                true,
+                "profile A tab metadata",
+            )?;
+            assert_tab_metadata(
+                &tab_b,
+                &context_b,
+                "Profile B",
+                url_b.as_str(),
+                true,
+                false,
+                "profile B tab metadata",
             )?;
             assert_context_excludes_foreign_surface(
                 &context_a,
@@ -693,6 +734,37 @@ impl ProfileGeneration {
         }
         Ok(evidence)
     }
+}
+
+fn assert_tab_metadata(
+    tab: &ProtocolObject<dyn WKWebExtensionTab>,
+    context: &WKWebExtensionContext,
+    expected_title: &str,
+    expected_url: &str,
+    expected_loading_complete: bool,
+    expected_pinned: bool,
+    description: &str,
+) -> Result<(), String> {
+    // SAFETY: these are optional WKWebExtensionTab delegate callbacks
+    // implemented by Zephium's retained BrowserTab object on the main thread.
+    let title = unsafe { tab.titleForWebExtensionContext(context) }
+        .ok_or_else(|| format!("{description} omitted its title"))?;
+    let url = unsafe { tab.urlForWebExtensionContext(context) }
+        .and_then(|url| url.absoluteString())
+        .ok_or_else(|| format!("{description} omitted its URL"))?;
+    let loading_complete = unsafe { tab.isLoadingCompleteForWebExtensionContext(context) };
+    let pinned = unsafe { tab.isPinnedForWebExtensionContext(context) };
+    let strings_match = objc2::rc::autoreleasepool(|pool| {
+        // SAFETY: both borrowed UTF-8 views are consumed within this pool.
+        unsafe { title.to_str(pool) == expected_title && url.to_str(pool) == expected_url }
+    });
+    if !strings_match || loading_complete != expected_loading_complete || pinned != expected_pinned
+    {
+        return Err(format!(
+            "{description} mismatch: strings_match={strings_match}, loading_complete={loading_complete}/{expected_loading_complete}, pinned={pinned}/{expected_pinned}"
+        ));
+    }
+    Ok(())
 }
 
 fn host_for_window(

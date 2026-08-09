@@ -82,7 +82,41 @@ fn startup_profile_projection_drives_the_ordinary_shell_bootstrap_path() {
     assert_eq!(surfaces.len(), 1);
     assert_eq!(surfaces[0].profile(), profile);
     assert_eq!(surfaces[0].windows()[0].active(), Some(item));
-    assert!(surfaces[0].windows()[0].tabs()[0].resident());
+    let tab = &surfaces[0].windows()[0].tabs()[0];
+    assert!(tab.resident());
+    assert_eq!(tab.title(), "Example");
+    assert_eq!(tab.url(), Some("https://example.invalid/"));
+    assert!(!tab.loading());
+    assert!(!tab.pinned());
+
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: item,
+        title: "Updated title".into(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id: item,
+        loading: true,
+    }));
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: item,
+        url: "https://example.invalid/account".into(),
+    }));
+
+    let surfaces = engine.extension_browser_surfaces();
+    assert_eq!(surfaces.len(), 4);
+    let tab = &surfaces.last().unwrap().windows()[0].tabs()[0];
+    assert_eq!(tab.title(), "Updated title");
+    assert_eq!(tab.url(), Some("https://example.invalid/account"));
+    assert!(tab.loading());
+    assert!(!tab.pinned());
+
+    // Re-observing an unchanged native fact may update ordinary chrome, but
+    // must not enqueue another extension graph generation.
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: item,
+        title: "Updated title".into(),
+    }));
+    assert_eq!(engine.extension_browser_surfaces().len(), 4);
 }
 
 #[test]
@@ -163,6 +197,18 @@ fn active_profile_publishes_all_logical_tabs_before_native_creation() {
     assert!(!tabs[0].resident());
     assert!(tabs[1].resident());
     assert!(!tabs[2].resident());
+    assert_eq!(tabs[0].title(), "New Tab");
+    assert_eq!(tabs[1].title(), "New Tab");
+    assert_eq!(tabs[2].title(), "New Tab");
+    assert_eq!(tabs[0].url(), None);
+    assert_eq!(tabs[1].url(), None);
+    assert_eq!(tabs[2].url(), None);
+    assert!(!tabs[0].loading());
+    assert!(!tabs[1].loading());
+    assert!(!tabs[2].loading());
+    assert!(tabs[0].pinned());
+    assert!(!tabs[1].pinned());
+    assert!(tabs[2].pinned());
 
     let unchanged = shell.apply(Vec::new());
     assert_eq!(unchanged, NativeWork::default());
@@ -178,6 +224,44 @@ fn active_profile_publishes_all_logical_tabs_before_native_creation() {
         ExtensionBrowserSurfaceGeneration::new(2).unwrap()
     );
     assert!(surfaces[1].windows()[0].tabs()[1].discarded());
+}
+
+#[test]
+fn rejected_surface_admission_is_retried_once_without_idle_rebuilds() {
+    let (mut shell, engine, _) = setup();
+    let profile = ProfileId::from(51_000);
+    let space = SpaceId::from(51_001);
+    install_profile(&mut shell, profile, &[space]);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, space, Size::new(1200.0, 800.0));
+    activate_profile(&mut shell, profile);
+    assert!(shell.items.insert_tab(
+        ItemId::from(51_002),
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+    ));
+    engine
+        .reject_native_dispatch
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let rejected = shell.sync_extension_browser_surfaces();
+
+    assert!(rejected.native.rejected);
+    assert!(engine.extension_browser_surfaces().is_empty());
+
+    engine
+        .reject_native_dispatch
+        .store(false, std::sync::atomic::Ordering::Release);
+    let retried = shell.retry_extension_browser_surfaces();
+    assert!(retried.native.scheduled);
+    assert_eq!(engine.extension_browser_surfaces().len(), 1);
+
+    let idle = shell.retry_extension_browser_surfaces();
+    assert_eq!(idle.native, NativeWork::default());
+    assert_eq!(engine.extension_browser_surfaces().len(), 1);
 }
 
 #[test]

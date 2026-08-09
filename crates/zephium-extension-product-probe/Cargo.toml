@@ -28,6 +28,7 @@ objc2-foundation = "0.3"
 raw-window-handle.workspace = true
 sha2 = "=0.10.9"
 tempfile.workspace = true
+url.workspace = true
 zephium-core.workspace = true
 zephium-engine = { workspace = true, features = ["native-extension-product-probes"] }
 zephium-extension-authority.workspace = true

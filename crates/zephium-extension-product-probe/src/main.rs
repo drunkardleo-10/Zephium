@@ -169,12 +169,23 @@ fn run() -> Result<ProbeDisposition, String> {
 
     set_phase("profile-view");
     let page = PageServer::start()?;
+    let page_url = url::Url::parse(page.url())
+        .map_err(|error| format!("cannot parse product-probe page URL: {error}"))?;
     let item = ItemId::from(1);
     let window = ExtensionBrowserWindow::new(
         1,
         false,
         Some(item),
-        vec![ExtensionBrowserTab::new(item, true)],
+        vec![ExtensionBrowserTab::from_snapshot(
+            None,
+            item,
+            true,
+            "Zephium extension product probe",
+            Some(&page_url),
+            false,
+            false,
+        )
+        .map_err(|error| format!("cannot construct product-probe browser tab: {error:?}"))?],
     )
     .map_err(|error| format!("cannot construct product-probe browser window: {error:?}"))?;
     let surface = ExtensionBrowserSurface::new(

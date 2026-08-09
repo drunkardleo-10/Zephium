@@ -7,6 +7,7 @@ use super::*;
 #[derive(Default)]
 pub(super) struct ExtensionBrowserSurfaceState {
     active_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
     published: HashMap<ProfileId, ExtensionBrowserSurface>,
 }
 
@@ -44,6 +45,7 @@ impl ExtensionBrowserSurfaceState {
 
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         self.active_profiles.remove(profile);
+        self.retry_profiles.remove(profile);
         self.published.remove(&profile);
     }
 
@@ -56,7 +58,16 @@ impl ExtensionBrowserSurfaceState {
     }
 
     fn record_published(&mut self, surface: ExtensionBrowserSurface) {
+        self.retry_profiles.remove(surface.profile());
         self.published.insert(surface.profile(), surface);
+    }
+
+    fn record_retry(&mut self, profile: ProfileId) -> bool {
+        self.retry_profiles.try_insert(profile)
+    }
+
+    fn retry_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+        self.retry_profiles
     }
 }
 
@@ -66,6 +77,38 @@ impl Shell {
     /// branch over one fixed-size value and an empty `HashMap`.
     pub(super) fn sync_extension_browser_surfaces(&mut self) -> ExtensionBrowserSurfaceSync {
         let profiles = self.extension_browser_surfaces.active_profiles();
+        self.sync_extension_browser_surface_profiles(profiles)
+    }
+
+    /// Retries only transient native admissions retained from an earlier
+    /// projection. The ordinary maintenance tick stays allocation-free when
+    /// no extension surface is waiting for native queue capacity.
+    pub(super) fn retry_extension_browser_surfaces(&mut self) -> ExtensionBrowserSurfaceSync {
+        let profiles = self.extension_browser_surfaces.retry_profiles();
+        self.sync_extension_browser_surface_profiles(profiles)
+    }
+
+    pub(super) fn sync_extension_browser_surface(
+        &mut self,
+        profile: ProfileId,
+    ) -> ExtensionBrowserSurfaceSync {
+        let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+        if self
+            .extension_browser_surfaces
+            .active_profiles()
+            .contains(profile)
+        {
+            // A member of the bounded active set always fits in an empty set.
+            let inserted = profiles.try_insert(profile);
+            debug_assert!(inserted);
+        }
+        self.sync_extension_browser_surface_profiles(profiles)
+    }
+
+    fn sync_extension_browser_surface_profiles(
+        &mut self,
+        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    ) -> ExtensionBrowserSurfaceSync {
         if profiles.is_empty() {
             return ExtensionBrowserSurfaceSync::default();
         }
@@ -111,9 +154,13 @@ impl Shell {
                 NativeDispatch::Scheduled => {
                     self.extension_browser_surfaces.record_published(surface)
                 }
-                NativeDispatch::Rejected | NativeDispatch::Unsupported => {
+                NativeDispatch::Rejected => {
+                    if !self.extension_browser_surfaces.record_retry(profile) {
+                        settlement.native.rejected = true;
+                    }
                     settlement.record_failure(profile)
                 }
+                NativeDispatch::Unsupported => settlement.record_failure(profile),
             }
         }
         settlement
@@ -148,7 +195,22 @@ impl Shell {
         }
 
         let mut tabs = Vec::new();
-        self.append_extension_placement_tabs(Placement::Favorites { profile }, &mut tabs);
+        // Current Zephium sessions expose at most one extension-visible window
+        // per profile. Reuse immutable metadata from the prior ordered surface
+        // on the common unchanged-order path, avoiding URL/title copies on
+        // unrelated Shell commits.
+        let previous_tabs = self
+            .extension_browser_surfaces
+            .published(profile)
+            .and_then(|surface| surface.windows().first())
+            .map_or(&[][..], ExtensionBrowserWindow::tabs);
+        let mut previous_index = 0_usize;
+        self.append_extension_placement_tabs(
+            Placement::Favorites { profile },
+            previous_tabs,
+            &mut previous_index,
+            &mut tabs,
+        )?;
         for space in self.spaces.iter().filter(|space| space.profile == profile) {
             for section in [SpaceSection::Pinned, SpaceSection::Today] {
                 self.append_extension_placement_tabs(
@@ -156,8 +218,10 @@ impl Shell {
                         space: space.id,
                         section,
                     },
+                    previous_tabs,
+                    &mut previous_index,
                     &mut tabs,
-                );
+                )?;
             }
         }
 
@@ -181,11 +245,21 @@ impl Shell {
     fn append_extension_placement_tabs(
         &self,
         placement: Placement,
+        previous_tabs: &[ExtensionBrowserTab],
+        previous_index: &mut usize,
         tabs: &mut Vec<ExtensionBrowserTab>,
-    ) {
+    ) -> Result<(), &'static str> {
         for &id in self.items.roots(placement) {
-            self.append_extension_node_tabs(id, None, placement, tabs);
+            self.append_extension_node_tabs(
+                id,
+                None,
+                placement,
+                previous_tabs,
+                previous_index,
+                tabs,
+            )?;
         }
+        Ok(())
     }
 
     fn append_extension_node_tabs(
@@ -193,23 +267,59 @@ impl Shell {
         id: ItemId,
         parent: Option<ItemId>,
         placement: Placement,
+        previous_tabs: &[ExtensionBrowserTab],
+        previous_index: &mut usize,
         tabs: &mut Vec<ExtensionBrowserTab>,
-    ) {
+    ) -> Result<(), &'static str> {
         let Some(item) = self
             .items
             .get(id)
             .filter(|item| item.parent == parent && item.placement == placement)
         else {
-            return;
+            return Ok(());
         };
         match &item.kind {
-            ItemKind::Tab(tab) => tabs.push(ExtensionBrowserTab::new(id, tab.has_view())),
+            ItemKind::Tab(tab) => {
+                let previous = previous_tabs
+                    .get(*previous_index)
+                    .filter(|previous| previous.id() == id);
+                *previous_index = previous_index
+                    .checked_add(1)
+                    .ok_or("extension browser tab index overflowed")?;
+                let pinned = !matches!(
+                    placement,
+                    Placement::Space {
+                        section: SpaceSection::Today,
+                        ..
+                    }
+                );
+                tabs.push(
+                    ExtensionBrowserTab::from_snapshot(
+                        previous,
+                        id,
+                        tab.has_view(),
+                        &tab.title,
+                        tab.url.as_ref(),
+                        tab.loading,
+                        pinned,
+                    )
+                    .map_err(|_| "extension browser tab metadata failed validation")?,
+                );
+            }
             ItemKind::Folder { .. } => {
                 for &child in self.items.children(id) {
-                    self.append_extension_node_tabs(child, Some(id), placement, tabs);
+                    self.append_extension_node_tabs(
+                        child,
+                        Some(id),
+                        placement,
+                        previous_tabs,
+                        previous_index,
+                        tabs,
+                    )?;
                 }
             }
         }
+        Ok(())
     }
 }
 

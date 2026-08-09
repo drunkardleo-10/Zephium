@@ -6291,6 +6291,7 @@ dependencies = [
  "raw-window-handle",
  "sha2",
  "tempfile",
+ "url",
  "zephium-core",
  "zephium-engine",
  "zephium-extension-authority",

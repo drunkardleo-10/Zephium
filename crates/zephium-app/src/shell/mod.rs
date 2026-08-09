@@ -628,6 +628,12 @@ impl Shell {
                 self.drive_blocker_preference_reconciliations();
                 self.drain_profile_deletion_inbox();
                 self.reconcile_runtime_restart_requirement();
+                let extension_surfaces = self.retry_extension_browser_surfaces();
+                if extension_surfaces.native.rejected {
+                    crate::diagnostic!(
+                        "extensions: maintenance could not reconcile browser metadata"
+                    );
+                }
                 if self.maintain_views() {
                     self.project_items();
                 }

@@ -7,22 +7,44 @@ use crate::ids::{ItemId, ProfileId, SpaceId};
 
 pub const MAX_PAGE_TITLE_CHARS: usize = 512;
 
+fn page_title_char_is_allowed(c: char) -> bool {
+    !c.is_control()
+        && !matches!(
+            c,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Reports whether a title is already in the canonical representation used
+/// by browser chrome. This is the allocation-free validation counterpart to
+/// [`sanitize_page_title`] for trusted-state projection boundaries.
+pub fn page_title_is_sanitized(title: &str) -> bool {
+    if title.is_empty() {
+        return false;
+    }
+    let mut characters = 0_usize;
+    for c in title.chars() {
+        if !page_title_char_is_allowed(c) {
+            return false;
+        }
+        characters += 1;
+        if characters > MAX_PAGE_TITLE_CHARS {
+            return false;
+        }
+    }
+    true
+}
+
 /// Page titles and legacy/session titles are equally untrusted. Keep one
 /// canonical sanitizer so restored data cannot bypass the renderer boundary.
 pub fn sanitize_page_title(title: &str) -> String {
     let title: String = title
         .chars()
-        .filter(|c| {
-            !c.is_control()
-                && !matches!(
-                    *c,
-                    '\u{061c}'
-                        | '\u{200e}'
-                        | '\u{200f}'
-                        | '\u{202a}'..='\u{202e}'
-                        | '\u{2066}'..='\u{2069}'
-                )
-        })
+        .filter(|c| page_title_char_is_allowed(*c))
         .take(MAX_PAGE_TITLE_CHARS)
         .collect();
     if title.is_empty() {

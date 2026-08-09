@@ -14,7 +14,7 @@ use std::sync::Arc;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_foundation::{MainThreadMarker, NSArray, NSObjectProtocol};
+use objc2_foundation::{MainThreadMarker, NSArray, NSObjectProtocol, NSString, NSURL};
 use objc2_web_kit::{
     WKWebExtensionContext, WKWebExtensionController, WKWebExtensionControllerDelegate,
     WKWebExtensionTab, WKWebExtensionWindow, WKWebView,
@@ -43,9 +43,13 @@ struct BrowserTabIvars {
     id: Box<ItemId>,
     window: RefCell<Option<Weak<BrowserWindow>>>,
     webview: RefCell<Option<Weak<WKWebView>>>,
+    title: RefCell<Retained<NSString>>,
+    url: RefCell<Option<Retained<NSURL>>>,
     index: Cell<usize>,
     selected: Cell<bool>,
     resident: Cell<bool>,
+    loading: Cell<bool>,
+    pinned: Cell<bool>,
     #[cfg(feature = "native-web-extension-probes")]
     lifecycle_drops: Arc<AtomicUsize>,
 }
@@ -85,6 +89,29 @@ define_class!(
                 .flatten()
         }
 
+        #[unsafe(method_id(titleForWebExtensionContext:))]
+        fn title_for_context(
+            &self,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<NSString>> {
+            Some(self.ivars().title.borrow().clone())
+        }
+
+        #[unsafe(method_id(urlForWebExtensionContext:))]
+        fn url_for_context(&self, _context: &WKWebExtensionContext) -> Option<Retained<NSURL>> {
+            self.ivars().url.borrow().clone()
+        }
+
+        #[unsafe(method(isLoadingCompleteForWebExtensionContext:))]
+        fn is_loading_complete_for_context(&self, _context: &WKWebExtensionContext) -> bool {
+            !self.ivars().loading.get()
+        }
+
+        #[unsafe(method(isPinnedForWebExtensionContext:))]
+        fn is_pinned_for_context(&self, _context: &WKWebExtensionContext) -> bool {
+            self.ivars().pinned.get()
+        }
+
         #[unsafe(method(indexInWindowForWebExtensionContext:))]
         fn index_in_window(&self, _context: &WKWebExtensionContext) -> usize {
             self.ivars().index.get()
@@ -100,22 +127,27 @@ define_class!(
 impl BrowserTab {
     fn new(
         mtm: MainThreadMarker,
-        id: ItemId,
+        projected: &zephium_core::extensions::ExtensionBrowserTab,
         #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
-    ) -> Retained<Self> {
+    ) -> Result<Retained<Self>, BrowserSurfaceError> {
+        let url = projected.url().map(native_url).transpose()?;
         let object = Self::alloc(mtm).set_ivars(BrowserTabIvars {
-            id: Box::new(id),
+            id: Box::new(projected.id()),
             window: RefCell::new(None),
             webview: RefCell::new(None),
+            title: RefCell::new(NSString::from_str(projected.title())),
+            url: RefCell::new(url),
             index: Cell::new(0),
             selected: Cell::new(false),
-            resident: Cell::new(false),
+            resident: Cell::new(projected.resident()),
+            loading: Cell::new(projected.loading()),
+            pinned: Cell::new(projected.pinned()),
             #[cfg(feature = "native-web-extension-probes")]
             lifecycle_drops,
         });
         // SAFETY: NSObject is the declared superclass and every ivar is fully
         // initialized before invoking its initializer.
-        unsafe { msg_send![super(object), init] }
+        Ok(unsafe { msg_send![super(object), init] })
     }
 
     fn id(&self) -> ItemId {
@@ -127,14 +159,23 @@ impl BrowserTab {
         window: &Retained<BrowserWindow>,
         index: usize,
         selected: bool,
-        resident: bool,
+        projected: &zephium_core::extensions::ExtensionBrowserTab,
         webview: Option<&Retained<WKWebView>>,
-    ) {
+    ) -> Result<(), BrowserSurfaceError> {
         *self.ivars().window.borrow_mut() = Some(Weak::from_retained(window));
         *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
+        if !native_string_matches(&self.ivars().title.borrow(), projected.title()) {
+            *self.ivars().title.borrow_mut() = NSString::from_str(projected.title());
+        }
+        if !native_url_matches(self.ivars().url.borrow().as_deref(), projected.url()) {
+            *self.ivars().url.borrow_mut() = projected.url().map(native_url).transpose()?;
+        }
         self.ivars().index.set(index);
         self.ivars().selected.set(selected);
-        self.ivars().resident.set(resident);
+        self.ivars().resident.set(projected.resident());
+        self.ivars().loading.set(projected.loading());
+        self.ivars().pinned.set(projected.pinned());
+        Ok(())
     }
 
     fn bind_webview(&self, webview: Option<&Retained<WKWebView>>) {
@@ -147,6 +188,28 @@ impl BrowserTab {
 
     fn window(&self) -> Option<Retained<BrowserWindow>> {
         self.ivars().window.borrow().as_ref().and_then(Weak::load)
+    }
+}
+
+fn native_url(value: &str) -> Result<Retained<NSURL>, BrowserSurfaceError> {
+    NSURL::URLWithString(&NSString::from_str(value)).ok_or(BrowserSurfaceError::IntegrityFailed)
+}
+
+fn native_string_matches(native: &NSString, expected: &str) -> bool {
+    objc2::rc::autoreleasepool(|pool| {
+        // SAFETY: the pool outlives this borrowed UTF-8 view, which is used
+        // only for the equality check inside the autorelease scope.
+        unsafe { native.to_str(pool) == expected }
+    })
+}
+
+fn native_url_matches(native: Option<&NSURL>, expected: Option<&str>) -> bool {
+    match (native, expected) {
+        (None, None) => true,
+        (Some(native), Some(expected)) => native
+            .absoluteString()
+            .is_some_and(|value| native_string_matches(&value, expected)),
+        _ => false,
     }
 }
 
@@ -435,29 +498,21 @@ impl MacosExtensionBrowserSurfaceHost {
             };
             let mut ordered_tabs = Vec::with_capacity(projected.tabs().len());
             for (index, projected_tab) in projected.tabs().iter().enumerate() {
-                let tab = old_tabs
-                    .get(&projected_tab.id())
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        BrowserTab::new(
-                            mtm,
-                            projected_tab.id(),
-                            #[cfg(feature = "native-web-extension-probes")]
-                            self.lifecycle_drops.clone(),
-                        )
-                    });
+                let tab = match old_tabs.get(&projected_tab.id()) {
+                    Some(tab) => tab.clone(),
+                    None => BrowserTab::new(
+                        mtm,
+                        projected_tab,
+                        #[cfg(feature = "native-web-extension-probes")]
+                        self.lifecycle_drops.clone(),
+                    )?,
+                };
                 let selected = projected.active() == Some(projected_tab.id());
                 let webview = projected_tab
                     .resident()
                     .then(|| webview_for(projected_tab.id()))
                     .flatten();
-                tab.update(
-                    &window,
-                    index,
-                    selected,
-                    projected_tab.resident(),
-                    webview.as_ref(),
-                );
+                tab.update(&window, index, selected, projected_tab, webview.as_ref())?;
                 if tabs.insert(projected_tab.id(), tab.clone()).is_some() {
                     return Err(BrowserSurfaceError::IntegrityFailed);
                 }
