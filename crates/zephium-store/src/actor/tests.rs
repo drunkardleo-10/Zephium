@@ -669,6 +669,80 @@ fn load_native_ownership_journal(
     }
 }
 
+#[test]
+fn extension_service_startup_inventory_is_complete_canonical_and_non_authorizing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+    store.save_session(two_profile_sample());
+    assert!(store.flush());
+
+    let enabled_profile = ProfileId::from(3);
+    let enabled_install = ExtensionInstallId::from(91);
+    let _fixture = prepare_native_ownership_activation(
+        store.as_ref(),
+        enabled_profile,
+        enabled_install,
+        51,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
+    let disabled_profile = ProfileId::from(1);
+    let disabled_install = ExtensionInstallId::from(92);
+    let ExtensionInstallCatalogLoadOutcome::Loaded(disabled_catalog) =
+        load_extension_installs(store.as_ref(), disabled_profile)
+    else {
+        panic!("disabled profile catalog did not load");
+    };
+    assert!(matches!(
+        mutate_extension_installs(
+            store.as_ref(),
+            disabled_profile,
+            disabled_catalog.revision(),
+            ExtensionInstallCatalogMutation::Install {
+                id: disabled_install,
+                package: bundled_extension_package(61, 62, 1),
+            },
+        ),
+        ExtensionInstallCatalogMutationOutcome::Applied(_)
+    ));
+
+    let authority = store
+        .claim_extension_service_store_authority()
+        .expect("startup inventory authority");
+    assert_eq!(
+        authority.load_runtime_startup_inventory_until(Instant::now()),
+        ExtensionServiceStoreCallOutcome::NotAdmitted
+    );
+    let ExtensionServiceStoreCallOutcome::Completed(
+        ExtensionRuntimeStartupInventoryLoadOutcome::Loaded(inventory),
+    ) = authority.load_runtime_startup_inventory_until(Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("startup inventory did not load");
+    };
+    assert_eq!(
+        inventory.keys(),
+        &[ExtensionNativeOwnershipKey::new(
+            enabled_profile,
+            enabled_install,
+            ExtensionGrantBrowsingContext::Regular,
+        )]
+    );
+    assert!(inventory.degraded_profiles().is_empty());
+
+    // Inventory is only a selector read: it neither begins native ownership
+    // nor consumes the package/grant authority needed by later activation.
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) =
+        load_native_ownership_journal(&authority)
+    else {
+        panic!("native ownership journal did not load");
+    };
+    assert!(journal.entries().is_empty());
+    drop(authority);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+}
+
 fn mutate_native_ownership_journal(
     authority: &ExtensionServiceStoreAuthority,
     expected: ExtensionNativeOwnershipJournalRevision,
@@ -3108,6 +3182,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
     for required in [
         "pub fn startup_requirement(",
         "pub fn load_native_ownership_until(",
+        "pub fn load_runtime_startup_inventory_until(",
         "pub fn mutate_native_ownership_until(",
         "pub fn begin_native_ownership_until(",
         "pub fn transition_native_ownership_to_may_own_until(",
@@ -3128,7 +3203,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 7,
+        public_items, 8,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("mutate_extension_install"));

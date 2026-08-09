@@ -22,8 +22,8 @@ use zephium_core::extensions::{
     ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
-    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+    ExtensionNativeOwnershipKey, MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+    MAX_EXTENSION_MANIFEST_RETAINED_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::item::sanitize_page_title;
@@ -126,6 +126,8 @@ type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutco
 type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
 type ExtensionNativeOwnershipJournalLoadDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
+type ExtensionRuntimeStartupInventoryLoadDone =
+    Box<dyn FnOnce(ExtensionRuntimeStartupInventoryLoadOutcome) + Send>;
 type ExtensionNativeOwnershipJournalMutationDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalMutationOutcome) + Send>;
 type ExtensionNativeOwnershipActivationDone =
@@ -610,6 +612,7 @@ enum Cmd {
         ExtensionGrantMutationDone,
     ),
     LoadExtensionNativeOwnershipJournal(ExtensionNativeOwnershipJournalLoadDone),
+    LoadExtensionRuntimeStartupInventory(ExtensionRuntimeStartupInventoryLoadDone),
     MutateExtensionNativeOwnershipJournal(
         ExtensionNativeOwnershipJournalRevision,
         ExtensionNativeOwnershipJournalMutation,
@@ -715,6 +718,50 @@ pub enum ExtensionServiceStoreCallOutcome<T> {
     TimedOutAfterAdmission,
 }
 
+/// Complete bounded selector inventory used to hydrate enabled extension
+/// runtimes before the browser constructs profile webviews.
+///
+/// Keys are canonical, unique, and limited by the durable profile/install
+/// ceilings. They are selectors only: activation must still reauthenticate the
+/// repository package and atomically reload the exact install/grant cohort.
+/// Profiles whose ancillary store is degraded are reported explicitly and
+/// never represented by a filtered or fabricated catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionRuntimeStartupInventory {
+    keys: Vec<ExtensionNativeOwnershipKey>,
+    degraded_profiles: Vec<ProfileId>,
+}
+
+impl ExtensionRuntimeStartupInventory {
+    pub(crate) fn new(
+        keys: Vec<ExtensionNativeOwnershipKey>,
+        degraded_profiles: Vec<ProfileId>,
+    ) -> Self {
+        Self {
+            keys,
+            degraded_profiles,
+        }
+    }
+
+    /// Enabled regular-context runtime selectors in canonical key order.
+    pub fn keys(&self) -> &[ExtensionNativeOwnershipKey] {
+        &self.keys
+    }
+
+    /// Registered profiles whose exact extension catalog could not be read.
+    pub fn degraded_profiles(&self) -> &[ProfileId] {
+        &self.degraded_profiles
+    }
+}
+
+/// Result of the actor's complete startup-inventory read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
+    Loaded(ExtensionRuntimeStartupInventory),
+    /// The complete registered-profile inventory could not be established.
+    Failed,
+}
+
 /// Move-only Store capability for the serialized extension service.
 ///
 /// In addition to the crash-critical native-ownership journal, this is the
@@ -813,6 +860,33 @@ impl ExtensionServiceStoreAuthority {
         if !self
             .store
             .try_load_extension_native_ownership_journal(deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Loads all currently enabled regular-context runtime selectors under
+    /// one serialized Store observation.
+    ///
+    /// This read deliberately returns no package or grant authority. Each key
+    /// must pass the coordinator's ordinary activation transaction, which
+    /// revalidates the current catalog, authenticated repository manifest,
+    /// grants, and native ownership immediately before use.
+    pub fn load_runtime_startup_inventory_until(
+        &self,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionRuntimeStartupInventoryLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_runtime_startup_inventory(deadline, done)
         {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1154,6 +1228,27 @@ impl SqliteStore {
         }
         self.tx
             .try_send(Cmd::LoadExtensionNativeOwnershipJournal(done))
+            .is_ok()
+    }
+
+    fn try_load_extension_runtime_startup_inventory(
+        &self,
+        deadline: Instant,
+        done: ExtensionRuntimeStartupInventoryLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionRuntimeStartupInventory(done))
             .is_ok()
     }
 
@@ -2335,6 +2430,18 @@ fn actor(
                     Err(error) => {
                         eprintln!("store: extension native-ownership journal load failed: {error}");
                         ExtensionNativeOwnershipJournalLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionRuntimeStartupInventory(done)) => {
+                let outcome = match hub.load_extension_runtime_startup_inventory() {
+                    Ok(inventory) => ExtensionRuntimeStartupInventoryLoadOutcome::Loaded(inventory),
+                    Err(error) => {
+                        eprintln!(
+                            "store: extension runtime startup inventory load failed: {error}"
+                        );
+                        ExtensionRuntimeStartupInventoryLoadOutcome::Failed
                     }
                 };
                 done(outcome);

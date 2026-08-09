@@ -7,14 +7,19 @@
 
 use super::*;
 
+use crate::actor::ExtensionRuntimeStartupInventory;
 use zephium_core::extensions::{
-    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionInstall, ExtensionInstallCatalog,
-    ExtensionInstallCatalogApplyError, ExtensionInstallCatalogMutation,
+    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionGrantBrowsingContext, ExtensionInstall,
+    ExtensionInstallCatalog, ExtensionInstallCatalogApplyError, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
-    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
-    MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionNativeOwnershipKey, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
+    EXTENSION_SHA256_BYTES, MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
+use zephium_core::session::MAX_SESSION_PROFILES;
+
+const MAX_EXTENSION_RUNTIME_STARTUP_KEYS: usize =
+    MAX_SESSION_PROFILES * MAX_EXTENSION_INSTALLS_PER_PROFILE;
 
 pub(super) const DURABLE_PAYLOAD_BUNDLED_TREE: i64 = 1;
 pub(super) const DURABLE_PAYLOAD_ACQUIRED_ZIP: i64 = 2;
@@ -79,6 +84,51 @@ use zephium_core::ports::store::{
 };
 
 impl Hub {
+    /// Enumerates the complete bounded set of enabled persistent-profile
+    /// installs without treating an unreadable profile as empty.
+    ///
+    /// The Store actor serializes this scan with catalog mutations. Returned
+    /// keys remain non-authorizing selectors and are revalidated by ordinary
+    /// activation, so no package or grant snapshot crosses this boundary.
+    pub(crate) fn load_extension_runtime_startup_inventory(
+        &mut self,
+    ) -> rusqlite::Result<ExtensionRuntimeStartupInventory> {
+        let mut profiles = self.registry.iter().copied().collect::<Vec<_>>();
+        profiles.sort_unstable();
+
+        let mut keys = Vec::new();
+        let mut degraded_profiles = Vec::new();
+        for profile in profiles {
+            if self.degraded_profiles.contains(&profile) {
+                degraded_profiles.push(profile);
+                continue;
+            }
+            let catalog = load_catalog(self.profile_conn(profile)?)?;
+            for install in catalog
+                .installs()
+                .iter()
+                .filter(|install| install.desired_enabled())
+            {
+                if keys.len() >= MAX_EXTENSION_RUNTIME_STARTUP_KEYS {
+                    return Err(invalid_data(
+                        "extension runtime startup inventory exceeds durable limit",
+                    ));
+                }
+                keys.push(ExtensionNativeOwnershipKey::new(
+                    profile,
+                    install.id(),
+                    ExtensionGrantBrowsingContext::Regular,
+                ));
+            }
+        }
+        keys.sort_unstable();
+        degraded_profiles.sort_unstable();
+        Ok(ExtensionRuntimeStartupInventory::new(
+            keys,
+            degraded_profiles,
+        ))
+    }
+
     pub(crate) fn load_extension_install_catalog(
         &mut self,
         profile: ProfileId,
