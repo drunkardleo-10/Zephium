@@ -3,27 +3,45 @@
 use std::collections::HashMap;
 
 use zephium_core::extensions::{
-    ExtensionActionSnapshot, ExtensionActionSnapshotSettlement, ExtensionBrowserSurface,
-    ExtensionBrowserSurfaceGeneration,
+    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
+    ExtensionActionRevision, ExtensionActionSettlement, ExtensionActionSnapshot,
+    ExtensionActionSnapshotSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
+    ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::NativeDispatch;
 
 use super::{NativeWork, Shell};
 
-#[derive(Default)]
+const MAX_PENDING_EXTENSION_ACTIONS: usize = 8;
+
 pub(super) struct ExtensionActionState {
     snapshots: HashMap<ProfileId, ExtensionActionSnapshot>,
     // Also acts as a bounded pending-settlement watchdog. A scheduled read
     // remains here until an exact applied result arrives, so the ordinary
     // maintenance tick repairs a dropped callback without a hot timer.
     retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    pending: HashMap<ExtensionActionRequestId, ExtensionActionRequest>,
+    next_request_id: Option<u64>,
+}
+
+impl Default for ExtensionActionState {
+    fn default() -> Self {
+        Self {
+            snapshots: HashMap::new(),
+            retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+            pending: HashMap::new(),
+            next_request_id: Some(1),
+        }
+    }
 }
 
 impl ExtensionActionState {
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         self.snapshots.remove(&profile);
         self.retry_profiles.remove(profile);
+        self.pending
+            .retain(|_, request| request.runtime().profile() != profile);
     }
 
     #[cfg(test)]
@@ -89,6 +107,86 @@ impl ExtensionActionState {
         self.retry_profiles.remove(profile);
         self.snapshots.remove(&profile);
     }
+
+    fn begin_invocation(
+        &mut self,
+        current_surface: Option<&ExtensionBrowserSurface>,
+        runtime: ExtensionRuntimeInstance,
+        revision: ExtensionActionRevision,
+        anchor: ExtensionPopupAnchor,
+    ) -> Result<ExtensionActionRequest, ExtensionActionRejection> {
+        let profile = runtime.profile();
+        let surface = current_surface
+            .filter(|surface| surface.profile() == profile)
+            .ok_or(ExtensionActionRejection::TabUnavailable)?;
+        let tab = surface
+            .windows()
+            .first()
+            .and_then(zephium_core::extensions::ExtensionBrowserWindow::active)
+            .ok_or(ExtensionActionRejection::TabUnavailable)?;
+        let snapshot = self
+            .snapshots
+            .get(&profile)
+            .filter(|snapshot| {
+                snapshot.tab() == tab && snapshot.surface_generation() == surface.generation()
+            })
+            .ok_or(ExtensionActionRejection::ActionUnavailable)?;
+        let action = snapshot
+            .actions()
+            .iter()
+            .find(|action| action.runtime() == runtime)
+            .ok_or(ExtensionActionRejection::ActionUnavailable)?;
+        if action.revision() != revision {
+            return Err(ExtensionActionRejection::RuntimeSuperseded);
+        }
+        if !action.is_enabled() {
+            return Err(ExtensionActionRejection::ActionDisabled);
+        }
+        if self.pending.len() >= MAX_PENDING_EXTENSION_ACTIONS {
+            return Err(ExtensionActionRejection::CapacityExceeded);
+        }
+        let id = self
+            .next_request_id
+            .and_then(ExtensionActionRequestId::new)
+            .ok_or(ExtensionActionRejection::NativeAdmissionFailed)?;
+        self.next_request_id = id.get().checked_add(1);
+        let request =
+            ExtensionActionRequest::new(id, runtime, tab, surface.generation(), revision, anchor);
+        if self.pending.contains_key(&id) {
+            return Err(ExtensionActionRejection::NativeAdmissionFailed);
+        }
+        self.pending.insert(id, request);
+        Ok(request)
+    }
+
+    fn cancel_invocation(&mut self, request: ExtensionActionRequestId) {
+        self.pending.remove(&request);
+    }
+
+    pub(super) fn settle_invocation(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionActionRequestId,
+        settlement: ExtensionActionSettlement,
+    ) -> ExtensionActionInvocationObservation {
+        let Some(pending) = self.pending.remove(&request) else {
+            return ExtensionActionInvocationObservation::Stale;
+        };
+        if pending.runtime().profile() != profile {
+            return ExtensionActionInvocationObservation::Contradictory;
+        }
+        match settlement {
+            ExtensionActionSettlement::Dispatched => {
+                ExtensionActionInvocationObservation::Dispatched
+            }
+            ExtensionActionSettlement::PopupPresented(_) => {
+                ExtensionActionInvocationObservation::PopupPresented
+            }
+            ExtensionActionSettlement::Rejected(reason) => {
+                ExtensionActionInvocationObservation::Rejected(reason)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +197,15 @@ pub(super) enum ExtensionActionObservation {
     Stale,
     Contradictory,
     CapacityExceeded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ExtensionActionInvocationObservation {
+    Dispatched,
+    PopupPresented,
+    Rejected(ExtensionActionRejection),
+    Stale,
+    Contradictory,
 }
 
 impl Shell {
@@ -146,5 +253,34 @@ impl Shell {
             native.merge(self.refresh_extension_actions(profile));
         }
         native
+    }
+
+    /// Admits a toolbar intent only against the exact Shell-visible action.
+    /// The caller cannot select a tab, surface generation, or newer revision;
+    /// those are derived from the current authoritative projection here.
+    pub(super) fn invoke_extension_action(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        revision: ExtensionActionRevision,
+        anchor: ExtensionPopupAnchor,
+    ) -> Result<ExtensionActionRequestId, ExtensionActionRejection> {
+        let request = self.extension_actions.begin_invocation(
+            self.extension_browser_surfaces
+                .published_surface(runtime.profile()),
+            runtime,
+            revision,
+            anchor,
+        )?;
+        match self.engine.invoke_extension_action(request) {
+            NativeDispatch::Scheduled => Ok(request.id()),
+            NativeDispatch::Rejected => {
+                self.extension_actions.cancel_invocation(request.id());
+                Err(ExtensionActionRejection::NativeAdmissionFailed)
+            }
+            NativeDispatch::Unsupported => {
+                self.extension_actions.cancel_invocation(request.id());
+                Err(ExtensionActionRejection::UnsupportedPlatform)
+            }
+        }
     }
 }

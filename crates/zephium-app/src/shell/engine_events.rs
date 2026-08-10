@@ -141,6 +141,33 @@ impl Shell {
                     );
                 }
             }
+            EngineEvent::ExtensionActionSettled {
+                profile,
+                request,
+                settlement,
+            } => {
+                let observation = self
+                    .extension_actions
+                    .settle_invocation(profile, request, settlement);
+                if matches!(
+                    observation,
+                    extension_actions::ExtensionActionInvocationObservation::Rejected(
+                        zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded
+                            | zephium_core::extensions::ExtensionActionRejection::ActionUnavailable
+                            | zephium_core::extensions::ExtensionActionRejection::ActionDisabled
+                    )
+                ) {
+                    let _ = self.refresh_extension_actions(profile);
+                }
+                if matches!(
+                    observation,
+                    extension_actions::ExtensionActionInvocationObservation::Contradictory
+                ) {
+                    crate::diagnostic!(
+                        "extensions: toolbar action settlement crossed profile authority"
+                    );
+                }
+            }
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
                 // stale or malformed callback mutate topology, swap tabs, or
@@ -356,6 +383,7 @@ impl Shell {
             // retained native completion receives an explicit rejection.
             EngineEvent::ExtensionBrowserRequested { .. } => None,
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
+            EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
             EngineEvent::SplitChanged { window, .. } => {
                 self.windows.get(*window).map(|window| window.profile)
             }

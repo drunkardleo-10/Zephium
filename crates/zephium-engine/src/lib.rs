@@ -42,7 +42,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionSnapshotSettlement, ExtensionBrowserRequestId,
+    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
+    ExtensionActionSnapshotSettlement, ExtensionBrowserRequestId,
     ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
     ExtensionNativeNamespaceScope,
 };
@@ -512,6 +513,9 @@ impl RetirementGate {
                 self.allows_scope(scope).then_some(event)
             }
             event @ EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
+            }
+            event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
             // This is an untrusted request, not a native-state fact. Deliver
@@ -1246,6 +1250,52 @@ impl Engine for WebviewEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (profile, tab, surface_generation);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn invoke_extension_action(&self, request: ExtensionActionRequest) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            let profile = request.runtime().profile();
+            if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+                return NativeDispatch::Rejected;
+            }
+            let queued_retirement = self.retirement.clone();
+            let sink = self.sink.clone();
+            NativeDispatch::from_scheduled(self.run(move || {
+                if !lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
+                    return;
+                }
+                let request_id = request.id();
+                let application_sink = sink.clone();
+                let admitted = host::try_with(move |host| {
+                    let settlement = host.invoke_extension_action(request);
+                    application_sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionActionSettled {
+                            profile,
+                            request: request_id,
+                            settlement,
+                        },
+                    ));
+                });
+                if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
+                {
+                    sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionActionSettled {
+                            profile,
+                            request: request_id,
+                            settlement: ExtensionActionSettlement::Rejected(
+                                ExtensionActionRejection::NativeAdmissionFailed,
+                            ),
+                        },
+                    ));
+                }
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = request;
             NativeDispatch::Unsupported
         }
     }

@@ -551,6 +551,8 @@ impl Shell {
             Command::Run(id) => {
                 let _ = self.operation_run_command(&id);
             }
+            // This privileged mutation must carry a desktop operation id.
+            Command::InvokeExtensionAction { .. } => {}
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);

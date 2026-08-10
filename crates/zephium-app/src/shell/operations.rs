@@ -17,6 +17,11 @@ impl Shell {
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
+            Command::InvokeExtensionAction {
+                runtime,
+                revision,
+                anchor,
+            } => self.operation_invoke_extension_action(runtime, revision, anchor),
             Command::OpenUrl(input) => self.operation_open_url(input),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
             Command::RetryContentPolicy {
@@ -36,6 +41,34 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::UnsupportedCommand,
             ),
+        }
+    }
+
+    fn operation_invoke_extension_action(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        revision: zephium_core::extensions::ExtensionActionRevision,
+        anchor: zephium_core::extensions::ExtensionPopupAnchor,
+    ) -> OperationDisposition {
+        match self.invoke_extension_action(runtime, revision, anchor) {
+            Ok(_) => operation_result(
+                OperationOutcome::Deferred,
+                OperationReason::NativeWorkPending,
+            ),
+            Err(zephium_core::extensions::ExtensionActionRejection::NativeAdmissionFailed) => {
+                operation_result(
+                    OperationOutcome::NativeAdmissionFailed,
+                    OperationReason::NativeDispatchRejected,
+                )
+            }
+            Err(
+                zephium_core::extensions::ExtensionActionRejection::UnsupportedPlatform
+                | zephium_core::extensions::ExtensionActionRejection::PopupUnavailable,
+            ) => operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::UnsupportedCommand,
+            ),
+            Err(_) => operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope),
         }
     }
 

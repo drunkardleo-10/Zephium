@@ -289,6 +289,8 @@ pub struct ExtensionActionRequest {
     id: ExtensionActionRequestId,
     runtime: ExtensionRuntimeInstance,
     tab: ItemId,
+    surface_generation: ExtensionBrowserSurfaceGeneration,
+    action_revision: ExtensionActionRevision,
     anchor: ExtensionPopupAnchor,
 }
 
@@ -297,12 +299,16 @@ impl ExtensionActionRequest {
         id: ExtensionActionRequestId,
         runtime: ExtensionRuntimeInstance,
         tab: ItemId,
+        surface_generation: ExtensionBrowserSurfaceGeneration,
+        action_revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
     ) -> Self {
         Self {
             id,
             runtime,
             tab,
+            surface_generation,
+            action_revision,
             anchor,
         }
     }
@@ -317,6 +323,14 @@ impl ExtensionActionRequest {
 
     pub const fn tab(self) -> ItemId {
         self.tab
+    }
+
+    pub const fn surface_generation(self) -> ExtensionBrowserSurfaceGeneration {
+        self.surface_generation
+    }
+
+    pub const fn action_revision(self) -> ExtensionActionRevision {
+        self.action_revision
     }
 
     pub const fn anchor(self) -> ExtensionPopupAnchor {
@@ -354,6 +368,7 @@ pub enum ExtensionActionRejection {
     ActionUnavailable,
     ActionDisabled,
     CapacityExceeded,
+    PopupUnavailable,
     PopupCapacityExceeded,
     NativeAdmissionFailed,
     ShuttingDown,
@@ -461,6 +476,22 @@ mod tests {
             ExtensionPopupAnchor::new(Rect::default()),
             Err(ExtensionActionError::InvalidPopupAnchor)
         );
+    }
+
+    #[test]
+    fn invocation_carries_the_exact_shell_versions() {
+        let id = ExtensionActionRequestId::new(9).unwrap();
+        let surface = ExtensionBrowserSurfaceGeneration::new(7).unwrap();
+        let revision = ExtensionActionRevision::new(11).unwrap();
+        let anchor = ExtensionPopupAnchor::new(Rect::new(10.0, 20.0, 24.0, 24.0)).unwrap();
+        let request =
+            ExtensionActionRequest::new(id, runtime(), ItemId::from(3), surface, revision, anchor);
+        assert_eq!(request.id(), id);
+        assert_eq!(request.runtime(), runtime());
+        assert_eq!(request.tab(), ItemId::from(3));
+        assert_eq!(request.surface_generation(), surface);
+        assert_eq!(request.action_revision(), revision);
+        assert_eq!(request.anchor(), anchor);
     }
 
     #[test]

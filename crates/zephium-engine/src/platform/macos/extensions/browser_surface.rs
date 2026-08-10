@@ -29,6 +29,8 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 
+pub(super) type NativeExtensionTab = Retained<ProtocolObject<dyn WKWebExtensionTab>>;
+
 use super::browser_request_broker::{
     BrowserRequestBroker, BrowserRequestPool, BrowserRequestSettlementOutcome,
 };
@@ -354,6 +356,10 @@ impl BrowserTab {
 
     fn id(&self) -> ItemId {
         *self.ivars().id
+    }
+
+    fn is_resident(&self) -> bool {
+        self.ivars().resident.get()
     }
 
     fn update(
@@ -1025,15 +1031,14 @@ impl MacosExtensionBrowserSurfaceHost {
         &self,
         generation: ExtensionBrowserSurfaceGeneration,
         id: ItemId,
-    ) -> Result<Option<Retained<ProtocolObject<dyn WKWebExtensionTab>>>, BrowserSurfaceError> {
+    ) -> Result<Option<(NativeExtensionTab, bool)>, BrowserSurfaceError> {
         if self.generation != Some(generation) {
             return Err(BrowserSurfaceError::StaleGeneration);
         }
-        Ok(self
-            .tabs
-            .get(&id)
-            .cloned()
-            .map(ProtocolObject::from_retained))
+        Ok(self.tabs.get(&id).cloned().map(|tab| {
+            let resident = tab.is_resident();
+            (ProtocolObject::from_retained(tab), resident)
+        }))
     }
 
     pub(super) fn settle_request(

@@ -4,6 +4,9 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
+use zephium_core::extensions::{
+    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+};
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::blocker::ContentBlocker;
@@ -194,6 +197,14 @@ pub enum Command {
         y: Option<f64>,
     },
     Run(String),
+    /// Trusted browser-chrome toolbar intent. The Shell derives the active tab
+    /// and exact browser-surface generation; callers can only echo one action
+    /// runtime/revision from the latest privileged projection.
+    InvokeExtensionAction {
+        runtime: ExtensionRuntimeInstance,
+        revision: ExtensionActionRevision,
+        anchor: ExtensionPopupAnchor,
+    },
     Search(String),
     OpenUrl(String),
     SetAppSetting {

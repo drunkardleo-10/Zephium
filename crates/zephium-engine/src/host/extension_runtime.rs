@@ -2048,8 +2048,55 @@ impl ExtensionRuntimeRegistry {
         runtime: &ExtensionRuntimeFingerprint,
         operation: impl FnOnce(&mut crate::platform::imp::MacosNativeRuntimeOwner) -> T,
     ) -> Result<Option<T>, ExtensionRuntimeHostBindError> {
+        let index = self.published_runtime_index(runtime)?;
+        self.entries[index]
+            .native
+            .with_owned_macos_owner(operation)
+            .map_err(|reason| match reason {
+                NativeBeginError::WrongState => ExtensionRuntimeHostBindError::Unavailable,
+                NativeBeginError::StaleTicket | NativeBeginError::ResourceMismatch => {
+                    self.fail_invariant();
+                    ExtensionRuntimeHostBindError::InternalInvariant
+                }
+            })
+    }
+
+    /// Mints `activeTab` only when the exact published authority declares it.
+    /// Missing permission is a normal `None`: toolbar dispatch does not depend
+    /// on `activeTab`. A fingerprint contradiction is a registry invariant.
+    #[cfg(target_os = "macos")]
+    pub(super) fn optional_toolbar_active_tab_witness(
+        &mut self,
+        runtime: &ExtensionRuntimeFingerprint,
+    ) -> Result<Option<ExtensionActiveTabGrantWitness>, ExtensionRuntimeHostBindError> {
+        let index = self.published_runtime_index(runtime)?;
+        let reservation = Arc::clone(&self.entries[index].reservation);
+        match reservation.mint_active_tab_grant_witness(
+            reservation.owner(),
+            reservation.generation,
+            runtime,
+            ExtensionUserInvocationKind::ToolbarAction,
+        ) {
+            Ok(witness) => Ok(Some(witness)),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing) => Ok(None),
+            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch) => {
+                self.fail_invariant();
+                Err(ExtensionRuntimeHostBindError::InternalInvariant)
+            }
+            Err(_) => Err(ExtensionRuntimeHostBindError::Unavailable),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn published_runtime_index(
+        &mut self,
+        runtime: &ExtensionRuntimeFingerprint,
+    ) -> Result<usize, ExtensionRuntimeHostBindError> {
         if self.sealed {
             return Err(ExtensionRuntimeHostBindError::Sealed);
+        }
+        if self.invariant_failed {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
         let mut matching = self
             .entries
@@ -2096,16 +2143,7 @@ impl ExtensionRuntimeRegistry {
                 return Err(ExtensionRuntimeHostBindError::Unavailable);
             }
         }
-        self.entries[index]
-            .native
-            .with_owned_macos_owner(operation)
-            .map_err(|reason| match reason {
-                NativeBeginError::WrongState => ExtensionRuntimeHostBindError::Unavailable,
-                NativeBeginError::StaleTicket | NativeBeginError::ResourceMismatch => {
-                    self.fail_invariant();
-                    ExtensionRuntimeHostBindError::InternalInvariant
-                }
-            })
+        Ok(index)
     }
 
     fn publish_native_terminal(

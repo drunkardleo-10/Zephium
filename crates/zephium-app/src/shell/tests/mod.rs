@@ -5,6 +5,7 @@ use zephium_core::blocker::{
     ContentRuleCoverage, ContentRuleDigest, ContentRules, NetworkDecision, NetworkRequest,
     NetworkRequestPolicy, ProfileBlockerConfig,
 };
+use zephium_core::extensions::ExtensionActionRequest;
 use zephium_core::ids::WindowId;
 use zephium_core::ports::blocker::{
     BlockerCatalog, BlockerCatalogPhase, BlockerCatalogRefreshDispatch, BlockerCatalogSnapshot,
@@ -327,6 +328,7 @@ pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
+    extension_action_invocations: Mutex<Vec<ExtensionActionRequest>>,
     extension_browser_settlements: Mutex<
         Vec<(
             ProfileId,
@@ -424,6 +426,10 @@ impl FakeEngine {
         self.extension_action_requests.lock().unwrap().clone()
     }
 
+    fn extension_action_invocations(&self) -> Vec<ExtensionActionRequest> {
+        self.extension_action_invocations.lock().unwrap().clone()
+    }
+
     fn extension_browser_settlements(
         &self,
     ) -> Vec<(
@@ -502,6 +508,16 @@ impl Engine for FakeEngine {
                 .lock()
                 .unwrap()
                 .push((profile, tab, generation));
+        }
+        admission
+    }
+    fn invoke_extension_action(&self, request: ExtensionActionRequest) -> NativeDispatch {
+        let admission = self.native_admission();
+        if admission == NativeDispatch::Scheduled {
+            self.extension_action_invocations
+                .lock()
+                .unwrap()
+                .push(request);
         }
         admission
     }

@@ -672,9 +672,17 @@ Scheduled reads remain in a fixed-size pending set until an exact applied
 settlement arrives; the existing low-frequency maintenance tick repairs a
 rejected or lost settlement without adding a timer or idle wakeup.
 Profile retirement erases both the logical surface and its action cohort. This
-read path is not invocation authority: trusted gesture admission, `activeTab`
-joining, icon rasterization, and overlay popup presentation remain separate
-gates.
+read path is not invocation authority. A toolbar invocation is independently
+versioned by request id, surface generation, runtime generation, and action
+revision; Shell derives the current tab rather than accepting one from IPC.
+The native host revalidates residency and action state, optionally joins a
+declared `activeTab` witness to the exact currently-presented HTTP(S) document,
+then revalidates again before `performActionForTab:`. Missing `activeTab` or a
+restricted document never suppresses the separate click event, while capacity
+or identity contradictions fail closed. Non-popup actions are dispatched;
+popup actions remain refused until the delegate has first retained the exact
+request and its one process-wide popup resource lease. Icon rasterization and
+popup presentation remain separate gates.
 
 The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live

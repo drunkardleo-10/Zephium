@@ -601,6 +601,15 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Invokes one Shell-authored, exact-version toolbar action. Page and
+    /// extension content must have no route to this port. The terminal result
+    /// arrives as [`EngineEvent::ExtensionActionSettled`].
+    fn invoke_extension_action(
+        &self,
+        _request: crate::extensions::ExtensionActionRequest,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Settles one exact native WebExtension browser mutation. The native
     /// adapter retains the platform completion handler behind the
     /// `(profile, request)` correlation pair and invokes it exactly once.
@@ -773,6 +782,12 @@ pub enum EngineEvent {
         tab: ItemId,
         surface_generation: crate::extensions::ExtensionBrowserSurfaceGeneration,
         settlement: crate::extensions::ExtensionActionSnapshotSettlement,
+    },
+    /// Terminal response to one exact trusted toolbar invocation.
+    ExtensionActionSettled {
+        profile: ProfileId,
+        request: crate::extensions::ExtensionActionRequestId,
+        settlement: crate::extensions::ExtensionActionSettlement,
     },
     TitleChanged {
         id: ItemId,

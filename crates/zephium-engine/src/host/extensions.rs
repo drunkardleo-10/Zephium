@@ -336,6 +336,14 @@ enum ExtensionAuthorityDenial {
     NativeOperationFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ToolbarActiveTabGrant {
+    Granted,
+    NotApplicable,
+    CapacityExceeded,
+    Invalid,
+}
+
 #[derive(Default)]
 pub(super) struct ExtensionDocumentAuthority {
     runtime_owners: BTreeMap<ExtensionRuntimeInstance, NativeExtensionRuntimeOwner>,
@@ -853,7 +861,6 @@ impl EngineHost {
     /// The only future production ingress for minting activeTab scope. All
     /// document fields are derived from EngineHost-owned maps; the service can
     /// supply only an opaque witness bound to the same runtime/invocation.
-    #[allow(dead_code)]
     fn grant_active_tab_from_user_invocation(
         &mut self,
         item: ItemId,
@@ -863,6 +870,29 @@ impl EngineHost {
         let document = self.exact_presented_extension_document(item, profile)?;
         self.extension_document_authority
             .grant_active_tab_from_witness_document(witness, document.borrowed())
+    }
+
+    /// Joins an operation-authority witness with the exact currently
+    /// presented host document. A restricted or not-yet-presented page simply
+    /// receives no transient scope; it does not suppress the independent
+    /// action click event.
+    pub(super) fn grant_toolbar_active_tab(
+        &mut self,
+        item: ItemId,
+        witness: ExtensionActiveTabGrantWitness,
+    ) -> ToolbarActiveTabGrant {
+        match self.grant_active_tab_from_user_invocation(item, witness) {
+            Ok(()) => ToolbarActiveTabGrant::Granted,
+            Err(
+                ExtensionAuthorityDenial::DocumentNotPresented
+                | ExtensionAuthorityDenial::NativeDocumentMismatch
+                | ExtensionAuthorityDenial::UnsupportedDocumentOrigin,
+            ) => ToolbarActiveTabGrant::NotApplicable,
+            Err(ExtensionAuthorityDenial::ActiveTabCapacity) => {
+                ToolbarActiveTabGrant::CapacityExceeded
+            }
+            Err(_) => ToolbarActiveTabGrant::Invalid,
+        }
     }
 
     /// Issues a permit only after joining the purpose witness with the exact

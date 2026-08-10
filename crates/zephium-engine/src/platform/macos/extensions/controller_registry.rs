@@ -41,6 +41,17 @@ use super::erasure::{
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
 const _: () = assert!(MAX_PERSISTENT_CONTROLLERS == 64);
 
+pub(crate) struct ControllerActionTab {
+    tab: super::browser_surface::NativeExtensionTab,
+    resident: bool,
+}
+
+impl ControllerActionTab {
+    pub(crate) fn into_parts(self) -> (super::browser_surface::NativeExtensionTab, bool) {
+        (self.tab, self.resident)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControllerRegistryError {
     CapacityExceeded,
@@ -426,10 +437,7 @@ impl PersistentControllerRegistry {
         profile: ProfileId,
         generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration,
         tab: ItemId,
-    ) -> Result<
-        Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>>>,
-        ControllerRegistryError,
-    > {
+    ) -> Result<Option<ControllerActionTab>, ControllerRegistryError> {
         self.slots.admission(profile)?;
         let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
         else {
@@ -448,7 +456,7 @@ impl PersistentControllerRegistry {
         {
             self.slots.poison();
         }
-        result
+        result.map(|tab| tab.map(|(tab, resident)| ControllerActionTab { tab, resident }))
     }
 
     #[cfg(feature = "native-web-extension-probes")]

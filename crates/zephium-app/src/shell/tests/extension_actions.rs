@@ -2,8 +2,8 @@ use super::extension_browser_surface::{activate_profile, install_profile};
 use super::*;
 use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionActionScope, ExtensionActionSnapshot,
-    ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionRuntimeGeneration,
-    ExtensionRuntimeInstance,
+    ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionPopupAnchor,
+    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
 use zephium_core::ids::ExtensionInstallId;
 
@@ -63,6 +63,34 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
     assert_eq!(shell.extension_actions.snapshot(profile), Some(&snapshot));
     assert_eq!(shell.retry_extension_actions(), NativeWork::default());
     assert_eq!(engine.extension_action_requests().len(), 1);
+    let anchor = ExtensionPopupAnchor::new(Rect::new(1100.0, 8.0, 28.0, 28.0)).unwrap();
+    assert_eq!(
+        shell.invoke_extension_action(
+            runtime,
+            ExtensionActionRevision::INITIAL.next().unwrap(),
+            anchor,
+        ),
+        Err(zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded)
+    );
+    let invocation = shell
+        .invoke_extension_action(runtime, ExtensionActionRevision::INITIAL, anchor)
+        .unwrap();
+    let native = engine.extension_action_invocations();
+    assert_eq!(native.len(), 1);
+    assert_eq!(native[0].id(), invocation);
+    assert_eq!(native[0].runtime(), runtime);
+    assert_eq!(native[0].tab(), tab);
+    assert_eq!(native[0].surface_generation(), generation);
+    assert_eq!(
+        native[0].action_revision(),
+        ExtensionActionRevision::INITIAL
+    );
+    assert_eq!(native[0].anchor(), anchor);
+    shell.handle(Command::Engine(EngineEvent::ExtensionActionSettled {
+        profile,
+        request: invocation,
+        settlement: zephium_core::extensions::ExtensionActionSettlement::Dispatched,
+    }));
 
     shell.handle(Command::Engine(
         EngineEvent::ExtensionActionsSnapshotSettled {

@@ -1,15 +1,15 @@
 //! Product action projection at the authenticated runtime/controller/tab join.
 
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionSnapshot, ExtensionActionSnapshotSettlement,
-    ExtensionBrowserSurfaceGeneration,
+    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
+    ExtensionActionSnapshot, ExtensionActionSnapshotSettlement, ExtensionBrowserSurfaceGeneration,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
 
 use crate::platform::imp::{ControllerRegistryError, MacosNativeActionFailure};
 
-use super::EngineHost;
+use super::{extensions::ToolbarActiveTabGrant, EngineHost};
 
 impl EngineHost {
     /// Reads effective action metadata for all published runtimes in one exact
@@ -27,7 +27,7 @@ impl EngineHost {
                 .macos_extension_controllers
                 .action_tab(profile, surface_generation, tab)
             {
-                Ok(Some(tab)) => tab,
+                Ok(Some(tab)) => tab.into_parts().0,
                 Ok(None) => {
                     return ExtensionActionSnapshotSettlement::Rejected(
                         ExtensionActionRejection::TabUnavailable,
@@ -75,6 +75,119 @@ impl EngineHost {
             ),
         }
     }
+
+    /// Invokes one exact, Shell-versioned, non-popup action. The runtime,
+    /// controller, logical tab and current action revision are rejoined on the
+    /// host thread. `activeTab` is minted only when declared and is never an
+    /// action-dispatch prerequisite.
+    pub(crate) fn invoke_extension_action(
+        &mut self,
+        request: ExtensionActionRequest,
+    ) -> ExtensionActionSettlement {
+        let profile = request.runtime().profile();
+        let (native_tab, resident) = match self.macos_extension_controllers.action_tab(
+            profile,
+            request.surface_generation(),
+            request.tab(),
+        ) {
+            Ok(Some(tab)) => tab.into_parts(),
+            Ok(None) => {
+                return ExtensionActionSettlement::Rejected(
+                    ExtensionActionRejection::TabUnavailable,
+                );
+            }
+            Err(error) => {
+                return ExtensionActionSettlement::Rejected(map_controller_error(error));
+            }
+        };
+        if !resident {
+            return ExtensionActionSettlement::Rejected(ExtensionActionRejection::TabDiscarded);
+        }
+        let runtimes = match self.extension_runtime_registry.published_runtimes(profile) {
+            Ok(runtimes) => runtimes,
+            Err(error) => {
+                return ExtensionActionSettlement::Rejected(map_runtime_error(error));
+            }
+        };
+        let Some(runtime) = runtimes
+            .into_iter()
+            .find(|runtime| runtime.instance() == request.runtime())
+        else {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::RuntimeUnavailable,
+            );
+        };
+        let state = match self
+            .extension_runtime_registry
+            .with_owned_macos_runtime(&runtime, |owner| {
+                owner.action_state_for_tab(runtime.instance(), request.tab(), &native_tab)
+            }) {
+            Ok(Some(Ok(state))) => state,
+            Ok(Some(Err(error))) => {
+                return ExtensionActionSettlement::Rejected(map_native_error(error));
+            }
+            Ok(None) => {
+                return ExtensionActionSettlement::Rejected(
+                    ExtensionActionRejection::RuntimeUnavailable,
+                );
+            }
+            Err(error) => {
+                return ExtensionActionSettlement::Rejected(map_runtime_error(error));
+            }
+        };
+        if state.revision() != request.action_revision() {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::RuntimeSuperseded,
+            );
+        }
+        if !state.is_enabled() {
+            return ExtensionActionSettlement::Rejected(ExtensionActionRejection::ActionDisabled);
+        }
+        if state.presents_popup() {
+            return ExtensionActionSettlement::Rejected(ExtensionActionRejection::PopupUnavailable);
+        }
+
+        match self
+            .extension_runtime_registry
+            .optional_toolbar_active_tab_witness(&runtime)
+        {
+            Ok(Some(witness)) => match self.grant_toolbar_active_tab(request.tab(), witness) {
+                ToolbarActiveTabGrant::Granted | ToolbarActiveTabGrant::NotApplicable => {}
+                ToolbarActiveTabGrant::CapacityExceeded => {
+                    return ExtensionActionSettlement::Rejected(
+                        ExtensionActionRejection::CapacityExceeded,
+                    );
+                }
+                ToolbarActiveTabGrant::Invalid => {
+                    return ExtensionActionSettlement::Rejected(
+                        ExtensionActionRejection::NativeAdmissionFailed,
+                    );
+                }
+            },
+            Ok(None) => {}
+            Err(error) => {
+                return ExtensionActionSettlement::Rejected(map_runtime_error(error));
+            }
+        }
+
+        match self
+            .extension_runtime_registry
+            .with_owned_macos_runtime(&runtime, |owner| {
+                owner.perform_non_popup_action_for_tab(
+                    runtime.instance(),
+                    request.tab(),
+                    &native_tab,
+                    request.action_revision(),
+                )
+            }) {
+            Ok(Some(Ok(()))) => ExtensionActionSettlement::Dispatched,
+            Ok(Some(Err(error))) => ExtensionActionSettlement::Rejected(map_native_error(error)),
+            Ok(None) => {
+                ExtensionActionSettlement::Rejected(ExtensionActionRejection::RuntimeUnavailable)
+            }
+            Err(error) => ExtensionActionSettlement::Rejected(map_runtime_error(error)),
+        }
+    }
 }
 
 fn map_controller_error(error: ControllerRegistryError) -> ExtensionActionRejection {
@@ -113,9 +226,14 @@ fn map_native_error(error: MacosNativeActionFailure) -> ExtensionActionRejection
     match error {
         MacosNativeActionFailure::ActionUnavailable => ExtensionActionRejection::ActionUnavailable,
         MacosNativeActionFailure::RevisionExhausted => ExtensionActionRejection::RuntimeUnavailable,
+        MacosNativeActionFailure::StaleAction | MacosNativeActionFailure::PopupRequired => {
+            ExtensionActionRejection::RuntimeSuperseded
+        }
+        MacosNativeActionFailure::ActionDisabled => ExtensionActionRejection::ActionDisabled,
         MacosNativeActionFailure::OwnerInvalid
         | MacosNativeActionFailure::ContextMismatch
-        | MacosNativeActionFailure::InvalidProjection => {
+        | MacosNativeActionFailure::InvalidProjection
+        | MacosNativeActionFailure::NativeException => {
             ExtensionActionRejection::NativeAdmissionFailed
         }
     }

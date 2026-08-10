@@ -277,6 +277,10 @@ pub(crate) enum MacosNativeActionFailure {
     ContextMismatch,
     InvalidProjection,
     RevisionExhausted,
+    StaleAction,
+    ActionDisabled,
+    PopupRequired,
+    NativeException,
 }
 
 impl MacosNativeRuntimeOwner {
@@ -407,6 +411,33 @@ impl MacosNativeRuntimeOwner {
         projection.next_revision = revision.get().checked_add(1);
         projection.last = Some(state.clone());
         Ok(state)
+    }
+
+    /// Performs only an action that still exactly matches the Shell-visible
+    /// revision and does not require popup presentation. Popup actions are
+    /// deliberately refused until the separately-budgeted delegate broker has
+    /// retained its completion and resource lease.
+    pub(crate) fn perform_non_popup_action_for_tab(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        tab_id: zephium_core::ids::ItemId,
+        tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+        expected_revision: zephium_core::extensions::ExtensionActionRevision,
+    ) -> Result<(), MacosNativeActionFailure> {
+        let state = self.action_state_for_tab(runtime, tab_id, tab)?;
+        if state.revision() != expected_revision {
+            return Err(MacosNativeActionFailure::StaleAction);
+        }
+        if !state.is_enabled() {
+            return Err(MacosNativeActionFailure::ActionDisabled);
+        }
+        if state.presents_popup() {
+            return Err(MacosNativeActionFailure::PopupRequired);
+        }
+        objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            self.context.performActionForTab(Some(tab));
+        }))
+        .map_err(|_| MacosNativeActionFailure::NativeException)
     }
 
     fn prove_absence(
