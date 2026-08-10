@@ -6,15 +6,18 @@
 //! from assumptions without shipping or embedding upstream source artifacts.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use std::time::Instant;
 
 use objc2::rc::Weak;
-use objc2_foundation::MainThreadMarker;
-use objc2_foundation::NSSet;
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::{MainThreadMarker, NSRunLoop, NSSet, NSString};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionMatchPattern,
     WKWebExtensionPermission,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 const EXPECTED_NATIVE_REQUIRED_PERMISSIONS: [&str; 11] = [
     "activeTab",
@@ -32,6 +35,7 @@ const EXPECTED_NATIVE_REQUIRED_PERMISSIONS: [&str; 11] = [
 const EXPECTED_NATIVE_OPTIONAL_PERMISSIONS: [&str; 1] = ["nativeMessaging"];
 const EXPECTED_REQUESTED_HOST_PATTERNS: [&str; 2] = ["http://*/*", "https://*/*"];
 const EXPECTED_ALL_REQUESTED_MATCH_PATTERNS: [&str; 3] = ["*://*/*", "http://*/*", "https://*/*"];
+const WEB_REQUEST_PROBE_TITLE: &str = "zephium-web-request-pending";
 
 pub(super) struct ContractEvidence {
     pub(super) error_count: usize,
@@ -122,7 +126,7 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
     write(&path, "manifest.json", &manifest.to_string())?;
     for (name, contents) in [
         ("autofill.css", "html { color-scheme: light dark; }"),
-        ("background.js", "void 0;"),
+        ("background.js", web_request_background_probe_script()),
         ("content-message-handler.js", "void 0;"),
         ("fido2-page-script.js", "void 0;"),
         ("managed-schema.json", "{}"),
@@ -134,6 +138,11 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
             "<!doctype html><title>notification</title>",
         ),
         ("popup.html", "<!doctype html><title>popup</title>"),
+        (
+            "web-request-probe.html",
+            "<!doctype html><meta charset=\"utf-8\"><title>zephium-web-request-pending</title><script src=\"web-request-probe.js\"></script>",
+        ),
+        ("web-request-probe.js", web_request_probe_script()),
         (
             "sidepanel-disabled.html",
             "<!doctype html><title>disabled</title>",
@@ -194,6 +203,7 @@ pub(super) fn inspect(extension: &WKWebExtension) -> Result<ContractEvidence, St
 
 pub(super) fn validate_native_grant_round_trip(
     extension: &WKWebExtension,
+    run_loop: &NSRunLoop,
     mtm: MainThreadMarker,
 ) -> Result<ContractNativeTeardown, String> {
     use super::super::extensions::MacosNativeApiPermission as Permission;
@@ -252,15 +262,188 @@ pub(super) fn validate_native_grant_round_trip(
         false,
     )
     .map_err(|error| format!("Bitwarden contract grant application failed: {error}"))?;
+
+    let surface_window = super::new_window(mtm)?;
+    let surface_host =
+        super::profile_isolation::host_for_window(&surface_window, "Bitwarden browser surface")?;
+    let surface_view = super::profile_isolation::build_profile_view(
+        &surface_host,
+        bundle.webview_configuration.clone(),
+    )?;
+    let native_surface = super::super::native::webkit(&surface_view);
+    let lifecycle_drops = Arc::new(AtomicUsize::new(0));
+    let webview_requests = Arc::new(AtomicUsize::new(0));
+    let tab = super::ProbeTab::new(
+        mtm,
+        native_surface.clone(),
+        webview_requests,
+        lifecycle_drops.clone(),
+    );
+    let window = super::ProbeWindow::new(mtm, tab.clone(), true, lifecycle_drops.clone());
+    tab.set_window(&window);
+    let delegate = super::ProbeControllerDelegate::new(mtm, window.clone(), lifecycle_drops);
+    let delegate_protocol = ProtocolObject::from_ref(&*delegate);
+    let window_protocol = ProtocolObject::from_ref(&*window);
+    let tab_protocol = ProtocolObject::from_ref(&*tab);
+    // SAFETY: the retained delegate, window, tab, and WebView all outlive the
+    // loaded context. The close notifications below exactly balance these
+    // publications before the delegate is severed.
+    unsafe {
+        bundle.controller.setDelegate(Some(delegate_protocol));
+        bundle.controller.didOpenWindow(window_protocol);
+        bundle.controller.didOpenTab(tab_protocol);
+        bundle.controller.didFocusWindow(Some(window_protocol));
+    }
+
     super::load_context(&bundle.controller, &context, "Bitwarden contract")?;
+    let web_request = probe_web_request(&context, run_loop, mtm)?;
+    validate_web_request_evidence(&web_request)?;
     super::validate_context_errors(&context, "Bitwarden contract")?;
+    // SAFETY: these notifications balance the exact live objects published
+    // above while the context can still observe their removal.
+    unsafe {
+        bundle.controller.didFocusWindow(None);
+        bundle
+            .controller
+            .didCloseTab_windowIsClosing(tab_protocol, true);
+        bundle.controller.didCloseWindow(window_protocol);
+    }
     super::unload_context(&bundle.controller, &context, "Bitwarden contract")?;
+    // SAFETY: the context is unloaded and no callback can legitimately retain
+    // the weak delegate after this point.
+    unsafe { bundle.controller.setDelegate(None) };
+    eprintln!("native-probe-bitwarden-web-request: background={web_request}");
     applied
         .clear_and_verify(&context)
         .map_err(|error| format!("Bitwarden contract grant cleanup failed: {error}"))?;
     drop(context);
+    drop(delegate);
+    drop(window);
+    drop(tab);
+    drop(native_surface);
+    drop(surface_view);
+    surface_window.close();
+    drop(surface_window);
     drop(bundle);
     Ok(teardown)
+}
+
+fn probe_web_request(
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+) -> Result<Value, String> {
+    let configuration = unsafe { context.webViewConfiguration() }.ok_or_else(|| {
+        "loaded Bitwarden contract returned no extension-page configuration".to_owned()
+    })?;
+    let window = super::new_window(mtm)?;
+    let host = super::profile_isolation::host_for_window(&window, "Bitwarden webRequest")?;
+    let view = super::profile_isolation::build_profile_view(&host, configuration)?;
+    window.orderFrontRegardless();
+
+    let page = unsafe { context.baseURL() }
+        .URLByAppendingPathComponent(&NSString::from_str("web-request-probe.html"))
+        .and_then(|url| url.absoluteString())
+        .ok_or_else(|| "Bitwarden contract produced no webRequest probe URL".to_owned())?
+        .to_string();
+    view.load_url(&page)
+        .map_err(|error| format!("cannot navigate Bitwarden webRequest probe: {error}"))?;
+
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    let result = loop {
+        let title = view
+            .document_title()
+            .map_err(|error| format!("cannot inspect Bitwarden webRequest probe title: {error}"))?;
+        if let Some(title) = title
+            .as_deref()
+            .filter(|title| !title.is_empty() && *title != WEB_REQUEST_PROBE_TITLE)
+        {
+            let result = serde_json::from_str(title).map_err(|error| {
+                format!("Bitwarden webRequest probe returned invalid evidence {title:?}: {error}")
+            })?;
+            break result;
+        }
+        super::validate_context_errors(context, "Bitwarden webRequest probe")?;
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Bitwarden webRequest probe timed out at {:?}",
+                view.url().ok()
+            ));
+        }
+        super::drain_run_loop_once(run_loop);
+    };
+
+    drop(view);
+    window.close();
+    drop(window);
+    Ok(result)
+}
+
+fn validate_web_request_evidence(evidence: &Value) -> Result<(), String> {
+    let expected = [
+        ("root", "object"),
+        ("namespace", "object"),
+        ("auth", "object"),
+        ("completed", "object"),
+        ("asyncBlocking", "accepted"),
+    ];
+    if expected
+        .iter()
+        .all(|(name, value)| evidence.get(name).and_then(Value::as_str) == Some(*value))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Bitwarden background webRequest contract was not accepted: {evidence}"
+        ))
+    }
+}
+
+fn web_request_background_probe_script() -> &'static str {
+    r#"(() => {
+    const webRequest = globalThis.chrome?.webRequest;
+    const outcome = {
+        root: typeof globalThis.chrome,
+        namespace: typeof webRequest,
+        auth: typeof webRequest?.onAuthRequired,
+        completed: typeof webRequest?.onCompleted,
+        asyncBlocking: "not-attempted"
+    };
+
+    if (webRequest?.onAuthRequired) {
+        try {
+            webRequest.onAuthRequired.addListener(
+                () => {},
+                { urls: ["http://*/*", "https://*/*"] },
+                ["asyncBlocking"]
+            );
+            outcome.asyncBlocking = "accepted";
+        } catch (_) {
+            outcome.asyncBlocking = "rejected";
+        }
+    } else {
+        outcome.asyncBlocking = "absent";
+    }
+
+    const api = globalThis.browser ?? globalThis.chrome;
+    void api?.storage?.local?.set({ zephiumBitwardenWebRequestProbe: outcome });
+})()"#
+}
+
+fn web_request_probe_script() -> &'static str {
+    r#"(() => {
+    const api = globalThis.browser ?? globalThis.chrome;
+    const settle = (value) => { document.title = JSON.stringify(value); };
+    const key = "zephiumBitwardenWebRequestProbe";
+    const poll = () => api?.storage?.local?.get(key).then((stored) => {
+        if (stored?.[key]) {
+            settle(stored[key]);
+            return;
+        }
+        setTimeout(poll, 25);
+    }, (error) => settle({ error: String(error?.message ?? error) }));
+    poll();
+})()"#
 }
 
 fn same_names(actual: &[String], expected: &[&str]) -> bool {
@@ -291,4 +474,46 @@ fn match_pattern_names(patterns: &NSSet<WKWebExtensionMatchPattern>) -> Vec<Stri
 fn write(directory: &Path, name: &str, contents: &str) -> Result<(), String> {
     std::fs::write(directory.join(name), contents)
         .map_err(|error| format!("cannot write Bitwarden contract fixture {name}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_native_permission_contract_keeps_web_request_explicit() {
+        assert!(EXPECTED_NATIVE_REQUIRED_PERMISSIONS.contains(&"webRequest"));
+        assert!(!EXPECTED_NATIVE_REQUIRED_PERMISSIONS.contains(&"webRequestAuthProvider"));
+        assert_eq!(EXPECTED_NATIVE_OPTIONAL_PERMISSIONS, ["nativeMessaging"]);
+    }
+
+    #[test]
+    fn background_probe_matches_bitwarden_http_auth_registration_shape() {
+        let script = web_request_background_probe_script();
+        assert!(script.contains("globalThis.chrome?.webRequest"));
+        assert!(script.contains("webRequest.onAuthRequired.addListener"));
+        assert!(script.contains("{ urls: [\"http://*/*\", \"https://*/*\"] }"));
+        assert!(script.contains("[\"asyncBlocking\"]"));
+        assert!(script.contains("storage?.local?.set"));
+    }
+
+    #[test]
+    fn background_evidence_requires_every_runtime_fact() {
+        let complete = json!({
+            "root": "object",
+            "namespace": "object",
+            "auth": "object",
+            "completed": "object",
+            "asyncBlocking": "accepted",
+        });
+        assert_eq!(validate_web_request_evidence(&complete), Ok(()));
+        for missing in ["root", "namespace", "auth", "completed", "asyncBlocking"] {
+            let mut incomplete = complete.clone();
+            incomplete
+                .as_object_mut()
+                .expect("fixture is an object")
+                .remove(missing);
+            assert!(validate_web_request_evidence(&incomplete).is_err());
+        }
+    }
 }

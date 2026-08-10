@@ -641,11 +641,12 @@ controller, and nonpersistent store is the storage-erasure boundary.
 
 The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live
-WebKit probe proves the platform adapter. A single product-shaped test has not
-yet joined those two evidence chains, and production provisioning remains
-deliberately empty; ordinary release builds therefore expose no extension
-runtime. The remaining release gaps include delegate/API mediation, extension
-UI, quotas, endurance, and the pinned compatibility contract. Older admitted
+WebKit probe proves the platform adapter. The authenticated product probe now
+joins package authority, native ownership, controller activation, the
+Shell-owned window/tab delegate, and real content-script execution. Production
+provisioning remains deliberately empty; ordinary release builds therefore
+expose no extension runtime. The remaining release gaps include the complete
+permission and API matrix, extension UI, quotas, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
@@ -787,6 +788,29 @@ degraded APIs must fail deterministically and be disclosed; they are never
 silently approximated. Permanent security invariants and release gates live in
 [`security-model.md`](security-model.md); implementation sequencing is not part
 of this architecture contract.
+
+The pinned Bitwarden Core `browser-v2026.7.0` contract treats `webRequest` as
+required. Its [exact background implementation](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/autofill/background/web-request.background.ts)
+uses that namespace only for HTTP Basic-auth autofill: `onAuthRequired` is
+registered with `asyncBlocking`, while completion/error observation only
+retires pending request identities. The macOS live gate now proves that WebKit
+parses the permission, exposes `chrome.webRequest`, starts the MV3 background
+worker, and accepts that exact listener-registration shape. Registration is
+not callback semantics: WebKit does not provide the blocking behavior the
+workflow requires, and the upstream `webRequestAuthProvider` declaration is
+filtered by the native parser. The reviewed macOS classification is therefore:
+
+| Bitwarden surface | macOS native classification | Evidence / boundary |
+|---|---|---|
+| MV3 background startup with declared `webRequest` | Compatible | Product-shaped live background registration gate |
+| Non-blocking request observation | Unassessed in Zephium's real tab surface | Public WebKit API exists; a product-tab live callback gate remains required |
+| HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
+| Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |
+
+This is one reviewed slice of the required declaration-by-declaration matrix,
+not a claim that the complete Bitwarden workflow is compatible. Product
+authority remains unprovisioned until every declared authority is classified
+and the exact sealed package/catalog digests are compiled in.
 
 ---
 

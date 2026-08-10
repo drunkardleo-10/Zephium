@@ -954,7 +954,7 @@ fn assert_tab_metadata(
     Ok(())
 }
 
-fn host_for_window(
+pub(super) fn host_for_window(
     window: &objc2_app_kit::NSWindow,
     description: &str,
 ) -> Result<ProbeHostView, String> {
@@ -965,7 +965,7 @@ fn host_for_window(
     })
 }
 
-fn build_profile_view(
+pub(super) fn build_profile_view(
     host: &ProbeHostView,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
 ) -> Result<wry::WebView, String> {
