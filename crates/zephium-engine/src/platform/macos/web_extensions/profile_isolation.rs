@@ -1043,7 +1043,10 @@ pub(super) fn build_profile_view(
         .map_err(|error| format!("cannot construct profile-bound Wry view: {error}"))
 }
 
-fn assert_attached_store(view: &WKWebView, expected: &WKWebsiteDataStore) -> Result<(), String> {
+pub(super) fn assert_attached_store(
+    view: &WKWebView,
+    expected: &WKWebsiteDataStore,
+) -> Result<(), String> {
     let configuration = unsafe { view.configuration() };
     let actual = unsafe { configuration.websiteDataStore() };
     if !std::ptr::eq(Retained::as_ptr(&actual), expected) {

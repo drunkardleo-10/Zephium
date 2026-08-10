@@ -409,6 +409,7 @@ struct ControllerBundle {
 
 struct ProbeTeardown {
     view: Weak<WKWebView>,
+    extension_ui_views: Vec<Weak<WKWebView>>,
     controllers: Vec<Weak<WKWebExtensionController>>,
     contexts: Vec<Weak<WKWebExtensionContext>>,
     lifecycle_drops: Arc<AtomicUsize>,
@@ -438,8 +439,9 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_http_basic_auth_autofill=degraded; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
+            teardown.extension_ui_views.len(),
             teardown.persistent_all_type_removal_callbacks,
             teardown.baseline_script_count,
             teardown.peak_extension_script_delta,
@@ -1137,6 +1139,7 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     set_phase("native-drop-complete");
     Ok(ProbeTeardown {
         view: view_weak,
+        extension_ui_views: bitwarden_contract_teardown.popup_views,
         controllers: controller_weaks,
         contexts: context_weaks,
         lifecycle_drops,
@@ -1743,12 +1746,14 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
 }
 
 fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
+    const EXPECTED_EXTENSION_UI_VIEWS: usize = 2;
     const EXPECTED_PROFILE_VIEWS: usize = 7;
     const EXPECTED_PROFILE_OWNERS: usize = 6;
     const EXPECTED_PROFILE_CONTEXTS: usize = 4;
     const EXPECTED_PROFILE_LIFECYCLE_GROUPS: usize =
         profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS.len();
-    if teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
+    if teardown.extension_ui_views.len() != EXPECTED_EXTENSION_UI_VIEWS
+        || teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
         || teardown.contexts.len() != EXPECTED_NATIVE_CONTEXTS
         || teardown.profile_views.len() != EXPECTED_PROFILE_VIEWS
         || teardown.profile_contexts.len() != EXPECTED_PROFILE_CONTEXTS
@@ -1757,7 +1762,8 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         || teardown.profile_lifecycle_drops.len() != EXPECTED_PROFILE_LIFECYCLE_GROUPS
     {
         return Err(format!(
-            "native teardown inventory mismatch: controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{EXPECTED_NATIVE_CONTEXTS}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
+            "native teardown inventory mismatch: extension_ui_views={}/{EXPECTED_EXTENSION_UI_VIEWS}, controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{EXPECTED_NATIVE_CONTEXTS}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
+            teardown.extension_ui_views.len(),
             teardown.controllers.len(),
             teardown.contexts.len(),
             teardown.profile_views.len(),
@@ -1774,6 +1780,10 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
             .controllers
             .iter()
             .all(|controller| controller.load().is_none());
+        let extension_ui_views_released = teardown
+            .extension_ui_views
+            .iter()
+            .all(|view| view.load().is_none());
         let contexts_released = teardown
             .contexts
             .iter()
@@ -1799,6 +1809,7 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         let profile_lifecycle_released = profile_lifecycle_counts.as_slice()
             == profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS;
         if teardown.view.load().is_none()
+            && extension_ui_views_released
             && controllers_released
             && contexts_released
             && profile_views_released
@@ -1812,8 +1823,10 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
+                "native teardown did not converge: view={}, extension_ui_views_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
                 teardown.view.load().is_none(),
+                teardown.extension_ui_views.iter().filter(|view| view.load().is_none()).count(),
+                teardown.extension_ui_views.len(),
                 teardown.controllers.iter().filter(|controller| controller.load().is_none()).count(),
                 teardown.controllers.len(),
                 teardown.contexts.iter().filter(|context| context.load().is_none()).count(),

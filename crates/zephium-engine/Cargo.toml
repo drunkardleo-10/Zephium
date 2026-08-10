@@ -14,6 +14,7 @@ native-isolation-probes = []
 native-web-extension-probes = [
     "dep:tempfile",
     "objc2-web-kit/WKWebExtension",
+    "objc2-web-kit/WKWebExtensionAction",
     "objc2-web-kit/WKWebExtensionContext",
     "objc2-web-kit/WKWebExtensionController",
     "objc2-web-kit/WKWebExtensionControllerConfiguration",
@@ -88,6 +89,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKUserContentController",
     "WKUserScript",
     "WKWebExtension",
+    "WKWebExtensionAction",
     "WKWebExtensionContext",
     "WKWebExtensionController",
     "WKWebExtensionControllerConfiguration",

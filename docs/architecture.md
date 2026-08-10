@@ -648,6 +648,17 @@ per installed extension lives for the private-session lifetime; its UI views
 may be recreated from that context, while destroying the session context,
 controller, and nonpersistent store is the storage-erasure boundary.
 
+The macOS Bitwarden contract gate additionally resolves its tab-specific
+`WKWebExtensionAction`, verifies label/enabled/popup state, and opens the
+declared popup `WKWebView`. That view must point to the exact extension
+controller and profile `WKWebsiteDataStore`; the gate proves load,
+`closePopup`, reopen, and final wrapper release when the context retires.
+WebKit may cache the wrapper and its last URL after `closePopup`, so production
+holds the process-wide `ExtensionPopup` resource lease only for the presented
+interval and treats the documented close call—not wrapper deallocation—as the
+presentation-resource release boundary. Only one such lease exists inside the
+same hard 48-resource ceiling.
+
 The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live
 WebKit probe proves the platform adapter. The authenticated product probe now
@@ -812,6 +823,7 @@ filtered by the native parser. The reviewed macOS classification is therefore:
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
 | MV3 background startup with declared `webRequest` | Compatible | Product-shaped live background registration gate |
+| Toolbar action and declared popup page | Native-brokered | Native action/popup lifecycle is proven; Shell projection, gesture admission, and overlay presentation remain release work |
 | Non-blocking request observation | Unassessed in Zephium's real tab surface | Public WebKit API exists; a product-tab live callback gate remains required |
 | HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
 | Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |

@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
-use objc2::rc::Weak;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{MainThreadMarker, NSRunLoop, NSSet, NSString};
 use objc2_web_kit::{
@@ -48,6 +48,7 @@ pub(super) struct ContractEvidence {
 pub(super) struct ContractNativeTeardown {
     pub(super) controller: Weak<WKWebExtensionController>,
     pub(super) context: Weak<WKWebExtensionContext>,
+    pub(super) popup_views: Vec<Weak<objc2_web_kit::WKWebView>>,
 }
 
 pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
@@ -210,9 +211,10 @@ pub(super) fn validate_native_grant_round_trip(
 
     let bundle = super::new_nonpersistent_controller(mtm)?;
     let context = super::new_context(extension, "zephium-bitwarden-contract")?;
-    let teardown = ContractNativeTeardown {
+    let mut teardown = ContractNativeTeardown {
         controller: Weak::from_retained(&bundle.controller),
         context: Weak::from_retained(&context),
+        popup_views: Vec::new(),
     };
     let permissions = [
         Permission::ActiveTab,
@@ -298,6 +300,13 @@ pub(super) fn validate_native_grant_round_trip(
     super::load_context(&bundle.controller, &context, "Bitwarden contract")?;
     let web_request = probe_web_request(&context, run_loop, mtm)?;
     validate_web_request_evidence(&web_request)?;
+    teardown.popup_views = validate_action_popup(
+        &context,
+        tab_protocol,
+        &bundle.controller,
+        &bundle._data_store,
+        run_loop,
+    )?;
     super::validate_context_errors(&context, "Bitwarden contract")?;
     // SAFETY: these notifications balance the exact live objects published
     // above while the context can still observe their removal.
@@ -326,6 +335,87 @@ pub(super) fn validate_native_grant_round_trip(
     drop(surface_window);
     drop(bundle);
     Ok(teardown)
+}
+
+fn validate_action_popup(
+    context: &WKWebExtensionContext,
+    tab: &ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+    controller: &WKWebExtensionController,
+    data_store: &objc2_web_kit::WKWebsiteDataStore,
+    run_loop: &NSRunLoop,
+) -> Result<Vec<Weak<objc2_web_kit::WKWebView>>, String> {
+    let action = unsafe { context.actionForTab(Some(tab)) }
+        .ok_or_else(|| "Bitwarden contract exposed no tab action".to_owned())?;
+    let action_context = unsafe { action.webExtensionContext() }
+        .ok_or_else(|| "Bitwarden action omitted its extension context".to_owned())?;
+    let associated_tab = unsafe { action.associatedTab() }
+        .ok_or_else(|| "Bitwarden action omitted its associated tab".to_owned())?;
+    let label = unsafe { action.label() }.to_string();
+    let badge = unsafe { action.badgeText() }.to_string();
+    if !std::ptr::eq(&*action_context, context)
+        || &*associated_tab != tab
+        || label != "Bitwarden"
+        || !badge.is_empty()
+        || !unsafe { action.isEnabled() }
+        || !unsafe { action.presentsPopup() }
+    {
+        return Err(format!(
+            "Bitwarden action metadata drifted: context={}, tab={}, label={label:?}, badge={badge:?}, enabled={}, popup={}",
+            std::ptr::eq(&*action_context, context),
+            &*associated_tab == tab,
+            unsafe { action.isEnabled() },
+            unsafe { action.presentsPopup() },
+        ));
+    }
+
+    let popup = open_action_popup(&action, context, controller, data_store, run_loop)?;
+    let first_popup = Weak::from_retained(&popup);
+
+    // SAFETY: the action and its popup are main-thread-only retained objects.
+    // WebKit requires explicit closure for a custom host so the popup document
+    // and its web process can be reclaimed immediately after dismissal.
+    unsafe { action.closePopup() };
+    drop(popup);
+    super::drain_run_loop_once(run_loop);
+    let reopened = open_action_popup(&action, context, controller, data_store, run_loop)?;
+    let reopened_popup = Weak::from_retained(&reopened);
+    unsafe { action.closePopup() };
+    drop(reopened);
+    drop(associated_tab);
+    drop(action_context);
+    drop(action);
+    eprintln!("native-probe-bitwarden-action-popup: open-close-reopen=passed");
+    Ok(vec![first_popup, reopened_popup])
+}
+
+fn open_action_popup(
+    action: &objc2_web_kit::WKWebExtensionAction,
+    context: &WKWebExtensionContext,
+    controller: &WKWebExtensionController,
+    data_store: &objc2_web_kit::WKWebsiteDataStore,
+    run_loop: &NSRunLoop,
+) -> Result<Retained<objc2_web_kit::WKWebView>, String> {
+    let popup = unsafe { action.popupWebView() }
+        .ok_or_else(|| "Bitwarden action declared a popup but returned no WKWebView".to_owned())?;
+    super::assert_attached_controller(&popup, controller)?;
+    super::profile_isolation::assert_attached_store(&popup, data_store)?;
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        let title = unsafe { popup.title() }.map(|title| title.to_string());
+        if title.as_deref() == Some("popup") {
+            return Ok(popup);
+        }
+        super::validate_context_errors(context, "Bitwarden action popup")?;
+        if Instant::now() >= deadline {
+            let url = unsafe { popup.URL() }
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string());
+            return Err(format!(
+                "Bitwarden action popup did not load: title={title:?}, url={url:?}"
+            ));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
 }
 
 fn probe_web_request(
