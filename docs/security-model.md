@@ -924,9 +924,11 @@ These inherited properties must not be overstated:
   disabled configuration therefore fails closed, but the public property is not an
   attestation of the confinement actually applied to a spawned process. The newest
   stable release reviewed in this pass is 2.52.5; the enforced 2.52.5 boundary is the
-  first release fixed for WSA-2026-0004. CI/release review expires after
-  August 9, 2026; runtime reports that expiry without disabling an otherwise
-  admitted engine.
+  first release fixed for WSA-2026-0004. The official advisory index and
+  release feed were re-reviewed on August 10, 2026; 2.53.90 remains an
+  odd-minor development release, so the stable boundary is unchanged.
+  CI/release review expires after September 9, 2026; runtime reports that
+  expiry without disabling an otherwise admitted engine.
 - Both privileged WebViews request non-persistent contexts. Their native permission and
   file-chooser denial handlers must install successfully, and the native context is
   checked to be ephemeral, or startup aborts. The vendored Wry adapter separately

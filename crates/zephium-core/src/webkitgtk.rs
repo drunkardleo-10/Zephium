@@ -29,10 +29,14 @@ pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-07-09";
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
     "https://webkitgtk.org/2026/07/09/webkitgtk2.52.5-released.html";
 
+/// Re-reviewed on 2026-08-10 against the official security-advisory index and
+/// release feed. WSA-2026-0004 and WebKitGTK 2.52.5 remain the newest stable
+/// security boundary; 2.53.90 is an odd-minor development release.
+///
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-09";
-/// 2026-08-10T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_786_320_000;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-09";
+/// 2026-09-10T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_788_998_400;
 
 /// Environment switches that can disable/replace renderer confinement,
 /// expose a remote inspector, pause a child for a debugger, or turn off
