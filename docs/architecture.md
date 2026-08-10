@@ -585,6 +585,15 @@ own profile surface. The probe retires each namespace independently, reopens
 both to verify zero persistent extension bytes, and requires every native
 view/controller/context/store and routing object weak reference to release.
 
+The delegate always enumerates the complete logical tab set, including
+discarded tabs, but it returns no `WKWebView` for a non-resident tab. That
+callback cannot carry a typed error, so the refusal increments one saturating,
+URL-free per-profile diagnostic instead of inventing a generic mutation
+failure. The native gate verifies that the physical-view resolver is never
+called for the discarded tab and that the diagnostic advances. Extension
+enumeration therefore cannot resurrect a renderer or defeat §7's memory
+policy.
+
 Native grant replacement is an exact, bounded main-thread operation. The pure
 grant compiler supplies the complete allowed API/host set; the adapter clears
 all four WebKit permission dictionaries, revokes every bounded prior key

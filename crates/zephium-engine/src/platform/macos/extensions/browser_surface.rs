@@ -48,6 +48,33 @@ pub(super) enum BrowserSurfaceError {
     IntegrityFailed,
 }
 
+/// Bounded, telemetry-free counters for native requests that cannot be
+/// represented by Zephium's logical-tab residency model.
+#[cfg(any(test, feature = "native-web-extension-probes"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BrowserSurfaceDiagnostics {
+    discarded_tab_webview_refusals: u64,
+}
+
+#[cfg(any(test, feature = "native-web-extension-probes"))]
+impl BrowserSurfaceDiagnostics {
+    pub(crate) const fn discarded_tab_webview_refusals(self) -> u64 {
+        self.discarded_tab_webview_refusals
+    }
+}
+
+fn resolve_resident_webview(
+    resident: bool,
+    broker: &BrowserRequestBroker,
+    load: impl FnOnce() -> Option<Retained<WKWebView>>,
+) -> Option<Retained<WKWebView>> {
+    if !resident {
+        broker.record_discarded_tab_webview_refusal();
+        return None;
+    }
+    load()
+}
+
 struct BrowserTabIvars {
     // ItemId is 16-byte aligned. Keep it behind a pointer-sized field because
     // objc2's dynamic class registrar supports ivar alignments only through 8.
@@ -94,11 +121,9 @@ define_class!(
             &self,
             _context: &WKWebExtensionContext,
         ) -> Option<Retained<WKWebView>> {
-            self.ivars()
-                .resident
-                .get()
-                .then(|| self.ivars().webview.borrow().as_ref().and_then(Weak::load))
-                .flatten()
+            resolve_resident_webview(self.ivars().resident.get(), &self.ivars().broker, || {
+                self.ivars().webview.borrow().as_ref().and_then(Weak::load)
+            })
         }
 
         #[unsafe(method_id(titleForWebExtensionContext:))]
@@ -1017,6 +1042,13 @@ impl MacosExtensionBrowserSurfaceHost {
     }
 
     #[cfg(feature = "native-web-extension-probes")]
+    pub(super) fn diagnostics(&self) -> BrowserSurfaceDiagnostics {
+        BrowserSurfaceDiagnostics {
+            discarded_tab_webview_refusals: self.broker.discarded_tab_webview_refusals(),
+        }
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
     pub(super) fn probe_identity(
         &self,
         window: WindowId,
@@ -1075,5 +1107,33 @@ mod tests {
         assert_main_thread_only::<BrowserTab>();
         assert_main_thread_only::<BrowserWindow>();
         assert_main_thread_only::<BrowserControllerDelegate>();
+    }
+
+    #[test]
+    fn discarded_tab_refusal_never_resolves_a_native_view() {
+        let broker =
+            BrowserRequestBroker::new(ProfileId::from(1), None, Rc::new(BrowserRequestPool::new()));
+        let resolver_called = Cell::new(false);
+        let resolved = resolve_resident_webview(false, &broker, || {
+            resolver_called.set(true);
+            None
+        });
+        assert!(resolved.is_none());
+        assert!(!resolver_called.get());
+        assert_eq!(broker.discarded_tab_webview_refusals(), 1);
+    }
+
+    #[test]
+    fn resident_tab_uses_the_existing_view_resolver_without_false_refusal() {
+        let broker =
+            BrowserRequestBroker::new(ProfileId::from(1), None, Rc::new(BrowserRequestPool::new()));
+        let resolver_called = Cell::new(false);
+        let resolved = resolve_resident_webview(true, &broker, || {
+            resolver_called.set(true);
+            None
+        });
+        assert!(resolved.is_none());
+        assert!(resolver_called.get());
+        assert_eq!(broker.discarded_tab_webview_refusals(), 0);
     }
 }

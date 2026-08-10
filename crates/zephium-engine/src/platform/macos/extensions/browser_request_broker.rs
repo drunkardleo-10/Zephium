@@ -87,6 +87,7 @@ pub(super) struct BrowserRequestBroker {
     next_request: Cell<u64>,
     pending: RefCell<HashMap<ExtensionBrowserRequestId, PendingRequest>>,
     sealed: Cell<bool>,
+    discarded_tab_webview_refusals: Cell<u64>,
 }
 
 impl BrowserRequestBroker {
@@ -103,7 +104,18 @@ impl BrowserRequestBroker {
             next_request: Cell::new(1),
             pending: RefCell::new(HashMap::new()),
             sealed: Cell::new(false),
+            discarded_tab_webview_refusals: Cell::new(0),
         })
+    }
+
+    pub(super) fn record_discarded_tab_webview_refusal(&self) {
+        self.discarded_tab_webview_refusals
+            .set(self.discarded_tab_webview_refusals.get().saturating_add(1));
+    }
+
+    #[cfg(any(test, feature = "native-web-extension-probes"))]
+    pub(super) fn discarded_tab_webview_refusals(&self) -> u64 {
+        self.discarded_tab_webview_refusals.get()
     }
 
     pub(super) fn bind_controller(&self, controller: &Retained<WKWebExtensionController>) {
@@ -400,6 +412,15 @@ mod tests {
             pool.release();
         }
         assert_eq!(pool.pending(), 0);
+    }
+
+    #[test]
+    fn discarded_tab_diagnostic_saturates() {
+        let broker =
+            BrowserRequestBroker::new(ProfileId::from(1), None, Rc::new(BrowserRequestPool::new()));
+        broker.discarded_tab_webview_refusals.set(u64::MAX);
+        broker.record_discarded_tab_webview_refusal();
+        assert_eq!(broker.discarded_tab_webview_refusals(), u64::MAX);
     }
 
     #[test]

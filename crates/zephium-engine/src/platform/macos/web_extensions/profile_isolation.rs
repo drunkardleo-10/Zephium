@@ -46,6 +46,7 @@ const COOKIE_PATH: &str = "/";
 const COOKIE_VALUE_A: &str = "regular-a";
 const COOKIE_VALUE_B: &str = "regular-b";
 const COOKIE_VALUE_PRIVATE: &str = "private";
+const MUTATION_TARGET_URL: &str = "https://profile-a.invalid/updated";
 const EXPECTED_REGULAR_PROFILES: usize = 2;
 const EXPECTED_NATIVE_OWNERS_PER_GENERATION: usize = 3;
 pub(super) const EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS: [usize; 4] = [1, 1, 3, 3];
@@ -486,10 +487,75 @@ impl ProfileGeneration {
                 &context_b,
                 native_a.clone(),
             )?;
+            let diagnostics_before = self
+                .registry
+                .probe_browser_surface_diagnostics(profile_a)
+                .map_err(|error| format!("cannot inspect browser-surface diagnostics: {error}"))?
+                .ok_or_else(|| "profile A browser-surface diagnostics are absent".to_owned())?;
+            let discarded_surface_a =
+                ExtensionBrowserSurface::new(
+                    profile_a,
+                    updated_surface_a
+                        .generation()
+                        .next()
+                        .ok_or_else(|| "browser-surface generation exhausted".to_owned())?,
+                    Some(WINDOW_A),
+                    vec![ExtensionBrowserWindow::new(
+                        WINDOW_A,
+                        false,
+                        Some(item_a),
+                        vec![ExtensionBrowserTab::from_snapshot(
+                            updated_surface_a.tabs().next(),
+                            item_a,
+                            false,
+                            "Profile A updated",
+                            Some(&url::Url::parse(MUTATION_TARGET_URL).map_err(|error| {
+                                format!("cannot parse discarded-tab URL: {error}")
+                            })?),
+                            false,
+                            true,
+                        )
+                        .map_err(|error| format!("cannot build discarded probe tab: {error:?}"))?],
+                    )
+                    .map_err(|error| format!("cannot build discarded probe window: {error:?}"))?],
+                )
+                .map_err(|error| format!("cannot build discarded probe surface: {error:?}"))?;
+            let resolver_calls = Cell::new(0_usize);
+            self.registry
+                .apply_browser_surface(&discarded_surface_a, |_| {
+                    resolver_calls.set(resolver_calls.get() + 1);
+                    Some(native_a.clone())
+                })
+                .map_err(|error| format!("cannot publish discarded browser surface: {error}"))?;
+            if resolver_calls.get() != 0 {
+                return Err("discarded surface invoked the native-view resolver".into());
+            }
+            // SAFETY: `tab_a` remains the exact main-thread delegate object in
+            // the loaded profile-A context. This callback has no NSError
+            // channel; nil plus the bounded diagnostic is the truthful result.
+            let discarded_view = unsafe { tab_a.webViewForWebExtensionContext(&context_a) };
+            let diagnostics_after = self
+                .registry
+                .probe_browser_surface_diagnostics(profile_a)
+                .map_err(|error| format!("cannot inspect discarded-tab diagnostics: {error}"))?
+                .ok_or_else(|| "profile A discarded-tab diagnostics are absent".to_owned())?;
+            if discarded_view.is_some()
+                || diagnostics_after.discarded_tab_webview_refusals()
+                    <= diagnostics_before.discarded_tab_webview_refusals()
+            {
+                return Err(format!(
+                    "discarded-tab refusal was not observable: native_view={}, before={}, after={}",
+                    discarded_view.is_some(),
+                    diagnostics_before.discarded_tab_webview_refusals(),
+                    diagnostics_after.discarded_tab_webview_refusals(),
+                ));
+            }
             let empty_a = ExtensionBrowserSurface::new(
                 profile_a,
-                ExtensionBrowserSurfaceGeneration::new(updated_surface_a.generation().get() + 1)
-                    .unwrap(),
+                discarded_surface_a
+                    .generation()
+                    .next()
+                    .ok_or_else(|| "browser-surface generation exhausted".to_owned())?,
                 None,
                 Vec::new(),
             )
@@ -571,8 +637,7 @@ impl ProfileGeneration {
         foreign_context: &WKWebExtensionContext,
         webview: Retained<WKWebView>,
     ) -> Result<ExtensionBrowserSurface, String> {
-        let target = "https://profile-a.invalid/updated";
-        let target_url = NSURL::URLWithString(&NSString::from_str(target))
+        let target_url = NSURL::URLWithString(&NSString::from_str(MUTATION_TARGET_URL))
             .ok_or_else(|| "cannot construct browser-mutation probe URL".to_owned())?;
         let completion_count = Rc::new(Cell::new(0));
         let completion_error = Rc::new(Cell::new(false));
@@ -596,7 +661,7 @@ impl ProfileGeneration {
             || request.action()
                 != &(ExtensionBrowserRequestAction::LoadTabUrl {
                     tab: item,
-                    url: Arc::from(target),
+                    url: Arc::from(MUTATION_TARGET_URL),
                 })
         {
             return Err(format!(
@@ -618,7 +683,7 @@ impl ProfileGeneration {
                     true,
                     "Profile A updated",
                     Some(
-                        &url::Url::parse(target)
+                        &url::Url::parse(MUTATION_TARGET_URL)
                             .map_err(|error| format!("cannot parse mutation URL: {error}"))?,
                     ),
                     false,

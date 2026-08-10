@@ -29,6 +29,8 @@ use zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit;
 
 use super::browser_request_broker::{BrowserRequestPool, BrowserRequestSettlementOutcome};
 #[cfg(feature = "native-web-extension-probes")]
+use super::browser_surface::BrowserSurfaceDiagnostics;
+#[cfg(feature = "native-web-extension-probes")]
 use super::browser_surface::ProbeBrowserSurfaceIdentity;
 use super::browser_surface::{BrowserSurfaceError, MacosExtensionBrowserSurfaceHost};
 use super::erasure::{
@@ -445,6 +447,20 @@ impl PersistentControllerRegistry {
         };
         validate_entry_identity(entry)?;
         Ok(Some(entry.browser_surface.probe_lifecycle_drops()))
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(crate) fn probe_browser_surface_diagnostics(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<Option<BrowserSurfaceDiagnostics>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(Some(entry.browser_surface.diagnostics()))
     }
 
     /// Updates only the physical-view binding of one already-projected tab.
