@@ -589,6 +589,18 @@ pub trait Engine {
     fn set_extension_browser_surface(&self, _surface: ExtensionBrowserSurface) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Requests one complete effective toolbar-action cohort for the exact
+    /// published logical tab generation. The terminal result arrives as
+    /// [`EngineEvent::ExtensionActionsSnapshotSettled`]. This query may read
+    /// native action metadata but must never create a tab or popup webview.
+    fn request_extension_actions(
+        &self,
+        _profile: ProfileId,
+        _tab: ItemId,
+        _surface_generation: crate::extensions::ExtensionBrowserSurfaceGeneration,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Settles one exact native WebExtension browser mutation. The native
     /// adapter retains the platform completion handler behind the
     /// `(profile, request)` correlation pair and invokes it exactly once.
@@ -754,6 +766,13 @@ pub enum EngineEvent {
     /// [`Engine::settle_extension_browser_request`].
     ExtensionBrowserRequested {
         request: ExtensionBrowserRequest,
+    },
+    /// Terminal response to one exact effective action-cohort query.
+    ExtensionActionsSnapshotSettled {
+        profile: ProfileId,
+        tab: ItemId,
+        surface_generation: crate::extensions::ExtensionBrowserSurfaceGeneration,
+        settlement: crate::extensions::ExtensionActionSnapshotSettlement,
     },
     TitleChanged {
         id: ItemId,

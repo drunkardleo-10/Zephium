@@ -110,6 +110,37 @@ impl Shell {
             EngineEvent::ExtensionBrowserRequested { request } => {
                 self.on_extension_browser_request(request)
             }
+            EngineEvent::ExtensionActionsSnapshotSettled {
+                profile,
+                tab,
+                surface_generation,
+                settlement,
+            } => {
+                let observation = self.extension_actions.observe(
+                    self.extension_browser_surfaces.published_surface(profile),
+                    profile,
+                    tab,
+                    surface_generation,
+                    settlement,
+                );
+                if matches!(
+                    observation,
+                    extension_actions::ExtensionActionObservation::Retained
+                ) {
+                    crate::diagnostic!(
+                        "extensions: native toolbar action refresh failed; retaining prior state"
+                    );
+                }
+                if matches!(
+                    observation,
+                    extension_actions::ExtensionActionObservation::Contradictory
+                        | extension_actions::ExtensionActionObservation::CapacityExceeded
+                ) {
+                    crate::diagnostic!(
+                        "extensions: contradictory or over-capacity toolbar action settlement"
+                    );
+                }
+            }
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
                 // stale or malformed callback mutate topology, swap tabs, or
@@ -324,6 +355,7 @@ impl Shell {
             // Requests must reach their handler even during retirement so the
             // retained native completion receives an explicit rejection.
             EngineEvent::ExtensionBrowserRequested { .. } => None,
+            EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::SplitChanged { window, .. } => {
                 self.windows.get(*window).map(|window| window.profile)
             }

@@ -4,6 +4,7 @@ mod blocker;
 mod bootstrap;
 mod effects;
 mod engine_events;
+mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod favicons;
@@ -21,6 +22,7 @@ mod window_layout;
 mod zoom;
 
 use effects::{mutation_result, operation_result, NativeWork};
+use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
@@ -166,6 +168,7 @@ pub struct Shell {
     extension_service: Option<ExtensionLifecycle>,
     extension_startup_ready: bool,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
+    extension_actions: ExtensionActionState,
     /// Any terminal extension lifecycle failure permanently closes bootstrap
     /// and profile-deletion progress for this process while the desktop
     /// composition root converges on orderly shutdown.
@@ -367,6 +370,7 @@ impl Shell {
             extension_service: Some(extension_service),
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
+            extension_actions: ExtensionActionState::default(),
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
@@ -638,6 +642,10 @@ impl Shell {
                     crate::diagnostic!(
                         "extensions: maintenance could not reconcile browser metadata"
                     );
+                }
+                let extension_actions = self.retry_extension_actions();
+                if extension_actions.rejected {
+                    crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
                 if self.maintain_views() {
                     self.project_items();

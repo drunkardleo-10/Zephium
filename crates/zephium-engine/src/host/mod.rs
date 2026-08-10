@@ -2,6 +2,8 @@ mod construction;
 mod content_rules;
 mod discard;
 mod dispatch;
+#[cfg(target_os = "macos")]
+mod extension_action;
 mod extension_browser_surface;
 pub(crate) mod extension_runtime;
 mod extensions;

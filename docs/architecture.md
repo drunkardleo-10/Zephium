@@ -659,6 +659,23 @@ interval and treats the documented close call—not wrapper deallocation—as th
 presentation-resource release boundary. Only one such lease exists inside the
 same hard 48-resource ceiling.
 
+Toolbar projection is a replaceable Shell-owned cohort keyed by the exact
+profile, logical tab, browser-surface generation, runtime generation, and
+monotonic native action revision. The engine enumerates only operation-authority
+published runtimes in stable native `Owned` state, resolves the already-created
+logical `WKWebExtensionTab`, and calls `actionForTab:` without reading the tab's
+weak webview or accessing `popupWebView`. Labels, badges, and future icon pixels
+cross the boundary only after fixed byte/dimension validation; unchanged
+effective state reuses its prior revision. An applied empty cohort removes stale
+buttons, while a rejected or stale refresh retains the last known-good cohort.
+Scheduled reads remain in a fixed-size pending set until an exact applied
+settlement arrives; the existing low-frequency maintenance tick repairs a
+rejected or lost settlement without adding a timer or idle wakeup.
+Profile retirement erases both the logical surface and its action cohort. This
+read path is not invocation authority: trusted gesture admission, `activeTab`
+joining, icon rasterization, and overlay popup presentation remain separate
+gates.
+
 The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live
 WebKit probe proves the platform adapter. The authenticated product probe now
@@ -823,7 +840,7 @@ filtered by the native parser. The reviewed macOS classification is therefore:
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
 | MV3 background startup with declared `webRequest` | Compatible | Product-shaped live background registration gate |
-| Toolbar action and declared popup page | Native-brokered | Native action/popup lifecycle is proven; Shell projection, gesture admission, and overlay presentation remain release work |
+| Toolbar action and declared popup page | Native-brokered | Native lifecycle and bounded Shell action read path are implemented; icon projection, gesture admission, and overlay presentation remain release work |
 | Non-blocking request observation | Unassessed in Zephium's real tab surface | Public WebKit API exists; a product-tab live callback gate remains required |
 | HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
 | Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |

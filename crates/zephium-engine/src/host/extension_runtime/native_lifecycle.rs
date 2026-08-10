@@ -1010,6 +1010,26 @@ impl NativeLifecycleSlot {
         Ok(self.platform_owners.retained_macos_mut().map(audit))
     }
 
+    /// Borrows the exact retained macOS owner only while native ownership is
+    /// in its stable `Owned` state. Product operations never borrow through a
+    /// pending activation, retirement, or reconciliation transition.
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_owned_macos_owner<T>(
+        &mut self,
+        operation: impl FnOnce(&mut MacosNativeRuntimeOwner) -> T,
+    ) -> Result<Option<T>, NativeBeginError> {
+        if self.platform_owners.is_quarantined()
+            || !matches!(
+                self.state,
+                TypedNativeState::Activation(ActivationState::Owned(_))
+                    | TypedNativeState::Recovery(RecoveryState::Owned(_))
+            )
+        {
+            return Err(NativeBeginError::WrongState);
+        }
+        Ok(self.platform_owners.retained_macos_mut().map(operation))
+    }
+
     /// Retains every owner returned by a future activation disposition and
     /// degrades the exact lifecycle to uncertainty. `#[non_exhaustive]` API
     /// evolution must never make the wildcard arm destroy a native owner.

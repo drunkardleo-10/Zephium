@@ -262,6 +262,21 @@ pub(crate) struct MacosNativeRuntimeOwner {
     context: Retained<WKWebExtensionContext>,
     controller: Retained<WKWebExtensionController>,
     applied_grants: Option<AppliedMacosGrantSet>,
+    action_projection: Option<Box<ActionProjectionCache>>,
+}
+
+struct ActionProjectionCache {
+    next_revision: Option<u64>,
+    last: Option<zephium_core::extensions::ExtensionActionState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MacosNativeActionFailure {
+    OwnerInvalid,
+    ActionUnavailable,
+    ContextMismatch,
+    InvalidProjection,
+    RevisionExhausted,
 }
 
 impl MacosNativeRuntimeOwner {
@@ -303,6 +318,95 @@ impl MacosNativeRuntimeOwner {
             Ok(audit) => MacosNativeRuntimeReconciliation::Absent(audit),
             Err(failure) => MacosNativeRuntimeReconciliation::StillUncertain(failure),
         }
+    }
+
+    /// Reads the effective action for one exact already-published logical tab.
+    /// No popup webview or content renderer is requested by this path.
+    pub(crate) fn action_state_for_tab(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        tab_id: zephium_core::ids::ItemId,
+        tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+    ) -> Result<zephium_core::extensions::ExtensionActionState, MacosNativeActionFailure> {
+        use objc2_foundation::NSUTF8StringEncoding;
+        use zephium_core::extensions::{
+            ExtensionActionRevision, ExtensionActionScope, ExtensionActionState,
+            MAX_EXTENSION_ACTION_BADGE_BYTES, MAX_EXTENSION_ACTION_LABEL_BYTES,
+        };
+
+        validate_loaded_owner_membership(self)
+            .map_err(|_| MacosNativeActionFailure::OwnerInvalid)?;
+        let action = unsafe { self.context.actionForTab(Some(tab)) }
+            .ok_or(MacosNativeActionFailure::ActionUnavailable)?;
+        let action_context = unsafe { action.webExtensionContext() }
+            .ok_or(MacosNativeActionFailure::ContextMismatch)?;
+        let associated_tab =
+            unsafe { action.associatedTab() }.ok_or(MacosNativeActionFailure::ContextMismatch)?;
+        if !std::ptr::eq(&*action_context, &*self.context) || &*associated_tab != tab {
+            return Err(MacosNativeActionFailure::ContextMismatch);
+        }
+
+        let label = unsafe { action.label() };
+        let badge = unsafe { action.badgeText() };
+        if label.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) > MAX_EXTENSION_ACTION_LABEL_BYTES
+            || badge.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)
+                > MAX_EXTENSION_ACTION_BADGE_BYTES
+        {
+            return Err(MacosNativeActionFailure::InvalidProjection);
+        }
+        let projection = self.action_projection.get_or_insert_with(|| {
+            Box::new(ActionProjectionCache {
+                next_revision: Some(1),
+                last: None,
+            })
+        });
+        // An exhausted counter must still permit an unchanged read. Use the
+        // cached revision as a comparison-only candidate, then reject only if
+        // WebKit actually presents a new value that cannot be numbered.
+        let (revision, revision_exhausted) = match projection.next_revision {
+            Some(next) => (
+                ExtensionActionRevision::new(next)
+                    .ok_or(MacosNativeActionFailure::RevisionExhausted)?,
+                false,
+            ),
+            None => (
+                projection
+                    .last
+                    .as_ref()
+                    .map(zephium_core::extensions::ExtensionActionState::revision)
+                    .ok_or(MacosNativeActionFailure::RevisionExhausted)?,
+                true,
+            ),
+        };
+        let state = objc2::rc::autoreleasepool(|pool| {
+            let label = unsafe { label.to_str(pool) };
+            let badge = unsafe { badge.to_str(pool) };
+            ExtensionActionState::new(
+                runtime,
+                ExtensionActionScope::Tab(tab_id),
+                revision,
+                label,
+                badge,
+                None,
+                unsafe { action.isEnabled() },
+                unsafe { action.presentsPopup() },
+                unsafe { action.hasUnreadBadgeText() },
+            )
+        })
+        .map_err(|_| MacosNativeActionFailure::InvalidProjection)?;
+        if let Some(cached) = projection
+            .last
+            .as_ref()
+            .filter(|cached| cached.same_presentation(&state))
+        {
+            return Ok(cached.clone());
+        }
+        if revision_exhausted {
+            return Err(MacosNativeActionFailure::RevisionExhausted);
+        }
+        projection.next_revision = revision.get().checked_add(1);
+        projection.last = Some(state.clone());
+        Ok(state)
     }
 
     fn prove_absence(
@@ -562,6 +666,7 @@ fn construct_loaded_owner(
         context,
         controller,
         applied_grants: None,
+        action_projection: None,
     };
 
     if let Err(failure) = set_and_verify_identity(&owner.context, expected_owner_id) {

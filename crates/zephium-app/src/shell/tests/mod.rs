@@ -326,6 +326,7 @@ pub(super) fn extension_lifecycle_with_startup_outcomes(
 pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
+    extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
     extension_browser_settlements: Mutex<
         Vec<(
             ProfileId,
@@ -417,6 +418,12 @@ impl FakeEngine {
         self.extension_browser_surfaces.lock().unwrap().clone()
     }
 
+    fn extension_action_requests(
+        &self,
+    ) -> Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)> {
+        self.extension_action_requests.lock().unwrap().clone()
+    }
+
     fn extension_browser_settlements(
         &self,
     ) -> Vec<(
@@ -480,6 +487,21 @@ impl Engine for FakeEngine {
                 .lock()
                 .unwrap()
                 .push(surface);
+        }
+        admission
+    }
+    fn request_extension_actions(
+        &self,
+        profile: ProfileId,
+        tab: ItemId,
+        generation: ExtensionBrowserSurfaceGeneration,
+    ) -> NativeDispatch {
+        let admission = self.native_admission();
+        if admission == NativeDispatch::Scheduled {
+            self.extension_action_requests
+                .lock()
+                .unwrap()
+                .push((profile, tab, generation));
         }
         admission
     }
@@ -1405,6 +1427,7 @@ mod actor_integration;
 mod blocker;
 mod bootstrap;
 mod engine_events;
+mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod favicons;

@@ -28,7 +28,7 @@ pub(crate) use grants::MacosNativeApiPermission;
 pub(crate) use native_runtime::begin_probe_native_runtime_activation;
 pub(crate) use native_runtime::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    MacosNativeRuntimeActivation, MacosNativeRuntimeFailure, MacosNativeRuntimeOwner,
-    MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
+    MacosNativeActionFailure, MacosNativeRuntimeActivation, MacosNativeRuntimeFailure,
+    MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
     MacosNativeRuntimeRetirement,
 };

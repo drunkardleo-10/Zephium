@@ -7,6 +7,7 @@
 //! were authenticated or remain available. A package-authority adapter must
 //! establish that proof and bind backend-native identifiers before activation.
 
+mod action;
 mod browser_surface;
 mod cohort;
 mod grants;
@@ -20,6 +21,15 @@ mod package_pin;
 mod runtime;
 mod transient;
 
+pub use action::{
+    ExtensionActionError, ExtensionActionIcon, ExtensionActionRejection, ExtensionActionRequest,
+    ExtensionActionRequestId, ExtensionActionRevision, ExtensionActionScope,
+    ExtensionActionSettlement, ExtensionActionSnapshot, ExtensionActionSnapshotSettlement,
+    ExtensionActionState, ExtensionPopupAnchor, EXTENSION_ACTION_ICON_HEIGHT,
+    EXTENSION_ACTION_ICON_RGBA_BYTES, EXTENSION_ACTION_ICON_WIDTH,
+    MAX_EXTENSION_ACTION_BADGE_BYTES, MAX_EXTENSION_ACTION_LABEL_BYTES, MAX_EXTENSION_POPUP_HEIGHT,
+    MAX_EXTENSION_POPUP_WIDTH, MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH,
+};
 pub use browser_surface::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestError,
     ExtensionBrowserRequestId, ExtensionBrowserRequestRejection, ExtensionBrowserRequestResult,

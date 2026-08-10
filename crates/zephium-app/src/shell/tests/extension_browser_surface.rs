@@ -1,6 +1,6 @@
 use super::*;
 
-fn install_profile(shell: &mut Shell, profile: ProfileId, spaces: &[SpaceId]) {
+pub(super) fn install_profile(shell: &mut Shell, profile: ProfileId, spaces: &[SpaceId]) {
     assert!(shell.profiles.insert(Profile {
         id: profile,
         name: "Extensions".into(),
@@ -16,7 +16,7 @@ fn install_profile(shell: &mut Shell, profile: ProfileId, spaces: &[SpaceId]) {
     }
 }
 
-fn activate_profile(shell: &mut Shell, profile: ProfileId) {
+pub(super) fn activate_profile(shell: &mut Shell, profile: ProfileId) {
     let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
     assert!(profiles.try_insert(profile));
     assert!(shell.extension_browser_surfaces.activate(profiles));
@@ -80,6 +80,10 @@ fn startup_profile_projection_drives_the_ordinary_shell_bootstrap_path() {
     assert!(surface_call < create_call, "native calls were {calls:?}");
     let surfaces = engine.extension_browser_surfaces();
     assert_eq!(surfaces.len(), 1);
+    assert_eq!(
+        engine.extension_action_requests(),
+        vec![(profile, item, ExtensionBrowserSurfaceGeneration::INITIAL)]
+    );
     assert_eq!(surfaces[0].profile(), profile);
     assert_eq!(surfaces[0].windows()[0].active(), Some(item));
     let tab = &surfaces[0].windows()[0].tabs()[0];

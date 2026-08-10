@@ -61,6 +61,10 @@ impl ExtensionBrowserSurfaceState {
         self.published.get(&profile)
     }
 
+    pub(super) fn published_surface(&self, profile: ProfileId) -> Option<&ExtensionBrowserSurface> {
+        self.published(profile)
+    }
+
     fn record_published(&mut self, surface: ExtensionBrowserSurface) {
         self.retry_profiles.remove(surface.profile());
         self.published.insert(surface.profile(), surface);
@@ -156,7 +160,13 @@ impl Shell {
             settlement.native.record(admission);
             match admission {
                 NativeDispatch::Scheduled => {
-                    self.extension_browser_surfaces.record_published(surface)
+                    self.extension_browser_surfaces.record_published(surface);
+                    let actions = self.refresh_extension_actions(profile);
+                    if actions.rejected {
+                        crate::diagnostic!(
+                            "extensions: toolbar action refresh awaits maintenance retry"
+                        );
+                    }
                 }
                 NativeDispatch::Rejected => {
                     if !self.extension_browser_surfaces.record_retry(profile) {

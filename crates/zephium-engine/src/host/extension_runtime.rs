@@ -1969,6 +1969,145 @@ impl ExtensionRuntimeRegistry {
             .map_err(|reason| self.transition_error(reason))
     }
 
+    /// Returns the exact published runtime fingerprints for one profile. The
+    /// bounded clone contains no package bytes or native object and is used
+    /// only to join Shell action projection with stable native ownership.
+    #[cfg(target_os = "macos")]
+    pub(super) fn published_runtimes(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<Vec<ExtensionRuntimeFingerprint>, ExtensionRuntimeHostBindError> {
+        if self.sealed {
+            return Err(ExtensionRuntimeHostBindError::Sealed);
+        }
+        if self.invariant_failed {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let mut runtimes = Vec::with_capacity(
+            self.entries
+                .len()
+                .min(zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES),
+        );
+        let mut invariant_failed = false;
+        for entry in &self.entries {
+            let ReservationBinding::Activation { grants, .. } = &entry.reservation.binding else {
+                continue;
+            };
+            if grants.runtime().instance().profile() != profile {
+                continue;
+            }
+            let state = match entry.reservation.authority_state.try_lock() {
+                Ok(state) => state,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ExtensionRuntimeHostBindError::Unavailable);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    entry
+                        .reservation
+                        .gate
+                        .inner
+                        .invariant_failed
+                        .store(true, Ordering::Release);
+                    invariant_failed = true;
+                    break;
+                }
+            };
+            let published = matches!(
+                &*state,
+                ReservationAuthorityState::Published {
+                    authority: Some(authority),
+                    ..
+                } if authority.fingerprint() == grants.runtime()
+            );
+            drop(state);
+            if published {
+                runtimes.push(grants.runtime().clone());
+            }
+        }
+        let runtimes_are_unique = runtimes.iter().enumerate().all(|(index, runtime)| {
+            runtimes[index + 1..]
+                .iter()
+                .all(|other| other.instance() != runtime.instance())
+        });
+        if invariant_failed
+            || !runtimes_are_unique
+            || runtimes.len()
+                > zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+        {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        Ok(runtimes)
+    }
+
+    /// Runs one operation against the stable native owner authenticated by a
+    /// complete published runtime fingerprint.
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_owned_macos_runtime<T>(
+        &mut self,
+        runtime: &ExtensionRuntimeFingerprint,
+        operation: impl FnOnce(&mut crate::platform::imp::MacosNativeRuntimeOwner) -> T,
+    ) -> Result<Option<T>, ExtensionRuntimeHostBindError> {
+        if self.sealed {
+            return Err(ExtensionRuntimeHostBindError::Sealed);
+        }
+        let mut matching = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(
+                    &entry.reservation.binding,
+                    ReservationBinding::Activation { grants, .. } if grants.runtime() == runtime
+                )
+                .then_some(index)
+            });
+        let Some(index) = matching.next() else {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        };
+        if matching.next().is_some() {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        {
+            let state = match self.entries[index].reservation.authority_state.try_lock() {
+                Ok(state) => state,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ExtensionRuntimeHostBindError::Unavailable);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    self.entries[index]
+                        .reservation
+                        .gate
+                        .inner
+                        .invariant_failed
+                        .store(true, Ordering::Release);
+                    self.invariant_failed = true;
+                    return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                }
+            };
+            if !matches!(
+                &*state,
+                ReservationAuthorityState::Published {
+                    authority: Some(authority),
+                    ..
+                } if authority.fingerprint() == runtime
+            ) {
+                return Err(ExtensionRuntimeHostBindError::Unavailable);
+            }
+        }
+        self.entries[index]
+            .native
+            .with_owned_macos_owner(operation)
+            .map_err(|reason| match reason {
+                NativeBeginError::WrongState => ExtensionRuntimeHostBindError::Unavailable,
+                NativeBeginError::StaleTicket | NativeBeginError::ResourceMismatch => {
+                    self.fail_invariant();
+                    ExtensionRuntimeHostBindError::InternalInvariant
+                }
+            })
+    }
+
     fn publish_native_terminal(
         &mut self,
         index: usize,

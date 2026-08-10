@@ -1017,6 +1017,25 @@ impl MacosExtensionBrowserSurfaceHost {
         }
     }
 
+    /// Resolves one logical tab inside the exact already-published generation.
+    /// This clones only the retained protocol wrapper and never consults the
+    /// tab's weak webview, so action enumeration cannot resurrect a discarded
+    /// renderer.
+    pub(super) fn action_tab(
+        &self,
+        generation: ExtensionBrowserSurfaceGeneration,
+        id: ItemId,
+    ) -> Result<Option<Retained<ProtocolObject<dyn WKWebExtensionTab>>>, BrowserSurfaceError> {
+        if self.generation != Some(generation) {
+            return Err(BrowserSurfaceError::StaleGeneration);
+        }
+        Ok(self
+            .tabs
+            .get(&id)
+            .cloned()
+            .map(ProtocolObject::from_retained))
+    }
+
     pub(super) fn settle_request(
         &self,
         request: zephium_core::extensions::ExtensionBrowserRequestId,

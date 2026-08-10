@@ -42,7 +42,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
 use zephium_core::extensions::{
-    ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionActionRejection, ExtensionActionSnapshotSettlement, ExtensionBrowserRequestId,
+    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
     ExtensionNativeNamespaceScope,
 };
 use zephium_core::geometry::Rect;
@@ -509,6 +510,9 @@ impl RetirementGate {
             }
             event @ EngineEvent::UserContentSettled { scope, .. } => {
                 self.allows_scope(scope).then_some(event)
+            }
+            event @ EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
             }
             // This is an untrusted request, not a native-state fact. Deliver
             // it after profile retirement so Shell can explicitly reject the
@@ -1192,6 +1196,58 @@ impl Engine for WebviewEngine {
                 );
             }
         }))
+    }
+
+    fn request_extension_actions(
+        &self,
+        profile: ProfileId,
+        tab: ItemId,
+        surface_generation: ExtensionBrowserSurfaceGeneration,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+                return NativeDispatch::Rejected;
+            }
+            let queued_retirement = self.retirement.clone();
+            let sink = self.sink.clone();
+            NativeDispatch::from_scheduled(self.run(move || {
+                if !lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
+                    return;
+                }
+                let application_sink = sink.clone();
+                let admitted = host::try_with(move |host| {
+                    let settlement =
+                        host.extension_actions_snapshot(profile, tab, surface_generation);
+                    application_sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionActionsSnapshotSettled {
+                            profile,
+                            tab,
+                            surface_generation,
+                            settlement,
+                        },
+                    ));
+                });
+                if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
+                {
+                    sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionActionsSnapshotSettled {
+                            profile,
+                            tab,
+                            surface_generation,
+                            settlement: ExtensionActionSnapshotSettlement::Rejected(
+                                ExtensionActionRejection::NativeAdmissionFailed,
+                            ),
+                        },
+                    ));
+                }
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (profile, tab, surface_generation);
+            NativeDispatch::Unsupported
+        }
     }
 
     fn settle_extension_browser_request(

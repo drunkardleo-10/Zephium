@@ -419,6 +419,38 @@ impl PersistentControllerRegistry {
         Ok(ControllerSurfaceApplication::Applied)
     }
 
+    /// Resolves an existing logical tab for action projection without asking
+    /// for, retaining, or creating its content webview.
+    pub(crate) fn action_tab(
+        &mut self,
+        profile: ProfileId,
+        generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration,
+        tab: ItemId,
+    ) -> Result<
+        Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>>>,
+        ControllerRegistryError,
+    > {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            entry
+                .browser_surface
+                .action_tab(generation, tab)
+                .map_err(map_browser_surface_error)
+        });
+        if result
+            .as_ref()
+            .is_err_and(|error| *error != ControllerRegistryError::BrowserSurfaceStale)
+        {
+            self.slots.poison();
+        }
+        result
+    }
+
     #[cfg(feature = "native-web-extension-probes")]
     pub(crate) fn probe_browser_surface_identity(
         &mut self,
