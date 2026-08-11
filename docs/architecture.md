@@ -889,6 +889,27 @@ filtered by the native parser. The reviewed macOS classification is therefore:
 | HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
 | Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |
 
+The same product-shaped background gate records a closed runtime-namespace
+inventory, not just the permissions WebKit retained while parsing. On the
+current native gate WebKit exposes `alarms`, `commands`, `contextMenus`,
+`scripting`, `storage.local`, `tabs`, `webNavigation`, and `webRequest`, while
+`idle`, `notifications`, `offscreen`, `sidePanel`, and `storage.managed` are
+absent. A namespace being present is not a behavioral compatibility claim;
+each API that affects the pinned workflow still needs an exact live gate. The
+known absence classifications are below; the release runner at the supported
+OS floor must reproduce the closed inventory before these become floor-wide
+claims.
+
+| Bitwarden surface | macOS native classification | Evidence / boundary |
+|---|---|---|
+| MV3 backup-localStorage through `offscreen` | Requires a reviewed Bitwarden Core adapter before release | The pinned entrypoint always selects [`OffscreenStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/storage/offscreen-storage.service.ts) for MV3. Primary writes survive because the upstream [`PrimarySecondaryStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/libs/common/src/platform/storage/primary-secondary-storage.service.ts) settles both writes, but a primary miss reaches the absent API. Zephium must select a deterministic primary-only/recovery-compatible adapter in its sealed build and test migration, missing-key, and recovery behavior; it must not inject a page-world shim. |
+| Idle and system-lock integration | Degraded | The pinned [`IdleBackground`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/background/idle.background.ts) returns immediately when the namespace is absent. System-lock vault timeout and idle-driven notification reconnect/disconnect are unavailable; ordinary timer-based vault locking remains a separate behavioral gate. |
+| System notifications | Degraded | The pinned composition selects `UnsupportedSystemNotificationsService` when `chrome.notifications` is absent. In-extension auth-request flows may remain available, but OS notification presentation/click handling is unavailable. |
+| Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
+| Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
+| Native messaging | Unsupported in the initial target | The optional permission is parsed, but product grant compilation prohibits it. Native biometric/application integration must be disclosed separately from core vault use. |
+| Clipboard read/write, alarms, commands, context menus, programmatic scripting, non-blocking navigation/request observation, dynamic web-accessible resources, and sandboxed pages | Behavior unassessed | Parser or namespace presence is insufficient; product-tab/popup live gates remain release blockers where the pinned workflow uses the surface. |
+
 This is one reviewed slice of the required declaration-by-declaration matrix,
 not a claim that the complete Bitwarden workflow is compatible. Product
 authority remains unprovisioned until every declared authority is classified

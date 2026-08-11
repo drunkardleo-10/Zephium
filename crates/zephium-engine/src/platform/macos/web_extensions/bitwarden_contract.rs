@@ -35,6 +35,20 @@ const EXPECTED_NATIVE_REQUIRED_PERMISSIONS: [&str; 11] = [
 const EXPECTED_NATIVE_OPTIONAL_PERMISSIONS: [&str; 1] = ["nativeMessaging"];
 const EXPECTED_REQUESTED_HOST_PATTERNS: [&str; 2] = ["http://*/*", "https://*/*"];
 const EXPECTED_ALL_REQUESTED_MATCH_PATTERNS: [&str; 3] = ["*://*/*", "http://*/*", "https://*/*"];
+const EXPECTED_BITWARDEN_RUNTIME_NAMESPACES: [(&str, &str); 12] = [
+    ("alarms", "object"),
+    ("commands", "object"),
+    ("contextMenus", "object"),
+    ("idle", "undefined"),
+    ("notifications", "undefined"),
+    ("offscreen", "undefined"),
+    ("scripting", "object"),
+    ("sidePanel", "undefined"),
+    ("storageLocal", "object"),
+    ("storageManaged", "undefined"),
+    ("tabs", "object"),
+    ("webNavigation", "object"),
+];
 const WEB_REQUEST_PROBE_TITLE: &str = "zephium-web-request-pending";
 
 pub(super) struct ContractEvidence {
@@ -477,9 +491,18 @@ fn validate_web_request_evidence(evidence: &Value) -> Result<(), String> {
         ("completed", "object"),
         ("asyncBlocking", "accepted"),
     ];
+    let namespaces = evidence.get("namespaces").and_then(Value::as_object);
     if expected
         .iter()
         .all(|(name, value)| evidence.get(name).and_then(Value::as_str) == Some(*value))
+        && namespaces.is_some_and(|namespaces| {
+            namespaces.len() == EXPECTED_BITWARDEN_RUNTIME_NAMESPACES.len()
+                && EXPECTED_BITWARDEN_RUNTIME_NAMESPACES
+                    .iter()
+                    .all(|(name, value)| {
+                        namespaces.get(*name).and_then(Value::as_str) == Some(*value)
+                    })
+        })
     {
         Ok(())
     } else {
@@ -492,12 +515,27 @@ fn validate_web_request_evidence(evidence: &Value) -> Result<(), String> {
 fn web_request_background_probe_script() -> &'static str {
     r#"(() => {
     const webRequest = globalThis.chrome?.webRequest;
+    const type = (value) => typeof value;
     const outcome = {
         root: typeof globalThis.chrome,
         namespace: typeof webRequest,
         auth: typeof webRequest?.onAuthRequired,
         completed: typeof webRequest?.onCompleted,
-        asyncBlocking: "not-attempted"
+        asyncBlocking: "not-attempted",
+        namespaces: {
+            alarms: type(globalThis.chrome?.alarms),
+            commands: type(globalThis.chrome?.commands),
+            contextMenus: type(globalThis.chrome?.contextMenus),
+            idle: type(globalThis.chrome?.idle),
+            notifications: type(globalThis.chrome?.notifications),
+            offscreen: type(globalThis.chrome?.offscreen),
+            scripting: type(globalThis.chrome?.scripting),
+            sidePanel: type(globalThis.chrome?.sidePanel),
+            storageLocal: type(globalThis.chrome?.storage?.local),
+            storageManaged: type(globalThis.chrome?.storage?.managed),
+            tabs: type(globalThis.chrome?.tabs),
+            webNavigation: type(globalThis.chrome?.webNavigation)
+        }
     };
 
     if (webRequest?.onAuthRequired) {
@@ -585,16 +623,24 @@ mod tests {
         assert!(script.contains("{ urls: [\"http://*/*\", \"https://*/*\"] }"));
         assert!(script.contains("[\"asyncBlocking\"]"));
         assert!(script.contains("storage?.local?.set"));
+        for (namespace, _) in EXPECTED_BITWARDEN_RUNTIME_NAMESPACES {
+            assert!(script.contains(&format!("{namespace}: type(")));
+        }
     }
 
     #[test]
     fn background_evidence_requires_every_runtime_fact() {
+        let namespaces = EXPECTED_BITWARDEN_RUNTIME_NAMESPACES
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), Value::String((*value).to_owned())))
+            .collect::<serde_json::Map<_, _>>();
         let complete = json!({
             "root": "object",
             "namespace": "object",
             "auth": "object",
             "completed": "object",
             "asyncBlocking": "accepted",
+            "namespaces": namespaces,
         });
         assert_eq!(validate_web_request_evidence(&complete), Ok(()));
         for missing in ["root", "namespace", "auth", "completed", "asyncBlocking"] {
@@ -605,5 +651,21 @@ mod tests {
                 .remove(missing);
             assert!(validate_web_request_evidence(&incomplete).is_err());
         }
+        for (missing, _) in EXPECTED_BITWARDEN_RUNTIME_NAMESPACES {
+            let mut incomplete = complete.clone();
+            incomplete["namespaces"]
+                .as_object_mut()
+                .expect("namespace evidence is an object")
+                .remove(missing);
+            assert!(validate_web_request_evidence(&incomplete).is_err());
+        }
+
+        let mut drifted = complete.clone();
+        drifted["namespaces"]["offscreen"] = Value::String("object".to_owned());
+        assert!(validate_web_request_evidence(&drifted).is_err());
+
+        let mut unbounded = complete;
+        unbounded["namespaces"]["unexpected"] = Value::String("object".to_owned());
+        assert!(validate_web_request_evidence(&unbounded).is_err());
     }
 }
