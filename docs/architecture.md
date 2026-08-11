@@ -775,6 +775,12 @@ native-host authority, profile retirement, and shutdown drain. It refuses clean
 worker evidence while a worker-owned runtime or attached authority remains
 unresolved or accepted/completed command counts differ. That evidence proves
 only worker/resource drain, not durable-journal or native-owner absence.
+The move-only application lifecycle is also the only app-facing activation and
+exact-runtime retirement ingress. Inputs are identity selectors, not authority;
+successful settlements carry the complete active-profile routing cohort from
+the same serialized worker turn. Shell therefore never guesses whether a
+sibling runtime still keeps a profile active, and cloneable status handles
+remain observation-only.
 The macOS native adapter is enabled, but sealed product provisioning remains
 empty and the Windows/Linux adapters remain unavailable, so this coordinator
 is not a release-enablement claim. Reconstruction also rejects

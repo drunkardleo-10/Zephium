@@ -1,17 +1,22 @@
 use std::time::{Duration, Instant};
 
+use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
+    ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeRetirementDisposition as CoreExtensionRuntimeRetirementDisposition,
     ExtensionServiceLifecycle,
     ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
     ExtensionServiceStartupOutcome as CoreExtensionServiceStartupOutcome,
 };
 
 use crate::{
-    ExtensionServiceOwner, ExtensionServiceProfileRetirementOutcome,
-    ExtensionServiceShutdownEvidence, ExtensionServiceStartupOutcome, ExtensionServiceStartupWait,
-    ExtensionServiceStatusSnapshot, ExtensionServiceStatusWait,
+    actor::RuntimeCommandSettlement, ExtensionServiceOwner,
+    ExtensionServiceProfileRetirementOutcome, ExtensionServiceRuntimeActivationOutcome,
+    ExtensionServiceRuntimeRetirementOutcome, ExtensionServiceShutdownEvidence,
+    ExtensionServiceStartupOutcome, ExtensionServiceStartupWait, ExtensionServiceStatusSnapshot,
+    ExtensionServiceStatusWait,
 };
 
 /// A startup retry may continue after the application actor's short
@@ -91,8 +96,93 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         continue_after_profile_retirement(outcome, continuation)
     }
 
+    fn activate_runtime_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+    ) -> CoreExtensionRuntimeActivationDisposition {
+        project_runtime_activation(ExtensionServiceOwner::activate_runtime_with_profiles_until(
+            self, key, deadline,
+        ))
+    }
+
+    fn retire_runtime_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+    ) -> CoreExtensionRuntimeRetirementDisposition {
+        project_runtime_retirement(ExtensionServiceOwner::retire_runtime_with_profiles_until(
+            self, key, deadline,
+        ))
+    }
+
     fn shutdown_until(self: Box<Self>, deadline: Instant) -> CoreExtensionServiceShutdownOutcome {
         project_lifecycle_shutdown_outcome(ExtensionServiceOwner::shutdown_until(*self, deadline))
+    }
+}
+
+fn project_runtime_activation(
+    settlement: RuntimeCommandSettlement<ExtensionServiceRuntimeActivationOutcome>,
+) -> CoreExtensionRuntimeActivationDisposition {
+    match settlement.outcome {
+        ExtensionServiceRuntimeActivationOutcome::Activated(generation) => {
+            match settlement.active_profiles {
+                Some(active_profiles) => CoreExtensionRuntimeActivationDisposition::Activated {
+                    generation,
+                    active_profiles,
+                },
+                None => CoreExtensionRuntimeActivationDisposition::FailedClosed,
+            }
+        }
+        ExtensionServiceRuntimeActivationOutcome::AlreadyActive(generation) => {
+            match settlement.active_profiles {
+                Some(active_profiles) => CoreExtensionRuntimeActivationDisposition::AlreadyActive {
+                    generation,
+                    active_profiles,
+                },
+                None => CoreExtensionRuntimeActivationDisposition::FailedClosed,
+            }
+        }
+        ExtensionServiceRuntimeActivationOutcome::Unavailable(_) => {
+            CoreExtensionRuntimeActivationDisposition::Unavailable
+        }
+        ExtensionServiceRuntimeActivationOutcome::Rejected(_) => {
+            CoreExtensionRuntimeActivationDisposition::Rejected
+        }
+        ExtensionServiceRuntimeActivationOutcome::CapacityExceeded => {
+            CoreExtensionRuntimeActivationDisposition::CapacityExceeded
+        }
+        ExtensionServiceRuntimeActivationOutcome::ProfileFenced => {
+            CoreExtensionRuntimeActivationDisposition::ProfileFenced
+        }
+        ExtensionServiceRuntimeActivationOutcome::FailedClosed(_) => {
+            CoreExtensionRuntimeActivationDisposition::FailedClosed
+        }
+    }
+}
+
+fn project_runtime_retirement(
+    settlement: RuntimeCommandSettlement<ExtensionServiceRuntimeRetirementOutcome>,
+) -> CoreExtensionRuntimeRetirementDisposition {
+    match settlement.outcome {
+        ExtensionServiceRuntimeRetirementOutcome::Retired => match settlement.active_profiles {
+            Some(active_profiles) => {
+                CoreExtensionRuntimeRetirementDisposition::Retired { active_profiles }
+            }
+            None => CoreExtensionRuntimeRetirementDisposition::FailedClosed,
+        },
+        ExtensionServiceRuntimeRetirementOutcome::NotPresent => match settlement.active_profiles {
+            Some(active_profiles) => {
+                CoreExtensionRuntimeRetirementDisposition::NotPresent { active_profiles }
+            }
+            None => CoreExtensionRuntimeRetirementDisposition::FailedClosed,
+        },
+        ExtensionServiceRuntimeRetirementOutcome::Unavailable(_) => {
+            CoreExtensionRuntimeRetirementDisposition::Unavailable
+        }
+        ExtensionServiceRuntimeRetirementOutcome::FailedClosed(_) => {
+            CoreExtensionRuntimeRetirementDisposition::FailedClosed
+        }
     }
 }
 
@@ -164,11 +254,13 @@ mod tests {
         ExtensionServiceCleanupEvidence, ExtensionServicePhase,
         ExtensionServiceProfileRetirementFailureReason,
         ExtensionServiceProfileRetirementUnavailableReason, ExtensionServiceReadyEvidence,
-        ExtensionServiceStartupFailure, ExtensionServiceStartupFailureReason,
-        ExtensionServiceStartupUnavailable, ExtensionServiceStartupUnavailableReason,
-        ExtensionServiceWorkerIdentity,
+        ExtensionServiceRuntimeFailureReason, ExtensionServiceStartupFailure,
+        ExtensionServiceStartupFailureReason, ExtensionServiceStartupUnavailable,
+        ExtensionServiceStartupUnavailableReason, ExtensionServiceWorkerIdentity,
     };
-    use zephium_core::extensions::ExtensionNativeOwnershipJournalRevision;
+    use zephium_core::extensions::{
+        ExtensionNativeOwnershipJournalRevision, ExtensionRuntimeGeneration,
+    };
 
     #[test]
     fn only_direct_retired_settlement_invokes_the_continuation() {
@@ -201,6 +293,56 @@ mod tests {
             CoreExtensionProfileRetirementDisposition::Continued
         );
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn runtime_projection_requires_same_turn_profile_evidence() {
+        let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+        assert!(profiles.try_insert(ProfileId::from(7)));
+
+        assert_eq!(
+            project_runtime_activation(RuntimeCommandSettlement::with_profile_projection(
+                ExtensionServiceRuntimeActivationOutcome::Activated(
+                    ExtensionRuntimeGeneration::INITIAL,
+                ),
+                profiles,
+            )),
+            CoreExtensionRuntimeActivationDisposition::Activated {
+                generation: ExtensionRuntimeGeneration::INITIAL,
+                active_profiles: profiles,
+            }
+        );
+        assert_eq!(
+            project_runtime_activation(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeActivationOutcome::AlreadyActive(
+                    ExtensionRuntimeGeneration::INITIAL,
+                ),
+            )),
+            CoreExtensionRuntimeActivationDisposition::FailedClosed
+        );
+        assert_eq!(
+            project_runtime_retirement(RuntimeCommandSettlement::with_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::Retired,
+                profiles,
+            )),
+            CoreExtensionRuntimeRetirementDisposition::Retired {
+                active_profiles: profiles,
+            }
+        );
+        assert_eq!(
+            project_runtime_retirement(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::NotPresent,
+            )),
+            CoreExtensionRuntimeRetirementDisposition::FailedClosed
+        );
+        assert_eq!(
+            project_runtime_retirement(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                ),
+            )),
+            CoreExtensionRuntimeRetirementDisposition::FailedClosed
+        );
     }
 
     #[test]

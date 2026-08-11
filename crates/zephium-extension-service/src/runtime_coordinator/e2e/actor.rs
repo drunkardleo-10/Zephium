@@ -1,4 +1,8 @@
 use zephium_core::extensions::ExtensionRuntimeGeneration;
+use zephium_core::ports::extensions::{
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeRetirementDisposition,
+    ExtensionServiceLifecycle,
+};
 
 use super::host::PublicationMode;
 use super::support::{deadline, ActorAuthorityHarness};
@@ -100,16 +104,21 @@ fn actor_real_authority_activation_exact_retirement_and_shutdown_are_clean() {
     let (harness, mut owner) = ActorAuthorityHarness::launch(1);
     let key = harness.keys[0];
 
-    assert_eq!(
-        owner.activate_runtime_until(key, deadline()),
-        ExtensionServiceRuntimeActivationOutcome::AlreadyActive(
-            ExtensionRuntimeGeneration::INITIAL
-        )
-    );
-    assert_eq!(
-        owner.retire_runtime_until(key, deadline()),
-        ExtensionServiceRuntimeRetirementOutcome::Retired
-    );
+    let ExtensionRuntimeActivationDisposition::AlreadyActive {
+        generation,
+        active_profiles,
+    } = ExtensionServiceLifecycle::activate_runtime_until(&mut owner, key, deadline())
+    else {
+        panic!("lifecycle activation did not preserve routing evidence")
+    };
+    assert_eq!(generation, ExtensionRuntimeGeneration::INITIAL);
+    assert_eq!(active_profiles.iter().collect::<Vec<_>>(), harness.profiles);
+    let ExtensionRuntimeRetirementDisposition::Retired { active_profiles } =
+        ExtensionServiceLifecycle::retire_runtime_until(&mut owner, key, deadline())
+    else {
+        panic!("lifecycle retirement did not preserve routing evidence")
+    };
+    assert!(active_profiles.is_empty());
     assert_eq!(harness.probe.bind_calls(), 1);
     assert_eq!(harness.probe.activation_calls(), 1);
     assert_eq!(harness.probe.publication_calls(), 1);

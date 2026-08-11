@@ -9,6 +9,7 @@ mod slot;
 use std::time::Instant;
 use zephium_core::extensions::{ExtensionNativeOwnershipKey, ExtensionRuntimeGeneration};
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::extensions::ExtensionActiveProfiles;
 use zephium_store::ExtensionServiceStoreAuthority;
 
 use crate::journal_store::{JournalBackend, JournalLoadFailure, JournalProjection};
@@ -80,6 +81,19 @@ impl RuntimeCoordinator {
             .iter()
             .flatten()
             .any(|slot| slot.key().profile() == profile)
+    }
+
+    /// Returns the complete profile routing cohort for runtimes whose native
+    /// owner has been published. Planning, uncertain, and release states do
+    /// not become browser-surface routing authority.
+    pub(crate) fn active_profiles(&self) -> Option<ExtensionActiveProfiles> {
+        let mut profiles = ExtensionActiveProfiles::EMPTY;
+        for slot in self.slots.iter().flatten().filter(|slot| slot.is_live()) {
+            if !profiles.try_insert(slot.key().profile()) {
+                return None;
+            }
+        }
+        Some(profiles)
     }
 
     pub(crate) fn has_attached_obligation(&self) -> bool {

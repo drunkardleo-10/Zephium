@@ -326,10 +326,12 @@ fn expired_profile_barrier_stays_installed_and_blocks_following_activation() {
         &fixture.startup,
         &fixture.cancellation,
     ));
+    let observed = observation.recv().unwrap();
     assert_eq!(
-        observation.recv().unwrap(),
+        observed.outcome,
         ExtensionServiceRuntimeActivationOutcome::ProfileFenced
     );
+    assert!(observed.active_profiles.is_none());
     assert!(!fixture.state.runtime.has_obligation());
     fixture.finish();
 }
@@ -353,12 +355,14 @@ fn queued_activation_observes_shutdown_cancellation_before_external_work() {
         &fixture.startup,
         &fixture.cancellation,
     ));
+    let observed = observation.recv().unwrap();
     assert_eq!(
-        observation.recv().unwrap(),
+        observed.outcome,
         ExtensionServiceRuntimeActivationOutcome::Unavailable(
             ExtensionServiceRuntimeActivationUnavailableReason::CancellationRequested
         )
     );
+    assert!(observed.active_profiles.is_none());
     assert!(!fixture.state.runtime.has_obligation());
     fixture.finish();
 }
@@ -386,12 +390,14 @@ fn non_ready_runtime_retirement_never_claims_not_present() {
         &fixture.startup,
         &fixture.cancellation,
     ));
+    let observed = observation.recv().unwrap();
     assert_eq!(
-        observation.recv().unwrap(),
+        observed.outcome,
         ExtensionServiceRuntimeRetirementOutcome::Unavailable(
             ExtensionServiceRuntimeRetirementUnavailableReason::ServiceNotReady
         )
     );
+    assert!(observed.active_profiles.is_none());
     assert!(!fixture.state.runtime.has_obligation());
     fixture.finish();
 }
@@ -412,12 +418,14 @@ fn queued_expired_runtime_retirement_never_claims_not_present() {
         &fixture.startup,
         &fixture.cancellation,
     ));
+    let observed = observation.recv().unwrap();
     assert_eq!(
-        observation.recv().unwrap(),
+        observed.outcome,
         ExtensionServiceRuntimeRetirementOutcome::Unavailable(
             ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached
         )
     );
+    assert!(observed.active_profiles.is_none());
     assert!(!fixture.state.runtime.has_obligation());
     fixture.finish();
 }

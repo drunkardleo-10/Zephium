@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::extensions::{ExtensionNativeOwnershipKey, ExtensionRuntimeGeneration};
 use crate::ids::ProfileId;
 
 /// The extension runtime pool has three background slots, so startup can
@@ -143,6 +144,50 @@ pub enum ExtensionProfileRetirementDisposition {
     FailedClosed,
 }
 
+/// Application-facing settlement of one exact runtime activation request.
+///
+/// The ownership key is only a selector. The concrete service reconstructs
+/// Store, package, grant, repository, and native authority inside its
+/// serialized worker. Successful variants carry the complete non-authorizing
+/// profile routing snapshot observed in the same worker turn.
+#[must_use = "runtime activation settlement must be checked"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionRuntimeActivationDisposition {
+    Activated {
+        generation: ExtensionRuntimeGeneration,
+        active_profiles: ExtensionActiveProfiles,
+    },
+    AlreadyActive {
+        generation: ExtensionRuntimeGeneration,
+        active_profiles: ExtensionActiveProfiles,
+    },
+    Unavailable,
+    Rejected,
+    CapacityExceeded,
+    ProfileFenced,
+    FailedClosed,
+}
+
+/// Application-facing settlement of one exact runtime retirement request.
+///
+/// `NotPresent` is process-local coordinator evidence only. It does not prove
+/// durable profile absence and must never authorize profile deletion. Both
+/// successful variants carry the complete routing snapshot from the same
+/// serialized worker turn, so Shell never guesses whether a sibling runtime
+/// still keeps the profile active.
+#[must_use = "runtime retirement settlement must be checked"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionRuntimeRetirementDisposition {
+    Retired {
+        active_profiles: ExtensionActiveProfiles,
+    },
+    NotPresent {
+        active_profiles: ExtensionActiveProfiles,
+    },
+    Unavailable,
+    FailedClosed,
+}
+
 /// Move-only application lifecycle boundary for the extension service.
 ///
 /// The unique owner is held behind a `Box` and consumed by shutdown. This
@@ -159,6 +204,33 @@ pub trait ExtensionServiceLifecycle: Send {
     /// [`ExtensionServiceStartupOutcome::Ready`] permits extension-sensitive
     /// application bootstrap.
     fn settle_startup_until(&mut self, deadline: Instant) -> ExtensionServiceStartupOutcome;
+
+    /// Activates one exact regular/private runtime through the service's
+    /// authenticated, serialized authority transaction.
+    ///
+    /// This call follows the same native-event-loop restriction as startup.
+    /// The default fails closed so inert and test adapters cannot accidentally
+    /// claim activation without owning the runtime coordinator.
+    fn activate_runtime_until(
+        &mut self,
+        _key: ExtensionNativeOwnershipKey,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeActivationDisposition {
+        ExtensionRuntimeActivationDisposition::FailedClosed
+    }
+
+    /// Retires one exact runtime before Shell mutates durable disable or
+    /// uninstall intent.
+    ///
+    /// The returned active-profile projection is routing data only. The
+    /// default fails closed and grants no absence authority.
+    fn retire_runtime_until(
+        &mut self,
+        _key: ExtensionNativeOwnershipKey,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeRetirementDisposition {
+        ExtensionRuntimeRetirementDisposition::FailedClosed
+    }
 
     /// Permanently fences `profile`, proves every extension-owned durable,
     /// package, and native obligation absent, then invokes `continuation`
@@ -240,6 +312,19 @@ mod tests {
         assert_eq!(
             lifecycle.settle_startup_until(Instant::now()),
             ExtensionServiceStartupOutcome::Ready(ExtensionActiveProfiles::EMPTY)
+        );
+        let key = ExtensionNativeOwnershipKey::new(
+            ProfileId::from(7),
+            crate::ids::ExtensionInstallId::from(1),
+            crate::extensions::ExtensionGrantBrowsingContext::Regular,
+        );
+        assert_eq!(
+            lifecycle.activate_runtime_until(key, Instant::now()),
+            ExtensionRuntimeActivationDisposition::FailedClosed
+        );
+        assert_eq!(
+            lifecycle.retire_runtime_until(key, Instant::now()),
+            ExtensionRuntimeRetirementDisposition::FailedClosed
         );
         let continued = Arc::new(AtomicBool::new(false));
         let continued_by_callback = Arc::clone(&continued);

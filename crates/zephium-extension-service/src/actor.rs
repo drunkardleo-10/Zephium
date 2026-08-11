@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::extensions::ExtensionActiveProfiles;
 
 use crate::cleanup::{
     reconcile_startup, CancellationCheck, CleanupAttempt, CleanupFailure, CleanupProgress,
@@ -89,12 +90,14 @@ enum WorkerCommand {
     ActivateRuntime {
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
-        settlement: mpsc::SyncSender<ExtensionServiceRuntimeActivationOutcome>,
+        settlement:
+            mpsc::SyncSender<RuntimeCommandSettlement<ExtensionServiceRuntimeActivationOutcome>>,
     },
     RetireRuntime {
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
-        settlement: mpsc::SyncSender<ExtensionServiceRuntimeRetirementOutcome>,
+        settlement:
+            mpsc::SyncSender<RuntimeCommandSettlement<ExtensionServiceRuntimeRetirementOutcome>>,
     },
     #[cfg(test)]
     Drive,
@@ -106,6 +109,31 @@ enum WorkerCommand {
     RetainDropProbe(TestDropProbe),
     #[cfg(test)]
     Block(Receiver<()>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeCommandSettlement<T> {
+    pub(crate) outcome: T,
+    pub(crate) active_profiles: Option<ExtensionActiveProfiles>,
+}
+
+impl<T> RuntimeCommandSettlement<T> {
+    pub(crate) const fn without_profile_projection(outcome: T) -> Self {
+        Self {
+            outcome,
+            active_profiles: None,
+        }
+    }
+
+    pub(crate) const fn with_profile_projection(
+        outcome: T,
+        active_profiles: ExtensionActiveProfiles,
+    ) -> Self {
+        Self {
+            outcome,
+            active_profiles: Some(active_profiles),
+        }
+    }
 }
 
 struct WorkerCancellation {
@@ -479,9 +507,20 @@ impl ExtensionServiceOwner {
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
     ) -> ExtensionServiceRuntimeActivationOutcome {
+        self.activate_runtime_with_profiles_until(key, deadline)
+            .outcome
+    }
+
+    pub(crate) fn activate_runtime_with_profiles_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+    ) -> RuntimeCommandSettlement<ExtensionServiceRuntimeActivationOutcome> {
         if Instant::now() >= deadline {
-            return ExtensionServiceRuntimeActivationOutcome::Unavailable(
-                ExtensionServiceRuntimeActivationUnavailableReason::DeadlineReached,
+            return RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                    ExtensionServiceRuntimeActivationUnavailableReason::DeadlineReached,
+                ),
             );
         }
         let (settlement, observation) = mpsc::sync_channel(1);
@@ -495,29 +534,39 @@ impl ExtensionServiceOwner {
                 match receive_runtime_command_until(&observation, deadline) {
                     Ok(outcome) => outcome,
                     Err(RuntimeCommandObservationFailure::DeadlineReached) => {
-                        ExtensionServiceRuntimeActivationOutcome::Unavailable(
-                            ExtensionServiceRuntimeActivationUnavailableReason::DeadlineReached,
+                        RuntimeCommandSettlement::without_profile_projection(
+                            ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                                ExtensionServiceRuntimeActivationUnavailableReason::DeadlineReached,
+                            ),
                         )
                     }
                     Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
-                        ExtensionServiceRuntimeActivationOutcome::FailedClosed(
-                            ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                        RuntimeCommandSettlement::without_profile_projection(
+                            ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                                ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                            ),
                         )
                     }
                 }
             }
-            NormalAdmission::Full(_) => ExtensionServiceRuntimeActivationOutcome::Unavailable(
-                ExtensionServiceRuntimeActivationUnavailableReason::RetryableNotAdmitted,
+            NormalAdmission::Full(_) => RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                    ExtensionServiceRuntimeActivationUnavailableReason::RetryableNotAdmitted,
+                ),
             ),
             NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
-                ExtensionServiceRuntimeActivationOutcome::FailedClosed(
-                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                    ),
                 )
             }
             NormalAdmission::CounterExhausted(_) => {
                 self.status.publish(ExtensionServicePhase::ShutdownQueued);
-                ExtensionServiceRuntimeActivationOutcome::FailedClosed(
-                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                    ),
                 )
             }
         }
@@ -537,9 +586,20 @@ impl ExtensionServiceOwner {
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
     ) -> ExtensionServiceRuntimeRetirementOutcome {
+        self.retire_runtime_with_profiles_until(key, deadline)
+            .outcome
+    }
+
+    pub(crate) fn retire_runtime_with_profiles_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        deadline: Instant,
+    ) -> RuntimeCommandSettlement<ExtensionServiceRuntimeRetirementOutcome> {
         if Instant::now() >= deadline {
-            return ExtensionServiceRuntimeRetirementOutcome::Unavailable(
-                ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached,
+            return RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                    ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached,
+                ),
             );
         }
         let (settlement, observation) = mpsc::sync_channel(1);
@@ -553,29 +613,39 @@ impl ExtensionServiceOwner {
                 match receive_runtime_command_until(&observation, deadline) {
                     Ok(outcome) => outcome,
                     Err(RuntimeCommandObservationFailure::DeadlineReached) => {
-                        ExtensionServiceRuntimeRetirementOutcome::Unavailable(
-                            ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached,
+                        RuntimeCommandSettlement::without_profile_projection(
+                            ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                                ExtensionServiceRuntimeRetirementUnavailableReason::DeadlineReached,
+                            ),
                         )
                     }
                     Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
-                        ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
-                            ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                        RuntimeCommandSettlement::without_profile_projection(
+                            ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                                ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                            ),
                         )
                     }
                 }
             }
-            NormalAdmission::Full(_) => ExtensionServiceRuntimeRetirementOutcome::Unavailable(
-                ExtensionServiceRuntimeRetirementUnavailableReason::RetryableNotAdmitted,
+            NormalAdmission::Full(_) => RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                    ExtensionServiceRuntimeRetirementUnavailableReason::RetryableNotAdmitted,
+                ),
             ),
             NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
-                ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
-                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                    ),
                 )
             }
             NormalAdmission::CounterExhausted(_) => {
                 self.status.publish(ExtensionServicePhase::ShutdownQueued);
-                ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
-                    ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::WorkerUnavailable,
+                    ),
                 )
             }
         }
@@ -1337,41 +1407,51 @@ impl WorkerState {
         cancellation: &WorkerCancellation,
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
-        settlement: &mpsc::SyncSender<ExtensionServiceRuntimeActivationOutcome>,
+        settlement: &mpsc::SyncSender<
+            RuntimeCommandSettlement<ExtensionServiceRuntimeActivationOutcome>,
+        >,
     ) -> bool {
         if cancellation.is_requested() {
-            let _ = settlement.try_send(ExtensionServiceRuntimeActivationOutcome::Unavailable(
-                ExtensionServiceRuntimeActivationUnavailableReason::CancellationRequested,
+            let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                    ExtensionServiceRuntimeActivationUnavailableReason::CancellationRequested,
+                ),
             ));
             return true;
         }
         match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
             RuntimeIngressReadiness::Ready => {}
             RuntimeIngressReadiness::NotReady => {
-                let _ = settlement.try_send(ExtensionServiceRuntimeActivationOutcome::Unavailable(
-                    ExtensionServiceRuntimeActivationUnavailableReason::ServiceNotReady,
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeActivationOutcome::Unavailable(
+                        ExtensionServiceRuntimeActivationUnavailableReason::ServiceNotReady,
+                    ),
                 ));
                 return true;
             }
             RuntimeIngressReadiness::StartupFailed(reason) => {
-                let _ =
-                    settlement.try_send(ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeActivationOutcome::FailedClosed(
                         ExtensionServiceRuntimeFailureReason::StartupFailed(reason),
-                    ));
+                    ),
+                ));
                 return true;
             }
             RuntimeIngressReadiness::ProtocolViolation => {
-                let _ =
-                    settlement.try_send(ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeActivationOutcome::FailedClosed(
                         ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
-                    ));
+                    ),
+                ));
                 status.publish(ExtensionServicePhase::Failed);
                 return false;
             }
         }
         let Some(startup) = self.startup.as_mut() else {
-            let _ = settlement.try_send(ExtensionServiceRuntimeActivationOutcome::FailedClosed(
-                ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+            let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+                ),
             ));
             status.publish(ExtensionServicePhase::Failed);
             return false;
@@ -1394,7 +1474,30 @@ impl WorkerState {
         ) {
             status.publish(ExtensionServicePhase::Failed);
         }
-        let _ = settlement.try_send(outcome.into());
+        let outcome = ExtensionServiceRuntimeActivationOutcome::from(outcome);
+        let settlement_value = if matches!(
+            outcome,
+            ExtensionServiceRuntimeActivationOutcome::Activated(_)
+                | ExtensionServiceRuntimeActivationOutcome::AlreadyActive(_)
+        ) {
+            let Some(active_profiles) = self
+                .runtime
+                .active_profiles()
+                .filter(|profiles| profiles.contains(key.profile()))
+            else {
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeActivationOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+                    ),
+                ));
+                status.publish(ExtensionServicePhase::Failed);
+                return false;
+            };
+            RuntimeCommandSettlement::with_profile_projection(outcome, active_profiles)
+        } else {
+            RuntimeCommandSettlement::without_profile_projection(outcome)
+        };
+        let _ = settlement.try_send(settlement_value);
         true
     }
 
@@ -1407,41 +1510,51 @@ impl WorkerState {
         cancellation: &WorkerCancellation,
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
-        settlement: &mpsc::SyncSender<ExtensionServiceRuntimeRetirementOutcome>,
+        settlement: &mpsc::SyncSender<
+            RuntimeCommandSettlement<ExtensionServiceRuntimeRetirementOutcome>,
+        >,
     ) -> bool {
         if cancellation.is_requested() {
-            let _ = settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::Unavailable(
-                ExtensionServiceRuntimeRetirementUnavailableReason::CancellationRequested,
+            let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                    ExtensionServiceRuntimeRetirementUnavailableReason::CancellationRequested,
+                ),
             ));
             return true;
         }
         match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
             RuntimeIngressReadiness::Ready => {}
             RuntimeIngressReadiness::NotReady => {
-                let _ = settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::Unavailable(
-                    ExtensionServiceRuntimeRetirementUnavailableReason::ServiceNotReady,
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeRetirementOutcome::Unavailable(
+                        ExtensionServiceRuntimeRetirementUnavailableReason::ServiceNotReady,
+                    ),
                 ));
                 return true;
             }
             RuntimeIngressReadiness::StartupFailed(reason) => {
-                let _ =
-                    settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
                         ExtensionServiceRuntimeFailureReason::StartupFailed(reason),
-                    ));
+                    ),
+                ));
                 return true;
             }
             RuntimeIngressReadiness::ProtocolViolation => {
-                let _ =
-                    settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
                         ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
-                    ));
+                    ),
+                ));
                 status.publish(ExtensionServicePhase::Failed);
                 return false;
             }
         }
         let Some(startup) = self.startup.as_mut() else {
-            let _ = settlement.try_send(ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
-                ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+            let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                    ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+                ),
             ));
             status.publish(ExtensionServicePhase::Failed);
             return false;
@@ -1462,7 +1575,26 @@ impl WorkerState {
         ) {
             status.publish(ExtensionServicePhase::Failed);
         }
-        let _ = settlement.try_send(outcome.into());
+        let outcome = ExtensionServiceRuntimeRetirementOutcome::from(outcome);
+        let settlement_value = if matches!(
+            outcome,
+            ExtensionServiceRuntimeRetirementOutcome::Retired
+                | ExtensionServiceRuntimeRetirementOutcome::NotPresent
+        ) {
+            let Some(active_profiles) = self.runtime.active_profiles() else {
+                let _ = settlement.try_send(RuntimeCommandSettlement::without_profile_projection(
+                    ExtensionServiceRuntimeRetirementOutcome::FailedClosed(
+                        ExtensionServiceRuntimeFailureReason::InternalProtocolViolation,
+                    ),
+                ));
+                status.publish(ExtensionServicePhase::Failed);
+                return false;
+            };
+            RuntimeCommandSettlement::with_profile_projection(outcome, active_profiles)
+        } else {
+            RuntimeCommandSettlement::without_profile_projection(outcome)
+        };
+        let _ = settlement.try_send(settlement_value);
         true
     }
 
