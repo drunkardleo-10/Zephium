@@ -415,6 +415,7 @@ impl MacosNativeRuntimeOwner {
                 true,
             ),
         };
+        let icon = super::action_icon::rasterize_action_icon(&action);
         let state = objc2::rc::autoreleasepool(|pool| {
             let label = unsafe { label.to_str(pool) };
             let badge = unsafe { badge.to_str(pool) };
@@ -424,7 +425,7 @@ impl MacosNativeRuntimeOwner {
                 revision,
                 label,
                 badge,
-                None,
+                icon,
                 unsafe { action.isEnabled() },
                 unsafe { action.presentsPopup() },
                 unsafe { action.hasUnreadBadgeText() },
