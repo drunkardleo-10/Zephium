@@ -8,6 +8,7 @@ use super::*;
 pub(super) struct ExtensionBrowserSurfaceState {
     active_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
     retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    retiring_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
     published: HashMap<ProfileId, ExtensionBrowserSurface>,
 }
 
@@ -29,6 +30,13 @@ impl ExtensionBrowserSurfaceSync {
             self.native.rejected = true;
         }
     }
+
+    fn merge(&mut self, other: Self) {
+        self.native.merge(other.native);
+        for profile in other.failed_profiles.iter() {
+            self.record_failure(profile);
+        }
+    }
 }
 
 impl ExtensionBrowserSurfaceState {
@@ -46,7 +54,27 @@ impl ExtensionBrowserSurfaceState {
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         self.active_profiles.remove(profile);
         self.retry_profiles.remove(profile);
+        self.retiring_profiles.remove(profile);
         self.published.remove(&profile);
+    }
+
+    /// Replaces the complete same-turn runtime routing cohort. Profiles that
+    /// lost their final runtime are retained in a fixed-size retirement set
+    /// until an empty native browser surface is accepted.
+    pub(super) fn replace_active_profiles(
+        &mut self,
+        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    ) -> bool {
+        for profile in self.active_profiles.iter() {
+            if !profiles.contains(profile) && !self.retiring_profiles.try_insert(profile) {
+                return false;
+            }
+        }
+        for profile in profiles.iter() {
+            self.retiring_profiles.remove(profile);
+        }
+        self.active_profiles = profiles;
+        true
     }
 
     pub(super) fn active_profiles(
@@ -79,6 +107,10 @@ impl ExtensionBrowserSurfaceState {
     fn retry_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
         self.retry_profiles
     }
+
+    fn retiring_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+        self.retiring_profiles
+    }
 }
 
 impl Shell {
@@ -86,16 +118,70 @@ impl Shell {
     /// native view. With no active runtime profile this is an allocation-free
     /// branch over one fixed-size value and an empty `HashMap`.
     pub(super) fn sync_extension_browser_surfaces(&mut self) -> ExtensionBrowserSurfaceSync {
+        let mut settlement = self.retire_extension_browser_surfaces();
         let profiles = self.extension_browser_surfaces.active_profiles();
-        self.sync_extension_browser_surface_profiles(profiles)
+        settlement.merge(self.sync_extension_browser_surface_profiles(profiles));
+        settlement
     }
 
     /// Retries only transient native admissions retained from an earlier
     /// projection. The ordinary maintenance tick stays allocation-free when
     /// no extension surface is waiting for native queue capacity.
     pub(super) fn retry_extension_browser_surfaces(&mut self) -> ExtensionBrowserSurfaceSync {
+        let mut settlement = self.retire_extension_browser_surfaces();
         let profiles = self.extension_browser_surfaces.retry_profiles();
-        self.sync_extension_browser_surface_profiles(profiles)
+        settlement.merge(self.sync_extension_browser_surface_profiles(profiles));
+        settlement
+    }
+
+    fn retire_extension_browser_surfaces(&mut self) -> ExtensionBrowserSurfaceSync {
+        let profiles = self.extension_browser_surfaces.retiring_profiles();
+        let mut settlement = ExtensionBrowserSurfaceSync::default();
+        for profile in profiles.iter() {
+            let generation = match self
+                .extension_browser_surfaces
+                .published(profile)
+                .map(ExtensionBrowserSurface::generation)
+            {
+                Some(current) => match current.next() {
+                    Some(next) => next,
+                    None => {
+                        settlement.native.rejected = true;
+                        settlement.record_failure(profile);
+                        continue;
+                    }
+                },
+                None => {
+                    self.extension_browser_surfaces
+                        .retiring_profiles
+                        .remove(profile);
+                    self.extension_actions.retire_profile(profile);
+                    self.project_extension_actions(profile);
+                    continue;
+                }
+            };
+            let surface = ExtensionBrowserSurface::new(profile, generation, None, Vec::new())
+                .expect("empty extension browser surface is bounded and valid");
+            let admission = self.engine.set_extension_browser_surface(surface);
+            settlement.native.record(admission);
+            match admission {
+                NativeDispatch::Scheduled => {
+                    self.extension_browser_surfaces.published.remove(&profile);
+                    self.extension_browser_surfaces
+                        .retry_profiles
+                        .remove(profile);
+                    self.extension_browser_surfaces
+                        .retiring_profiles
+                        .remove(profile);
+                    self.extension_actions.retire_profile(profile);
+                    self.project_extension_actions(profile);
+                }
+                NativeDispatch::Rejected | NativeDispatch::Unsupported => {
+                    settlement.record_failure(profile)
+                }
+            }
+        }
+        settlement
     }
 
     pub(super) fn sync_extension_browser_surface(

@@ -28,6 +28,8 @@ type HeldBlockerUpdate = (
     Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>,
 );
 type HeldBlockerLoad = (ProfileId, Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>);
+type HeldExtensionSetEnabled = zephium_core::ports::extensions::ExtensionSetEnabledCallback;
+type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstallCallback;
 
 pub(crate) struct ImmediateAllowAllCompiler;
 
@@ -152,6 +154,23 @@ pub(super) struct FakeExtensionLifecycleState {
     pub(super) retirement_invoke_override: Mutex<Option<bool>>,
     pub(super) panic_on_retirement: std::sync::atomic::AtomicBool,
     pub(super) panic_after_retirement_continuation: std::sync::atomic::AtomicBool,
+    pub(super) management_admission:
+        Mutex<Option<zephium_core::ports::extensions::ExtensionManagementAdmission>>,
+    pub(super) set_enabled_calls: Mutex<
+        Vec<(
+            zephium_core::ports::extensions::ExtensionInstallSelector,
+            bool,
+            std::time::Instant,
+        )>,
+    >,
+    pub(super) set_enabled_callbacks: Mutex<Vec<HeldExtensionSetEnabled>>,
+    pub(super) uninstall_calls: Mutex<
+        Vec<(
+            zephium_core::ports::extensions::ExtensionInstallSelector,
+            std::time::Instant,
+        )>,
+    >,
+    pub(super) uninstall_callbacks: Mutex<Vec<HeldExtensionUninstall>>,
     pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
     pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
     pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
@@ -269,6 +288,57 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
             );
         }
         disposition
+    }
+
+    fn begin_set_install_enabled(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallSelector,
+        enabled: bool,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionSetEnabledCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        self.state
+            .set_enabled_calls
+            .lock()
+            .unwrap()
+            .push((selector, enabled, deadline));
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state.set_enabled_callbacks.lock().unwrap().push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
+    fn begin_uninstall(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallSelector,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionUninstallCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        self.state
+            .uninstall_calls
+            .lock()
+            .unwrap()
+            .push((selector, deadline));
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state.uninstall_callbacks.lock().unwrap().push(done);
+        } else {
+            drop(done);
+        }
+        admission
     }
 
     fn shutdown_until(

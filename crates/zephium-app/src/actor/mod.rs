@@ -702,6 +702,8 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::DropTab { .. }
             | Command::DividerRelease { .. }
             | Command::Run(_)
+            | Command::SetFocusedExtensionEnabled { .. }
+            | Command::UninstallFocusedExtension { .. }
             | Command::OpenUrl(_)
             | Command::SetAppSetting { .. }
             | Command::DeleteProfile(_)

@@ -488,6 +488,251 @@ fn tracked_operation_has_exact_admission_and_actor_disposition_id() {
 }
 
 #[test]
+fn extension_management_stays_pending_until_serialized_service_settlement() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let engine = Arc::new(FakeEngine::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
+    let _ = rx.try_iter().count();
+
+    let install = zephium_core::ids::ExtensionInstallId::from(91_000);
+    assert!(handle.dispatch_operation(
+        "extension-enable".into(),
+        Command::SetFocusedExtensionEnabled {
+            install,
+            expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            expected_install: zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+            enabled: true,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state.set_enabled_callbacks.lock().unwrap().len() == 1
+    ));
+    assert!(rx
+        .try_iter()
+        .all(|projection| !matches!(projection, Projection::OperationProcessed(_))));
+    let (selector, enabled, deadline) = extension_state.set_enabled_calls.lock().unwrap()[0];
+    assert_eq!(selector.profile(), profile);
+    assert_eq!(selector.install(), install);
+    assert!(enabled);
+    assert!(deadline > std::time::Instant::now());
+
+    let mut active_profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+    assert!(active_profiles.try_insert(profile));
+    extension_state
+        .set_enabled_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(
+        zephium_core::ports::extensions::ExtensionManagementSettlement::new(
+            zephium_core::ports::extensions::ExtensionSetEnabledOutcome::Enabled {
+                generation: zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+                changed: true,
+            },
+            Some(active_profiles),
+        ),
+    );
+    let enabled = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "extension-enable" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("service settlement must complete the original operation");
+    assert_eq!(enabled.outcome, OperationOutcome::Applied);
+    assert_eq!(enabled.reason, OperationReason::MutationApplied);
+    assert!(engine
+        .extension_browser_surfaces()
+        .last()
+        .is_some_and(|surface| !surface.windows().is_empty()));
+
+    let expected_catalog = zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL
+        .next()
+        .unwrap();
+    let expected_install = zephium_core::extensions::ExtensionInstallRevision::INITIAL
+        .next()
+        .unwrap();
+    assert!(handle.dispatch_operation(
+        "extension-uninstall".into(),
+        Command::UninstallFocusedExtension {
+            install,
+            expected_catalog,
+            expected_install,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state.uninstall_callbacks.lock().unwrap().len() == 1
+    ));
+    assert!(rx
+        .try_iter()
+        .all(|projection| !matches!(projection, Projection::OperationProcessed(_))));
+    let (selector, deadline) = extension_state.uninstall_calls.lock().unwrap()[0];
+    assert_eq!(selector.profile(), profile);
+    assert_eq!(selector.install(), install);
+    assert_eq!(selector.catalog_revision(), expected_catalog);
+    assert_eq!(selector.install_revision(), expected_install);
+    assert!(deadline > std::time::Instant::now());
+
+    extension_state
+        .uninstall_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(
+        zephium_core::ports::extensions::ExtensionManagementSettlement::new(
+            zephium_core::ports::extensions::ExtensionUninstallOutcome::Uninstalled,
+            Some(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+        ),
+    );
+    let uninstalled =
+        std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .find_map(|projection| match projection {
+                Projection::OperationProcessed(completion)
+                    if completion.operation_id == "extension-uninstall" =>
+                {
+                    Some(completion)
+                }
+                _ => None,
+            })
+            .expect("uninstall settlement must complete the original operation");
+    assert_eq!(uninstalled.outcome, OperationOutcome::Applied);
+    assert_eq!(uninstalled.reason, OperationReason::MutationApplied);
+    assert!(engine
+        .extension_browser_surfaces()
+        .last()
+        .is_some_and(|surface| surface.windows().is_empty()));
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}
+
+#[test]
+fn ambiguous_extension_management_write_fences_later_writes_until_restart() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    assert!(
+        std::iter::from_fn(|| { rx.recv_timeout(std::time::Duration::from_secs(2)).ok() }).any(
+            |projection| matches!(projection, Projection::Items(items) if items.profile.is_some())
+        )
+    );
+    let _ = rx.try_iter().count();
+
+    assert!(handle.dispatch_operation(
+        "extension-unknown".into(),
+        Command::SetFocusedExtensionEnabled {
+            install: zephium_core::ids::ExtensionInstallId::from(92_000),
+            expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            expected_install: zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+            enabled: false,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state.set_enabled_callbacks.lock().unwrap().len() == 1
+    ));
+    extension_state
+        .set_enabled_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(
+        zephium_core::ports::extensions::ExtensionManagementSettlement::new(
+            zephium_core::ports::extensions::ExtensionSetEnabledOutcome::OutcomeUnknown,
+            None,
+        ),
+    );
+    let ambiguous = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "extension-unknown" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("ambiguous write must terminalize its admitted operation");
+    assert_eq!(ambiguous.outcome, OperationOutcome::Deferred);
+    assert_eq!(ambiguous.reason, OperationReason::StoreOutcomeUnknown);
+
+    assert!(handle.dispatch_operation(
+        "extension-fenced".into(),
+        Command::UninstallFocusedExtension {
+            install: zephium_core::ids::ExtensionInstallId::from(92_001),
+            expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            expected_install: zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+        },
+    ));
+    let fenced = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "extension-fenced" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("post-ambiguity operation must be rejected in actor order");
+    assert_eq!(fenced.outcome, OperationOutcome::Rejected);
+    assert_eq!(fenced.reason, OperationReason::StoreReconciliationFailed);
+    assert!(extension_state.uninstall_calls.lock().unwrap().is_empty());
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}
+
+#[test]
 fn spawned_shutdown_is_ordered_behind_prior_commands() {
     let store = Arc::new(FakeStore::default());
     let (tx, rx) = std::sync::mpsc::channel();

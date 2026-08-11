@@ -5,14 +5,18 @@ use std::sync::Arc;
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Size;
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
 use zephium_core::ports::extensions::ExtensionServiceLifecycle;
+use zephium_core::ports::extensions::{
+    ExtensionManagementSettlement, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+};
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
 use zephium_ipc::{BlockerStatusView, Projection, TabView};
@@ -29,6 +33,15 @@ pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
 /// this owner moves onto the shell actor and is consumed exactly once during
 /// ordered process shutdown.
 pub type ExtensionLifecycle = Box<dyn ExtensionServiceLifecycle>;
+/// Maximum user-owned extension management operations awaiting serialized
+/// service settlement. This also reserves critical Shell mailbox capacity.
+pub const MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionManagementCompletion {
+    SetEnabled(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>),
+    Uninstall(ExtensionManagementSettlement<ExtensionUninstallOutcome>),
+}
 /// Redacted terminal reason delivered to the desktop composition root when
 /// the shell can no longer continue safely in the current process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +217,29 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
+    },
+    /// Changes one installed extension in the focused profile. All selector
+    /// fields must originate from the latest privileged management
+    /// projection; Shell supplies the profile identity itself.
+    SetFocusedExtensionEnabled {
+        install: ExtensionInstallId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+        enabled: bool,
+    },
+    /// Removes one exact installed extension from the focused profile after
+    /// the extension service proves regular/private native absence.
+    UninstallFocusedExtension {
+        install: ExtensionInstallId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+    },
+    /// Internal exactly-once handoff from an admitted extension-service
+    /// management callback. It is never accepted through public operation
+    /// dispatch.
+    ExtensionManagementSettled {
+        request: u64,
+        completion: ExtensionManagementCompletion,
     },
     Search(String),
     OpenUrl(String),

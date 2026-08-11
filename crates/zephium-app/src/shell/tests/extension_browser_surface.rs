@@ -269,6 +269,98 @@ fn rejected_surface_admission_is_retried_once_without_idle_rebuilds() {
 }
 
 #[test]
+fn final_runtime_retirement_publishes_an_empty_surface_and_releases_shell_state() {
+    let (mut shell, engine, _) = setup();
+    let profile = ProfileId::from(52_000);
+    let space = SpaceId::from(52_001);
+    install_profile(&mut shell, profile, &[space]);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, space, Size::new(1200.0, 800.0));
+    activate_profile(&mut shell, profile);
+    assert!(shell.items.insert_tab(
+        ItemId::from(52_002),
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+    ));
+    assert!(shell.sync_extension_browser_surfaces().native.scheduled);
+
+    assert!(shell
+        .extension_browser_surfaces
+        .replace_active_profiles(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY));
+    let retired = shell.sync_extension_browser_surfaces();
+
+    assert!(retired.native.scheduled);
+    assert!(!shell.extension_browser_surfaces.is_active(profile));
+    assert!(shell
+        .extension_browser_surfaces
+        .published_surface(profile)
+        .is_none());
+    let surfaces = engine.extension_browser_surfaces();
+    assert_eq!(surfaces.len(), 2);
+    assert_eq!(
+        surfaces[1].generation(),
+        ExtensionBrowserSurfaceGeneration::new(2).unwrap()
+    );
+    assert!(surfaces[1].windows().is_empty());
+}
+
+#[test]
+fn rejected_final_runtime_surface_retirement_is_bounded_and_retryable() {
+    let (mut shell, engine, _) = setup();
+    let profile = ProfileId::from(53_000);
+    let space = SpaceId::from(53_001);
+    install_profile(&mut shell, profile, &[space]);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, space, Size::new(1200.0, 800.0));
+    activate_profile(&mut shell, profile);
+    assert!(shell.items.insert_tab(
+        ItemId::from(53_002),
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+    ));
+    assert!(shell.sync_extension_browser_surfaces().native.scheduled);
+    assert!(shell
+        .extension_browser_surfaces
+        .replace_active_profiles(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY));
+    engine
+        .reject_native_dispatch
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let refused = shell.sync_extension_browser_surfaces();
+    assert!(refused.native.rejected);
+    assert!(shell
+        .extension_browser_surfaces
+        .published_surface(profile)
+        .is_some());
+
+    engine
+        .reject_native_dispatch
+        .store(false, std::sync::atomic::Ordering::Release);
+    let retried = shell.retry_extension_browser_surfaces();
+    assert!(retried.native.scheduled);
+    assert!(shell
+        .extension_browser_surfaces
+        .published_surface(profile)
+        .is_none());
+    assert!(engine
+        .extension_browser_surfaces()
+        .last()
+        .unwrap()
+        .windows()
+        .is_empty());
+    assert_eq!(
+        shell.retry_extension_browser_surfaces().native,
+        NativeWork::default()
+    );
+}
+
+#[test]
 fn ambiguous_multiwindow_ownership_refuses_view_creation() {
     let (mut shell, engine, _) = setup();
     let profile = ProfileId::from(1);

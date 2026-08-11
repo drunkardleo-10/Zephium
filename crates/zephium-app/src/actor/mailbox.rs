@@ -97,6 +97,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
+    + crate::api::MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS
     + 3;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
@@ -207,6 +208,7 @@ enum RecoveryKey {
     ContentRules(ProfileId, ContentPolicyGeneration),
     UserContent(ContentScope),
     ProfileDeletion(ProfileId),
+    ExtensionManagement(u64),
     Split(zephium_core::ids::WindowId),
 }
 
@@ -242,6 +244,9 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
             Some(RecoveryKey::UserContent(*scope))
         }
         Command::ProfileDeletionReady(profile) => Some(RecoveryKey::ProfileDeletion(*profile)),
+        Command::ExtensionManagementSettled { request, .. } => {
+            Some(RecoveryKey::ExtensionManagement(*request))
+        }
         Command::Engine(EngineEvent::SplitChanged { window, .. }) => {
             Some(RecoveryKey::Split(*window))
         }
@@ -985,6 +990,7 @@ fn command_is_critical(command: &Command) -> bool {
         Command::BlockerReady(_)
             | Command::BlockerStoreReady(_)
             | Command::ProfileDeletionReady(_)
+            | Command::ExtensionManagementSettled { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
                 EngineEvent::UrlChanged { .. }

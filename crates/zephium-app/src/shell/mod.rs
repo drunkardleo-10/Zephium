@@ -7,6 +7,7 @@ mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_management;
 mod favicons;
 mod operations;
 mod persistence;
@@ -24,6 +25,7 @@ mod zoom;
 use effects::{mutation_result, operation_result, NativeWork};
 use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
+use extension_management::ExtensionManagementState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
@@ -52,8 +54,8 @@ use crate::actor::{spawn, Handle, TryPushError};
 use crate::actor::{CallbackHandle, CommandQueue};
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
-    EmitFn, ExtensionLifecycle, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
-    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
+    EmitFn, ExtensionLifecycle, ExtensionManagementCompletion, SharedBlocker, SharedChrome,
+    SharedEngine, SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 #[cfg(test)]
 use crate::api::{ChromePresentationCallback, PresentationChrome};
@@ -170,6 +172,7 @@ pub struct Shell {
     extension_startup_ready: bool,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
     extension_actions: ExtensionActionState,
+    extension_management: ExtensionManagementState,
     /// Any terminal extension lifecycle failure permanently closes bootstrap
     /// and profile-deletion progress for this process while the desktop
     /// composition root converges on orderly shutdown.
@@ -372,6 +375,7 @@ impl Shell {
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
             extension_actions: ExtensionActionState::default(),
+            extension_management: ExtensionManagementState::default(),
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
@@ -435,6 +439,19 @@ impl Shell {
                     return;
                 }
                 let command = *command;
+                if matches!(
+                    &command,
+                    Command::SetFocusedExtensionEnabled { .. }
+                        | Command::UninstallFocusedExtension { .. }
+                ) {
+                    if let Some(mut completion) =
+                        self.begin_extension_management(operation_id.clone(), command)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if let Command::DeleteProfile(profile) = &command {
                     let profile = *profile;
                     let mut completion =
@@ -553,7 +570,13 @@ impl Shell {
                 let _ = self.operation_run_command(&id);
             }
             // This privileged mutation must carry a desktop operation id.
-            Command::InvokeExtensionAction { .. } => {}
+            Command::InvokeExtensionAction { .. }
+            | Command::SetFocusedExtensionEnabled { .. }
+            | Command::UninstallFocusedExtension { .. } => {}
+            Command::ExtensionManagementSettled {
+                request,
+                completion,
+            } => self.settle_extension_management(request, completion),
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);

@@ -261,6 +261,7 @@ pub enum OperationReason {
     StoreConflict,
     StoreOutcomeUnknown,
     StoreReconciliationFailed,
+    ExtensionActivationPending,
     ContentPolicyApplyFailed,
     ContentPolicySourceUnavailable,
     ContentPolicySourceRefreshPending,
