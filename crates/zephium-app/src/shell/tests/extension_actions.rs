@@ -1,9 +1,10 @@
 use super::extension_browser_surface::{activate_profile, install_profile};
 use super::*;
+use crate::shell::extension_actions::ExtensionActionInvocationObservation;
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionActionScope, ExtensionActionSnapshot,
+    ExtensionActionIcon, ExtensionActionRevision, ExtensionActionScope, ExtensionActionSnapshot,
     ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionPopupAnchor,
-    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
+    ExtensionRuntimeGeneration, ExtensionRuntimeInstance, EXTENSION_ACTION_ICON_RGBA_BYTES,
 };
 use zephium_core::ids::ExtensionInstallId;
 
@@ -44,7 +45,7 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         ExtensionActionRevision::INITIAL,
         "Bitwarden",
         "",
-        None,
+        Some(ExtensionActionIcon::from_rgba(vec![7; EXTENSION_ACTION_ICON_RGBA_BYTES]).unwrap()),
         true,
         true,
         false,
@@ -61,6 +62,25 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         },
     ));
     assert_eq!(shell.extension_actions.snapshot(profile), Some(&snapshot));
+    let projected = shell
+        .extension_actions
+        .projected_actions(profile, tab, generation);
+    assert_eq!(projected.len(), 1);
+    assert_eq!(
+        projected[0].runtime.install_id,
+        runtime.install_id().to_string()
+    );
+    assert_eq!(projected[0].runtime.generation, "0000000000000001");
+    assert_eq!(projected[0].revision, "0000000000000001");
+    assert_eq!(projected[0].label, "Bitwarden");
+    assert_eq!(
+        projected[0].icon_rgba_base64.as_deref().map(str::len),
+        Some(5_464)
+    );
+    assert!(shell
+        .extension_actions
+        .projected_actions(profile, tab, generation.next().unwrap())
+        .is_empty());
     assert_eq!(shell.retry_extension_actions(), NativeWork::default());
     assert_eq!(engine.extension_action_requests().len(), 1);
     let anchor = ExtensionPopupAnchor::new(Rect::new(1100.0, 8.0, 28.0, 28.0)).unwrap();
@@ -91,6 +111,22 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         request: invocation,
         settlement: zephium_core::extensions::ExtensionActionSettlement::Dispatched,
     }));
+    let rejected_invocation = shell
+        .invoke_extension_action(runtime, ExtensionActionRevision::INITIAL, anchor)
+        .unwrap();
+    assert_eq!(
+        shell.extension_actions.settle_invocation(
+            profile,
+            rejected_invocation,
+            zephium_core::extensions::ExtensionActionSettlement::Rejected(
+                zephium_core::extensions::ExtensionActionRejection::TabDiscarded,
+            ),
+        ),
+        ExtensionActionInvocationObservation::Rejected {
+            tab,
+            reason: zephium_core::extensions::ExtensionActionRejection::TabDiscarded,
+        }
+    );
     shell.handle(Command::Engine(EngineEvent::ExtensionActionsInvalidated {
         profile,
     }));

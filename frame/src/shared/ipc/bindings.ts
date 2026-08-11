@@ -15,6 +15,7 @@ export const commands = {
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
+	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
@@ -47,6 +48,8 @@ export const commands = {
 /** Events */
 export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
+	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
+	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -207,6 +210,75 @@ export type DividerView = {
 	width: number | null,
 	height: number | null,
 	vertical: boolean,
+};
+
+export type ExtensionActionFailed = ExtensionActionFailedView;
+
+/**
+ *  Actor-ordered, context-bound transient failure notice. The revision lets
+ *  privileged chrome discard a delayed eval and present each current failure
+ *  at most once; the profile/tab join prevents a late native refusal from
+ *  appearing after the user has switched context.
+ */
+export type ExtensionActionFailedView = {
+	projection_revision: string,
+	profile_id: string,
+	tab_id: string,
+	reason: ExtensionActionFailure,
+};
+
+/**
+ *  Closed, sanitized reason why a trusted toolbar gesture could not complete.
+ *  Native strings, extension content, URLs, and runtime identities are never
+ *  forwarded through this transient user-notice channel.
+ */
+export type ExtensionActionFailure = "invalid_request" | "runtime_unavailable" | "runtime_superseded" | "tab_unavailable" | "tab_discarded" | "action_unavailable" | "action_disabled" | "capacity_exceeded" | "popup_unavailable" | "popup_capacity_exceeded" | "native_admission_failed" | "shutting_down" | "unsupported_platform";
+
+/**
+ *  Non-authorizing identity for one live extension runtime. Privileged chrome
+ *  may echo this value only as part of an action gesture; the Shell rejoins it
+ *  to the focused profile, active tab, browser-surface generation, and current
+ *  action revision before any native work is admitted.
+ */
+export type ExtensionActionRuntimeView = {
+	install_id: string,
+	/**
+	 *  Process-local nonzero generation, encoded as fixed-width hexadecimal
+	 *  so JavaScript never rounds a Rust `u64`.
+	 */
+	generation: string,
+};
+
+/**
+ *  One effective toolbar action for the focused profile's active logical tab.
+ *  Labels and badges are bounded before this projection is constructed. The
+ *  optional icon is the canonical base64 encoding of exactly 32x32 RGBA bytes;
+ *  privileged chrome performs no extension-controlled image decoding.
+ */
+export type ExtensionActionView = {
+	runtime: ExtensionActionRuntimeView,
+	revision: string,
+	label: string,
+	badge: string,
+	icon_rgba_base64: string | null,
+	enabled: boolean,
+	presents_popup: boolean,
+	unread_badge: boolean,
+};
+
+export type ExtensionActionsChanged = ExtensionActionsView;
+
+/**
+ *  Exact replacement action cohort. An empty `actions` collection removes all
+ *  previously visible actions for this profile/tab. The frame additionally
+ *  joins `profile_id` and `tab_id` to its current Items projection, so event
+ *  reordering cannot expose a stale action after focus changes.
+ */
+export type ExtensionActionsView = {
+	projection_revision: string,
+	profile_id: string,
+	tab_id: string | null,
+	actions: ExtensionActionView[],
 };
 
 export type ItemsChanged = ItemsState;

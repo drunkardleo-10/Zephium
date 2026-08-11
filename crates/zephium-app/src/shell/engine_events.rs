@@ -125,6 +125,12 @@ impl Shell {
                 );
                 if matches!(
                     observation,
+                    extension_actions::ExtensionActionObservation::Applied
+                ) {
+                    self.project_extension_actions(profile);
+                }
+                if matches!(
+                    observation,
                     extension_actions::ExtensionActionObservation::Retained
                 ) {
                     crate::diagnostic!(
@@ -149,15 +155,20 @@ impl Shell {
                 let observation = self
                     .extension_actions
                     .settle_invocation(profile, request, settlement);
-                if matches!(
-                    observation,
-                    extension_actions::ExtensionActionInvocationObservation::Rejected(
+                if let extension_actions::ExtensionActionInvocationObservation::Rejected {
+                    tab,
+                    reason,
+                } = observation
+                {
+                    self.project_extension_action_failure(profile, Some(tab), reason);
+                    if matches!(
+                        reason,
                         zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded
                             | zephium_core::extensions::ExtensionActionRejection::ActionUnavailable
                             | zephium_core::extensions::ExtensionActionRejection::ActionDisabled
-                    )
-                ) {
-                    let _ = self.refresh_extension_actions(profile);
+                    ) {
+                        let _ = self.refresh_extension_actions(profile);
+                    }
                 }
                 if matches!(
                     observation,

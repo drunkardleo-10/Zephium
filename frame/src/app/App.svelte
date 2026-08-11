@@ -7,6 +7,7 @@
   import { commands } from "../shared/ipc/bindings";
   import { IS_MAC } from "../shared/platform";
   import * as blocker from "../domain/blocker/blocker.svelte";
+  import * as extensions from "../domain/extensions/extensions.svelte";
   import * as layout from "../features/split/layout.svelte";
   import * as operations from "../domain/operations/operations";
   import * as runtime from "../domain/runtime/runtime.svelte";
@@ -87,6 +88,7 @@
     // Runtime status is emitted by the same actor-ordered bootstrap that
     // supplies tabs, so its listener must exist before tabs starts bootstrap.
     const runtimeReady = runtime.init();
+    const extensionsReady = extensions.init();
     const tabsReady = tabs.init();
     const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
@@ -97,7 +99,14 @@
 
     void (async () => {
       try {
-        await Promise.all([themeReady, runtimeReady, tabsReady, uiEventsReady, sidebarReady]);
+        await Promise.all([
+          themeReady,
+          runtimeReady,
+          extensionsReady,
+          tabsReady,
+          uiEventsReady,
+          sidebarReady,
+        ]);
         if (disposed) return;
 
         // A hidden native window can suspend animation frames indefinitely.
@@ -120,6 +129,7 @@
       operations.dispose();
       blocker.dispose();
       runtime.dispose();
+      extensions.dispose();
       tabs.dispose();
       ui.dispose();
       if (!IS_MAC) layout.dispose();

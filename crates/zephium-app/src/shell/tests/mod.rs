@@ -1197,6 +1197,8 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
                 *slot = t;
             }
         }
+        Projection::ExtensionActions(_) => {}
+        Projection::ExtensionActionFailed(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}

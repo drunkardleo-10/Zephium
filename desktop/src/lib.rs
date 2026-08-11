@@ -35,9 +35,13 @@ use zephium_app::{
     ExtensionLifecycle, Handle, SharedChrome, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 use zephium_blocker_service::ManagedBlocker;
-use zephium_core::geometry::Size;
+use zephium_core::extensions::{
+    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
+    ExtensionRuntimeInstance,
+};
+use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::ScriptId;
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_core::injection::MatchSet;
 use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome};
 use zephium_core::ports::engine::{
@@ -86,6 +90,8 @@ const APPEARANCE_DARK: u8 = 2;
 
 const EVENT_ITEMS: &str = "zephium:items";
 const EVENT_TAB: &str = "zephium:tab";
+const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
+const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
 const EVENT_UI: &str = "zephium:ui-command";
 const EVENT_SEARCH: &str = "zephium:search";
@@ -1126,6 +1132,12 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 struct TabChanged(zephium_ipc::TabView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ExtensionActionsChanged(zephium_ipc::ExtensionActionsView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct UiCommand(String);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1294,6 +1306,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_forward,
             tabs_split,
             tabs_unsplit,
+            extension_action_invoke,
             blocker_status,
             blocker_set_enabled,
             blocker_retry,
@@ -1325,6 +1338,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .events(collect_events![
             ItemsChanged,
             TabChanged,
+            ExtensionActionsChanged,
+            ExtensionActionFailed,
             UiCommand,
             SearchChanged,
             LayoutChanged,
@@ -1707,6 +1722,47 @@ fn window_point(x: f64, y: f64) -> Option<(f64, f64)> {
     point_in_bounds(point.0, point.1).then_some(point)
 }
 
+fn fixed_nonzero_hex(value: &str) -> Option<u64> {
+    if value.len() != 16
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let parsed = u64::from_str_radix(value, 16).ok()?;
+    (parsed != 0).then_some(parsed)
+}
+
+fn extension_popup_anchor_in_bounds(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    window_width: f64,
+    window_height: f64,
+) -> Option<ExtensionPopupAnchor> {
+    let values = [x, y, width, height, window_width, window_height];
+    if values.iter().any(|value| !value.is_finite())
+        || x < 0.0
+        || y < 0.0
+        || width <= 0.0
+        || height <= 0.0
+        || window_width <= 0.0
+        || window_height <= 0.0
+        || window_width > MAX_WINDOW_COORDINATE
+        || window_height > MAX_WINDOW_COORDINATE
+    {
+        return None;
+    }
+    let right = x + width;
+    let bottom = y + height;
+    if !right.is_finite() || !bottom.is_finite() || right > window_width || bottom > window_height {
+        return None;
+    }
+    ExtensionPopupAnchor::new(Rect::new(x, y, width, height)).ok()
+}
+
 fn sidebar_width_in_bounds(width: f64) -> bool {
     width.is_finite() && (MIN_SIDEBAR_WIDTH..=MAX_SIDEBAR_WIDTH).contains(&width)
 }
@@ -2014,6 +2070,87 @@ fn tabs_unsplit(
         return rejected_operation();
     }
     dispatch_operation(caller.app_handle(), &shell, Command::Unsplit)
+}
+
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+fn extension_action_invoke(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    profile_id: String,
+    install_id: String,
+    runtime_generation: String,
+    action_revision: String,
+    anchor_x: f64,
+    anchor_y: f64,
+    anchor_width: f64,
+    anchor_height: f64,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "extension_action_invoke")
+        || shutdown_started(caller.app_handle())
+        || !bounded(&profile_id, MAX_ITEM_ID_BYTES)
+        || !bounded(&install_id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(profile) =
+        ProfileId::parse(&profile_id).filter(|profile| profile.to_string() == profile_id)
+    else {
+        return rejected_operation();
+    };
+    let Some(install) =
+        ExtensionInstallId::parse(&install_id).filter(|install| install.to_string() == install_id)
+    else {
+        return rejected_operation();
+    };
+    let Some(generation) =
+        fixed_nonzero_hex(&runtime_generation).and_then(ExtensionRuntimeGeneration::new)
+    else {
+        return rejected_operation();
+    };
+    let Some(revision) = fixed_nonzero_hex(&action_revision).and_then(ExtensionActionRevision::new)
+    else {
+        return rejected_operation();
+    };
+    let Ok(inner_size) = caller.inner_size() else {
+        return rejected_operation();
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return rejected_operation();
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return rejected_operation();
+    }
+    // DOMRect is relative to the positioned privileged chrome WebView, while
+    // the native popup parent is the window content view. Apply the same
+    // generation-checked chrome origin used by drag/menu coordinates; never
+    // let a negative CSS coordinate become valid merely because of the inset.
+    if anchor_x < 0.0 || anchor_y < 0.0 {
+        return rejected_operation();
+    }
+    let Some((window_anchor_x, window_anchor_y)) = window_point(anchor_x, anchor_y) else {
+        return rejected_operation();
+    };
+    let Some(anchor) = extension_popup_anchor_in_bounds(
+        window_anchor_x,
+        window_anchor_y,
+        anchor_width,
+        anchor_height,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::InvokeExtensionAction {
+            runtime: ExtensionRuntimeInstance::new(profile, install, generation),
+            revision,
+            anchor,
+        },
+    )
 }
 
 #[tauri::command]
@@ -3446,6 +3583,18 @@ pub fn run() {
                 Projection::Tab(tab) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
                 }
+                Projection::ExtensionActions(actions) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_EXTENSION_ACTIONS,
+                    &actions,
+                ),
+                Projection::ExtensionActionFailed(failure) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_EXTENSION_ACTION_FAILED,
+                    &failure,
+                ),
                 Projection::UiCommand(id) => {
                     if let Some(mode) = id.strip_prefix("theme.") {
                         if matches!(mode, "system" | "light" | "dark") {
@@ -4142,6 +4291,36 @@ mod tests {
             super::menu_popup_anchor(12.5, 40.0, 800.0, f64::NAN),
         ] {
             assert_eq!(invalid, None);
+        }
+    }
+
+    #[test]
+    fn extension_action_identity_and_anchor_are_exact_and_window_local() {
+        assert_eq!(super::fixed_nonzero_hex("0000000000000001"), Some(1));
+        for invalid in [
+            "0000000000000000",
+            "000000000000001",
+            "00000000000000001",
+            "000000000000000A",
+            "000000000000000g",
+        ] {
+            assert_eq!(super::fixed_nonzero_hex(invalid), None);
+        }
+
+        let valid = super::extension_popup_anchor_in_bounds(110.5, 8.0, 28.0, 28.0, 240.0, 800.0)
+            .expect("a visible logical button rectangle is accepted");
+        assert_eq!(
+            valid.rect(),
+            zephium_core::geometry::Rect::new(110.5, 8.0, 28.0, 28.0)
+        );
+        for invalid in [
+            super::extension_popup_anchor_in_bounds(-1.0, 8.0, 28.0, 28.0, 240.0, 800.0),
+            super::extension_popup_anchor_in_bounds(220.0, 8.0, 28.0, 28.0, 240.0, 800.0),
+            super::extension_popup_anchor_in_bounds(8.0, 790.0, 28.0, 28.0, 240.0, 800.0),
+            super::extension_popup_anchor_in_bounds(8.0, 8.0, 0.0, 28.0, 240.0, 800.0),
+            super::extension_popup_anchor_in_bounds(f64::NAN, 8.0, 28.0, 28.0, 240.0, 800.0),
+        ] {
+            assert!(invalid.is_none());
         }
     }
 

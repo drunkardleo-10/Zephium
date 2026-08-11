@@ -665,8 +665,11 @@ profile, logical tab, browser-surface generation, runtime generation, and
 monotonic native action revision. The engine enumerates only operation-authority
 published runtimes in stable native `Owned` state, resolves the already-created
 logical `WKWebExtensionTab`, and calls `actionForTab:` without reading the tab's
-weak webview or accessing `popupWebView`. Labels, badges, and future icon pixels
-cross the boundary only after fixed byte/dimension validation; unchanged
+weak webview or accessing `popupWebView`. Labels and badges cross the boundary
+only after fixed byte validation. WebKit decodes the declared icon natively;
+the adapter exception-contains and rasterizes its `NSImage` into one exact
+32x32 straight-alpha RGBA buffer, so privileged chrome never decodes an
+extension-controlled image format or retains a native image graph. Unchanged
 effective state reuses its prior revision. An applied empty cohort removes stale
 buttons, while a rejected or stale refresh retains the last known-good cohort.
 `didUpdateAction` is accepted only from the exact profile controller, loaded
@@ -694,8 +697,28 @@ terminal settlement. Surface replacement closes a popup when its tab becomes
 discarded, inactive, or absent; runtime retirement, profile erasure, and host
 shutdown cancel loading and close the native popup before owner release. The
 lease covers only the pending/presented interval and is released even though
-WebKit may cache its popup wrapper. Icon rasterization and the public Shell IPC
-gesture surface remain separate release gates.
+WebKit may cache its popup wrapper.
+
+The privileged frame receives an actor-revisioned exact-replacement action
+cohort only for the focused profile and active logical tab. Fixed RGBA icons
+use canonical base64 rather than a 4,096-element JSON integer array. The frame
+joins the projected profile/tab to the current Items snapshot, rejects delayed
+action or failure evals against the same monotonic revision floor, and echoes
+only install/runtime/action revisions plus the clicked button's CSS viewport
+rectangle. Desktop translates that rectangle through the generation-checked
+chrome origin into window-logical coordinates, then accepts canonical ULIDs,
+fixed lowercase nonzero hex, a fully visible finite anchor, the main-window
+caller, and a live shutdown state;
+Shell and native code still derive and revalidate every authorizing fact.
+Synchronous and asynchronous refusal map to a closed, profile/tab-bound
+user-visible taxonomy without exposing native strings, URLs, extension content,
+or runtime identity. A surface-generation replacement emits an empty cohort
+before its asynchronous native refresh, so even a same-tab reconstruction
+cannot preserve a stale button.
+Toolbar rendering is allocation-bounded by the eight-install profile ceiling;
+disabled actions remain visible but inert, badges are clipped, and no idle
+animation, renderer, timer, or popup resource exists until an actual failure or
+trusted click.
 
 The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live
@@ -861,7 +884,7 @@ filtered by the native parser. The reviewed macOS classification is therefore:
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
 | MV3 background startup with declared `webRequest` | Compatible | Product-shaped live background registration gate |
-| Toolbar action and declared popup page | Native-brokered | Exact action projection, trusted invocation, native transient popup presentation, resource admission, and teardown are implemented; icon projection and the public Shell IPC gesture surface remain release work |
+| Toolbar action and declared popup page | Native-brokered | Exact action/icon projection, privileged gesture admission, native transient popup presentation, bounded failure UX, resource admission, and teardown are implemented; release-build end-to-end UX/RSS/endurance evidence remains required |
 | Non-blocking request observation | Unassessed in Zephium's real tab surface | Public WebKit API exists; a product-tab live callback gate remains required |
 | HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
 | Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |

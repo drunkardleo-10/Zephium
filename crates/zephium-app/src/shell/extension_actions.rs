@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
     ExtensionActionRevision, ExtensionActionSettlement, ExtensionActionSnapshot,
@@ -10,6 +12,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::NativeDispatch;
+use zephium_ipc::{ExtensionActionRuntimeView, ExtensionActionView};
 
 use super::{NativeWork, Shell};
 
@@ -47,6 +50,39 @@ impl ExtensionActionState {
     #[cfg(test)]
     pub(super) fn snapshot(&self, profile: ProfileId) -> Option<&ExtensionActionSnapshot> {
         self.snapshots.get(&profile)
+    }
+
+    pub(super) fn projected_actions(
+        &self,
+        profile: ProfileId,
+        tab: ItemId,
+        surface_generation: ExtensionBrowserSurfaceGeneration,
+    ) -> Vec<ExtensionActionView> {
+        let Some(snapshot) = self.snapshots.get(&profile).filter(|snapshot| {
+            snapshot.tab() == tab && snapshot.surface_generation() == surface_generation
+        }) else {
+            return Vec::new();
+        };
+        snapshot
+            .actions()
+            .iter()
+            .map(|action| {
+                let runtime = action.runtime();
+                ExtensionActionView {
+                    runtime: ExtensionActionRuntimeView {
+                        install_id: runtime.install_id().to_string(),
+                        generation: format!("{:016x}", runtime.generation().get()),
+                    },
+                    revision: format!("{:016x}", action.revision().get()),
+                    label: action.label().to_owned(),
+                    badge: action.badge().to_owned(),
+                    icon_rgba_base64: action.icon().map(|icon| STANDARD.encode(icon.rgba())),
+                    enabled: action.is_enabled(),
+                    presents_popup: action.presents_popup(),
+                    unread_badge: action.has_unread_badge(),
+                }
+            })
+            .collect()
     }
 
     pub(super) fn observe(
@@ -104,9 +140,9 @@ impl ExtensionActionState {
         self.retry_profiles
     }
 
-    fn clear_projection(&mut self, profile: ProfileId) {
+    fn clear_projection(&mut self, profile: ProfileId) -> bool {
         self.retry_profiles.remove(profile);
-        self.snapshots.remove(&profile);
+        self.snapshots.remove(&profile).is_some()
     }
 
     fn begin_invocation(
@@ -184,7 +220,10 @@ impl ExtensionActionState {
                 ExtensionActionInvocationObservation::PopupPresented
             }
             ExtensionActionSettlement::Rejected(reason) => {
-                ExtensionActionInvocationObservation::Rejected(reason)
+                ExtensionActionInvocationObservation::Rejected {
+                    tab: pending.tab(),
+                    reason,
+                }
             }
         }
     }
@@ -204,7 +243,10 @@ pub(super) enum ExtensionActionObservation {
 pub(super) enum ExtensionActionInvocationObservation {
     Dispatched,
     PopupPresented,
-    Rejected(ExtensionActionRejection),
+    Rejected {
+        tab: ItemId,
+        reason: ExtensionActionRejection,
+    },
     Stale,
     Contradictory,
 }
@@ -226,7 +268,9 @@ impl Shell {
                     .map(|tab| (tab, surface.generation()))
             });
         let Some((tab, generation)) = target else {
-            self.extension_actions.clear_projection(profile);
+            if self.extension_actions.clear_projection(profile) {
+                self.project_extension_actions(profile);
+            }
             return NativeWork::default();
         };
         let mut native = NativeWork::default();
@@ -238,8 +282,10 @@ impl Shell {
             .engine
             .request_extension_actions(profile, tab, generation);
         native.record(admission);
-        if admission == NativeDispatch::Unsupported {
-            self.extension_actions.clear_projection(profile);
+        if admission == NativeDispatch::Unsupported
+            && self.extension_actions.clear_projection(profile)
+        {
+            self.project_extension_actions(profile);
         }
         native
     }

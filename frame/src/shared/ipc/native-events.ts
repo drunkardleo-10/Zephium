@@ -1,5 +1,7 @@
 import type {
   BlockerStatusChanged,
+  ExtensionActionFailed,
+  ExtensionActionsChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -29,6 +31,8 @@ function scopedEvent<T>(name: string) {
 export const events = {
   itemsChanged: scopedEvent<ItemsChanged>("zephium:items"),
   tabChanged: scopedEvent<TabChanged>("zephium:tab"),
+  extensionActionsChanged: scopedEvent<ExtensionActionsChanged>("zephium:extension-actions"),
+  extensionActionFailed: scopedEvent<ExtensionActionFailed>("zephium:extension-action-failed"),
   presentationTab: scopedEvent<PresentationTab>("zephium:presentation-tab"),
   uiCommand: scopedEvent<UiCommand>("zephium:ui-command"),
   searchChanged: scopedEvent<SearchChanged>("zephium:search"),

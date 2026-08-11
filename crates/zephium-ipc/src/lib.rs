@@ -21,6 +21,79 @@ pub struct TabView {
     pub favicon: Option<String>,
 }
 
+/// Non-authorizing identity for one live extension runtime. Privileged chrome
+/// may echo this value only as part of an action gesture; the Shell rejoins it
+/// to the focused profile, active tab, browser-surface generation, and current
+/// action revision before any native work is admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionRuntimeView {
+    pub install_id: String,
+    /// Process-local nonzero generation, encoded as fixed-width hexadecimal
+    /// so JavaScript never rounds a Rust `u64`.
+    pub generation: String,
+}
+
+/// One effective toolbar action for the focused profile's active logical tab.
+/// Labels and badges are bounded before this projection is constructed. The
+/// optional icon is the canonical base64 encoding of exactly 32x32 RGBA bytes;
+/// privileged chrome performs no extension-controlled image decoding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionView {
+    pub runtime: ExtensionActionRuntimeView,
+    pub revision: String,
+    pub label: String,
+    pub badge: String,
+    pub icon_rgba_base64: Option<String>,
+    pub enabled: bool,
+    pub presents_popup: bool,
+    pub unread_badge: bool,
+}
+
+/// Exact replacement action cohort. An empty `actions` collection removes all
+/// previously visible actions for this profile/tab. The frame additionally
+/// joins `profile_id` and `tab_id` to its current Items projection, so event
+/// reordering cannot expose a stale action after focus changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionsView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub tab_id: Option<String>,
+    pub actions: Vec<ExtensionActionView>,
+}
+
+/// Closed, sanitized reason why a trusted toolbar gesture could not complete.
+/// Native strings, extension content, URLs, and runtime identities are never
+/// forwarded through this transient user-notice channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActionFailure {
+    InvalidRequest,
+    RuntimeUnavailable,
+    RuntimeSuperseded,
+    TabUnavailable,
+    TabDiscarded,
+    ActionUnavailable,
+    ActionDisabled,
+    CapacityExceeded,
+    PopupUnavailable,
+    PopupCapacityExceeded,
+    NativeAdmissionFailed,
+    ShuttingDown,
+    UnsupportedPlatform,
+}
+
+/// Actor-ordered, context-bound transient failure notice. The revision lets
+/// privileged chrome discard a delayed eval and present each current failure
+/// at most once; the profile/tab join prevents a late native refusal from
+/// appearing after the user has switched context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionFailedView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub tab_id: String,
+    pub reason: ExtensionActionFailure,
+}
+
 /// The one retained split group owned by the focused window. Members are
 /// normalized references into [`ItemsState::tabs`] in native pane traversal
 /// order; geometry and mutable divider ratios remain native-only authority.
@@ -515,6 +588,8 @@ impl BlockerStatusView {
 pub enum Projection {
     Items(ItemsState),
     Tab(TabView),
+    ExtensionActions(ExtensionActionsView),
+    ExtensionActionFailed(ExtensionActionFailedView),
     UiCommand(String),
     Search(SearchResults),
     Layout(LayoutState),

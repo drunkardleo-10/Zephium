@@ -108,9 +108,10 @@ use zephium_core::{commands, navigation};
 use zephium_ipc::{
     BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
-    BlockerSourceProvenance, BlockerStatusView, DividerView, ItemsState, LayoutState,
-    OperationDisposition, OperationOutcome, OperationReason, ProfileKindView, ProfileView,
-    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
+    BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
+    ExtensionActionFailure, ExtensionActionsView, ItemsState, LayoutState, OperationDisposition,
+    OperationOutcome, OperationReason, ProfileKindView, ProfileView, Projection,
+    RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
     RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
     SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };

@@ -6,6 +6,7 @@
   import EssentialsEmpty from "./essentials/EssentialsEmpty.svelte";
   import EssentialsRail from "./essentials/EssentialsRail.svelte";
   import SidebarFooter from "./footer/SidebarFooter.svelte";
+  import ExtensionActions from "./extensions/ExtensionActions.svelte";
   import SidebarHeader from "./header/SidebarHeader.svelte";
   import { effectiveWidth, isCompact, toggleMode } from "./sidebar-mode.svelte";
   import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
@@ -66,6 +67,7 @@
 
   <SidebarHeader {compact} />
   <AddressField {compact} />
+  <ExtensionActions {compact} />
 
   {#if compact}
     <EssentialsRail entries={railEssentials} onSelect={selectTab} />

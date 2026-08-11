@@ -163,6 +163,11 @@ impl Shell {
             match admission {
                 NativeDispatch::Scheduled => {
                     self.extension_browser_surfaces.record_published(surface);
+                    // Replace any snapshot tied to the previous surface
+                    // generation before the asynchronous native read. A
+                    // same-tab reconstruction must never leave a stale button
+                    // actionable or visible while its replacement settles.
+                    self.project_extension_actions(profile);
                     let actions = self.refresh_extension_actions(profile);
                     if actions.rejected {
                         crate::diagnostic!(

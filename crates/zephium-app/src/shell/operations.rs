@@ -55,20 +55,29 @@ impl Shell {
                 OperationOutcome::Deferred,
                 OperationReason::NativeWorkPending,
             ),
-            Err(zephium_core::extensions::ExtensionActionRejection::NativeAdmissionFailed) => {
+            Err(
+                reason @ zephium_core::extensions::ExtensionActionRejection::NativeAdmissionFailed,
+            ) => {
+                self.project_extension_action_failure(runtime.profile(), None, reason);
                 operation_result(
                     OperationOutcome::NativeAdmissionFailed,
                     OperationReason::NativeDispatchRejected,
                 )
             }
             Err(
-                zephium_core::extensions::ExtensionActionRejection::UnsupportedPlatform
-                | zephium_core::extensions::ExtensionActionRejection::PopupUnavailable,
-            ) => operation_result(
-                OperationOutcome::Rejected,
-                OperationReason::UnsupportedCommand,
-            ),
-            Err(_) => operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope),
+                reason @ (zephium_core::extensions::ExtensionActionRejection::UnsupportedPlatform
+                | zephium_core::extensions::ExtensionActionRejection::PopupUnavailable),
+            ) => {
+                self.project_extension_action_failure(runtime.profile(), None, reason);
+                operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::UnsupportedCommand,
+                )
+            }
+            Err(reason) => {
+                self.project_extension_action_failure(runtime.profile(), None, reason);
+                operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope)
+            }
         }
     }
 

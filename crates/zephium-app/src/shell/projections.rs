@@ -13,6 +13,71 @@ struct SidebarProjection {
 }
 
 impl Shell {
+    /// Projects only the focused profile and exact active tab. A missing or
+    /// stale native snapshot is represented by an empty replacement cohort;
+    /// old buttons can never survive a focus/surface transition by inference.
+    pub(super) fn project_extension_actions(&self, profile: ProfileId) {
+        let Some(window) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+        else {
+            return;
+        };
+        let surface = self
+            .extension_browser_surfaces
+            .published_surface(profile)
+            .filter(|surface| {
+                surface
+                    .windows()
+                    .first()
+                    .and_then(zephium_core::extensions::ExtensionBrowserWindow::active)
+                    == window.active
+            });
+        let tab = surface.and_then(|surface| {
+            surface
+                .windows()
+                .first()
+                .and_then(zephium_core::extensions::ExtensionBrowserWindow::active)
+                .map(|tab| (tab, surface.generation()))
+        });
+        let actions = tab.map_or_else(Vec::new, |(tab, generation)| {
+            self.extension_actions
+                .projected_actions(profile, tab, generation)
+        });
+        (self.emit)(Projection::ExtensionActions(ExtensionActionsView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            profile_id: profile.to_string(),
+            tab_id: tab.map(|(tab, _)| tab.to_string()),
+            actions,
+        }));
+    }
+
+    pub(super) fn project_extension_action_failure(
+        &self,
+        profile: ProfileId,
+        expected_tab: Option<ItemId>,
+        reason: zephium_core::extensions::ExtensionActionRejection,
+    ) {
+        let Some(tab) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+            .and_then(|window| window.active)
+            .filter(|tab| expected_tab.is_none_or(|expected| expected == *tab))
+        else {
+            return;
+        };
+        (self.emit)(Projection::ExtensionActionFailed(
+            ExtensionActionFailedView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                profile_id: profile.to_string(),
+                tab_id: tab.to_string(),
+                reason: extension_action_failure_view(reason),
+            },
+        ));
+    }
+
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
@@ -282,6 +347,27 @@ impl Shell {
     pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
         let parsed = url::Url::parse(url).ok()?;
         self.favicon_key_for(profile, &origin_of(&parsed)?)
+    }
+}
+
+fn extension_action_failure_view(
+    reason: zephium_core::extensions::ExtensionActionRejection,
+) -> ExtensionActionFailure {
+    use zephium_core::extensions::ExtensionActionRejection as Core;
+    match reason {
+        Core::InvalidRequest => ExtensionActionFailure::InvalidRequest,
+        Core::RuntimeUnavailable => ExtensionActionFailure::RuntimeUnavailable,
+        Core::RuntimeSuperseded => ExtensionActionFailure::RuntimeSuperseded,
+        Core::TabUnavailable => ExtensionActionFailure::TabUnavailable,
+        Core::TabDiscarded => ExtensionActionFailure::TabDiscarded,
+        Core::ActionUnavailable => ExtensionActionFailure::ActionUnavailable,
+        Core::ActionDisabled => ExtensionActionFailure::ActionDisabled,
+        Core::CapacityExceeded => ExtensionActionFailure::CapacityExceeded,
+        Core::PopupUnavailable => ExtensionActionFailure::PopupUnavailable,
+        Core::PopupCapacityExceeded => ExtensionActionFailure::PopupCapacityExceeded,
+        Core::NativeAdmissionFailed => ExtensionActionFailure::NativeAdmissionFailed,
+        Core::ShuttingDown => ExtensionActionFailure::ShuttingDown,
+        Core::UnsupportedPlatform => ExtensionActionFailure::UnsupportedPlatform,
     }
 }
 
