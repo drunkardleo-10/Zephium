@@ -654,6 +654,15 @@ The macOS Bitwarden contract gate additionally resolves its tab-specific
 declared popup `WKWebView`. That view must point to the exact extension
 controller and profile `WKWebsiteDataStore`; the gate proves load,
 `closePopup`, reopen, and final wrapper release when the context retires.
+The contract runs on a persistent regular profile prepared through the product
+controller registry, not on a nonpersistent stand-in: Wry's constructed view
+must pass the normal controller/store attachment attestation, the Shell-shaped
+browser surface supplies the existing resident tab, and teardown closes that
+surface before unloading the context, clearing grants, erasing the exact probe
+principal's data record, and releasing the registry. This distinction is
+behavioral. WebKit treats a nonpersistent website data store as private even
+when a test delegate labels its logical window regular, which suppresses
+content injection without the independent private-data grant.
 WebKit may cache the wrapper and its last URL after `closePopup`, so production
 holds the process-wide `ExtensionPopup` resource lease only for the presented
 interval and treats the documented close call—not wrapper deallocation—as the
@@ -882,16 +891,20 @@ uses that namespace only for HTTP Basic-auth autofill: `onAuthRequired` is
 registered with `asyncBlocking`, while completion/error observation only
 retires pending request identities. The macOS live gate now proves that WebKit
 parses the permission, exposes `chrome.webRequest`, starts the MV3 background
-worker, and accepts that exact listener-registration shape. Registration is
-not callback semantics: WebKit does not provide the blocking behavior the
-workflow requires, and the upstream `webRequestAuthProvider` declaration is
-filtered by the native parser. The reviewed macOS classification is therefore:
+worker, accepts that exact listener-registration shape, and invokes the
+non-blocking `onCompleted` listener after the already-registered worker observes
+a real HTTP navigation in an existing regular product tab. The content script
+must also run in that document before the callback observation is accepted.
+This proves observation, not blocking semantics: WebKit does not provide the
+blocking behavior the Basic-auth workflow requires, and the upstream
+`webRequestAuthProvider` declaration is filtered by the native parser. The
+reviewed macOS classification is therefore:
 
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
-| MV3 background startup with declared `webRequest` | Compatible | Product-shaped live background registration gate |
+| MV3 background startup with declared `webRequest` | Compatible | Persistent product-profile live background registration gate |
 | Toolbar action and declared popup page | Native-brokered | Exact action/icon projection, privileged gesture admission, native transient popup presentation, bounded failure UX, resource admission, and teardown are implemented; release-build end-to-end UX/RSS/endurance evidence remains required |
-| Non-blocking request observation | Unassessed in Zephium's real tab surface | Public WebKit API exists; a product-tab live callback gate remains required |
+| Non-blocking request observation | Compatible on the exercised runtime | Exact upstream-shaped `onCompleted` registration observes a real regular-tab HTTP navigation; the supported macOS floor still requires the same release-runner evidence |
 | HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
 | Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |
 
@@ -914,7 +927,7 @@ claims.
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
 | Native messaging | Unsupported in the initial target | The optional permission is parsed, but product grant compilation prohibits it. Native biometric/application integration must be disclosed separately from core vault use. |
-| Clipboard read/write, alarms, commands, context menus, programmatic scripting, non-blocking navigation/request observation, dynamic web-accessible resources, and sandboxed pages | Behavior unassessed | Parser or namespace presence is insufficient; product-tab/popup live gates remain release blockers where the pinned workflow uses the surface. |
+| Clipboard read/write, alarms, commands, context menus, programmatic scripting, non-blocking navigation observation, dynamic web-accessible resources, and sandboxed pages | Behavior unassessed | Parser or namespace presence is insufficient; product-tab/popup live gates remain release blockers where the pinned workflow uses the surface. Non-blocking request completion observation is classified separately above. |
 
 This is one reviewed slice of the required declaration-by-declaration matrix,
 not a claim that the complete Bitwarden workflow is compatible. Product

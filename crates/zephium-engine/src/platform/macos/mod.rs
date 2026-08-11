@@ -7,8 +7,6 @@ mod stage;
 #[cfg(feature = "native-web-extension-probes")]
 mod web_extensions;
 
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use extensions::ProbeControllerPreparation;
 pub(crate) use extensions::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
     ControllerBrowserRequestSettlement, ControllerErasureSettlement, ControllerErasureTicket,
@@ -17,6 +15,8 @@ pub(crate) use extensions::{
     MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
     MacosNativeRuntimeRetirement, PersistentControllerRegistry, ProfileControllerErasure,
 };
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};
 
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,

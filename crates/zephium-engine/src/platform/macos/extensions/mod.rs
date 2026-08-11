@@ -14,12 +14,14 @@ mod grant_application;
 mod grants;
 mod native_runtime;
 
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use controller_registry::ControllerPreparation as ProbeControllerPreparation;
 pub(crate) use controller_registry::{
     ControllerBrowserRequestSettlement, ControllerErasureSettlement,
     ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
     PersistentControllerRegistry,
+};
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use controller_registry::{
+    ControllerPreparation as ProbeControllerPreparation, ControllerSurfaceApplication,
 };
 pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 #[cfg(feature = "native-web-extension-probes")]
