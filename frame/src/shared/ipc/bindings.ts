@@ -16,6 +16,15 @@ export const commands = {
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
+	/**
+	 *  Opens or closes the one focused-profile management subscription.
+	 *  This is deliberately an explicit, non-polling visibility signal: the Shell
+	 *  retains authenticated management metadata only while privileged chrome is
+	 *  displaying it and performs no extension repository work at browser startup.
+	 */
+	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
+	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
+	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
@@ -50,6 +59,7 @@ export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
+	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -279,6 +289,55 @@ export type ExtensionActionsView = {
 	profile_id: string,
 	tab_id: string | null,
 	actions: ExtensionActionView[],
+};
+
+export type ExtensionManagementChanged = ExtensionManagementView;
+
+/**  Reviewed compatibility of the exact authenticated manifest. */
+export type ExtensionManagementCompatibilityView = "compatible" | "degraded";
+
+/**  One authenticated installed extension in browser-owned management UI. */
+export type ExtensionManagementEntryView = {
+	install_id: string,
+	install_revision: string,
+	name: string,
+	description: string | null,
+	author: string | null,
+	version: string,
+	runtime: ExtensionManagementRuntimeView,
+	/**  Present only when `runtime` is `active`. */
+	runtime_generation: string | null,
+	grants: ExtensionManagementGrantView,
+	compatibility: ExtensionManagementCompatibilityView,
+};
+
+/**  Non-authorizing summary of the atomic grant row joined to an install. */
+export type ExtensionManagementGrantView = {
+	initialized: boolean,
+	revision: string | null,
+	api_grants: number,
+	host_grants: number,
+	file_access: boolean,
+	private_access: boolean,
+};
+
+/**  Settlement of the focused profile's lazy installed-extension projection. */
+export type ExtensionManagementPhase = "loading" | "ready" | "unavailable" | "rejected" | "failed_closed";
+
+/**  Process-local regular-runtime state for one installed extension. */
+export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "active";
+
+/**
+ *  Exact replacement management cohort for the focused profile.
+ *  Loading and failure phases always carry no catalog revision or rows, so a
+ *  delayed failure cannot leave stale selectors actionable in privileged UI.
+ */
+export type ExtensionManagementView = {
+	projection_revision: string,
+	profile_id: string,
+	phase: ExtensionManagementPhase,
+	catalog_revision: string | null,
+	entries: ExtensionManagementEntryView[],
 };
 
 export type ItemsChanged = ItemsState;

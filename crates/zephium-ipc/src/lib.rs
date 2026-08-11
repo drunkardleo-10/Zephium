@@ -94,6 +94,73 @@ pub struct ExtensionActionFailedView {
     pub reason: ExtensionActionFailure,
 }
 
+/// Settlement of the focused profile's lazy installed-extension projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionManagementPhase {
+    Loading,
+    Ready,
+    Unavailable,
+    Rejected,
+    FailedClosed,
+}
+
+/// Process-local regular-runtime state for one installed extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionManagementRuntimeView {
+    Disabled,
+    PendingActivation,
+    Active,
+}
+
+/// Reviewed compatibility of the exact authenticated manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionManagementCompatibilityView {
+    Compatible,
+    Degraded,
+}
+
+/// Non-authorizing summary of the atomic grant row joined to an install.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionManagementGrantView {
+    pub initialized: bool,
+    pub revision: Option<String>,
+    pub api_grants: u8,
+    pub host_grants: u8,
+    pub file_access: bool,
+    pub private_access: bool,
+}
+
+/// One authenticated installed extension in browser-owned management UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionManagementEntryView {
+    pub install_id: String,
+    pub install_revision: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub version: String,
+    pub runtime: ExtensionManagementRuntimeView,
+    /// Present only when `runtime` is `active`.
+    pub runtime_generation: Option<String>,
+    pub grants: ExtensionManagementGrantView,
+    pub compatibility: ExtensionManagementCompatibilityView,
+}
+
+/// Exact replacement management cohort for the focused profile.
+/// Loading and failure phases always carry no catalog revision or rows, so a
+/// delayed failure cannot leave stale selectors actionable in privileged UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionManagementView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub phase: ExtensionManagementPhase,
+    pub catalog_revision: Option<String>,
+    pub entries: Vec<ExtensionManagementEntryView>,
+}
+
 /// The one retained split group owned by the focused window. Members are
 /// normalized references into [`ItemsState::tabs`] in native pane traversal
 /// order; geometry and mutable divider ratios remain native-only authority.
@@ -591,6 +658,7 @@ pub enum Projection {
     Tab(TabView),
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
+    ExtensionManagement(ExtensionManagementView),
     UiCommand(String),
     Search(SearchResults),
     Layout(LayoutState),

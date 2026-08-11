@@ -92,8 +92,9 @@ use zephium_core::ports::engine::{
     NavigationPresentationId, Partition, ProfileDataErasureOutcome, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
-    ExtensionProfileRetirementDisposition, ExtensionServiceShutdownOutcome,
-    ExtensionServiceStartupOutcome,
+    ExtensionManagementCompatibility, ExtensionManagementGrantState,
+    ExtensionManagementRuntimeState, ExtensionProfileRetirementDisposition,
+    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -111,9 +112,11 @@ use zephium_ipc::{
     BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
-    ExtensionActionFailure, ExtensionActionsView, ItemsState, LayoutState, OperationDisposition,
-    OperationOutcome, OperationReason, ProfileKindView, ProfileView, Projection,
-    RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
+    ExtensionActionFailure, ExtensionActionsView, ExtensionManagementCompatibilityView,
+    ExtensionManagementEntryView, ExtensionManagementGrantView, ExtensionManagementPhase,
+    ExtensionManagementRuntimeView, ExtensionManagementView, ItemsState, LayoutState,
+    OperationDisposition, OperationOutcome, OperationReason, ProfileKindView, ProfileView,
+    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
     RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
     SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
@@ -573,10 +576,18 @@ impl Shell {
             Command::InvokeExtensionAction { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
+            Command::SetExtensionManagementVisible(visible) => {
+                self.set_extension_management_visible(visible)
+            }
             Command::ExtensionManagementSettled {
                 request,
                 completion,
             } => self.settle_extension_management(request, completion),
+            Command::ExtensionManagementCatalogSettled {
+                request,
+                profile,
+                outcome,
+            } => self.settle_extension_management_catalog(request, profile, outcome),
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);

@@ -30,6 +30,8 @@ type HeldBlockerUpdate = (
 type HeldBlockerLoad = (ProfileId, Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>);
 type HeldExtensionSetEnabled = zephium_core::ports::extensions::ExtensionSetEnabledCallback;
 type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstallCallback;
+type HeldExtensionManagementCatalog =
+    zephium_core::ports::extensions::ExtensionManagementCatalogCallback;
 
 pub(crate) struct ImmediateAllowAllCompiler;
 
@@ -156,6 +158,10 @@ pub(super) struct FakeExtensionLifecycleState {
     pub(super) panic_after_retirement_continuation: std::sync::atomic::AtomicBool,
     pub(super) management_admission:
         Mutex<Option<zephium_core::ports::extensions::ExtensionManagementAdmission>>,
+    pub(super) management_catalog_admission:
+        Mutex<Option<zephium_core::ports::extensions::ExtensionManagementCatalogAdmission>>,
+    pub(super) management_catalog_calls: Mutex<Vec<(ProfileId, std::time::Instant)>>,
+    pub(super) management_catalog_callbacks: Mutex<Vec<HeldExtensionManagementCatalog>>,
     pub(super) set_enabled_calls: Mutex<
         Vec<(
             zephium_core::ports::extensions::ExtensionInstallSelector,
@@ -310,6 +316,39 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
             .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
         if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
             self.state.set_enabled_callbacks.lock().unwrap().push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
+    fn begin_load_management_catalog(
+        &mut self,
+        profile: ProfileId,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionManagementCatalogCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementCatalogAdmission {
+        self.state
+            .management_catalog_calls
+            .lock()
+            .unwrap()
+            .push((profile, deadline));
+        let admission = self
+            .state
+            .management_catalog_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(
+                zephium_core::ports::extensions::ExtensionManagementCatalogAdmission::Accepted,
+            );
+        if admission
+            == zephium_core::ports::extensions::ExtensionManagementCatalogAdmission::Accepted
+        {
+            self.state
+                .management_catalog_callbacks
+                .lock()
+                .unwrap()
+                .push(done);
         } else {
             drop(done);
         }
@@ -1269,6 +1308,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         }
         Projection::ExtensionActions(_) => {}
         Projection::ExtensionActionFailed(_) => {}
+        Projection::ExtensionManagement(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}

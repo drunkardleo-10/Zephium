@@ -13,6 +13,96 @@ struct SidebarProjection {
 }
 
 impl Shell {
+    pub(super) fn project_extension_management_phase(
+        &self,
+        profile: ProfileId,
+        phase: ExtensionManagementPhase,
+    ) {
+        debug_assert!(phase != ExtensionManagementPhase::Ready);
+        (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            profile_id: profile.to_string(),
+            phase,
+            catalog_revision: None,
+            entries: Vec::new(),
+        }));
+    }
+
+    pub(super) fn project_extension_management_catalog(&self) {
+        let Some(catalog) = self.extension_management.catalog() else {
+            return;
+        };
+        let entries = catalog
+            .entries()
+            .iter()
+            .map(|entry| {
+                let selector = entry.selector();
+                let (runtime, runtime_generation) = match entry.runtime() {
+                    ExtensionManagementRuntimeState::Disabled => {
+                        (ExtensionManagementRuntimeView::Disabled, None)
+                    }
+                    ExtensionManagementRuntimeState::PendingActivation => {
+                        (ExtensionManagementRuntimeView::PendingActivation, None)
+                    }
+                    ExtensionManagementRuntimeState::Active(generation) => (
+                        ExtensionManagementRuntimeView::Active,
+                        Some(format!("{:016x}", generation.get())),
+                    ),
+                };
+                let grants = match entry.grants() {
+                    ExtensionManagementGrantState::Uninitialized => ExtensionManagementGrantView {
+                        initialized: false,
+                        revision: None,
+                        api_grants: 0,
+                        host_grants: 0,
+                        file_access: false,
+                        private_access: false,
+                    },
+                    ExtensionManagementGrantState::Initialized {
+                        revision,
+                        api_grants,
+                        host_grants,
+                        file_access,
+                        private_access,
+                    } => ExtensionManagementGrantView {
+                        initialized: true,
+                        revision: Some(format!("{:016x}", revision.get())),
+                        api_grants,
+                        host_grants,
+                        file_access,
+                        private_access,
+                    },
+                };
+                ExtensionManagementEntryView {
+                    install_id: selector.install().to_string(),
+                    install_revision: format!("{:016x}", selector.install_revision().get()),
+                    name: entry.name().to_owned(),
+                    description: entry.description().map(str::to_owned),
+                    author: entry.author().map(str::to_owned),
+                    version: entry.version().to_owned(),
+                    runtime,
+                    runtime_generation,
+                    grants,
+                    compatibility: match entry.compatibility() {
+                        ExtensionManagementCompatibility::Compatible => {
+                            ExtensionManagementCompatibilityView::Compatible
+                        }
+                        ExtensionManagementCompatibility::Degraded => {
+                            ExtensionManagementCompatibilityView::Degraded
+                        }
+                    },
+                }
+            })
+            .collect();
+        (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            profile_id: catalog.profile().to_string(),
+            phase: ExtensionManagementPhase::Ready,
+            catalog_revision: Some(format!("{:016x}", catalog.catalog_revision().get())),
+            entries,
+        }));
+    }
+
     /// Projects only the focused profile and exact active tab. A missing or
     /// stale native snapshot is represented by an empty replacement cohort;
     /// old buttons can never survive a focus/surface transition by inference.

@@ -36,8 +36,8 @@ use zephium_app::{
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
-    ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionPopupAnchor, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::ScriptId;
@@ -92,6 +92,7 @@ const EVENT_ITEMS: &str = "zephium:items";
 const EVENT_TAB: &str = "zephium:tab";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
+const EVENT_EXTENSION_MANAGEMENT: &str = "zephium:extension-management";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
 const EVENT_UI: &str = "zephium:ui-command";
 const EVENT_SEARCH: &str = "zephium:search";
@@ -1138,6 +1139,9 @@ struct ExtensionActionsChanged(zephium_ipc::ExtensionActionsView);
 struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct UiCommand(String);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1307,6 +1311,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_split,
             tabs_unsplit,
             extension_action_invoke,
+            extension_management_set_visible,
+            extension_management_set_enabled,
+            extension_management_uninstall,
             blocker_status,
             blocker_set_enabled,
             blocker_retry,
@@ -1340,6 +1347,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             TabChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
+            ExtensionManagementChanged,
             UiCommand,
             SearchChanged,
             LayoutChanged,
@@ -1732,6 +1740,27 @@ fn fixed_nonzero_hex(value: &str) -> Option<u64> {
     }
     let parsed = u64::from_str_radix(value, 16).ok()?;
     (parsed != 0).then_some(parsed)
+}
+
+fn extension_management_selector(
+    install_id: &str,
+    catalog_revision: &str,
+    install_revision: &str,
+) -> Option<(
+    ExtensionInstallId,
+    ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision,
+)> {
+    if !bounded(install_id, MAX_ITEM_ID_BYTES) {
+        return None;
+    }
+    let install = ExtensionInstallId::parse(install_id)
+        .filter(|install| install.to_string() == install_id)?;
+    let catalog =
+        fixed_nonzero_hex(catalog_revision).and_then(ExtensionInstallCatalogRevision::new)?;
+    let install_revision =
+        fixed_nonzero_hex(install_revision).and_then(ExtensionInstallRevision::new)?;
+    Some((install, catalog, install_revision))
 }
 
 fn extension_popup_anchor_in_bounds(
@@ -2149,6 +2178,93 @@ fn extension_action_invoke(
             runtime: ExtensionRuntimeInstance::new(profile, install, generation),
             revision,
             anchor,
+        },
+    )
+}
+
+/// Opens or closes the one focused-profile management subscription.
+/// This is deliberately an explicit, non-polling visibility signal: the Shell
+/// retains authenticated management metadata only while privileged chrome is
+/// displaying it and performs no extension repository work at browser startup.
+#[tauri::command]
+#[specta::specta]
+fn extension_management_set_visible(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    visible: bool,
+) -> bool {
+    authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_set_visible",
+    ) && !shutdown_started(caller.app_handle())
+        && shell.dispatch(Command::SetExtensionManagementVisible(visible))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn extension_management_set_enabled(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    install_id: String,
+    catalog_revision: String,
+    install_revision: String,
+    enabled: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_set_enabled",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some((install, expected_catalog, expected_install)) =
+        extension_management_selector(&install_id, &catalog_revision, &install_revision)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::SetFocusedExtensionEnabled {
+            install,
+            expected_catalog,
+            expected_install,
+            enabled,
+        },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn extension_management_uninstall(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    install_id: String,
+    catalog_revision: String,
+    install_revision: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_uninstall",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some((install, expected_catalog, expected_install)) =
+        extension_management_selector(&install_id, &catalog_revision, &install_revision)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::UninstallFocusedExtension {
+            install,
+            expected_catalog,
+            expected_install,
         },
     )
 }
@@ -3595,6 +3711,12 @@ pub fn run() {
                     EVENT_EXTENSION_ACTION_FAILED,
                     &failure,
                 ),
+                Projection::ExtensionManagement(management) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_EXTENSION_MANAGEMENT,
+                    &management,
+                ),
                 Projection::UiCommand(id) => {
                     if let Some(mode) = id.strip_prefix("theme.") {
                         if matches!(mode, "system" | "light" | "dark") {
@@ -4322,6 +4444,88 @@ mod tests {
         ] {
             assert!(invalid.is_none());
         }
+    }
+
+    #[test]
+    fn extension_management_selector_requires_canonical_identity_and_exact_revisions() {
+        let install = zephium_core::ids::ExtensionInstallId::from(17);
+        assert_eq!(
+            super::extension_management_selector(
+                &install.to_string(),
+                "0000000000000001",
+                "0000000000000002",
+            ),
+            Some((
+                install,
+                zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+                zephium_core::extensions::ExtensionInstallRevision::new(2).unwrap(),
+            ))
+        );
+        let canonical_install = install.to_string();
+        let noncanonical_install = canonical_install.to_ascii_lowercase();
+        for (install_id, catalog_revision, install_revision) in [
+            ("not-an-install", "0000000000000001", "0000000000000002"),
+            (
+                noncanonical_install.as_str(),
+                "0000000000000001",
+                "0000000000000002",
+            ),
+            (
+                canonical_install.as_str(),
+                "0000000000000000",
+                "0000000000000002",
+            ),
+            (
+                canonical_install.as_str(),
+                "0000000000000001",
+                "0000000000000000",
+            ),
+            (
+                canonical_install.as_str(),
+                "0000000000000001",
+                "000000000000000A",
+            ),
+        ] {
+            assert!(super::extension_management_selector(
+                install_id,
+                catalog_revision,
+                install_revision,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn extension_management_commands_are_main_only_and_profile_implicit() {
+        let source = include_str!("lib.rs");
+        for command_name in [
+            "extension_management_set_visible",
+            "extension_management_set_enabled",
+            "extension_management_uninstall",
+        ] {
+            let command = source
+                .split(&format!("fn {command_name}("))
+                .nth(1)
+                .expect("extension management command")
+                .split("#[tauri::command]")
+                .next()
+                .expect("bounded extension management command");
+            assert!(command.contains("CallerPolicy::Main"));
+            assert!(command.contains("shutdown_started"));
+            assert!(!command.contains("profile_id"));
+            assert!(!command.contains("ProfileId"));
+        }
+
+        let delivery = source
+            .split("Projection::ExtensionManagement(management)")
+            .nth(1)
+            .expect("extension management projection route")
+            .split("Projection::UiCommand")
+            .next()
+            .expect("bounded extension management projection route");
+        assert!(delivery.contains("MAIN_LABEL"));
+        assert!(delivery.contains("EVENT_EXTENSION_MANAGEMENT"));
+        assert!(!delivery.contains("PANEL_LABEL"));
     }
 
     #[test]

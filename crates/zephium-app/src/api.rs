@@ -15,7 +15,8 @@ use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
 use zephium_core::ports::extensions::ExtensionServiceLifecycle;
 use zephium_core::ports::extensions::{
-    ExtensionManagementSettlement, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionManagementCatalogOutcome, ExtensionManagementSettlement, ExtensionSetEnabledOutcome,
+    ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
@@ -234,12 +235,22 @@ pub enum Command {
         expected_catalog: ExtensionInstallCatalogRevision,
         expected_install: ExtensionInstallRevision,
     },
+    /// Opens or closes the focused profile's lazy privileged management
+    /// subscription. Opening performs one explicit authenticated read; closing
+    /// invalidates late callbacks and retains no polling work.
+    SetExtensionManagementVisible(bool),
     /// Internal exactly-once handoff from an admitted extension-service
     /// management callback. It is never accepted through public operation
     /// dispatch.
     ExtensionManagementSettled {
         request: u64,
         completion: ExtensionManagementCompletion,
+    },
+    /// Internal exactly-once handoff for one admitted catalog read.
+    ExtensionManagementCatalogSettled {
+        request: u64,
+        profile: ProfileId,
+        outcome: ExtensionManagementCatalogOutcome,
     },
     Search(String),
     OpenUrl(String),

@@ -11,6 +11,92 @@ fn wait_for_actor_condition(timeout: std::time::Duration, condition: impl Fn() -
     condition()
 }
 
+fn extension_management_catalog(
+    profile: ProfileId,
+    install: zephium_core::ids::ExtensionInstallId,
+    catalog_revision: zephium_core::extensions::ExtensionInstallCatalogRevision,
+    install_revision: zephium_core::extensions::ExtensionInstallRevision,
+    runtime: zephium_core::ports::extensions::ExtensionManagementRuntimeState,
+) -> zephium_core::ports::extensions::ExtensionManagementCatalog {
+    let selector = zephium_core::ports::extensions::ExtensionInstallSelector::new(
+        profile,
+        install,
+        catalog_revision,
+        install_revision,
+    );
+    let entry = zephium_core::ports::extensions::ExtensionManagementEntry::new(
+        selector,
+        "Fixture extension",
+        Some("Authenticated fixture metadata".into()),
+        Some("Zephium tests".into()),
+        "1.0.0",
+        runtime,
+        zephium_core::ports::extensions::ExtensionManagementGrantState::Uninitialized,
+        zephium_core::ports::extensions::ExtensionManagementCompatibility::Compatible,
+    )
+    .expect("fixture management row must be valid");
+    zephium_core::ports::extensions::ExtensionManagementCatalog::new(
+        profile,
+        catalog_revision,
+        vec![entry],
+    )
+    .expect("fixture management catalog must be valid")
+}
+
+fn empty_extension_management_catalog(
+    profile: ProfileId,
+    catalog_revision: zephium_core::extensions::ExtensionInstallCatalogRevision,
+) -> zephium_core::ports::extensions::ExtensionManagementCatalog {
+    zephium_core::ports::extensions::ExtensionManagementCatalog::new(
+        profile,
+        catalog_revision,
+        Vec::new(),
+    )
+    .expect("empty fixture management catalog must be valid")
+}
+
+fn settle_next_management_catalog(
+    state: &FakeExtensionLifecycleState,
+    catalog: zephium_core::ports::extensions::ExtensionManagementCatalog,
+) {
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || state.management_catalog_callbacks.lock().unwrap().len() == 1
+    ));
+    state
+        .management_catalog_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("accepted catalog read must retain its callback")(
+        zephium_core::ports::extensions::ExtensionManagementCatalogOutcome::Loaded(catalog),
+    );
+}
+
+fn wait_for_ready_management_catalog(
+    rx: &std::sync::mpsc::Receiver<Projection>,
+    expected_profile: ProfileId,
+    expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision,
+    expected_entries: usize,
+) {
+    let ready = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::ExtensionManagement(view)
+                if view.phase == zephium_ipc::ExtensionManagementPhase::Ready =>
+            {
+                Some(view)
+            }
+            _ => None,
+        })
+        .expect("catalog settlement must publish a ready management projection");
+    assert_eq!(ready.profile_id, expected_profile.to_string());
+    assert_eq!(
+        ready.catalog_revision.as_deref(),
+        Some(format!("{:016x}", expected_catalog.get()).as_str())
+    );
+    assert_eq!(ready.entries.len(), expected_entries);
+}
+
 struct ActorExitBlocker {
     order: Arc<Mutex<Vec<&'static str>>>,
     maintain_calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -517,6 +603,23 @@ fn extension_management_stays_pending_until_serialized_service_settlement() {
     let _ = rx.try_iter().count();
 
     let install = zephium_core::ids::ExtensionInstallId::from(91_000);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog(
+            profile,
+            install,
+            zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+            zephium_core::ports::extensions::ExtensionManagementRuntimeState::Disabled,
+        ),
+    );
+    wait_for_ready_management_catalog(
+        &rx,
+        profile,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        1,
+    );
     assert!(handle.dispatch_operation(
         "extension-enable".into(),
         Command::SetFocusedExtensionEnabled {
@@ -578,6 +681,19 @@ fn extension_management_stays_pending_until_serialized_service_settlement() {
     let expected_install = zephium_core::extensions::ExtensionInstallRevision::INITIAL
         .next()
         .unwrap();
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog(
+            profile,
+            install,
+            expected_catalog,
+            expected_install,
+            zephium_core::ports::extensions::ExtensionManagementRuntimeState::Active(
+                zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+            ),
+        ),
+    );
+    wait_for_ready_management_catalog(&rx, profile, expected_catalog, 1);
     assert!(handle.dispatch_operation(
         "extension-uninstall".into(),
         Command::UninstallFocusedExtension {
@@ -629,6 +745,14 @@ fn extension_management_stays_pending_until_serialized_service_settlement() {
         .last()
         .is_some_and(|surface| surface.windows().is_empty()));
 
+    let uninstalled_catalog = expected_catalog.next().unwrap();
+    settle_next_management_catalog(
+        &extension_state,
+        empty_extension_management_catalog(profile, uninstalled_catalog),
+    );
+    wait_for_ready_management_catalog(&rx, profile, uninstalled_catalog, 0);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(false)));
+
     assert_eq!(
         handle
             .shutdown()
@@ -657,17 +781,38 @@ fn ambiguous_extension_management_write_fences_later_writes_until_restart() {
     .expect("spawn test shell");
     assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
     assert!(handle.dispatch(Command::Bootstrap));
-    assert!(
-        std::iter::from_fn(|| { rx.recv_timeout(std::time::Duration::from_secs(2)).ok() }).any(
-            |projection| matches!(projection, Projection::Items(items) if items.profile.is_some())
-        )
-    );
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
     let _ = rx.try_iter().count();
+
+    let install = zephium_core::ids::ExtensionInstallId::from(92_000);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog(
+            profile,
+            install,
+            zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+            zephium_core::ports::extensions::ExtensionManagementRuntimeState::PendingActivation,
+        ),
+    );
+    wait_for_ready_management_catalog(
+        &rx,
+        profile,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        1,
+    );
 
     assert!(handle.dispatch_operation(
         "extension-unknown".into(),
         Command::SetFocusedExtensionEnabled {
-            install: zephium_core::ids::ExtensionInstallId::from(92_000),
+            install,
             expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
             expected_install: zephium_core::extensions::ExtensionInstallRevision::INITIAL,
             enabled: false,
