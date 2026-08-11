@@ -15,11 +15,13 @@
 //! package builds, reconciles possible native owners one exact lineage at a
 //! time, retires owners that still exist, releases package pins only after
 //! durable native absence, and revalidates every enabled runtime before
-//! activation. The unique owner exposes bounded activation and exact-runtime
-//! retirement commands whose inputs are identity selectors only; the worker
-//! reconstructs and revalidates Store, repository, grant, and native authority
-//! inside its serialized turn.
-//! Returned runtime and profile-retirement values are ordinary path-free,
+//! activation. The unique owner exposes bounded activation, exact-runtime
+//! retirement, stale-resistant enablement, and uninstall commands whose inputs
+//! are identity selectors only; the worker reconstructs and revalidates Store,
+//! repository, grant, and native authority inside its serialized turn. Disable
+//! and uninstall retire every browsing-context owner before durable mutation;
+//! enablement persists user intent before authenticated activation. Returned
+//! runtime, management, and profile-retirement values are ordinary path-free,
 //! non-authorizing control-flow settlements.
 //!
 //! The owner cannot be shared across threads:

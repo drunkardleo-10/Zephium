@@ -3,12 +3,15 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
+    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
     ExtensionRuntimeRetirementDisposition as CoreExtensionRuntimeRetirementDisposition,
     ExtensionServiceLifecycle,
     ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
     ExtensionServiceStartupOutcome as CoreExtensionServiceStartupOutcome,
+    ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome, ExtensionUninstallCallback,
+    ExtensionUninstallOutcome,
 };
 
 use crate::{
@@ -114,6 +117,42 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         project_runtime_retirement(ExtensionServiceOwner::retire_runtime_with_profiles_until(
             self, key, deadline,
         ))
+    }
+
+    fn set_install_enabled_until(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        enabled: bool,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionSetEnabledOutcome> {
+        ExtensionServiceOwner::set_install_enabled_until(self, selector, enabled, deadline)
+    }
+
+    fn begin_set_install_enabled(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        enabled: bool,
+        deadline: Instant,
+        done: ExtensionSetEnabledCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_set_install_enabled(self, selector, enabled, deadline, done)
+    }
+
+    fn uninstall_until(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionUninstallOutcome> {
+        ExtensionServiceOwner::uninstall_until(self, selector, deadline)
+    }
+
+    fn begin_uninstall(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        deadline: Instant,
+        done: ExtensionUninstallCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_uninstall(self, selector, deadline, done)
     }
 
     fn shutdown_until(self: Box<Self>, deadline: Instant) -> CoreExtensionServiceShutdownOutcome {

@@ -315,6 +315,25 @@ impl ActorAuthorityHarness {
         drop((keys, profiles, probe));
         temporary.close_and_assert_removed();
     }
+
+    pub(super) fn install_catalog(
+        &self,
+        profile: ProfileId,
+    ) -> zephium_core::extensions::ExtensionInstallCatalog {
+        let (reply, outcome) = mpsc::sync_channel(1);
+        assert!(self.store.load_extension_install_catalog(
+            profile,
+            Box::new(move |result| {
+                let _ = reply.send(result);
+            }),
+        ));
+        match outcome.recv_timeout(TEST_TIMEOUT).unwrap() {
+            zephium_core::ports::store::ExtensionInstallCatalogLoadOutcome::Loaded(catalog) => {
+                catalog
+            }
+            other => panic!("real Store install catalog load failed: {other:?}"),
+        }
+    }
 }
 
 fn provision_authenticated_repository(

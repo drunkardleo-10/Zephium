@@ -254,6 +254,22 @@ impl ExtensionInstallMutationPermit {
             admission: admission.clone(),
         })
     }
+
+    fn try_acquire(admission: &Arc<Mutex<ExtensionInstallMutationAdmission>>) -> Option<Self> {
+        let mut state = match admission.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        let next = state.count.checked_add(1)?;
+        if next > MAX_PENDING_EXTENSION_INSTALL_MUTATIONS {
+            return None;
+        }
+        state.count = next;
+        Some(Self {
+            admission: admission.clone(),
+        })
+    }
 }
 
 impl Drop for ExtensionInstallMutationPermit {
@@ -766,11 +782,14 @@ pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
 ///
 /// In addition to the crash-critical native-ownership journal, this is the
 /// service's only path to exact install catalogs and their atomically bound
-/// grant cohorts. Install and grant access is read-only: their mutation APIs
-/// remain on separately authorized product flows. One concrete [`SqliteStore`]
-/// actor lifetime can mint this authority once, after which the coordinator
-/// may move it onto its single worker thread. It is `Send` but deliberately
-/// neither `Clone` nor `Sync`.
+/// grant cohorts. The capability also exposes the fixed-size install mutation
+/// vocabulary required by the service's high-level management transactions;
+/// raw Store ownership and mutation callbacks never cross into Shell. Grant
+/// mutation remains outside this boundary until the permission coordinator is
+/// joined to the same serialized transaction model. One concrete
+/// [`SqliteStore`] actor lifetime can mint this authority once, after which the
+/// coordinator may move it onto its single worker thread. It is `Send` but
+/// deliberately neither `Clone` nor `Sync`.
 ///
 /// ```compile_fail
 /// use zephium_store::ExtensionServiceStoreAuthority;
@@ -784,14 +803,7 @@ pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
 /// require_sync::<ExtensionServiceStoreAuthority>();
 /// ```
 ///
-/// Install and grant mutation authority does not cross this boundary:
-///
-/// ```compile_fail
-/// use zephium_store::ExtensionServiceStoreAuthority;
-/// fn cannot_mutate_installs(authority: &ExtensionServiceStoreAuthority) {
-///     authority.mutate_extension_install_catalog();
-/// }
-/// ```
+/// Grant mutation authority does not cross this boundary:
 ///
 /// ```compile_fail
 /// use zephium_store::ExtensionServiceStoreAuthority;
@@ -1010,6 +1022,74 @@ impl ExtensionServiceStoreAuthority {
         if !self
             .store
             .try_load_extension_install_catalog(profile, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Applies one exact desired-enabled CAS for a serialized management
+    /// transaction. This capability cannot construct a new installation.
+    pub fn set_install_enabled_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        desired_enabled: bool,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogMutationOutcome> {
+        self.mutate_install_catalog_until(
+            profile,
+            expected_catalog,
+            ExtensionInstallCatalogMutation::SetDesiredEnabled {
+                id: install,
+                expected: expected_install,
+                desired_enabled,
+            },
+            deadline,
+        )
+    }
+
+    /// Deletes one exact installation after native ownership has been proved
+    /// absent. Subordinate grant rows are removed by the same Store
+    /// transaction. This capability cannot construct a new installation.
+    pub fn delete_install_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogMutationOutcome> {
+        self.mutate_install_catalog_until(
+            profile,
+            expected_catalog,
+            ExtensionInstallCatalogMutation::Delete {
+                id: install,
+                expected: expected_install,
+            },
+            deadline,
+        )
+    }
+
+    fn mutate_install_catalog_until(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionInstallCatalogRevision,
+        mutation: ExtensionInstallCatalogMutation,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogMutationOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_mutate_extension_install_catalog(profile, expected, mutation, deadline, done)
         {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1304,6 +1384,40 @@ impl SqliteStore {
         self.tx
             .try_send(Cmd::LoadExtensionGrantCohort(
                 profile, bindings, permit, done,
+            ))
+            .is_ok()
+    }
+
+    fn try_mutate_extension_install_catalog(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionInstallCatalogRevision,
+        mutation: ExtensionInstallCatalogMutation,
+        deadline: Instant,
+        done: ExtensionInstallCatalogMutationDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(permit) =
+            ExtensionInstallMutationPermit::try_acquire(&self.extension_install_mutation_admission)
+        else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::MutateExtensionInstallCatalog(
+                profile, expected, mutation, permit, done,
             ))
             .is_ok()
     }

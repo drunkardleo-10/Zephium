@@ -134,9 +134,11 @@ fn validate_app_data_directory(path: &Path) -> Result<(), ExtensionRepositoryRoo
 /// The input combines exactly one process-global extension-service Store
 /// capability, one lexically admitted repository location, and the engine's
 /// unique native-host factory. The Store capability permits exact install and
-/// grant reads plus native-ownership reconciliation, but no install or grant
-/// mutation. Its fields are private, and neither the input nor any authority
-/// is exposed through the cloneable service handle.
+/// grant reads, fixed-size install-state mutations owned by serialized
+/// management transactions, and native-ownership reconciliation. Grant writes
+/// remain a separate future permission-coordinator authority. Its fields are
+/// private, and neither the input nor any authority is exposed through the
+/// cloneable service handle.
 ///
 /// ```compile_fail
 /// use zephium_extension_service::ExtensionServiceLaunchInput;

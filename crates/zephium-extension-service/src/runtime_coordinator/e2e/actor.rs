@@ -1,7 +1,8 @@
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ports::extensions::{
-    ExtensionRuntimeActivationDisposition, ExtensionRuntimeRetirementDisposition,
-    ExtensionServiceLifecycle,
+    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeRetirementDisposition, ExtensionServiceLifecycle, ExtensionSetEnabledOutcome,
+    ExtensionUninstallOutcome,
 };
 
 use super::host::PublicationMode;
@@ -131,6 +132,113 @@ fn actor_real_authority_activation_exact_retirement_and_shutdown_are_clean() {
     };
     assert_eq!(evidence.accepted_commands(), 2);
     assert_eq!(evidence.completed_commands(), 2);
+    harness.finish(evidence);
+}
+
+#[test]
+fn actor_management_serializes_disable_reenable_and_uninstall_with_native_ownership() {
+    let (harness, mut owner) = ActorAuthorityHarness::launch(1);
+    let profile = harness.profiles[0];
+    let install_id = harness.keys[0].install_id();
+    let initial = harness.install_catalog(profile);
+    let initial_install = initial.get(install_id).unwrap();
+    let initial_selector = ExtensionInstallSelector::new(
+        profile,
+        install_id,
+        initial.revision(),
+        initial_install.revision(),
+    );
+
+    let (disabled_tx, disabled_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_set_install_enabled(
+            &mut owner,
+            initial_selector,
+            false,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = disabled_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    let disabled = disabled_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap();
+    assert_eq!(
+        disabled.outcome(),
+        &ExtensionSetEnabledOutcome::Disabled { changed: true }
+    );
+    assert!(disabled.active_profiles().unwrap().is_empty());
+    let after_disable = harness.install_catalog(profile);
+    let disabled_install = after_disable.get(install_id).unwrap();
+    assert!(!disabled_install.desired_enabled());
+
+    let stale = ExtensionServiceLifecycle::set_install_enabled_until(
+        &mut owner,
+        initial_selector,
+        true,
+        deadline(),
+    );
+    assert_eq!(stale.outcome(), &ExtensionSetEnabledOutcome::Conflict);
+    assert!(stale.active_profiles().unwrap().is_empty());
+
+    let disabled_selector = ExtensionInstallSelector::new(
+        profile,
+        install_id,
+        after_disable.revision(),
+        disabled_install.revision(),
+    );
+    let enabled = ExtensionServiceLifecycle::set_install_enabled_until(
+        &mut owner,
+        disabled_selector,
+        true,
+        deadline(),
+    );
+    let ExtensionSetEnabledOutcome::Enabled {
+        generation,
+        changed: true,
+    } = enabled.outcome()
+    else {
+        panic!("disabled install did not reactivate: {enabled:?}");
+    };
+    assert!(*generation > ExtensionRuntimeGeneration::INITIAL);
+    assert_eq!(
+        enabled
+            .active_profiles()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [profile]
+    );
+
+    let after_enable = harness.install_catalog(profile);
+    let enabled_install = after_enable.get(install_id).unwrap();
+    assert!(enabled_install.desired_enabled());
+    let enabled_selector = ExtensionInstallSelector::new(
+        profile,
+        install_id,
+        after_enable.revision(),
+        enabled_install.revision(),
+    );
+    let uninstalled =
+        ExtensionServiceLifecycle::uninstall_until(&mut owner, enabled_selector, deadline());
+    assert_eq!(
+        uninstalled.outcome(),
+        &ExtensionUninstallOutcome::Uninstalled
+    );
+    assert!(uninstalled.active_profiles().unwrap().is_empty());
+    assert!(harness.install_catalog(profile).installs().is_empty());
+
+    assert_eq!(harness.probe.activation_calls(), 2);
+    assert_eq!(harness.probe.retirement_calls(), 2);
+    assert_eq!(harness.probe.reclaim_calls(), 2);
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("management actor did not prove clean shutdown")
+    };
+    assert_eq!(evidence.accepted_commands(), 4);
+    assert_eq!(evidence.completed_commands(), 4);
     harness.finish(evidence);
 }
 

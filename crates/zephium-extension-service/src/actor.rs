@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
-use zephium_core::ports::extensions::ExtensionActiveProfiles;
+use zephium_core::ports::extensions::{
+    ExtensionActiveProfiles, ExtensionInstallSelector, ExtensionManagementAdmission,
+    ExtensionManagementSettlement, ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome,
+    ExtensionUninstallCallback, ExtensionUninstallOutcome,
+};
 
 use crate::cleanup::{
     reconcile_startup, CancellationCheck, CleanupAttempt, CleanupFailure, CleanupProgress,
@@ -51,6 +55,7 @@ use crate::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence, ExtensionServiceWorkerIdentity,
 };
 
+mod management;
 mod runtime_operations;
 
 pub use runtime_operations::{
@@ -99,6 +104,17 @@ enum WorkerCommand {
         settlement:
             mpsc::SyncSender<RuntimeCommandSettlement<ExtensionServiceRuntimeRetirementOutcome>>,
     },
+    SetInstallEnabled {
+        selector: ExtensionInstallSelector,
+        enabled: bool,
+        deadline: Instant,
+        settlement: ManagementSettlementSink<ExtensionSetEnabledOutcome>,
+    },
+    Uninstall {
+        selector: ExtensionInstallSelector,
+        deadline: Instant,
+        settlement: ManagementSettlementSink<ExtensionUninstallOutcome>,
+    },
     #[cfg(test)]
     Drive,
     #[cfg(test)]
@@ -109,6 +125,77 @@ enum WorkerCommand {
     RetainDropProbe(TestDropProbe),
     #[cfg(test)]
     Block(Receiver<()>),
+}
+
+enum ManagementSettlementSink<T> {
+    Waiting(mpsc::SyncSender<ExtensionManagementSettlement<T>>),
+    Callback {
+        done: Option<Box<dyn FnOnce(ExtensionManagementSettlement<T>) + Send>>,
+        worker_lost: fn() -> ExtensionManagementSettlement<T>,
+    },
+}
+
+impl<T> ManagementSettlementSink<T> {
+    fn callback(
+        done: Box<dyn FnOnce(ExtensionManagementSettlement<T>) + Send>,
+        worker_lost: fn() -> ExtensionManagementSettlement<T>,
+    ) -> Self {
+        Self::Callback {
+            done: Some(done),
+            worker_lost,
+        }
+    }
+
+    fn settle(mut self, outcome: ExtensionManagementSettlement<T>) {
+        match &mut self {
+            Self::Waiting(waiting) => {
+                let _ = waiting.try_send(outcome);
+            }
+            Self::Callback { done, .. } => {
+                // A Shell callback is not extension-service authority. Its
+                // panic must not kill the serialized worker and strand native
+                // ownership or package pins.
+                if let Some(done) = done.take() {
+                    let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+                }
+            }
+        }
+    }
+
+    fn cancel(mut self) {
+        if let Self::Callback { done, .. } = &mut self {
+            drop(done.take());
+        }
+    }
+}
+
+impl<T> Drop for ManagementSettlementSink<T> {
+    fn drop(&mut self) {
+        let Self::Callback { done, worker_lost } = self else {
+            return;
+        };
+        let Some(done) = done.take() else {
+            return;
+        };
+        let outcome = worker_lost();
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+    }
+}
+
+fn set_enabled_worker_lost() -> ExtensionManagementSettlement<ExtensionSetEnabledOutcome> {
+    ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+}
+
+fn uninstall_worker_lost() -> ExtensionManagementSettlement<ExtensionUninstallOutcome> {
+    ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
+}
+
+fn cancel_unadmitted_management(command: WorkerCommand) {
+    match command {
+        WorkerCommand::SetInstallEnabled { settlement, .. } => settlement.cancel(),
+        WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
+        _ => debug_assert!(false, "management admission returned a different command"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -651,6 +738,184 @@ impl ExtensionServiceOwner {
         }
     }
 
+    /// Coordinates one stale-resistant durable enable/disable request with
+    /// exact regular/private runtime ownership.
+    #[must_use = "extension enablement settlement must be checked"]
+    pub fn set_install_enabled_until(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        enabled: bool,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionSetEnabledOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionManagementSettlement::new(
+                ExtensionSetEnabledOutcome::Unavailable,
+                None,
+            );
+        }
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::SetInstallEnabled {
+            selector,
+            enabled,
+            deadline,
+            settlement: ManagementSettlementSink::Waiting(settlement),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionSetEnabledOutcome::Unavailable,
+                            None,
+                        )
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionSetEnabledOutcome::FailedClosed,
+                            None,
+                        )
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => {
+                ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::Unavailable, None)
+            }
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+            }
+        }
+    }
+
+    /// Admits a non-blocking enable/disable transaction. Accepted callbacks
+    /// settle on the service worker and must immediately hand off to their
+    /// application actor rather than performing UI or native-loop work.
+    #[must_use = "management admission determines callback ownership"]
+    pub fn begin_set_install_enabled(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        enabled: bool,
+        deadline: Instant,
+        done: ExtensionSetEnabledCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let command = WorkerCommand::SetInstallEnabled {
+            selector,
+            enabled,
+            deadline,
+            settlement: ManagementSettlementSink::callback(done, set_enabled_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Retires every regular/private owner before deleting one exact install
+    /// and its subordinate grants.
+    #[must_use = "extension uninstall settlement must be checked"]
+    pub fn uninstall_until(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionUninstallOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionManagementSettlement::new(
+                ExtensionUninstallOutcome::Unavailable,
+                None,
+            );
+        }
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::Uninstall {
+            selector,
+            deadline,
+            settlement: ManagementSettlementSink::Waiting(settlement),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionUninstallOutcome::Unavailable,
+                            None,
+                        )
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionUninstallOutcome::FailedClosed,
+                            None,
+                        )
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => {
+                ExtensionManagementSettlement::new(ExtensionUninstallOutcome::Unavailable, None)
+            }
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
+            }
+        }
+    }
+
+    /// Admits a non-blocking exact uninstall transaction.
+    #[must_use = "management admission determines callback ownership"]
+    pub fn begin_uninstall(
+        &mut self,
+        selector: ExtensionInstallSelector,
+        deadline: Instant,
+        done: ExtensionUninstallCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let command = WorkerCommand::Uninstall {
+            selector,
+            deadline,
+            settlement: ManagementSettlementSink::callback(done, uninstall_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
     /// Permanently fences one profile in this worker and tries to prove that
     /// all extension-owned state for it has been retired by `deadline`.
     ///
@@ -1057,6 +1322,7 @@ struct WorkerState {
     initial_startup: Option<(Instant, StartupAttempt)>,
     retirements: ProfileRetirementRegistry,
     runtime: RuntimeCoordinator,
+    management_write_state: ManagementWriteState,
     #[cfg(test)]
     retained_probe: Option<TestDropProbe>,
 }
@@ -1067,6 +1333,22 @@ enum RuntimeIngressReadiness {
     NotReady,
     StartupFailed(ExtensionServiceStartupFailureReason),
     ProtocolViolation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagementIngressFailure {
+    Unavailable,
+    OutcomeUnknown,
+    FailedClosed,
+    ProtocolViolation,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ManagementWriteState {
+    #[default]
+    Healthy,
+    OutcomeUnknown,
+    FailedClosed,
 }
 
 fn runtime_ingress_readiness(
@@ -1114,6 +1396,7 @@ impl WorkerState {
             initial_startup,
             retirements: ProfileRetirementRegistry::new(),
             runtime: RuntimeCoordinator::new(),
+            management_write_state: ManagementWriteState::Healthy,
             #[cfg(test)]
             retained_probe: None,
         }
@@ -1376,6 +1659,44 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::SetInstallEnabled {
+                selector,
+                enabled,
+                deadline,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_set_install_enabled(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    selector,
+                    enabled,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
+            WorkerCommand::Uninstall {
+                selector,
+                deadline,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_uninstall(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    selector,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             #[cfg(test)]
             WorkerCommand::Drive => {}
             #[cfg(test)]
@@ -1396,6 +1717,153 @@ impl WorkerState {
             .checked_add(1)
             .expect("mailbox admission proves the completion counter bound");
         true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_set_install_enabled(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        selector: ExtensionInstallSelector,
+        enabled: bool,
+        deadline: Instant,
+    ) -> (
+        ExtensionManagementSettlement<ExtensionSetEnabledOutcome>,
+        bool,
+    ) {
+        if let Err(failure) = self.management_ingress_readiness(
+            worker,
+            startup_outcome,
+            cancellation,
+            selector.profile(),
+        ) {
+            let outcome = match failure {
+                ManagementIngressFailure::Unavailable => ExtensionSetEnabledOutcome::Unavailable,
+                ManagementIngressFailure::OutcomeUnknown => {
+                    ExtensionSetEnabledOutcome::OutcomeUnknown
+                }
+                ManagementIngressFailure::FailedClosed
+                | ManagementIngressFailure::ProtocolViolation => {
+                    status.publish(ExtensionServicePhase::Failed);
+                    ExtensionSetEnabledOutcome::FailedClosed
+                }
+            };
+            return (
+                ExtensionManagementSettlement::new(outcome, self.runtime.active_profiles()),
+                failure != ManagementIngressFailure::ProtocolViolation,
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None),
+                false,
+            );
+        };
+        let outcome =
+            management::set_enabled_until(startup, &mut self.runtime, selector, enabled, deadline);
+        match outcome.outcome() {
+            ExtensionSetEnabledOutcome::OutcomeUnknown => {
+                self.management_write_state = ManagementWriteState::OutcomeUnknown;
+            }
+            ExtensionSetEnabledOutcome::FailedClosed
+            | ExtensionSetEnabledOutcome::PendingActivation(
+                zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
+            ) => {
+                self.management_write_state = ManagementWriteState::FailedClosed;
+                status.publish(ExtensionServicePhase::Failed);
+            }
+            _ => {}
+        }
+        (outcome, true)
+    }
+
+    fn complete_uninstall(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        selector: ExtensionInstallSelector,
+        deadline: Instant,
+    ) -> (
+        ExtensionManagementSettlement<ExtensionUninstallOutcome>,
+        bool,
+    ) {
+        if let Err(failure) = self.management_ingress_readiness(
+            worker,
+            startup_outcome,
+            cancellation,
+            selector.profile(),
+        ) {
+            let outcome = match failure {
+                ManagementIngressFailure::Unavailable => ExtensionUninstallOutcome::Unavailable,
+                ManagementIngressFailure::OutcomeUnknown => {
+                    ExtensionUninstallOutcome::OutcomeUnknown
+                }
+                ManagementIngressFailure::FailedClosed
+                | ManagementIngressFailure::ProtocolViolation => {
+                    status.publish(ExtensionServicePhase::Failed);
+                    ExtensionUninstallOutcome::FailedClosed
+                }
+            };
+            return (
+                ExtensionManagementSettlement::new(outcome, self.runtime.active_profiles()),
+                failure != ManagementIngressFailure::ProtocolViolation,
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None),
+                false,
+            );
+        };
+        let outcome = management::uninstall_until(startup, &mut self.runtime, selector, deadline);
+        match outcome.outcome() {
+            ExtensionUninstallOutcome::OutcomeUnknown => {
+                self.management_write_state = ManagementWriteState::OutcomeUnknown;
+            }
+            ExtensionUninstallOutcome::FailedClosed => {
+                self.management_write_state = ManagementWriteState::FailedClosed;
+                status.publish(ExtensionServicePhase::Failed)
+            }
+            _ => {}
+        }
+        (outcome, true)
+    }
+
+    fn management_ingress_readiness(
+        &self,
+        worker: ExtensionServiceWorkerIdentity,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        profile: ProfileId,
+    ) -> Result<(), ManagementIngressFailure> {
+        match self.management_write_state {
+            ManagementWriteState::Healthy => {}
+            ManagementWriteState::OutcomeUnknown => {
+                return Err(ManagementIngressFailure::OutcomeUnknown)
+            }
+            ManagementWriteState::FailedClosed => {
+                return Err(ManagementIngressFailure::FailedClosed)
+            }
+        }
+        if cancellation.is_requested() || self.retirements.blocks_ingress(profile) {
+            return Err(ManagementIngressFailure::Unavailable);
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => Ok(()),
+            RuntimeIngressReadiness::NotReady => Err(ManagementIngressFailure::Unavailable),
+            RuntimeIngressReadiness::StartupFailed(_) => {
+                Err(ManagementIngressFailure::FailedClosed)
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                Err(ManagementIngressFailure::ProtocolViolation)
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2007,6 +2475,54 @@ mod tests {
 
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
+
+    fn management_selector(seed: u128) -> ExtensionInstallSelector {
+        ExtensionInstallSelector::new(
+            ProfileId::from(seed),
+            zephium_core::ids::ExtensionInstallId::from(seed + 1),
+            zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+        )
+    }
+
+    #[test]
+    fn dropped_admitted_management_callback_settles_failed_closed_exactly_once() {
+        let (completed, observation) = mpsc::sync_channel(1);
+        let sink = ManagementSettlementSink::callback(
+            Box::new(move |outcome| {
+                completed.send(outcome).unwrap();
+            }),
+            set_enabled_worker_lost,
+        );
+
+        drop(sink);
+
+        assert_eq!(
+            observation.recv().unwrap(),
+            ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+        );
+        assert!(matches!(
+            observation.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn unadmitted_management_callback_is_disarmed_without_invocation() {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked = Arc::clone(&invoked);
+        cancel_unadmitted_management(WorkerCommand::SetInstallEnabled {
+            selector: management_selector(41),
+            enabled: true,
+            deadline: Instant::now() + Duration::from_secs(1),
+            settlement: ManagementSettlementSink::callback(
+                Box::new(move |_| callback_invoked.store(true, Ordering::Release)),
+                set_enabled_worker_lost,
+            ),
+        });
+
+        assert!(!invoked.load(Ordering::Acquire));
+    }
 
     struct UnsupportedHostFactoryPort;
 

@@ -1,7 +1,10 @@
 use std::time::Instant;
 
-use crate::extensions::{ExtensionNativeOwnershipKey, ExtensionRuntimeGeneration};
-use crate::ids::ProfileId;
+use crate::extensions::{
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionNativeOwnershipKey,
+    ExtensionRuntimeGeneration,
+};
+use crate::ids::{ExtensionInstallId, ProfileId};
 
 /// The extension runtime pool has three background slots, so startup can
 /// expose at most three distinct profiles with executable runtime authority.
@@ -188,6 +191,150 @@ pub enum ExtensionRuntimeRetirementDisposition {
     FailedClosed,
 }
 
+/// Stale-UI-resistant selector for one installed extension.
+///
+/// The revisions are compare-and-swap inputs, not Store or package authority.
+/// Shell constructs this value only from its latest privileged management
+/// projection; the serialized service reloads and revalidates the complete
+/// catalog before changing runtime or durable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionInstallSelector {
+    profile: ProfileId,
+    install: ExtensionInstallId,
+    catalog_revision: ExtensionInstallCatalogRevision,
+    install_revision: ExtensionInstallRevision,
+}
+
+impl ExtensionInstallSelector {
+    pub const fn new(
+        profile: ProfileId,
+        install: ExtensionInstallId,
+        catalog_revision: ExtensionInstallCatalogRevision,
+        install_revision: ExtensionInstallRevision,
+    ) -> Self {
+        Self {
+            profile,
+            install,
+            catalog_revision,
+            install_revision,
+        }
+    }
+
+    pub const fn profile(self) -> ProfileId {
+        self.profile
+    }
+
+    pub const fn install(self) -> ExtensionInstallId {
+        self.install
+    }
+
+    pub const fn catalog_revision(self) -> ExtensionInstallCatalogRevision {
+        self.catalog_revision
+    }
+
+    pub const fn install_revision(self) -> ExtensionInstallRevision {
+        self.install_revision
+    }
+}
+
+/// Why enabled user intent was durably accepted but the regular runtime is
+/// not active in the current process.
+///
+/// This is a truthful state, not a successful enablement claim. Restart or a
+/// later explicit retry re-enters the ordinary authenticated activation path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionActivationPendingReason {
+    Unavailable,
+    Rejected,
+    CapacityExceeded,
+    ProfileFenced,
+    FailedClosed,
+}
+
+/// Exact result of one serialized enable/disable transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionSetEnabledOutcome {
+    Enabled {
+        generation: ExtensionRuntimeGeneration,
+        changed: bool,
+    },
+    Disabled {
+        changed: bool,
+    },
+    /// Durable desired-enabled state is true, but activation did not settle.
+    PendingActivation(ExtensionActivationPendingReason),
+    /// The privileged projection was stale. No durable mutation was admitted.
+    Conflict,
+    /// Current package/grant state cannot authorize the requested transition.
+    Rejected,
+    Unavailable,
+    /// A Store mutation was admitted but its commit could not be observed.
+    /// The process must reconcile before accepting another management write.
+    OutcomeUnknown,
+    FailedClosed,
+}
+
+/// Exact result of one serialized uninstall transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionUninstallOutcome {
+    Uninstalled,
+    Conflict,
+    Rejected,
+    Unavailable,
+    OutcomeUnknown,
+    FailedClosed,
+}
+
+/// Management settlement plus the complete same-turn browser-routing cohort.
+///
+/// `None` means the worker could not establish a trustworthy runtime
+/// projection. Shell must retain its previous projection in that case.
+#[must_use = "extension management settlement and routing projection must be checked"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionManagementSettlement<T> {
+    outcome: T,
+    active_profiles: Option<ExtensionActiveProfiles>,
+}
+
+/// Non-blocking admission result for a management transaction.
+///
+/// `Accepted` transfers exactly-once callback ownership to the service. Every
+/// refusal leaves durable and native state untouched and drops the callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionManagementAdmission {
+    Accepted,
+    Busy,
+    Unavailable,
+}
+
+/// Exactly-once completion callback for an admitted enable/disable request.
+pub type ExtensionSetEnabledCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>) + Send>;
+/// Exactly-once completion callback for an admitted uninstall request.
+pub type ExtensionUninstallCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionUninstallOutcome>) + Send>;
+
+impl<T> ExtensionManagementSettlement<T> {
+    pub const fn new(outcome: T, active_profiles: Option<ExtensionActiveProfiles>) -> Self {
+        Self {
+            outcome,
+            active_profiles,
+        }
+    }
+
+    pub const fn outcome(&self) -> &T {
+        &self.outcome
+    }
+
+    pub const fn active_profiles(&self) -> Option<ExtensionActiveProfiles> {
+        self.active_profiles
+    }
+
+    pub fn into_outcome(self) -> T {
+        self.outcome
+    }
+}
+
 /// Move-only application lifecycle boundary for the extension service.
 ///
 /// The unique owner is held behind a `Box` and consumed by shutdown. This
@@ -230,6 +377,57 @@ pub trait ExtensionServiceLifecycle: Send {
         _deadline: Instant,
     ) -> ExtensionRuntimeRetirementDisposition {
         ExtensionRuntimeRetirementDisposition::FailedClosed
+    }
+
+    /// Atomically coordinates one stale-resistant enable/disable request with
+    /// native runtime ownership and durable desired state.
+    ///
+    /// Implementations retire both regular and private owners before a
+    /// disabling write, and persist enabled intent before entering ordinary
+    /// authenticated activation. The default fails closed.
+    fn set_install_enabled_until(
+        &mut self,
+        _selector: ExtensionInstallSelector,
+        _enabled: bool,
+        _deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionSetEnabledOutcome> {
+        ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+    }
+
+    /// Non-blocking form used by the application actor. `Accepted` transfers
+    /// callback ownership and the implementation must settle it exactly once
+    /// after its serialized worker completes the request.
+    fn begin_set_install_enabled(
+        &mut self,
+        _selector: ExtensionInstallSelector,
+        _enabled: bool,
+        _deadline: Instant,
+        done: ExtensionSetEnabledCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Retires every regular/private owner before deleting one exact install.
+    /// Grant rows are subordinate durable state and are removed by the same
+    /// Store transaction. The default fails closed.
+    fn uninstall_until(
+        &mut self,
+        _selector: ExtensionInstallSelector,
+        _deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionUninstallOutcome> {
+        ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
+    }
+
+    /// Non-blocking uninstall form used by the application actor.
+    fn begin_uninstall(
+        &mut self,
+        _selector: ExtensionInstallSelector,
+        _deadline: Instant,
+        done: ExtensionUninstallCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
     }
 
     /// Permanently fences `profile`, proves every extension-owned durable,
@@ -325,6 +523,20 @@ mod tests {
         assert_eq!(
             lifecycle.retire_runtime_until(key, Instant::now()),
             ExtensionRuntimeRetirementDisposition::FailedClosed
+        );
+        let selector = ExtensionInstallSelector::new(
+            ProfileId::from(7),
+            crate::ids::ExtensionInstallId::from(1),
+            crate::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            crate::extensions::ExtensionInstallRevision::INITIAL,
+        );
+        assert_eq!(
+            lifecycle.set_install_enabled_until(selector, true, Instant::now()),
+            ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+        );
+        assert_eq!(
+            lifecycle.uninstall_until(selector, Instant::now()),
+            ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
         );
         let continued = Arc::new(AtomicBool::new(false));
         let continued_by_callback = Arc::clone(&continued);
