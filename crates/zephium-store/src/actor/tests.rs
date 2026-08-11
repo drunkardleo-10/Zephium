@@ -10,17 +10,17 @@ use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
     ExtensionGrantBrowsingContext, ExtensionGrantInitializationState,
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionGrantMutation,
-    ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDeclarations,
-    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
-    ExtensionManifestResourceDigest, ExtensionNativeOwnershipIdentity,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
-    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
-    ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-    ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionGrantRevision, ExtensionHostPermissionSet, ExtensionInstall,
+    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDeclarations, ExtensionManifestDescriptor, ExtensionManifestDigest,
+    ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
+    ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
+    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+    ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
+    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest,
+    EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
 use zephium_core::injection::{MatchOptions, MatchPattern, MatchSet};
@@ -3187,6 +3187,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn begin_native_ownership_until(",
         "pub fn transition_native_ownership_to_may_own_until(",
         "pub fn load_install_catalog_until(",
+        "pub fn provision_install_until(",
         "pub fn set_install_enabled_until(",
         "pub fn delete_install_until(",
         "pub fn load_grant_cohort_until(",
@@ -3205,7 +3206,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 10,
+        public_items, 11,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
@@ -3315,6 +3316,154 @@ fn extension_service_store_authority_loads_exact_runtime_snapshots() {
     assert_eq!(cohort.profile(), profile);
     assert_eq!(cohort.install_catalog(), &catalog);
     assert_eq!(cohort.grants().len(), 0);
+}
+
+#[test]
+fn extension_service_store_authority_atomically_provisions_disabled_install_and_grants() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(0x5001);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let service = store.claim_extension_service_store_authority().unwrap();
+    let manifest = extension_manifest(bundled_extension_package(31, 32, 1));
+    let provisional = ExtensionInstall::new(install_id, manifest.package().clone());
+    let grants = ExtensionGrantAuthority::initialize(
+        &provisional,
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &manifest,
+    )
+    .unwrap();
+
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallProvisionOutcome::Applied(
+        applied,
+    )) = service.provision_install_until(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        install_id,
+        Arc::clone(&manifest),
+        Box::new(grants.clone()),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("service Store authority did not atomically provision the install");
+    };
+    assert_eq!(
+        applied.catalog_revision,
+        ExtensionInstallCatalogRevision::INITIAL.next().unwrap()
+    );
+    assert_eq!(*applied.install, provisional);
+    assert!(!applied.install.desired_enabled());
+    assert_eq!(*applied.authority, grants);
+
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(store.as_ref(), profile)
+    else {
+        panic!("provisioned install catalog did not reload");
+    };
+    assert_eq!(catalog.installs(), std::slice::from_ref(&provisional));
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) = load_extension_grants(
+        store.as_ref(),
+        profile,
+        extension_grant_bindings(&[(install_id, manifest)]),
+    ) else {
+        panic!("provisioned grant cohort did not reload");
+    };
+    assert_eq!(
+        cohort
+            .resolve_entry(install_id)
+            .and_then(|entry| entry.authority_arc())
+            .map(Arc::as_ref),
+        Some(&grants)
+    );
+}
+
+#[test]
+fn extension_provision_rejects_mismatched_authority_without_partial_state() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(0x5002);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let service = store.claim_extension_service_store_authority().unwrap();
+    let manifest = extension_manifest(bundled_extension_package(33, 34, 1));
+    let wrong_manifest = extension_manifest(bundled_extension_package(35, 36, 1));
+    let wrong_install = ExtensionInstall::new(install_id, wrong_manifest.package().clone());
+    let wrong_grants = ExtensionGrantAuthority::new(&wrong_install, &wrong_manifest).unwrap();
+
+    assert_eq!(
+        service.provision_install_until(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            install_id,
+            manifest,
+            Box::new(wrong_grants),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallProvisionOutcome::Invalid)
+    );
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(store.as_ref(), profile)
+    else {
+        panic!("install catalog did not reload after rejected provision");
+    };
+    assert_eq!(catalog.revision(), ExtensionInstallCatalogRevision::INITIAL);
+    assert!(catalog.installs().is_empty());
+}
+
+#[test]
+fn ambiguous_extension_provision_never_commits_half_an_install() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(0x5003);
+    let manifest = extension_manifest(bundled_extension_package(37, 38, 1));
+    let provisional = ExtensionInstall::new(install_id, manifest.package().clone());
+    let grants = ExtensionGrantAuthority::new(&provisional, &manifest).unwrap();
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    hub.make_next_extension_install_commit_ambiguous();
+    let store = Arc::new(SqliteStore::spawn(hub).unwrap());
+    let service = store.claim_extension_service_store_authority().unwrap();
+
+    assert_eq!(
+        service.provision_install_until(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            install_id,
+            Arc::clone(&manifest),
+            Box::new(grants.clone()),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallProvisionOutcome::OutcomeUnknown
+        )
+    );
+
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(store.as_ref(), profile)
+    else {
+        panic!("ambiguous provision catalog did not reload");
+    };
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) = load_extension_grants(
+        store.as_ref(),
+        profile,
+        extension_grant_bindings(&[(install_id, manifest)]),
+    ) else {
+        panic!("ambiguous provision grant cohort did not reload");
+    };
+    let installed = catalog.get(install_id);
+    let authority = cohort
+        .resolve_entry(install_id)
+        .and_then(|entry| entry.authority_arc())
+        .map(Arc::as_ref);
+    assert_eq!(
+        (installed.is_some(), authority.is_some()),
+        (true, true),
+        "one SQLite commit must retain both the install and grant root"
+    );
+    assert_eq!(authority, Some(&grants));
 }
 
 #[test]

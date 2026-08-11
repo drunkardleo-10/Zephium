@@ -279,6 +279,30 @@ pub enum ExtensionInstallCatalogMutationOutcome {
     Failed,
 }
 
+/// Durable settlement of one curated install and its complete initial grant
+/// authority in a single profile-database transaction.
+///
+/// The installed row is always created disabled. A successful result therefore
+/// records package selection and the user's exact permission decision without
+/// granting native runtime ownership or affirming enabled intent. Callers must
+/// enter the ordinary serialized enable/activation transaction separately.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExtensionInstallProvisionOutcome {
+    Applied(ExtensionGrantMutationApplied),
+    Conflict {
+        current: ExtensionInstallCatalogRevision,
+    },
+    NotRegistered,
+    DegradedProfile,
+    Invalid,
+    LimitReached,
+    RevisionExhausted,
+    /// The SQLite commit was attempted but its settlement could not be
+    /// observed. No further management write is safe in this process.
+    OutcomeUnknown,
+    Failed,
+}
+
 /// Bounded grant write payload. Initialization persists a complete selected
 /// grant set in one transaction; later settings changes remain per-install
 /// CAS operations.

@@ -18,12 +18,13 @@ use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
-    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantManifestBindings,
-    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
-    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
-    MAX_EXTENSION_MANIFEST_RETAINED_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
+    ExtensionGrantManifestBindings, ExtensionInstallCatalogMutation,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
+    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipJournalMutation,
+    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::item::sanitize_page_title;
@@ -32,13 +33,13 @@ use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPat
 use zephium_core::ports::store::{
     BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionGrantCohortLoadOutcome,
     ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
-    ExtensionInstallCatalogMutationOutcome, ExtensionNativeOwnershipActivationOutcome,
-    ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
-    HistoryHit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
-    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
-    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
-    UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
-    MAX_FAVICON_BATCH_ORIGINS,
+    ExtensionInstallCatalogMutationOutcome, ExtensionInstallProvisionOutcome,
+    ExtensionNativeOwnershipActivationOutcome, ExtensionNativeOwnershipJournalLoadOutcome,
+    ExtensionNativeOwnershipJournalMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
+    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
+    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
+    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome,
+    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -124,6 +125,7 @@ type ExtensionInstallCatalogMutationDone =
     Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
 type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>;
 type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
+type ExtensionInstallProvisionDone = Box<dyn FnOnce(ExtensionInstallProvisionOutcome) + Send>;
 type ExtensionNativeOwnershipJournalLoadDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
 type ExtensionRuntimeStartupInventoryLoadDone =
@@ -627,6 +629,16 @@ enum Cmd {
         ExtensionGrantRequestPermit,
         ExtensionGrantMutationDone,
     ),
+    ProvisionExtensionInstall(
+        ProfileId,
+        ExtensionInstallCatalogRevision,
+        ExtensionInstallId,
+        Arc<ExtensionManifestDescriptor>,
+        Box<ExtensionGrantAuthority>,
+        ExtensionInstallMutationPermit,
+        ExtensionGrantRequestPermit,
+        ExtensionInstallProvisionDone,
+    ),
     LoadExtensionNativeOwnershipJournal(ExtensionNativeOwnershipJournalLoadDone),
     LoadExtensionRuntimeStartupInventory(ExtensionRuntimeStartupInventoryLoadDone),
     MutateExtensionNativeOwnershipJournal(
@@ -784,9 +796,10 @@ pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
 /// service's only path to exact install catalogs and their atomically bound
 /// grant cohorts. The capability also exposes the fixed-size install mutation
 /// vocabulary required by the service's high-level management transactions;
-/// raw Store ownership and mutation callbacks never cross into Shell. Grant
-/// mutation remains outside this boundary until the permission coordinator is
-/// joined to the same serialized transaction model. One concrete
+/// raw Store ownership and mutation callbacks never cross into Shell. The one
+/// install-construction operation atomically persists a disabled row and its
+/// complete initial grants; later grant mutation remains outside this boundary
+/// until the permission coordinator joins the same serialized model. One concrete
 /// [`SqliteStore`] actor lifetime can mint this authority once, after which the
 /// coordinator may move it onto its single worker thread. It is `Send` but
 /// deliberately neither `Clone` nor `Sync`.
@@ -1023,6 +1036,42 @@ impl ExtensionServiceStoreAuthority {
             .store
             .try_load_extension_install_catalog(profile, deadline, done)
         {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Atomically persists one authenticated disabled install and its complete
+    /// initial grant authority.
+    ///
+    /// This is the only install-construction capability exposed by the Store
+    /// actor. The broad [`Store`] port cannot call it, and successful
+    /// persistence does not enable or activate the extension.
+    pub fn provision_install_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        authority: Box<ExtensionGrantAuthority>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallProvisionOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self.store.try_provision_extension_install(
+            profile,
+            expected_catalog,
+            install,
+            manifest,
+            authority,
+            deadline,
+            done,
+        ) {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
         observe_extension_service_store_call(result, deadline)
@@ -1418,6 +1467,65 @@ impl SqliteStore {
         self.tx
             .try_send(Cmd::MutateExtensionInstallCatalog(
                 profile, expected, mutation, permit, done,
+            ))
+            .is_ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_provision_extension_install(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        authority: Box<ExtensionGrantAuthority>,
+        deadline: Instant,
+        done: ExtensionInstallProvisionDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(retained_bytes) = manifest
+            .retained_bytes()
+            .checked_add(authority.retained_bytes())
+        else {
+            return false;
+        };
+        if retained_bytes > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES {
+            return false;
+        }
+        let Some(install_permit) =
+            ExtensionInstallMutationPermit::try_acquire(&self.extension_install_mutation_admission)
+        else {
+            return false;
+        };
+        let Some(grant_permit) = ExtensionGrantRequestPermit::try_acquire(
+            &self.extension_grant_request_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::ProvisionExtensionInstall(
+                profile,
+                expected,
+                install,
+                manifest,
+                authority,
+                install_permit,
+                grant_permit,
+                done,
             ))
             .is_ok()
     }
@@ -2534,6 +2642,31 @@ fn actor(
                             "store: profile {profile} extension-grant mutation failed: {error}"
                         );
                         ExtensionGrantMutationOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::ProvisionExtensionInstall(
+                profile,
+                expected_catalog,
+                install,
+                manifest,
+                authority,
+                _install_permit,
+                _grant_permit,
+                done,
+            )) => {
+                let outcome = match hub.provision_extension_install(
+                    profile,
+                    expected_catalog,
+                    install,
+                    manifest,
+                    authority,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("store: profile {profile} extension provision failed: {error}");
+                        ExtensionInstallProvisionOutcome::Failed
                     }
                 };
                 done(outcome);

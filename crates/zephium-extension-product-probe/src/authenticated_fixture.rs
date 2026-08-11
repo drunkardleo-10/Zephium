@@ -4,18 +4,18 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
-    ExtensionGrantAuthority, ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
+    ExtensionGrantAuthority, ExtensionInstall, ExtensionInstallCatalogRevision,
     ExtensionManifestDescriptor, ExtensionPackageKey,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::ports::store::{
-    ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogMutationOutcome,
+    ExtensionInstallCatalogMutationOutcome, ExtensionInstallProvisionOutcome,
     ExtensionNativeOwnershipJournalLoadOutcome, Store, StoreShutdownOutcome,
 };
 use zephium_core::profiles::ProfileKind;
@@ -56,6 +56,7 @@ fn deadline() -> Instant {
 pub(crate) struct AuthenticatedFixture {
     temporary: Option<TempDir>,
     store: Option<Arc<SqliteStore>>,
+    authority: Option<ExtensionServiceStoreAuthority>,
     profile: ProfileId,
     boot_prepared: bool,
 }
@@ -73,11 +74,16 @@ impl AuthenticatedFixture {
                 .map_err(|error| format!("cannot open product-probe Store: {error}"))?,
         );
         let profile = ProfileId::from(PROBE_PROFILE);
-        provision_store(store.as_ref(), profile, &manifest)?;
+        provision_profile(store.as_ref(), profile)?;
+        let authority = store
+            .claim_extension_service_store_authority()
+            .map_err(|error| format!("cannot claim extension-service Store authority: {error}"))?;
+        provision_store(&authority, profile, &manifest)?;
 
         Ok(Self {
             temporary: Some(temporary),
             store: Some(store),
+            authority: Some(authority),
             profile,
             boot_prepared: false,
         })
@@ -96,13 +102,13 @@ impl AuthenticatedFixture {
             return Err("extension-service boot was prepared more than once".to_owned());
         }
         self.boot_prepared = true;
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| "product-probe Store was already consumed".to_owned())?;
-        let authority = store
-            .claim_extension_service_store_authority()
-            .map_err(|error| format!("cannot claim extension-service Store authority: {error}"))?;
+        if self.store.is_none() {
+            return Err("product-probe Store was already consumed".to_owned());
+        }
+        let authority = self
+            .authority
+            .take()
+            .ok_or_else(|| "extension-service Store authority was already consumed".to_owned())?;
         let repository_root = ExtensionRepositoryRoot::from_app_data_directory(self.root())
             .map_err(|error| format!("cannot derive extension repository root: {error}"))?;
         match prepare_extension_service_boot(authority, repository_root)
@@ -213,11 +219,7 @@ fn provision_authenticated_repository(
     Ok(manifest)
 }
 
-fn provision_store(
-    store: &impl Store,
-    profile: ProfileId,
-    manifest: &Arc<ExtensionManifestDescriptor>,
-) -> Result<(), String> {
+fn provision_profile(store: &impl Store, profile: ProfileId) -> Result<(), String> {
     store.save_session(SessionState {
         profiles: vec![PersistedProfile {
             id: profile,
@@ -229,26 +231,19 @@ fn provision_store(
     if !store.flush_until(deadline()) {
         return Err("Store did not flush product-probe profile".to_owned());
     }
+    Ok(())
+}
 
+fn provision_store(
+    store: &ExtensionServiceStoreAuthority,
+    profile: ProfileId,
+    manifest: &Arc<ExtensionManifestDescriptor>,
+) -> Result<(), String> {
     let install = ExtensionInstallId::from(1);
-    let ExtensionInstallCatalogMutationOutcome::Applied(installed) = install_mutation(
-        store,
-        profile,
-        ExtensionInstallCatalogRevision::INITIAL,
-        ExtensionInstallCatalogMutation::Install {
-            id: install,
-            package: manifest.package().clone(),
-        },
-    )?
-    else {
-        return Err("Store rejected authenticated extension installation".to_owned());
-    };
-    let installed_row = installed
-        .install
-        .ok_or_else(|| "Store omitted installed extension row".to_owned())?;
+    let provisional = ExtensionInstall::new(install, manifest.package().clone());
     let declarations = manifest.declarations();
     let grants = ExtensionGrantAuthority::initialize(
-        &installed_row,
+        &provisional,
         declarations.required_api().names().to_vec(),
         declarations
             .required_host_authorities()
@@ -260,32 +255,31 @@ fn provision_store(
         manifest,
     )
     .map_err(|error| format!("cannot initialize extension grant authority: {error:?}"))?;
-    let ExtensionGrantMutationOutcome::Applied(initialized) = grant_mutation(
-        store,
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallProvisionOutcome::Applied(
+        installed,
+    )) = store.provision_install_until(
         profile,
-        installed.catalog_revision,
-        installed_row.revision(),
+        ExtensionInstallCatalogRevision::INITIAL,
         install,
         Arc::clone(manifest),
-        ExtensionGrantWrite::Initialize {
-            authority: Box::new(grants),
-        },
-    )?
+        Box::new(grants),
+        deadline(),
+    )
     else {
-        return Err("Store rejected initial extension grants".to_owned());
+        return Err("Store rejected authenticated extension installation".to_owned());
     };
     if !matches!(
-        install_mutation(
-            store,
+        store.set_install_enabled_until(
             profile,
-            initialized.catalog_revision,
-            ExtensionInstallCatalogMutation::SetDesiredEnabled {
-                id: install,
-                expected: initialized.install.revision(),
-                desired_enabled: true,
-            },
-        )?,
-        ExtensionInstallCatalogMutationOutcome::Applied(_)
+            installed.catalog_revision,
+            install,
+            installed.install.revision(),
+            true,
+            deadline(),
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallCatalogMutationOutcome::Applied(_)
+        )
     ) {
         return Err("Store rejected enabled extension state".to_owned());
     }
@@ -328,57 +322,6 @@ fn admitted_manifest(
         )
         .map_err(|error| format!("internal extension manifest was rejected: {error:?}"))?;
     Ok(Arc::new(manifest.descriptor().clone()))
-}
-
-fn install_mutation(
-    store: &impl Store,
-    profile: ProfileId,
-    expected: ExtensionInstallCatalogRevision,
-    mutation: ExtensionInstallCatalogMutation,
-) -> Result<ExtensionInstallCatalogMutationOutcome, String> {
-    let (reply, outcome) = mpsc::sync_channel(1);
-    if !store.mutate_extension_install_catalog(
-        profile,
-        expected,
-        mutation,
-        Box::new(move |result| {
-            let _ = reply.send(result);
-        }),
-    ) {
-        return Err("Store did not admit extension-install mutation".to_owned());
-    }
-    outcome
-        .recv_timeout(STORE_TIMEOUT)
-        .map_err(|error| format!("extension-install mutation did not settle: {error}"))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn grant_mutation(
-    store: &impl Store,
-    profile: ProfileId,
-    expected_catalog: ExtensionInstallCatalogRevision,
-    expected_install: zephium_core::extensions::ExtensionInstallRevision,
-    install: ExtensionInstallId,
-    manifest: Arc<ExtensionManifestDescriptor>,
-    write: ExtensionGrantWrite,
-) -> Result<ExtensionGrantMutationOutcome, String> {
-    let (reply, outcome) = mpsc::sync_channel(1);
-    if !store.mutate_extension_grants(
-        profile,
-        expected_catalog,
-        expected_install,
-        install,
-        manifest,
-        write,
-        Box::new(move |result| {
-            let _ = reply.send(result);
-        }),
-    ) {
-        return Err("Store did not admit extension-grant mutation".to_owned());
-    }
-    outcome
-        .recv_timeout(STORE_TIMEOUT)
-        .map_err(|error| format!("extension-grant mutation did not settle: {error}"))
 }
 
 fn establish_active(

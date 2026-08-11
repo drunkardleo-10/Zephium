@@ -200,29 +200,13 @@ impl Hub {
                         ),
                     ));
                 }
-                let projection = authority.persistence_projection();
-                if projection.install_id() != install.id()
-                    || projection.revision() != ExtensionGrantRevision::INITIAL
-                    || projection.package() != install.package()
-                {
-                    return Ok(ExtensionGrantMutationOutcome::Invalid);
-                }
                 // Reconstruct the submitted authority against the exact
                 // admitted manifest. This refuses stale declarations and
                 // independently recomputes retained-byte accounting/digest
                 // before any durable write begins.
-                let verified = match ExtensionGrantAuthority::from_persisted(
-                    install,
-                    ExtensionGrantRevision::INITIAL,
-                    projection.package().clone(),
-                    projection.api_grants().cloned().collect(),
-                    projection.host_grants().cloned().collect(),
-                    projection.persisted_file_access(),
-                    projection.persisted_private_access(),
-                    &manifest,
-                ) {
-                    Ok(verified) if verified == *authority => verified,
-                    _ => return Ok(ExtensionGrantMutationOutcome::Invalid),
+                let Some(verified) = verify_initial_authority(install, &manifest, &authority)
+                else {
+                    return Ok(ExtensionGrantMutationOutcome::Invalid);
                 };
                 (verified, GrantPersistence::Initialize)
             }
@@ -368,7 +352,7 @@ fn load_all_authorities(
     Ok(authorities)
 }
 
-fn validate_global_grant_integrity(conn: &Connection) -> rusqlite::Result<()> {
+pub(super) fn validate_global_grant_integrity(conn: &Connection) -> rusqlite::Result<()> {
     let (root_count, root_orphans): (i64, i64) = conn.query_row(
         "SELECT count(*),
                 COALESCE(sum(CASE WHEN i.id IS NULL THEN 1 ELSE 0 END), 0)
@@ -725,7 +709,37 @@ fn load_host_grants(
     Ok(grants)
 }
 
-fn insert_authority(
+/// Rebuilds a submitted initial authority against the exact installed row and
+/// admitted manifest. The reconstruction independently checks declarations,
+/// digest, canonical ordering, and retained-memory accounting before a write.
+pub(super) fn verify_initial_authority(
+    install: &ExtensionInstall,
+    manifest: &ExtensionManifestDescriptor,
+    authority: &ExtensionGrantAuthority,
+) -> Option<ExtensionGrantAuthority> {
+    let projection = authority.persistence_projection();
+    if projection.install_id() != install.id()
+        || projection.revision() != ExtensionGrantRevision::INITIAL
+        || projection.package() != install.package()
+        || manifest.package() != install.package()
+    {
+        return None;
+    }
+    ExtensionGrantAuthority::from_persisted(
+        install,
+        ExtensionGrantRevision::INITIAL,
+        projection.package().clone(),
+        projection.api_grants().cloned().collect(),
+        projection.host_grants().cloned().collect(),
+        projection.persisted_file_access(),
+        projection.persisted_private_access(),
+        manifest,
+    )
+    .ok()
+    .filter(|verified| verified == authority)
+}
+
+pub(super) fn insert_authority(
     conn: &Connection,
     authority: &ExtensionGrantAuthority,
 ) -> rusqlite::Result<()> {

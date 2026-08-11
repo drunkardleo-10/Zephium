@@ -7,14 +7,18 @@
 
 use super::*;
 
+use std::sync::Arc;
+
 use crate::actor::ExtensionRuntimeStartupInventory;
 use zephium_core::extensions::{
-    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionGrantBrowsingContext, ExtensionInstall,
-    ExtensionInstallCatalog, ExtensionInstallCatalogApplyError, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-    ExtensionNativeOwnershipKey, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
-    EXTENSION_SHA256_BYTES, MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionInstallCatalogApplyError, ExtensionInstallCatalogMutation,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
+    ExtensionManifestDigest, ExtensionNativeOwnershipKey, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
+    ExtensionTreeDigest, EXTENSION_SHA256_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::session::MAX_SESSION_PROFILES;
 
@@ -79,8 +83,9 @@ pub(super) fn decode_package_payload(
 }
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
-    ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationApplied,
-    ExtensionInstallCatalogMutationOutcome,
+    ExtensionGrantMutationApplied, ExtensionInstallCatalogLoadOutcome,
+    ExtensionInstallCatalogMutationApplied, ExtensionInstallCatalogMutationOutcome,
+    ExtensionInstallProvisionOutcome,
 };
 
 impl Hub {
@@ -294,24 +299,13 @@ impl Hub {
             }
         }
 
-        let current_high_water_bytes = current_high_water.map(ExtensionInstallId::bytes);
-        let next_high_water_bytes = applied.install_id_high_water.map(ExtensionInstallId::bytes);
-        let catalog_updated = tx.execute(
-            "UPDATE extension_install_catalog
-             SET revision = ?2, install_id_high_water = ?3
-             WHERE id = 1 AND revision = ?1 AND install_id_high_water IS ?4",
-            params![
-                revision_i64(current_revision.get())?,
-                revision_i64(applied.catalog_revision.get())?,
-                next_high_water_bytes.as_ref().map(|bytes| &bytes[..]),
-                current_high_water_bytes.as_ref().map(|bytes| &bytes[..]),
-            ],
+        update_catalog_header(
+            &tx,
+            current_revision,
+            current_high_water,
+            applied.catalog_revision,
+            applied.install_id_high_water,
         )?;
-        if catalog_updated != 1 {
-            return Err(invalid_data(
-                "extension install catalog changed during compare-and-swap",
-            ));
-        }
 
         let committed = tx.commit();
         #[cfg(test)]
@@ -330,6 +324,132 @@ impl Hub {
                     "store: profile {profile} extension-install catalog commit outcome is unknown: {error}"
                 );
                 Ok(ExtensionInstallCatalogMutationOutcome::OutcomeUnknown)
+            }
+        }
+    }
+
+    /// Atomically creates one disabled install and its complete initial grant
+    /// root in the same profile SQLite transaction.
+    ///
+    /// Package and manifest authentication happen before this persistence
+    /// boundary. This method nevertheless reconstructs the submitted grant
+    /// authority against the exact manifest and aggregate-produced install so
+    /// stale or internally inconsistent authority cannot become durable.
+    pub(crate) fn provision_extension_install(
+        &mut self,
+        profile: ProfileId,
+        expected: ExtensionInstallCatalogRevision,
+        install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        authority: Box<ExtensionGrantAuthority>,
+    ) -> rusqlite::Result<ExtensionInstallProvisionOutcome> {
+        if self.recovery_required.is_some() {
+            return Err(invalid_data("session recovery mode is read-only"));
+        }
+        if !self.registry.contains(&profile) {
+            return Ok(ExtensionInstallProvisionOutcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(ExtensionInstallProvisionOutcome::DegradedProfile);
+        }
+        #[cfg(test)]
+        let ambiguous_commit = std::mem::take(&mut self.ambiguous_extension_install_commit_once);
+
+        self.profile_conn(profile)?;
+        let meta = &self.meta;
+        let conn = self
+            .profiles
+            .get_mut(&profile)
+            .ok_or_else(|| invalid_data("registered extension profile connection is absent"))?;
+        let tx = conn.transaction()?;
+        let current = load_catalog(&tx)?;
+        let current_revision = current.revision();
+        let current_high_water = current.install_id_high_water();
+        let application = match current.apply(
+            expected,
+            ExtensionInstallCatalogMutation::Install {
+                id: install_id,
+                package: manifest.package().clone(),
+            },
+        ) {
+            Ok(application) => application,
+            Err(ExtensionInstallCatalogApplyError::CatalogRevisionConflict { .. }) => {
+                return Ok(ExtensionInstallProvisionOutcome::Conflict {
+                    current: current_revision,
+                });
+            }
+            Err(ExtensionInstallCatalogApplyError::LimitReached { .. }) => {
+                return Ok(ExtensionInstallProvisionOutcome::LimitReached);
+            }
+            Err(ExtensionInstallCatalogApplyError::CatalogRevisionExhausted) => {
+                return Ok(ExtensionInstallProvisionOutcome::RevisionExhausted);
+            }
+            Err(
+                ExtensionInstallCatalogApplyError::InstallAlreadyExists(_)
+                | ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater { .. }
+                | ExtensionInstallCatalogApplyError::InstallRevisionConflict { .. }
+                | ExtensionInstallCatalogApplyError::InstallRevisionExhausted { .. }
+                | ExtensionInstallCatalogApplyError::InstallNotFound(_)
+                | ExtensionInstallCatalogApplyError::PackageAlreadyInstalled { .. }
+                | ExtensionInstallCatalogApplyError::CatalogRejected(_),
+            ) => return Ok(ExtensionInstallProvisionOutcome::Invalid),
+        };
+        let install = application
+            .install()
+            .ok_or_else(|| invalid_data("extension provision transition has no install row"))?;
+        if install.desired_enabled() || install.id() != install_id {
+            return Err(invalid_data(
+                "extension provision transition produced an invalid install row",
+            ));
+        }
+
+        super::extension_grants::validate_global_grant_integrity(&tx)?;
+        super::extension_grants::ensure_install_id_has_no_grant_rows(&tx, install_id)?;
+        if super::native_ownership::has_unresolved_native_ownership_for_install(
+            meta, profile, install_id,
+        )? {
+            return Err(invalid_data(
+                "new extension install id has unresolved native ownership",
+            ));
+        }
+        let Some(verified_authority) =
+            super::extension_grants::verify_initial_authority(install, &manifest, &authority)
+        else {
+            return Ok(ExtensionInstallProvisionOutcome::Invalid);
+        };
+
+        insert_install(&tx, install)?;
+        super::extension_grants::insert_authority(&tx, &verified_authority)?;
+        update_catalog_header(
+            &tx,
+            current_revision,
+            current_high_water,
+            application.catalog().revision(),
+            application.catalog().install_id_high_water(),
+        )?;
+        let applied = ExtensionGrantMutationApplied::new(
+            application.catalog().revision(),
+            Box::new(install.clone()),
+            Box::new(verified_authority),
+        );
+
+        let committed = tx.commit();
+        #[cfg(test)]
+        if ambiguous_commit {
+            if let Err(error) = committed {
+                eprintln!(
+                    "store: injected profile {profile} extension provision commit ambiguity: {error}"
+                );
+            }
+            return Ok(ExtensionInstallProvisionOutcome::OutcomeUnknown);
+        }
+        match committed {
+            Ok(()) => Ok(ExtensionInstallProvisionOutcome::Applied(applied)),
+            Err(error) => {
+                eprintln!(
+                    "store: profile {profile} extension provision commit outcome is unknown: {error}"
+                );
+                Ok(ExtensionInstallProvisionOutcome::OutcomeUnknown)
             }
         }
     }
@@ -371,6 +491,34 @@ fn insert_install(conn: &Connection, install: &ExtensionInstall) -> rusqlite::Re
     if inserted != 1 {
         return Err(invalid_data(
             "extension install row was not inserted exactly once",
+        ));
+    }
+    Ok(())
+}
+
+fn update_catalog_header(
+    conn: &Connection,
+    current_revision: ExtensionInstallCatalogRevision,
+    current_high_water: Option<ExtensionInstallId>,
+    next_revision: ExtensionInstallCatalogRevision,
+    next_high_water: Option<ExtensionInstallId>,
+) -> rusqlite::Result<()> {
+    let current_high_water_bytes = current_high_water.map(ExtensionInstallId::bytes);
+    let next_high_water_bytes = next_high_water.map(ExtensionInstallId::bytes);
+    let updated = conn.execute(
+        "UPDATE extension_install_catalog
+         SET revision = ?2, install_id_high_water = ?3
+         WHERE id = 1 AND revision = ?1 AND install_id_high_water IS ?4",
+        params![
+            revision_i64(current_revision.get())?,
+            revision_i64(next_revision.get())?,
+            next_high_water_bytes.as_ref().map(|bytes| &bytes[..]),
+            current_high_water_bytes.as_ref().map(|bytes| &bytes[..]),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(invalid_data(
+            "extension install catalog changed during compare-and-swap",
         ));
     }
     Ok(())
