@@ -38,7 +38,12 @@ Chromium's full site-isolation model.
    accept identity from a JavaScript payload; only capability-specific,
    permission-checked brokers may cross into zone 1. This is the required enablement
    contract, not a current product claim: production adapters remain disabled until
-   platform-native hostile tests enforce it.
+   platform-native hostile tests enforce it. A manifest-declared extension sandbox is
+   not itself a fifth trust zone on macOS: the live WKWebExtension gate proves such a
+   page retains its `webkit-extension` origin and `chrome` API. Product provisioning
+   must remain disabled until the sealed package either removes that dependency through
+   a reviewed source adaptation or hosts it in a separately attested unprivileged
+   renderer. Native naming or CSP text is never accepted as sandbox evidence.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.

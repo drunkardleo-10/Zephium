@@ -735,8 +735,11 @@ WebKit probe proves the platform adapter. The authenticated product probe now
 joins package authority, native ownership, controller activation, the
 Shell-owned window/tab delegate, and real content-script execution. Production
 provisioning remains deliberately empty; ordinary release builds therefore
-expose no extension runtime. The remaining release gaps include the complete
-permission and API matrix, extension UI, quotas, and endurance. Older admitted
+expose no extension runtime. Authenticated catalog management and install UX,
+native action projection, and transient popup hosting are implemented; the
+remaining release gaps include the complete permission and API matrix,
+permission-prompt integration, quotas, release-build resource evidence, and
+endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
@@ -915,9 +918,16 @@ current native gate WebKit exposes `alarms`, `commands`, `contextMenus`,
 `idle`, `notifications`, `offscreen`, `sidePanel`, and `storage.managed` are
 absent. A namespace being present is not a behavioral compatibility claim;
 each API that affects the pinned workflow still needs an exact live gate. The
-known absence classifications are below; the release runner at the supported
-OS floor must reproduce the closed inventory before these become floor-wide
-claims.
+product-tab gate additionally proves a main-world file injection when the
+literal `"MAIN"` value is supplied, a top-level `webNavigation.onCommitted`
+callback, execution through an opaque dynamic web-accessible-resource URL, and
+the native sandbox-page behavior. WebKit omits the `ExecutionWorld` enum even
+though literal main-world injection succeeds, and its manifest-declared
+sandbox page retains both a `webkit-extension` origin and the `chrome` API.
+Those two divergences require a sealed package adapter; the sandbox page must
+not be treated as a lower-trust renderer. The release runner at the supported
+OS floor must reproduce the closed inventory and these exact behavioral
+classifications before they become floor-wide claims.
 
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
@@ -927,7 +937,11 @@ claims.
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
 | Native messaging | Unsupported in the initial target | The optional permission is parsed, but product grant compilation prohibits it. Native biometric/application integration must be disclosed separately from core vault use. |
-| Clipboard read/write, alarms, commands, context menus, programmatic scripting, non-blocking navigation observation, dynamic web-accessible resources, and sandboxed pages | Behavior unassessed | Parser or namespace presence is insufficient; product-tab/popup live gates remain release blockers where the pinned workflow uses the surface. Non-blocking request completion observation is classified separately above. |
+| Programmatic main-world scripting | Requires a sealed Bitwarden Core adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
+| Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |
+| Dynamic web-accessible resources | Compatible on the exercised runtime | A content script resolves an opaque runtime URL for a `use_dynamic_url` resource; the page loads and executes the declared resource. Revocation, multi-frame behavior, and hostile embedding remain separate gates. |
+| Manifest sandbox pages | Requires a sealed Bitwarden Core adapter | The live gate proves WebKit loads the declared page with a `webkit-extension` origin and an available `chrome` namespace, not Chrome's lower-trust sandbox semantics. Zephium must place the exact pinned workflow behind a genuinely unprivileged renderer boundary or remove the dependency through a reviewed source adaptation; native behavior must never be labelled sandboxed. |
+| Clipboard read/write, alarms, commands, and context menus | Behavior unassessed | Parser or namespace presence is insufficient; exact product-tab/popup live gates remain release blockers where the pinned workflow uses the surface. |
 
 This is one reviewed slice of the required declaration-by-declaration matrix,
 not a claim that the complete Bitwarden workflow is compatible. Product

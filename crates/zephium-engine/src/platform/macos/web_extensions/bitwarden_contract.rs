@@ -5,6 +5,8 @@
 //! MV3 manifest, so the live gate can distinguish WebKit parser/runtime facts
 //! from assumptions without shipping or embedding upstream source artifacts.
 
+mod browser_api;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -76,6 +78,9 @@ pub(super) struct ContractNativeTeardown {
     pub(super) product_store: Weak<objc2_web_kit::WKWebsiteDataStore>,
     pub(super) popup_views: Vec<Weak<objc2_web_kit::WKWebView>>,
     pub(super) web_request_observation: &'static str,
+    pub(super) dynamic_resource_url: &'static str,
+    pub(super) execution_world_namespace: &'static str,
+    pub(super) sandbox_isolation: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,10 +174,8 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
     write(&path, "manifest.json", &manifest.to_string())?;
     for (name, contents) in [
         ("autofill.css", "html { color-scheme: light dark; }"),
-        ("background.js", web_request_background_probe_script()),
-        ("fido2-page-script.js", "void 0;"),
+        ("background.js", background_probe_script()),
         ("managed-schema.json", "{}"),
-        ("menu-button.html", "<!doctype html><title>button</title>"),
         ("menu-list.html", "<!doctype html><title>list</title>"),
         ("menu.html", "<!doctype html><title>menu</title>"),
         (
@@ -193,24 +196,19 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         write(&path, name, contents)?;
     }
     write(&path, "web-request-probe.js", &web_request_probe_script())?;
+    browser_api::write_fixture_assets(&path)?;
+    let title = serde_json::to_string(BITWARDEN_PRODUCT_TAB_TITLE)
+        .expect("static product-tab title is serializable");
     write(
         &path,
         "content-message-handler.js",
-        &product_tab_content_script(),
+        &browser_api::product_tab_content_script(&title),
     )?;
     let fonts = path.join("fonts");
     std::fs::create_dir(&fonts)
         .map_err(|error| format!("cannot create Bitwarden contract font directory: {error}"))?;
     write(&fonts, "fixture.woff2", "fixture")?;
     Ok(path)
-}
-
-fn product_tab_content_script() -> String {
-    let title = serde_json::to_string(BITWARDEN_PRODUCT_TAB_TITLE)
-        .expect("static product-tab title is serializable");
-    format!(
-        "addEventListener('DOMContentLoaded', () => {{ document.title = {title}; }}, {{ once: true }});"
-    )
 }
 
 pub(super) fn inspect(extension: &WKWebExtension) -> Result<ContractEvidence, String> {
@@ -385,6 +383,7 @@ pub(super) fn validate_native_grant_round_trip(
     let mut product_view = None;
     let mut popup_views = Vec::new();
     let mut web_request = None;
+    let mut browser_api_observation = None;
     let gate = (|| {
         let window = super::new_window(mtm)?;
         let surface_host =
@@ -448,6 +447,8 @@ pub(super) fn validate_native_grant_round_trip(
             &context,
             run_loop,
         )?;
+        let browser_api_evidence = probe_browser_apis(&context, run_loop, mtm)?;
+        browser_api_observation = Some(browser_api::validate(&browser_api_evidence)?);
         let evidence = probe_web_request(&context, run_loop, mtm, "completed")?;
         let observation = validate_web_request_evidence(&evidence, true)?;
         popup_views = validate_action_popup(
@@ -532,6 +533,14 @@ pub(super) fn validate_native_grant_round_trip(
                 "native-probe-bitwarden-web-request: observation={}; background={evidence}",
                 observation.as_str()
             );
+            let browser_api = browser_api_observation
+                .expect("successful Bitwarden gate records browser API evidence");
+            eprintln!(
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                browser_api.execution_world_namespace(),
+                browser_api.dynamic_resource_url(),
+                browser_api.sandbox_isolation(),
+            );
             Ok(ContractNativeTeardown {
                 controller: controller_weak,
                 context: context_weak,
@@ -540,6 +549,9 @@ pub(super) fn validate_native_grant_round_trip(
                 product_store: store_weak,
                 popup_views,
                 web_request_observation: observation.as_str(),
+                dynamic_resource_url: browser_api.dynamic_resource_url(),
+                execution_world_namespace: browser_api.execution_world_namespace(),
+                sandbox_isolation: browser_api.sandbox_isolation(),
             })
         }
         (Err(gate), Ok(())) => Err(gate),
@@ -661,41 +673,80 @@ fn probe_web_request(
     mtm: MainThreadMarker,
     phase: &str,
 ) -> Result<Value, String> {
+    probe_extension_page(
+        context,
+        run_loop,
+        mtm,
+        &format!("web-request-probe.html?phase={phase}"),
+        WEB_REQUEST_PROBE_TITLE,
+        "webRequest",
+    )
+}
+
+fn probe_browser_apis(
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+) -> Result<Value, String> {
+    probe_extension_page(
+        context,
+        run_loop,
+        mtm,
+        "browser-api-probe.html",
+        browser_api::PROBE_TITLE,
+        "browser API",
+    )
+}
+
+fn probe_extension_page(
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+    page: &str,
+    pending_title: &str,
+    label: &str,
+) -> Result<Value, String> {
     let configuration = unsafe { context.webViewConfiguration() }.ok_or_else(|| {
-        "loaded Bitwarden contract returned no extension-page configuration".to_owned()
+        format!("loaded Bitwarden contract returned no {label} extension-page configuration")
     })?;
     let window = super::new_window(mtm)?;
-    let host = super::profile_isolation::host_for_window(&window, "Bitwarden webRequest")?;
+    let host = super::profile_isolation::host_for_window(&window, &format!("Bitwarden {label}"))?;
     let view = super::profile_isolation::build_profile_view(&host, configuration)?;
     window.orderFrontRegardless();
 
-    let page = unsafe { context.baseURL() }
-        .URLByAppendingPathComponent(&NSString::from_str("web-request-probe.html"))
+    let (page_path, query) = page
+        .split_once('?')
+        .map_or((page, None), |(path, query)| (path, Some(query)));
+    let mut page = unsafe { context.baseURL() }
+        .URLByAppendingPathComponent(&NSString::from_str(page_path))
         .and_then(|url| url.absoluteString())
-        .ok_or_else(|| "Bitwarden contract produced no webRequest probe URL".to_owned())?
+        .ok_or_else(|| format!("Bitwarden contract produced no {label} probe URL"))?
         .to_string();
-    let page = format!("{page}?phase={phase}");
+    if let Some(query) = query {
+        page.push('?');
+        page.push_str(query);
+    }
     view.load_url(&page)
-        .map_err(|error| format!("cannot navigate Bitwarden webRequest probe: {error}"))?;
+        .map_err(|error| format!("cannot navigate Bitwarden {label} probe: {error}"))?;
 
     let deadline = Instant::now() + super::PROBE_TIMEOUT;
     let result = loop {
         let title = view
             .document_title()
-            .map_err(|error| format!("cannot inspect Bitwarden webRequest probe title: {error}"))?;
+            .map_err(|error| format!("cannot inspect Bitwarden {label} probe title: {error}"))?;
         if let Some(title) = title
             .as_deref()
-            .filter(|title| !title.is_empty() && *title != WEB_REQUEST_PROBE_TITLE)
+            .filter(|title| !title.is_empty() && *title != pending_title)
         {
             let result = serde_json::from_str(title).map_err(|error| {
-                format!("Bitwarden webRequest probe returned invalid evidence {title:?}: {error}")
+                format!("Bitwarden {label} probe returned invalid evidence {title:?}: {error}")
             })?;
             break result;
         }
-        super::validate_context_errors(context, "Bitwarden webRequest probe")?;
+        super::validate_context_errors(context, &format!("Bitwarden {label} probe"))?;
         if Instant::now() >= deadline {
             return Err(format!(
-                "Bitwarden webRequest probe timed out at {:?}",
+                "Bitwarden {label} probe timed out at {:?}",
                 view.url().ok()
             ));
         }
@@ -751,7 +802,7 @@ fn validate_web_request_evidence(
     }
 }
 
-fn web_request_background_probe_script() -> &'static str {
+fn background_probe_script() -> &'static str {
     r#"(() => {
     const webRequest = globalThis.chrome?.webRequest;
     const type = (value) => typeof value;
@@ -817,7 +868,61 @@ fn web_request_background_probe_script() -> &'static str {
     } else {
         outcome.observationListeners = "absent";
     }
+
+    const surface = {
+        executionWorldNamespace: type(globalThis.chrome?.scripting?.ExecutionWorld),
+        mainWorldValue: globalThis.chrome?.scripting?.ExecutionWorld?.MAIN ?? "absent",
+        messageSenderTab: "pending",
+        executeScript: "pending",
+        webNavigationCommitted: "pending"
+    };
+    const publishSurface = () => api?.storage?.local?.set({ zephiumBitwardenBackgroundApiProbe: surface });
+    if (globalThis.chrome?.webNavigation?.onCommitted) {
+        globalThis.chrome.webNavigation.onCommitted.addListener((details) => {
+            if (details.frameId === 0 && /^https?:/.test(details.url ?? "")) {
+                surface.webNavigationCommitted = "observed";
+                void publishSurface();
+            }
+        });
+    } else {
+        surface.webNavigationCommitted = "absent";
+    }
+    if (api?.runtime?.onMessage) {
+        api.runtime.onMessage.addListener((message, sender) => {
+            if (message?.type !== "zephium-bitwarden-programmatic-script") return;
+            const tabId = sender?.tab?.id;
+            surface.messageSenderTab = Number.isInteger(tabId) ? "present" : "absent";
+            if (!Number.isInteger(tabId) || !globalThis.chrome?.scripting?.executeScript) {
+                surface.executeScript = "absent";
+                void publishSurface();
+                return;
+            }
+            try {
+                const execution = globalThis.chrome.scripting.executeScript({
+                    target: { tabId, allFrames: false },
+                    world: globalThis.chrome.scripting.ExecutionWorld?.MAIN ?? "MAIN",
+                    files: ["scripting-page-script.js"]
+                });
+                if (execution?.then) {
+                    execution.then(
+                        () => { surface.executeScript = "fulfilled"; void publishSurface(); },
+                        () => { surface.executeScript = "rejected"; void publishSurface(); }
+                    );
+                } else {
+                    surface.executeScript = "returned-without-promise";
+                    void publishSurface();
+                }
+            } catch (_) {
+                surface.executeScript = "rejected";
+                void publishSurface();
+            }
+        });
+    } else {
+        surface.messageSenderTab = "runtime-messaging-absent";
+        surface.executeScript = "runtime-messaging-absent";
+    }
     void publish();
+    void publishSurface();
 })()"#
 }
 
@@ -894,7 +999,7 @@ mod tests {
 
     #[test]
     fn background_probe_matches_bitwarden_http_auth_registration_shape() {
-        let script = web_request_background_probe_script();
+        let script = background_probe_script();
         assert!(script.contains("globalThis.chrome?.webRequest"));
         assert!(script.contains("webRequest.onAuthRequired.addListener"));
         assert!(script.contains("webRequest.onCompleted.addListener"));
@@ -902,6 +1007,9 @@ mod tests {
         assert!(script.contains("{ urls: [\"http://*/*\", \"https://*/*\"] }"));
         assert!(script.contains("[\"asyncBlocking\"]"));
         assert!(script.contains("storage?.local?.set"));
+        assert!(script.contains("scripting.executeScript"));
+        assert!(script.contains("ExecutionWorld?.MAIN ?? \"MAIN\""));
+        assert!(script.contains("webNavigation.onCommitted.addListener"));
         for (namespace, _) in EXPECTED_BITWARDEN_RUNTIME_NAMESPACES {
             assert!(script.contains(&format!("{namespace}: type(")));
         }
@@ -910,9 +1018,6 @@ mod tests {
         assert!(page.contains("phase === \"listeners\""));
         assert!(page.contains("phase === \"completed\""));
         assert!(page.contains(&format!("polls >= {WEB_REQUEST_SETTLE_POLLS}")));
-        let content = product_tab_content_script();
-        assert!(content.contains("DOMContentLoaded"));
-        assert!(content.contains(BITWARDEN_PRODUCT_TAB_TITLE));
     }
 
     #[test]
