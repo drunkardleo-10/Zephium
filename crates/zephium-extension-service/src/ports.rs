@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
+    ExtensionInstallCallback, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
     ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
     ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
@@ -137,6 +138,34 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         done: ExtensionSetEnabledCallback,
     ) -> ExtensionManagementAdmission {
         ExtensionServiceOwner::begin_set_install_enabled(self, selector, enabled, deadline, done)
+    }
+
+    fn install_until(
+        &mut self,
+        selector: ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
+        ExtensionServiceOwner::install_until(self, selector, file_access, private_access, deadline)
+    }
+
+    fn begin_install(
+        &mut self,
+        selector: ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: Instant,
+        done: ExtensionInstallCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_install(
+            self,
+            selector,
+            file_access,
+            private_access,
+            deadline,
+            done,
+        )
     }
 
     fn uninstall_until(

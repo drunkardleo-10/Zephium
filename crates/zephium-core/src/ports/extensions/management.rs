@@ -5,12 +5,15 @@ use std::fmt;
 use std::mem::size_of;
 
 use crate::extensions::{
-    ExtensionCompatibilityLevel, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
-    ExtensionRuntimeGeneration, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ApiPermissionName, ExtensionCompatibilityLevel, ExtensionGrantRevision,
+    ExtensionInstallCatalogRevision, ExtensionRuntimeGeneration, MAX_EXTENSION_API_PERMISSIONS,
+    MAX_EXTENSION_API_PERMISSION_NAME_BYTES, MAX_EXTENSION_HOST_GRANTS,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use crate::ids::ProfileId;
+use crate::injection::{MatchPattern, MAX_MATCH_PATTERN_BYTES};
 
-use super::ExtensionInstallSelector;
+use super::{ExtensionInstallCandidateSelector, ExtensionInstallSelector};
 
 /// Maximum bytes in one browser-rendered extension metadata field.
 pub const MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES: usize = 4 * 1024;
@@ -19,7 +22,12 @@ pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
     ExtensionManagementCatalog,
 >()
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
-        * (size_of::<ExtensionManagementEntry>() + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES);
+        * (size_of::<ExtensionManagementEntry>() + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES)
+    + MAX_EXTENSION_INSTALLS_PER_PROFILE
+        * (size_of::<ExtensionInstallCandidateEntry>()
+            + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
+            + MAX_EXTENSION_API_PERMISSIONS * MAX_EXTENSION_API_PERMISSION_NAME_BYTES
+            + MAX_EXTENSION_HOST_GRANTS * MAX_MATCH_PATTERN_BYTES);
 
 /// Truthful process-local state of one regular extension runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,12 +193,162 @@ impl ExtensionManagementEntry {
     }
 }
 
+/// One authenticated package offered for installation by the exact current
+/// curated catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionInstallCandidateEntry {
+    selector: ExtensionInstallCandidateSelector,
+    name: Box<str>,
+    description: Option<Box<str>>,
+    author: Option<Box<str>>,
+    version: Box<str>,
+    required_api: Box<[Box<str>]>,
+    required_hosts: Box<[Box<str>]>,
+    supports_file_access: bool,
+    compatibility: ExtensionManagementCompatibility,
+    retained_bytes: usize,
+}
+
+impl ExtensionInstallCandidateEntry {
+    /// Builds one bounded candidate from freshly authenticated package data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        selector: ExtensionInstallCandidateSelector,
+        name: impl Into<Box<str>>,
+        description: Option<Box<str>>,
+        author: Option<Box<str>>,
+        version: impl Into<Box<str>>,
+        required_api: Vec<Box<str>>,
+        required_hosts: Vec<Box<str>>,
+        compatibility: ExtensionManagementCompatibility,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        let name = name.into();
+        let version = version.into();
+        validate_display_text(&name, 75, true)?;
+        validate_display_text(&version, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES, false)?;
+        if version.is_empty() || !version.is_ascii() {
+            return Err(ExtensionManagementProjectionError::InvalidDisplayText);
+        }
+        if let Some(description) = description.as_deref() {
+            validate_display_text(description, 132, false)?;
+        }
+        if let Some(author) = author.as_deref() {
+            validate_display_text(author, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES, false)?;
+        }
+        if required_api.len() > MAX_EXTENSION_API_PERMISSIONS
+            || required_hosts.len() > MAX_EXTENSION_HOST_GRANTS
+        {
+            return Err(ExtensionManagementProjectionError::TooManyPermissions);
+        }
+        let mut required_api = required_api;
+        required_api.sort_unstable();
+        if required_api.windows(2).any(|pair| pair[0] == pair[1])
+            || required_api.iter().any(|name| {
+                ApiPermissionName::parse_exact(name)
+                    .ok()
+                    .is_none_or(|parsed| parsed.as_str() != name.as_ref())
+            })
+        {
+            return Err(ExtensionManagementProjectionError::InvalidPermission);
+        }
+        let mut required_hosts = required_hosts;
+        required_hosts.sort_unstable();
+        if required_hosts.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ExtensionManagementProjectionError::InvalidPermission);
+        }
+        let mut supports_file_access = false;
+        for pattern in &required_hosts {
+            let parsed = MatchPattern::parse(pattern)
+                .map_err(|_| ExtensionManagementProjectionError::InvalidPermission)?;
+            if parsed.as_str() != pattern.as_ref() {
+                return Err(ExtensionManagementProjectionError::InvalidPermission);
+            }
+            supports_file_access |= parsed.components().includes_file();
+        }
+        let text_bytes = name
+            .len()
+            .checked_add(version.len())
+            .and_then(|bytes| {
+                bytes.checked_add(description.as_ref().map_or(0, |value| value.len()))
+            })
+            .and_then(|bytes| bytes.checked_add(author.as_ref().map_or(0, |value| value.len())))
+            .and_then(|bytes| {
+                required_api
+                    .iter()
+                    .chain(required_hosts.iter())
+                    .try_fold(bytes, |bytes, value| bytes.checked_add(value.len()))
+            })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        let retained_bytes = size_of::<Self>()
+            .checked_add(text_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (required_api.len() + required_hosts.len()) * size_of::<Box<str>>(),
+                )
+            })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        Ok(Self {
+            selector,
+            name,
+            description,
+            author,
+            version,
+            required_api: required_api.into_boxed_slice(),
+            required_hosts: required_hosts.into_boxed_slice(),
+            supports_file_access,
+            compatibility,
+            retained_bytes,
+        })
+    }
+
+    pub const fn selector(&self) -> &ExtensionInstallCandidateSelector {
+        &self.selector
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn author(&self) -> Option<&str> {
+        self.author.as_deref()
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn required_api(&self) -> &[Box<str>] {
+        &self.required_api
+    }
+
+    pub fn required_hosts(&self) -> &[Box<str>] {
+        &self.required_hosts
+    }
+
+    pub const fn supports_file_access(&self) -> bool {
+        self.supports_file_access
+    }
+
+    pub const fn compatibility(&self) -> ExtensionManagementCompatibility {
+        self.compatibility
+    }
+
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+}
+
 /// Complete exact-revision management snapshot for one profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionManagementCatalog {
     profile: ProfileId,
     catalog_revision: ExtensionInstallCatalogRevision,
     entries: Box<[ExtensionManagementEntry]>,
+    candidates: Box<[ExtensionInstallCandidateEntry]>,
     retained_bytes: usize,
 }
 
@@ -199,7 +357,18 @@ impl ExtensionManagementCatalog {
     pub fn new(
         profile: ProfileId,
         catalog_revision: ExtensionInstallCatalogRevision,
+        entries: Vec<ExtensionManagementEntry>,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        Self::with_candidates(profile, catalog_revision, entries, Vec::new())
+    }
+
+    /// Validates installed rows and current-catalog install candidates as one
+    /// complete stale-resistant management projection.
+    pub fn with_candidates(
+        profile: ProfileId,
+        catalog_revision: ExtensionInstallCatalogRevision,
         mut entries: Vec<ExtensionManagementEntry>,
+        mut candidates: Vec<ExtensionInstallCandidateEntry>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
         if entries.len() > MAX_EXTENSION_INSTALLS_PER_PROFILE {
             return Err(ExtensionManagementProjectionError::TooManyEntries);
@@ -217,9 +386,36 @@ impl ExtensionManagementCatalog {
         }) {
             return Err(ExtensionManagementProjectionError::MixedCatalog);
         }
-        let retained_bytes = entries.iter().try_fold(size_of::<Self>(), |bytes, entry| {
-            bytes.checked_add(entry.retained_bytes())
+        if candidates.len() > MAX_EXTENSION_INSTALLS_PER_PROFILE {
+            return Err(ExtensionManagementProjectionError::TooManyEntries);
+        }
+        candidates.sort_unstable_by(|left, right| {
+            left.selector()
+                .package()
+                .update_line()
+                .cmp(&right.selector().package().update_line())
         });
+        if candidates.windows(2).any(|pair| {
+            pair[0].selector().package().update_line() == pair[1].selector().package().update_line()
+        }) {
+            return Err(ExtensionManagementProjectionError::DuplicateCandidate);
+        }
+        if candidates.iter().any(|candidate| {
+            candidate.selector().profile() != profile
+                || candidate.selector().expected_catalog_revision() != catalog_revision
+        }) {
+            return Err(ExtensionManagementProjectionError::MixedCatalog);
+        }
+        let retained_bytes = entries
+            .iter()
+            .try_fold(size_of::<Self>(), |bytes, entry| {
+                bytes.checked_add(entry.retained_bytes())
+            })
+            .and_then(|bytes| {
+                candidates.iter().try_fold(bytes, |bytes, candidate| {
+                    bytes.checked_add(candidate.retained_bytes())
+                })
+            });
         let retained_bytes =
             retained_bytes.ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         if retained_bytes > MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES {
@@ -229,6 +425,7 @@ impl ExtensionManagementCatalog {
             profile,
             catalog_revision,
             entries: entries.into_boxed_slice(),
+            candidates: candidates.into_boxed_slice(),
             retained_bytes,
         })
     }
@@ -245,6 +442,10 @@ impl ExtensionManagementCatalog {
         &self.entries
     }
 
+    pub fn candidates(&self) -> &[ExtensionInstallCandidateEntry] {
+        &self.candidates
+    }
+
     pub const fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -255,7 +456,10 @@ impl ExtensionManagementCatalog {
 pub enum ExtensionManagementProjectionError {
     TooManyEntries,
     DuplicateInstall,
+    DuplicateCandidate,
     MixedCatalog,
+    TooManyPermissions,
+    InvalidPermission,
     InvalidDisplayText,
     AccountingOverflow,
     RetainedBytesExceeded,
@@ -266,7 +470,10 @@ impl fmt::Display for ExtensionManagementProjectionError {
         formatter.write_str(match self {
             Self::TooManyEntries => "too many extension management entries",
             Self::DuplicateInstall => "duplicate extension management install",
+            Self::DuplicateCandidate => "duplicate extension install candidate",
             Self::MixedCatalog => "extension management entries span profile catalogs",
+            Self::TooManyPermissions => "too many extension install permissions",
+            Self::InvalidPermission => "invalid extension install permission",
             Self::InvalidDisplayText => "invalid extension management display text",
             Self::AccountingOverflow => "extension management accounting overflow",
             Self::RetainedBytesExceeded => "extension management retained-byte bound exceeded",
@@ -337,7 +544,11 @@ fn is_unsafe_display_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extensions::ExtensionInstallRevision;
+    use crate::extensions::{
+        ExtensionAuthorityId, ExtensionCatalogSetDigest, ExtensionInstallRevision,
+        ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
+        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
+    };
     use crate::ids::ExtensionInstallId;
 
     fn selector(profile: ProfileId, install: u128) -> ExtensionInstallSelector {
@@ -358,6 +569,38 @@ mod tests {
             "1.0.0",
             ExtensionManagementRuntimeState::PendingActivation,
             ExtensionManagementGrantState::Uninitialized,
+            ExtensionManagementCompatibility::Compatible,
+        )
+        .unwrap()
+    }
+
+    fn candidate(
+        profile: ProfileId,
+        key: u8,
+        required_api: Vec<Box<str>>,
+        required_hosts: Vec<Box<str>>,
+    ) -> ExtensionInstallCandidateEntry {
+        let package = ExtensionPackageIdentity::new(
+            ExtensionAuthorityId::from_bytes([1; 32]),
+            ExtensionPackageKey::from_bytes([key; 32]),
+            ExtensionPackageRevision::INITIAL,
+            ExtensionPackagePayloadIdentity::BundledTree,
+            ExtensionManifestDigest::from_bytes([3; 32]),
+            ExtensionTreeDigest::from_bytes([4; 32]),
+        );
+        ExtensionInstallCandidateEntry::new(
+            ExtensionInstallCandidateSelector::new(
+                profile,
+                ExtensionInstallCatalogRevision::INITIAL,
+                ExtensionCatalogSetDigest::from_bytes([5; 32]),
+                package,
+            ),
+            "Fixture candidate",
+            Some("Authenticated candidate metadata".into()),
+            Some("Zephium tests".into()),
+            "1.0.0",
+            required_api,
+            required_hosts,
             ExtensionManagementCompatibility::Compatible,
         )
         .unwrap()
@@ -425,5 +668,70 @@ mod tests {
             ]),
             None
         );
+    }
+
+    #[test]
+    fn candidates_are_canonical_bounded_and_derive_file_scope_from_patterns() {
+        let profile = ProfileId::from(1);
+        let with_files = candidate(
+            profile,
+            2,
+            vec!["storage".into(), "tabs".into()],
+            vec!["<all_urls>".into()],
+        );
+        assert!(with_files.supports_file_access());
+        assert_eq!(
+            with_files.required_api(),
+            &[Box::<str>::from("storage"), Box::<str>::from("tabs")]
+        );
+        let catalog = ExtensionManagementCatalog::with_candidates(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            Vec::new(),
+            vec![
+                with_files,
+                candidate(profile, 1, vec!["alarms".into()], Vec::new()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            catalog.candidates()[0]
+                .selector()
+                .package()
+                .key()
+                .as_bytes(),
+            &[1; 32]
+        );
+        assert!(catalog.retained_bytes() <= MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn candidates_reject_duplicate_or_noncanonical_permission_authority() {
+        let profile = ProfileId::from(1);
+        assert!(matches!(
+            ExtensionInstallCandidateEntry::new(
+                candidate(profile, 1, Vec::new(), Vec::new())
+                    .selector()
+                    .clone(),
+                "Fixture",
+                None,
+                None,
+                "1.0.0",
+                vec!["storage".into(), "storage".into()],
+                Vec::new(),
+                ExtensionManagementCompatibility::Compatible,
+            ),
+            Err(ExtensionManagementProjectionError::InvalidPermission)
+        ));
+        let duplicate = candidate(profile, 1, Vec::new(), Vec::new());
+        assert!(matches!(
+            ExtensionManagementCatalog::with_candidates(
+                profile,
+                ExtensionInstallCatalogRevision::INITIAL,
+                Vec::new(),
+                vec![duplicate.clone(), duplicate],
+            ),
+            Err(ExtensionManagementProjectionError::DuplicateCandidate)
+        ));
     }
 }

@@ -5,9 +5,11 @@ use std::sync::Arc;
 use thiserror::Error;
 use zephium_core::extensions::{
     ExtensionGrantCohortError, ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
-    ExtensionInstallCatalog,
+    ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogRevision,
+    ExtensionManifestDescriptor, ExtensionPackageIdentity,
 };
 use zephium_core::ids::ExtensionInstallId;
+use zephium_extension_authority::BundledPackageAuthority;
 use zephium_extension_package::{
     ExtensionDefaultLocaleResolutionError, ResolvedExtensionManifestMetadata,
 };
@@ -82,6 +84,76 @@ pub struct BundledCurrentManagementManifests {
     manifests: Box<[BundledManagementManifest]>,
 }
 
+/// One freshly authenticated package offered by the exact current bundled
+/// catalog for installation.
+///
+/// The descriptor and display metadata are path-free. This value grants no
+/// profile permission, durable install, package pin, or runtime authority; the
+/// extension service must reauthenticate it in the serialized install turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundledInstallCandidate {
+    package: ExtensionPackageIdentity,
+    manifest: Arc<ExtensionManifestDescriptor>,
+    presentation: BundledManagementManifest,
+}
+
+impl BundledInstallCandidate {
+    /// Returns the exact authenticated structural package identity.
+    pub const fn package(&self) -> &ExtensionPackageIdentity {
+        &self.package
+    }
+
+    /// Returns the freshly admitted manifest descriptor.
+    pub const fn manifest_arc(&self) -> &Arc<ExtensionManifestDescriptor> {
+        &self.manifest
+    }
+
+    /// Returns the canonical manifest version.
+    pub fn version(&self) -> &str {
+        self.presentation.version()
+    }
+
+    /// Returns the required locale-resolved display name.
+    pub fn name(&self) -> &str {
+        self.presentation.name()
+    }
+
+    /// Returns the optional locale-resolved description.
+    pub fn description(&self) -> Option<&str> {
+        self.presentation.description()
+    }
+
+    /// Returns the optional locale-resolved author.
+    pub fn author(&self) -> Option<&str> {
+        self.presentation.author()
+    }
+}
+
+/// Exact current catalog identity plus every authenticated installable package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use = "install candidates must be projected or deliberately discarded"]
+pub struct BundledCurrentInstallCandidates {
+    current: BundledCurrentCatalogSet,
+    candidates: Box<[BundledInstallCandidate]>,
+}
+
+impl BundledCurrentInstallCandidates {
+    /// Returns the content-addressed current catalog-set identity and role.
+    pub const fn current_catalog_set(&self) -> BundledCurrentCatalogSet {
+        self.current
+    }
+
+    /// Borrows the complete canonical package-key-ordered candidate set.
+    pub fn candidates(&self) -> &[BundledInstallCandidate] {
+        &self.candidates
+    }
+
+    /// Consumes the projection into its selection identity and candidates.
+    pub fn into_parts(self) -> (BundledCurrentCatalogSet, Box<[BundledInstallCandidate]>) {
+        (self.current, self.candidates)
+    }
+}
+
 impl BundledCurrentManagementManifests {
     /// Returns the exact content-addressed repository selection.
     pub const fn current_catalog_set(&self) -> BundledCurrentCatalogSet {
@@ -98,7 +170,7 @@ impl BundledCurrentManagementManifests {
         &self.manifests
     }
 
-    /// Consumes the repository projection into its Store input and UI identities.
+    /// Consumes the repository projection into Store inputs and UI identities.
     pub fn into_parts(
         self,
     ) -> (
@@ -129,6 +201,121 @@ impl From<ExtensionRepositoryError> for BundledManagementManifestsError {
 }
 
 impl ExtensionRepository {
+    /// Authenticates and resolves browser-owned UI identity for every package
+    /// in the exact current bundled catalog without acquiring package pins.
+    ///
+    /// Synthetic install identities exist only inside this method so the
+    /// established complete-cohort manifest loader can verify the full
+    /// bounded package set in one pass. They never cross the return boundary
+    /// and are never written to Store.
+    pub fn authenticate_current_bundled_install_candidates(
+        &mut self,
+    ) -> Result<BundledCurrentInstallCandidates, BundledManagementManifestsError> {
+        let packages = {
+            let runtime = self.runtime.clone();
+            let _operation = runtime.enter().map_err(|error| {
+                BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::Repository(error.repository_error()),
+                )
+            })?;
+            let current = current_catalog_set_projection(self.writer_materialization()?)
+                .map_err(|error| self.finish_management_manifest_snapshot_error(error))?
+                .ok_or(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::NoCurrentSelection,
+                ))?;
+            if current.build_in_progress() {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::BuildInProgress,
+                ));
+            }
+            let exact_catalog = self.read_authenticated_catalog_object(current.catalog_digest())?;
+            let authority = BundledPackageAuthority::product().map_err(|error| {
+                BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::CatalogAuthority(error),
+                )
+            })?;
+            match current.role() {
+                VerifiedCatalogRole::Active => {
+                    authority.admit_catalog(&exact_catalog).map(|admitted| {
+                        admitted
+                            .catalog()
+                            .packages()
+                            .iter()
+                            .map(|package| package.identity().clone())
+                            .collect::<Vec<_>>()
+                    })
+                }
+                VerifiedCatalogRole::Rollback => authority
+                    .admit_rollback_catalog(&exact_catalog)
+                    .map(|admitted| {
+                        admitted
+                            .catalog()
+                            .packages()
+                            .iter()
+                            .map(|package| package.identity().clone())
+                            .collect::<Vec<_>>()
+                    }),
+            }
+            .map_err(|error| {
+                self.writer_seal();
+                BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::CatalogAdmission(error),
+                )
+            })?
+        };
+
+        let mut installs = Vec::with_capacity(packages.len());
+        for (index, package) in packages.iter().enumerate() {
+            let id = ExtensionInstallId::from(index as u128 + 1);
+            installs.push(ExtensionInstall::new(id, package.clone()));
+        }
+        let high_water = installs.last().map(ExtensionInstall::id);
+        let synthetic = ExtensionInstallCatalog::from_persisted(
+            ExtensionInstallCatalogRevision::INITIAL,
+            high_water,
+            installs,
+        )
+        .map_err(|_| {
+            BundledManagementManifestsError::Authentication(
+                BundledManifestBindingsError::CapacityExhausted,
+            )
+        })?;
+        let authenticated = self.authenticate_current_bundled_management_manifests(&synthetic)?;
+        let (current, bindings, presentations) = authenticated.into_parts();
+        if packages.len() != presentations.len() || bindings.len() != packages.len() {
+            return Err(BundledManagementManifestsError::Authentication(
+                BundledManifestBindingsError::CapacityExhausted,
+            ));
+        }
+        let mut candidates = Vec::with_capacity(packages.len());
+        for ((index, package), presentation) in packages
+            .into_iter()
+            .enumerate()
+            .zip(presentations.into_vec())
+        {
+            let id = ExtensionInstallId::from(index as u128 + 1);
+            let Some(binding) = bindings.iter().find(|binding| binding.install_id() == id) else {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::CapacityExhausted,
+                ));
+            };
+            if presentation.install_id() != id || binding.manifest().package() != &package {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::InstallPackageMismatch,
+                ));
+            }
+            candidates.push(BundledInstallCandidate {
+                package,
+                manifest: Arc::clone(binding.manifest_arc()),
+                presentation,
+            });
+        }
+        Ok(BundledCurrentInstallCandidates {
+            current,
+            candidates: candidates.into_boxed_slice(),
+        })
+    }
+
     /// Freshly authenticates and resolves display identity for every supplied install.
     ///
     /// This method is deliberately separate from runtime manifest bootstrap so

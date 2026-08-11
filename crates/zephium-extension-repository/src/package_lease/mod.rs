@@ -23,7 +23,8 @@ pub use api::{
     BundledPackageResourceError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
 };
 pub use management_manifests::{
-    BundledCurrentManagementManifests, BundledManagementManifest, BundledManagementManifestsError,
+    BundledCurrentInstallCandidates, BundledCurrentManagementManifests, BundledInstallCandidate,
+    BundledManagementManifest, BundledManagementManifestsError,
 };
 pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
 pub use profile_audit::{

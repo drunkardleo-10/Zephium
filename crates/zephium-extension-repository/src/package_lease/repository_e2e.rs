@@ -1677,6 +1677,39 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
         .is_empty());
     assert_eq!(completed_package_verification_count(), 0);
 
+    let install_candidates = repository
+        .authenticate_current_bundled_install_candidates()
+        .unwrap();
+    assert_eq!(
+        install_candidates.current_catalog_set(),
+        BundledCurrentCatalogSet {
+            identity: active_current,
+            role: BundledCatalogGenerationRole::Active,
+        }
+    );
+    let [candidate] = install_candidates.candidates() else {
+        panic!("one authenticated install candidate expected");
+    };
+    assert_eq!(candidate.package(), active_eligibility.package());
+    assert_eq!(
+        candidate.manifest_arc().as_ref(),
+        active_eligibility.manifest()
+    );
+    assert_eq!(candidate.version(), "1.0.0");
+    assert_eq!(candidate.name(), "Fixture");
+    assert_eq!(
+        candidate.description(),
+        Some("Authenticated native product-path fixture.")
+    );
+    assert_eq!(harness.snapshot(), before);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+    assert_eq!(completed_package_verification_count(), 0);
+
     assert!(matches!(
         repository.authenticate_current_bundled_manifest_bindings(&install_catalog(
             ExtensionInstallId::from(109),

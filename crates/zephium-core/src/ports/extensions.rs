@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crate::extensions::{
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionNativeOwnershipKey,
-    ExtensionRuntimeGeneration,
+    ExtensionCatalogSetDigest, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionNativeOwnershipKey, ExtensionPackageIdentity, ExtensionRuntimeGeneration,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 
@@ -10,8 +10,8 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 mod management;
 
 pub use management::{
-    ExtensionManagementCatalog, ExtensionManagementCompatibility, ExtensionManagementEntry,
-    ExtensionManagementGrantState, ExtensionManagementProjectionError,
+    ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
+    ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementProjectionError,
     ExtensionManagementRuntimeState, MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES,
     MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
 };
@@ -215,6 +215,52 @@ pub struct ExtensionInstallSelector {
     install_revision: ExtensionInstallRevision,
 }
 
+/// Stale-resistant selector for one authenticated package offered by the
+/// current curated catalog.
+///
+/// This value is structural routing data, not package or installation
+/// authority. The extension service reauthenticates the exact current catalog,
+/// package, and manifest before it can persist anything.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionInstallCandidateSelector {
+    profile: ProfileId,
+    expected_catalog_revision: ExtensionInstallCatalogRevision,
+    catalog_set: ExtensionCatalogSetDigest,
+    package: ExtensionPackageIdentity,
+}
+
+impl ExtensionInstallCandidateSelector {
+    pub const fn new(
+        profile: ProfileId,
+        expected_catalog_revision: ExtensionInstallCatalogRevision,
+        catalog_set: ExtensionCatalogSetDigest,
+        package: ExtensionPackageIdentity,
+    ) -> Self {
+        Self {
+            profile,
+            expected_catalog_revision,
+            catalog_set,
+            package,
+        }
+    }
+
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    pub const fn expected_catalog_revision(&self) -> ExtensionInstallCatalogRevision {
+        self.expected_catalog_revision
+    }
+
+    pub const fn catalog_set(&self) -> ExtensionCatalogSetDigest {
+        self.catalog_set
+    }
+
+    pub const fn package(&self) -> &ExtensionPackageIdentity {
+        &self.package
+    }
+}
+
 impl ExtensionInstallSelector {
     pub const fn new(
         profile: ProfileId,
@@ -295,6 +341,38 @@ pub enum ExtensionUninstallOutcome {
     FailedClosed,
 }
 
+/// Why an install committed atomically but could not affirm enabled intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionInstallEnablementPendingReason {
+    Conflict,
+    Rejected,
+    Unavailable,
+}
+
+/// Truthful post-install runtime state from the same serialized worker turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionInstalledRuntimeState {
+    Active(ExtensionRuntimeGeneration),
+    PendingActivation(ExtensionActivationPendingReason),
+    Disabled(ExtensionInstallEnablementPendingReason),
+}
+
+/// Exact result of installing one authenticated curated package.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionInstallOutcome {
+    Installed {
+        install: ExtensionInstallId,
+        runtime: ExtensionInstalledRuntimeState,
+    },
+    /// The retained UI catalog or package selection is stale.
+    Conflict,
+    AlreadyInstalled,
+    Rejected,
+    Unavailable,
+    OutcomeUnknown,
+    FailedClosed,
+}
+
 /// Management settlement plus the complete same-turn browser-routing cohort.
 ///
 /// `None` means the worker could not establish a trustworthy runtime
@@ -349,6 +427,9 @@ pub type ExtensionSetEnabledCallback =
 /// Exactly-once completion callback for an admitted uninstall request.
 pub type ExtensionUninstallCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionUninstallOutcome>) + Send>;
+/// Exactly-once completion callback for an admitted curated install request.
+pub type ExtensionInstallCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionInstallOutcome>) + Send>;
 /// Exactly-once completion callback for an admitted management-catalog read.
 pub type ExtensionManagementCatalogCallback =
     Box<dyn FnOnce(ExtensionManagementCatalogOutcome) + Send>;
@@ -442,6 +523,35 @@ pub trait ExtensionServiceLifecycle: Send {
         _enabled: bool,
         _deadline: Instant,
         done: ExtensionSetEnabledCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Installs one authenticated current-catalog package with its required
+    /// declarations, then enters ordinary enablement and activation.
+    ///
+    /// `file_access` and `private_access` are independent explicit user
+    /// decisions. Callers cannot submit API names or host patterns; the
+    /// serialized service derives those only from the reauthenticated manifest.
+    fn install_until(
+        &mut self,
+        _selector: ExtensionInstallCandidateSelector,
+        _file_access: bool,
+        _private_access: bool,
+        _deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
+        ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
+    }
+
+    /// Non-blocking curated-install form used by the application actor.
+    fn begin_install(
+        &mut self,
+        _selector: ExtensionInstallCandidateSelector,
+        _file_access: bool,
+        _private_access: bool,
+        _deadline: Instant,
+        done: ExtensionInstallCallback,
     ) -> ExtensionManagementAdmission {
         drop(done);
         ExtensionManagementAdmission::Unavailable
@@ -588,6 +698,24 @@ mod tests {
         assert_eq!(
             lifecycle.set_install_enabled_until(selector, true, Instant::now()),
             ExtensionManagementSettlement::new(ExtensionSetEnabledOutcome::FailedClosed, None)
+        );
+        let package = crate::extensions::ExtensionPackageIdentity::new(
+            crate::extensions::ExtensionAuthorityId::from_bytes([1; 32]),
+            crate::extensions::ExtensionPackageKey::from_bytes([2; 32]),
+            crate::extensions::ExtensionPackageRevision::INITIAL,
+            crate::extensions::ExtensionPackagePayloadIdentity::BundledTree,
+            crate::extensions::ExtensionManifestDigest::from_bytes([3; 32]),
+            crate::extensions::ExtensionTreeDigest::from_bytes([4; 32]),
+        );
+        let candidate = ExtensionInstallCandidateSelector::new(
+            ProfileId::from(7),
+            crate::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            crate::extensions::ExtensionCatalogSetDigest::from_bytes([5; 32]),
+            package,
+        );
+        assert_eq!(
+            lifecycle.install_until(candidate, false, false, Instant::now()),
+            ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
         );
         assert_eq!(
             lifecycle.uninstall_until(selector, Instant::now()),

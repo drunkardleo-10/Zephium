@@ -1,11 +1,17 @@
 //! Lazy authenticated installed-extension management projection.
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use zephium_core::extensions::{ExtensionGrantBrowsingContext, ExtensionNativeOwnershipKey};
+use zephium_core::extensions::{
+    ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext, ExtensionGrantManifestBinding,
+    ExtensionGrantManifestBindings, ExtensionNativeOwnershipKey,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+};
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
-    ExtensionInstallSelector, ExtensionManagementCatalog, ExtensionManagementCatalogOutcome,
+    ExtensionInstallCandidateEntry, ExtensionInstallCandidateSelector, ExtensionInstallSelector,
+    ExtensionManagementCatalog, ExtensionManagementCatalogOutcome,
     ExtensionManagementCompatibility, ExtensionManagementEntry, ExtensionManagementGrantState,
     ExtensionManagementRuntimeState,
 };
@@ -49,14 +55,29 @@ pub(super) fn load(
         }
     };
 
-    let authenticated = match startup
-        .repository
-        .authenticate_management_manifests(&catalog)
-    {
+    let authenticated = match startup.repository.authenticate_install_candidates() {
         Ok(authenticated) => authenticated,
         Err(error) => return classify_repository_error(error),
     };
-    let (_current, bindings, manifests) = authenticated.into_parts();
+    let (current, candidates) = authenticated.into_parts();
+    let catalog_set = ExtensionCatalogSetDigest::from_bytes(current.identity().bytes());
+    let mut bindings = Vec::with_capacity(catalog.installs().len());
+    for install in catalog.installs() {
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.package() == install.package())
+        else {
+            return ExtensionManagementCatalogOutcome::Rejected;
+        };
+        bindings.push(ExtensionGrantManifestBinding::new(
+            install.id(),
+            Arc::clone(candidate.manifest_arc()),
+        ));
+    }
+    let bindings = match ExtensionGrantManifestBindings::new(bindings) {
+        Ok(bindings) => bindings,
+        Err(_) => return ExtensionManagementCatalogOutcome::FailedClosed,
+    };
     let cohort = match startup
         .store
         .load_grant_cohort_until(profile, bindings, deadline)
@@ -82,15 +103,14 @@ pub(super) fn load(
         // coherent retry, never a filtered or mixed-generation projection.
         return ExtensionManagementCatalogOutcome::Unavailable;
     }
-    if manifests.len() != catalog.installs().len() {
-        return ExtensionManagementCatalogOutcome::FailedClosed;
-    }
-
     let mut entries = Vec::with_capacity(catalog.installs().len());
-    for (install, manifest) in catalog.installs().iter().zip(manifests.iter()) {
-        if install.id() != manifest.install_id() {
+    for install in catalog.installs() {
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.package() == install.package())
+        else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
-        }
+        };
         let Some(cohort_entry) = cohort.resolve_entry(install.id()) else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
         };
@@ -125,13 +145,7 @@ pub(super) fn load(
                 }
             }
         };
-        let Some(compatibility) = ExtensionManagementCompatibility::from_levels(
-            cohort_entry
-                .manifest()
-                .compatibility()
-                .iter()
-                .map(|classification| classification.level()),
-        ) else {
+        let Some(compatibility) = compatibility(candidate.manifest_arc()) else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
         };
         let selector = ExtensionInstallSelector::new(
@@ -142,10 +156,10 @@ pub(super) fn load(
         );
         let entry = match ExtensionManagementEntry::new(
             selector,
-            manifest.name(),
-            manifest.description().map(Into::into),
-            manifest.author().map(Into::into),
-            manifest.version(),
+            candidate.name(),
+            candidate.description().map(Into::into),
+            candidate.author().map(Into::into),
+            candidate.version(),
             runtime_state,
             grants,
             compatibility,
@@ -156,10 +170,74 @@ pub(super) fn load(
         entries.push(entry);
     }
 
-    match ExtensionManagementCatalog::new(profile, catalog.revision(), entries) {
+    let mut available_entries = Vec::with_capacity(candidates.len());
+    for candidate in candidates.iter() {
+        let (authority, key) = candidate.package().update_line();
+        if catalog.by_package(authority, key).is_some() {
+            continue;
+        }
+        let Some(compatibility) = compatibility(candidate.manifest_arc()) else {
+            return ExtensionManagementCatalogOutcome::FailedClosed;
+        };
+        let declarations = candidate.manifest_arc().declarations();
+        let selector = ExtensionInstallCandidateSelector::new(
+            profile,
+            catalog.revision(),
+            catalog_set,
+            candidate.package().clone(),
+        );
+        let entry = match ExtensionInstallCandidateEntry::new(
+            selector,
+            candidate.name(),
+            candidate.description().map(Into::into),
+            candidate.author().map(Into::into),
+            candidate.version(),
+            declarations
+                .required_api()
+                .names()
+                .iter()
+                .map(|name| Box::<str>::from(name.as_str()))
+                .collect(),
+            declarations
+                .required_host_authorities()
+                .into_iter()
+                .map(|pattern| Box::<str>::from(pattern.as_str()))
+                .collect(),
+            compatibility,
+        ) {
+            Ok(entry) => entry,
+            Err(_) => return ExtensionManagementCatalogOutcome::FailedClosed,
+        };
+        available_entries.push(entry);
+    }
+    available_entries.sort_unstable_by(|left, right| {
+        left.selector()
+            .package()
+            .update_line()
+            .cmp(&right.selector().package().update_line())
+    });
+    available_entries.truncate(MAX_EXTENSION_INSTALLS_PER_PROFILE.saturating_sub(entries.len()));
+
+    match ExtensionManagementCatalog::with_candidates(
+        profile,
+        catalog.revision(),
+        entries,
+        available_entries,
+    ) {
         Ok(catalog) => ExtensionManagementCatalogOutcome::Loaded(catalog),
         Err(_) => ExtensionManagementCatalogOutcome::FailedClosed,
     }
+}
+
+fn compatibility(
+    manifest: &zephium_core::extensions::ExtensionManifestDescriptor,
+) -> Option<ExtensionManagementCompatibility> {
+    ExtensionManagementCompatibility::from_levels(
+        manifest
+            .compatibility()
+            .iter()
+            .map(|classification| classification.level()),
+    )
 }
 
 fn classify_repository_error(

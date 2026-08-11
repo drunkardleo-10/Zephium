@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
-    ExtensionActiveProfiles, ExtensionInstallSelector, ExtensionManagementAdmission,
+    ExtensionActiveProfiles, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
+    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
     ExtensionManagementCatalogOutcome, ExtensionManagementSettlement, ExtensionSetEnabledCallback,
     ExtensionSetEnabledOutcome, ExtensionUninstallCallback, ExtensionUninstallOutcome,
@@ -56,6 +57,7 @@ use crate::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence, ExtensionServiceWorkerIdentity,
 };
 
+mod installation;
 mod management;
 mod management_catalog;
 mod runtime_operations;
@@ -111,6 +113,13 @@ enum WorkerCommand {
         enabled: bool,
         deadline: Instant,
         settlement: ManagementSettlementSink<ExtensionSetEnabledOutcome>,
+    },
+    Install {
+        selector: ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: Instant,
+        settlement: ManagementSettlementSink<ExtensionInstallOutcome>,
     },
     Uninstall {
         selector: ExtensionInstallSelector,
@@ -228,9 +237,14 @@ fn uninstall_worker_lost() -> ExtensionManagementSettlement<ExtensionUninstallOu
     ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
 }
 
+fn install_worker_lost() -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
+    ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
+}
+
 fn cancel_unadmitted_management(command: WorkerCommand) {
     match command {
         WorkerCommand::SetInstallEnabled { settlement, .. } => settlement.cancel(),
+        WorkerCommand::Install { settlement, .. } => settlement.cancel(),
         WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
         WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
@@ -850,6 +864,97 @@ impl ExtensionServiceOwner {
             enabled,
             deadline,
             settlement: ManagementSettlementSink::callback(done, set_enabled_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Authenticates and atomically installs one current curated package,
+    /// then enters the ordinary enabled-runtime transaction.
+    #[must_use = "extension installation settlement must be checked"]
+    pub fn install_until(
+        &mut self,
+        selector: ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionManagementSettlement::new(ExtensionInstallOutcome::Unavailable, None);
+        }
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::Install {
+            selector,
+            file_access,
+            private_access,
+            deadline,
+            settlement: ManagementSettlementSink::Waiting(settlement),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionInstallOutcome::Unavailable,
+                            None,
+                        )
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionInstallOutcome::FailedClosed,
+                            None,
+                        )
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => {
+                ExtensionManagementSettlement::new(ExtensionInstallOutcome::Unavailable, None)
+            }
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
+            }
+        }
+    }
+
+    /// Admits a non-blocking curated-package installation transaction.
+    #[must_use = "management admission determines callback ownership"]
+    pub fn begin_install(
+        &mut self,
+        selector: ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: Instant,
+        done: ExtensionInstallCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let command = WorkerCommand::Install {
+            selector,
+            file_access,
+            private_access,
+            deadline,
+            settlement: ManagementSettlementSink::callback(done, install_worker_lost),
         };
         match self.mailbox.try_push_normal(command) {
             NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
@@ -1753,6 +1858,28 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::Install {
+                selector,
+                file_access,
+                private_access,
+                deadline,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_install(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    selector,
+                    file_access,
+                    private_access,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             WorkerCommand::Uninstall {
                 selector,
                 deadline,
@@ -1864,6 +1991,73 @@ impl WorkerState {
             | ExtensionSetEnabledOutcome::PendingActivation(
                 zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
             ) => {
+                self.management_write_state = ManagementWriteState::FailedClosed;
+                status.publish(ExtensionServicePhase::Failed);
+            }
+            _ => {}
+        }
+        (outcome, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_install(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        selector: ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: Instant,
+    ) -> (ExtensionManagementSettlement<ExtensionInstallOutcome>, bool) {
+        if let Err(failure) = self.management_ingress_readiness(
+            worker,
+            startup_outcome,
+            cancellation,
+            selector.profile(),
+        ) {
+            let outcome = match failure {
+                ManagementIngressFailure::Unavailable => ExtensionInstallOutcome::Unavailable,
+                ManagementIngressFailure::OutcomeUnknown => ExtensionInstallOutcome::OutcomeUnknown,
+                ManagementIngressFailure::FailedClosed
+                | ManagementIngressFailure::ProtocolViolation => {
+                    status.publish(ExtensionServicePhase::Failed);
+                    ExtensionInstallOutcome::FailedClosed
+                }
+            };
+            return (
+                ExtensionManagementSettlement::new(outcome, self.runtime.active_profiles()),
+                failure != ManagementIngressFailure::ProtocolViolation,
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None),
+                false,
+            );
+        };
+        let outcome = installation::install_until(
+            startup,
+            &mut self.runtime,
+            selector,
+            file_access,
+            private_access,
+            deadline,
+        );
+        match outcome.outcome() {
+            ExtensionInstallOutcome::OutcomeUnknown => {
+                self.management_write_state = ManagementWriteState::OutcomeUnknown;
+            }
+            ExtensionInstallOutcome::FailedClosed
+            | ExtensionInstallOutcome::Installed {
+                runtime:
+                    zephium_core::ports::extensions::ExtensionInstalledRuntimeState::PendingActivation(
+                        zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
+                    ),
+                ..
+            } => {
                 self.management_write_state = ManagementWriteState::FailedClosed;
                 status.publish(ExtensionServicePhase::Failed);
             }

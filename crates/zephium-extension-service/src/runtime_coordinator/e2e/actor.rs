@@ -1,10 +1,11 @@
-use zephium_core::extensions::ExtensionRuntimeGeneration;
+use zephium_core::extensions::{ExtensionCatalogSetDigest, ExtensionRuntimeGeneration};
 use zephium_core::ports::extensions::{
-    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
-    ExtensionManagementCatalogOutcome, ExtensionManagementGrantState,
-    ExtensionManagementRuntimeState, ExtensionRuntimeActivationDisposition,
-    ExtensionRuntimeRetirementDisposition, ExtensionServiceLifecycle, ExtensionSetEnabledOutcome,
-    ExtensionUninstallOutcome,
+    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
+    ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
+    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
+    ExtensionManagementGrantState, ExtensionManagementRuntimeState,
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeRetirementDisposition,
+    ExtensionServiceLifecycle, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 
 use super::host::PublicationMode;
@@ -172,6 +173,7 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
     let [entry] = management.entries() else {
         panic!("one installed extension expected");
     };
+    assert!(management.candidates().is_empty());
     assert_eq!(entry.name(), "Fixture");
     assert_eq!(entry.version(), "1.0.0");
     assert_eq!(
@@ -279,6 +281,155 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
     };
     assert_eq!(evidence.accepted_commands(), 5);
     assert_eq!(evidence.completed_commands(), 5);
+    harness.finish(evidence);
+}
+
+#[test]
+fn actor_installs_authenticated_candidate_atomically_then_activates_it() {
+    let (harness, mut owner) = ActorAuthorityHarness::launch_empty();
+    let profile = harness.profiles[0];
+    let initial = harness.install_catalog(profile);
+    assert!(initial.installs().is_empty());
+    let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_load_management_catalog(
+            &mut owner,
+            profile,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = catalog_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementCatalogAdmission::Accepted
+    );
+    let ExtensionManagementCatalogOutcome::Loaded(management) = catalog_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap()
+    else {
+        panic!("empty authenticated management catalog did not load");
+    };
+    assert!(management.entries().is_empty());
+    let [candidate] = management.candidates() else {
+        panic!("one authenticated install candidate expected");
+    };
+    assert_eq!(candidate.name(), "Fixture");
+    assert_eq!(candidate.version(), "1.0.0");
+    assert!(!candidate.supports_file_access());
+    assert!(candidate
+        .required_api()
+        .iter()
+        .any(|name| name.as_ref() == "storage"));
+    assert_eq!(
+        candidate.selector().catalog_set(),
+        ExtensionCatalogSetDigest::from_bytes(harness.catalog_set.bytes())
+    );
+    let selector = candidate.selector().clone();
+
+    let installed =
+        ExtensionServiceLifecycle::install_until(&mut owner, selector, false, false, deadline());
+    let ExtensionInstallOutcome::Installed {
+        install,
+        runtime: ExtensionInstalledRuntimeState::Active(generation),
+    } = installed.outcome()
+    else {
+        panic!("authenticated candidate did not install and activate: {installed:?}");
+    };
+    assert_eq!(*generation, ExtensionRuntimeGeneration::INITIAL);
+    assert_eq!(
+        installed
+            .active_profiles()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [profile]
+    );
+    let catalog = harness.install_catalog(profile);
+    let durable = catalog
+        .get(*install)
+        .expect("installed row must be durable");
+    assert!(durable.desired_enabled());
+    assert_eq!(durable.package(), &harness.package);
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 1);
+
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("installed-candidate actor did not prove clean shutdown");
+    };
+    assert_eq!(evidence.accepted_commands(), 2);
+    assert_eq!(evidence.completed_commands(), 2);
+    harness.finish(evidence);
+}
+
+#[test]
+fn actor_install_reauthenticates_selection_and_refuses_unrequested_file_scope() {
+    let (harness, mut owner) = ActorAuthorityHarness::launch_empty();
+    let profile = harness.profiles[0];
+    let initial = harness.install_catalog(profile);
+    let candidate = || {
+        ExtensionInstallCandidateSelector::new(
+            profile,
+            initial.revision(),
+            ExtensionCatalogSetDigest::from_bytes(harness.catalog_set.bytes()),
+            harness.package.clone(),
+        )
+    };
+
+    let file_scope =
+        ExtensionServiceLifecycle::install_until(&mut owner, candidate(), true, false, deadline());
+    assert_eq!(file_scope.outcome(), &ExtensionInstallOutcome::Rejected);
+    assert!(harness.install_catalog(profile).installs().is_empty());
+
+    let stale = ExtensionInstallCandidateSelector::new(
+        profile,
+        initial.revision(),
+        ExtensionCatalogSetDigest::from_bytes([0xA5; 32]),
+        harness.package.clone(),
+    );
+    let stale =
+        ExtensionServiceLifecycle::install_until(&mut owner, stale, false, false, deadline());
+    assert_eq!(stale.outcome(), &ExtensionInstallOutcome::Conflict);
+    assert!(harness.install_catalog(profile).installs().is_empty());
+    assert_eq!(harness.probe.bind_calls(), 0);
+    assert_eq!(harness.probe.activation_calls(), 0);
+
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("refused-install actor did not prove clean shutdown");
+    };
+    assert_eq!(evidence.accepted_commands(), 2);
+    assert_eq!(evidence.completed_commands(), 2);
+    harness.finish(evidence);
+}
+
+#[test]
+fn actor_install_refuses_an_already_installed_update_line_without_new_native_work() {
+    let (harness, mut owner) = ActorAuthorityHarness::launch(1);
+    let profile = harness.profiles[0];
+    let catalog = harness.install_catalog(profile);
+    let selector = ExtensionInstallCandidateSelector::new(
+        profile,
+        catalog.revision(),
+        ExtensionCatalogSetDigest::from_bytes(harness.catalog_set.bytes()),
+        harness.package.clone(),
+    );
+    let duplicate =
+        ExtensionServiceLifecycle::install_until(&mut owner, selector, false, false, deadline());
+    assert_eq!(
+        duplicate.outcome(),
+        &ExtensionInstallOutcome::AlreadyInstalled
+    );
+    assert_eq!(harness.install_catalog(profile), catalog);
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("duplicate-install actor did not prove clean shutdown");
+    };
+    assert_eq!(evidence.accepted_commands(), 1);
+    assert_eq!(evidence.completed_commands(), 1);
     harness.finish(evidence);
 }
 

@@ -11,7 +11,8 @@ use zephium_core::extensions::{
     ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionManifestDescriptor, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
-    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase, ExtensionPackageKey,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
+    ExtensionPackageKey,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::ports::store::{
@@ -27,7 +28,7 @@ use zephium_extension_authority::{
 };
 use zephium_extension_package::CanonicalExtensionTreeIndex;
 use zephium_extension_repository::{
-    BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome,
+    BundledCatalogSetIdentity, BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome,
     BundledPackageMaterializationOutcome, BundledPackageRuntimeSelection, BundledReleaseByteSource,
     BundledReleaseResource, BundledReleaseResourceKind, BundledReleaseSourceError,
     ExtensionRepository, ProfilePackageObligation, ProfilePackageObligationKind,
@@ -83,7 +84,7 @@ impl RealAuthorityHarness {
         absence_evidence_mode: AbsenceEvidenceMode,
     ) -> Self {
         let temporary = RepositoryTemporary::new();
-        let manifest = provision_authenticated_repository(&temporary);
+        let (manifest, _current) = provision_authenticated_repository(&temporary);
         let store = Arc::new(SqliteStore::in_memory().unwrap());
         let (profiles, keys) = provision_store(store.as_ref(), profile_count, &manifest);
         let authority = store.claim_extension_service_store_authority().unwrap();
@@ -215,6 +216,8 @@ pub(super) struct ActorAuthorityHarness {
     pub(super) keys: Vec<ExtensionNativeOwnershipKey>,
     pub(super) profiles: Vec<ProfileId>,
     pub(super) probe: Arc<HostProbe>,
+    pub(super) catalog_set: BundledCatalogSetIdentity,
+    pub(super) package: ExtensionPackageIdentity,
     worker: ExtensionServiceWorkerIdentity,
     store: Arc<SqliteStore>,
     temporary: RepositoryTemporary,
@@ -246,7 +249,7 @@ impl ActorAuthorityHarness {
         publication_mode: PublicationMode,
     ) -> (Self, ExtensionServiceOwner, ExtensionServiceStartupWait) {
         let temporary = RepositoryTemporary::new();
-        let manifest = provision_authenticated_repository(&temporary);
+        let (manifest, catalog_set) = provision_authenticated_repository(&temporary);
         let store = Arc::new(SqliteStore::open(temporary.path()).unwrap());
         let (profiles, keys) = provision_store(store.as_ref(), profile_count, &manifest);
         let authority = store.claim_extension_service_store_authority().unwrap();
@@ -266,6 +269,8 @@ impl ActorAuthorityHarness {
                 keys,
                 profiles,
                 probe,
+                catalog_set,
+                package: manifest.package().clone(),
                 worker,
                 store,
                 temporary,
@@ -275,11 +280,51 @@ impl ActorAuthorityHarness {
         )
     }
 
+    pub(super) fn launch_empty() -> (Self, ExtensionServiceOwner) {
+        let temporary = RepositoryTemporary::new();
+        let (manifest, catalog_set) = provision_authenticated_repository(&temporary);
+        let store = Arc::new(SqliteStore::open(temporary.path()).unwrap());
+        let profiles = provision_profiles(store.as_ref(), 1);
+        let authority = store.claim_extension_service_store_authority().unwrap();
+        let repository_root =
+            ExtensionRepositoryRoot::from_app_data_directory(temporary.path()).unwrap();
+        let (host_factory, probe) = scripted_host_factory(PublicationMode::Immediate);
+        let owner = ExtensionServiceOwner::launch(
+            ExtensionServiceLaunchInput::new(authority, repository_root, host_factory),
+            deadline(),
+        )
+        .unwrap();
+        let worker = owner.handle().worker_identity();
+        let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) =
+            owner.wait_for_startup_until(deadline())
+        else {
+            panic!("empty real-authority actor startup did not settle ready");
+        };
+        assert_eq!(evidence.worker(), worker);
+        assert_eq!(evidence.active_runtime_count(), 0);
+        assert!(evidence.active_profiles().is_empty());
+        (
+            Self {
+                keys: Vec::new(),
+                profiles,
+                probe,
+                catalog_set,
+                package: manifest.package().clone(),
+                worker,
+                store,
+                temporary,
+            },
+            owner,
+        )
+    }
+
     pub(super) fn finish(self, evidence: ExtensionServiceShutdownEvidence) {
         let Self {
             keys,
             profiles,
             probe,
+            catalog_set: _,
+            package: _,
             worker,
             store,
             temporary,
@@ -338,7 +383,7 @@ impl ActorAuthorityHarness {
 
 fn provision_authenticated_repository(
     temporary: &RepositoryTemporary,
-) -> Arc<ExtensionManifestDescriptor> {
+) -> (Arc<ExtensionManifestDescriptor>, BundledCatalogSetIdentity) {
     let repository_path = temporary.path().join(EXTENSION_REPOSITORY_DIRECTORY_NAME);
     let active = admitted_active_catalog();
     let manifest = admitted_manifest(&active);
@@ -346,9 +391,9 @@ fn provision_authenticated_repository(
         LockedPrivateNamespace::open_or_create(&repository_path).unwrap(),
     )
     .unwrap();
-    establish_active(&mut repository, &active);
+    let current = establish_active(&mut repository, &active);
     drop(repository);
-    manifest
+    (manifest, current)
 }
 
 fn provision_store(
@@ -357,6 +402,24 @@ fn provision_store(
     manifest: &Arc<ExtensionManifestDescriptor>,
 ) -> (Vec<ProfileId>, Vec<ExtensionNativeOwnershipKey>) {
     assert!((1..=crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES + 1).contains(&profile_count));
+    let profiles = provision_profiles(store, profile_count);
+
+    let install = ExtensionInstallId::from(1);
+    let keys = profiles
+        .iter()
+        .map(|profile| {
+            register_enabled_install(store, *profile, install, Arc::clone(manifest));
+            ExtensionNativeOwnershipKey::new(
+                *profile,
+                install,
+                ExtensionGrantBrowsingContext::Regular,
+            )
+        })
+        .collect();
+    (profiles, keys)
+}
+
+fn provision_profiles(store: &impl Store, profile_count: usize) -> Vec<ProfileId> {
     let profiles = (1..=profile_count)
         .map(|value| ProfileId::from(value as u128))
         .collect::<Vec<_>>();
@@ -377,20 +440,7 @@ fn provision_store(
         ..SessionState::default()
     });
     assert!(store.flush_until(deadline()));
-
-    let install = ExtensionInstallId::from(1);
-    let keys = profiles
-        .iter()
-        .map(|profile| {
-            register_enabled_install(store, *profile, install, Arc::clone(manifest));
-            ExtensionNativeOwnershipKey::new(
-                *profile,
-                install,
-                ExtensionGrantBrowsingContext::Regular,
-            )
-        })
-        .collect();
-    (profiles, keys)
+    profiles
 }
 
 fn load_journal(authority: &ExtensionServiceStoreAuthority) -> ExtensionNativeOwnershipJournal {
@@ -540,7 +590,10 @@ fn grant_mutation(
     outcome.recv_timeout(TEST_TIMEOUT).unwrap()
 }
 
-fn establish_active(repository: &mut ExtensionRepository, active: &AdmittedBundledCatalog) {
+fn establish_active(
+    repository: &mut ExtensionRepository,
+    active: &AdmittedBundledCatalog,
+) -> BundledCatalogSetIdentity {
     let mut materialize = FixtureSource::active(active);
     assert!(matches!(
         repository.materialize_active_bundled_package(
@@ -579,6 +632,7 @@ fn establish_active(repository: &mut ExtensionRepository, active: &AdmittedBundl
         Ok(BundledCatalogSetPromotionOutcome::Promoted(_))
             | Ok(BundledCatalogSetPromotionOutcome::IdempotentCurrent(_))
     ));
+    identity
 }
 
 struct FixtureSource;
