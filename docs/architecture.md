@@ -921,7 +921,10 @@ each API that affects the pinned workflow still needs an exact live gate. The
 product-tab gate additionally proves a main-world file injection when the
 literal `"MAIN"` value is supplied, a top-level `webNavigation.onCommitted`
 callback, execution through an opaque dynamic web-accessible-resource URL, and
-the native sandbox-page behavior. WebKit omits the `ExecutionWorld` enum even
+the native sandbox-page behavior. It also verifies alarm create/read/clear,
+exact manifest-command enumeration plus native-to-background dispatch, and
+context-menu create/update/native projection/remove.
+WebKit omits the `ExecutionWorld` enum even
 though literal main-world injection succeeds, and its manifest-declared
 sandbox page retains both a `webkit-extension` origin and the `chrome` API.
 Those two divergences require a sealed package adapter; the sandbox page must
@@ -941,7 +944,10 @@ classifications before they become floor-wide claims.
 | Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |
 | Dynamic web-accessible resources | Compatible on the exercised runtime | A content script resolves an opaque runtime URL for a `use_dynamic_url` resource; the page loads and executes the declared resource. Revocation, multi-frame behavior, and hostile embedding remain separate gates. |
 | Manifest sandbox pages | Requires a sealed Bitwarden Core adapter | The live gate proves WebKit loads the declared page with a `webkit-extension` origin and an available `chrome` namespace, not Chrome's lower-trust sandbox semantics. Zephium must place the exact pinned workflow behind a genuinely unprivileged renderer boundary or remove the dependency through a reviewed source adaptation; native behavior must never be labelled sandboxed. |
-| Clipboard read/write, alarms, commands, and context menus | Behavior unassessed | Parser or namespace presence is insufficient; exact product-tab/popup live gates remain release blockers where the pinned workflow uses the surface. |
+| Alarms | Lifecycle admission compatible; delivery unassessed | The background creates an exact future alarm, reads back its name and finite scheduled time, clears it, and proves post-clear absence. Firing, service-worker wakeup, restart persistence, sleep/wake behavior, and long-duration drift remain release gates. |
+| Commands | Native dispatch compatible; keyboard routing unassessed | `commands.getAll` returns the exact six pinned command names. The host selects the native `autofill_login` command from the profile context, verifies its context identity, performs it through `WKWebExtensionContext`, and the background receives the exact `commands.onCommand` identifier. Physical shortcut event matching, collision handling, remapping, focus behavior, and `_execute_action` routing remain release gates. |
+| Context menus | Native projection compatible; click routing unassessed | The background creates and updates one tab-context item; `menuItemsForTab` returns exactly that updated native item for the product tab; the background then removes it and the probe settles only after removal. Product-tab menu presentation at a pointer location, click routing, frame/editable context, enablement updates, and teardown under navigation remain release gates. |
+| Clipboard read/write | Behavior unassessed | A production gate must be driven by a trusted popup gesture and preserve the user's prior clipboard contents on every success, refusal, timeout, and crash path. Automated tests must not destructively overwrite ambient clipboard state. |
 
 This is one reviewed slice of the required declaration-by-declaration matrix,
 not a claim that the complete Bitwarden workflow is compatible. Product

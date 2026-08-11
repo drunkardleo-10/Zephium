@@ -447,8 +447,23 @@ pub(super) fn validate_native_grant_round_trip(
             &context,
             run_loop,
         )?;
-        let browser_api_evidence = probe_browser_apis(&context, run_loop, mtm)?;
-        browser_api_observation = Some(browser_api::validate(&browser_api_evidence)?);
+        perform_native_command(&context, "autofill_login")?;
+        let browser_api_evidence = probe_browser_apis(&context, run_loop, mtm, false)?;
+        let observation = browser_api::validate_for_native_inspection(&browser_api_evidence)?;
+        validate_native_context_menu(
+            &context,
+            tab_protocol
+                .as_ref()
+                .expect("Bitwarden tab identity is retained"),
+        )?;
+        let cleanup_evidence = probe_browser_apis(&context, run_loop, mtm, true)?;
+        let cleanup_observation = browser_api::validate_after_cleanup(&cleanup_evidence)?;
+        if observation != cleanup_observation {
+            return Err(
+                "Bitwarden browser API evidence changed during context-menu cleanup".into(),
+            );
+        }
+        browser_api_observation = Some(observation);
         let evidence = probe_web_request(&context, run_loop, mtm, "completed")?;
         let observation = validate_web_request_evidence(&evidence, true)?;
         popup_views = validate_action_popup(
@@ -536,7 +551,7 @@ pub(super) fn validate_native_grant_round_trip(
             let browser_api = browser_api_observation
                 .expect("successful Bitwarden gate records browser API evidence");
             eprintln!(
-                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; alarms_lifecycle=passed; commands_readback=passed; commands_native_dispatch=passed; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
                 browser_api.execution_world_namespace(),
                 browser_api.dynamic_resource_url(),
                 browser_api.sandbox_isolation(),
@@ -687,15 +702,58 @@ fn probe_browser_apis(
     context: &WKWebExtensionContext,
     run_loop: &NSRunLoop,
     mtm: MainThreadMarker,
+    cleanup_context_menu: bool,
 ) -> Result<Value, String> {
+    let page = if cleanup_context_menu {
+        "browser-api-probe.html?cleanup=context-menu"
+    } else {
+        "browser-api-probe.html"
+    };
     probe_extension_page(
         context,
         run_loop,
         mtm,
-        "browser-api-probe.html",
+        page,
         browser_api::PROBE_TITLE,
         "browser API",
     )
+}
+
+fn perform_native_command(context: &WKWebExtensionContext, identifier: &str) -> Result<(), String> {
+    let commands = unsafe { context.commands() };
+    let command = (0..commands.count())
+        .map(|index| commands.objectAtIndex(index))
+        .find(|command| unsafe { command.identifier() }.to_string() == identifier)
+        .ok_or_else(|| format!("Bitwarden native command {identifier:?} was not exposed"))?;
+    let command_context = unsafe { command.webExtensionContext() }
+        .ok_or_else(|| format!("Bitwarden native command {identifier:?} omitted its context"))?;
+    if !std::ptr::eq(&*command_context, context) {
+        return Err(format!(
+            "Bitwarden native command {identifier:?} crossed extension contexts"
+        ));
+    }
+    unsafe { context.performCommand(&command) };
+    Ok(())
+}
+
+fn validate_native_context_menu(
+    context: &WKWebExtensionContext,
+    tab: &ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+) -> Result<(), String> {
+    let items = unsafe { context.menuItemsForTab(tab) };
+    if items.count() != 1 {
+        return Err(format!(
+            "Bitwarden native context-menu projection returned {} items instead of one",
+            items.count()
+        ));
+    }
+    let title = items.objectAtIndex(0).title().to_string();
+    if title != "Zephium Bitwarden probe updated" {
+        return Err(format!(
+            "Bitwarden native context-menu projection returned an unexpected title: {title:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn probe_extension_page(
@@ -874,7 +932,12 @@ fn background_probe_script() -> &'static str {
         mainWorldValue: globalThis.chrome?.scripting?.ExecutionWorld?.MAIN ?? "absent",
         messageSenderTab: "pending",
         executeScript: "pending",
-        webNavigationCommitted: "pending"
+        webNavigationCommitted: "pending",
+        alarmsLifecycle: "pending",
+        commandNames: [],
+        commandsReadback: "pending",
+        commandDispatch: "pending",
+        contextMenusLifecycle: "pending"
     };
     const publishSurface = () => api?.storage?.local?.set({ zephiumBitwardenBackgroundApiProbe: surface });
     if (globalThis.chrome?.webNavigation?.onCommitted) {
@@ -889,6 +952,16 @@ fn background_probe_script() -> &'static str {
     }
     if (api?.runtime?.onMessage) {
         api.runtime.onMessage.addListener((message, sender) => {
+            if (message?.type === "zephium-bitwarden-context-menu-cleanup") {
+                globalThis.chrome.contextMenus.remove(menuId, () => {
+                    const removeError = globalThis.chrome.runtime.lastError;
+                    surface.contextMenusLifecycle = removeError
+                        ? "remove-rejected"
+                        : "created-updated-native-read-removed";
+                    void publishSurface();
+                });
+                return;
+            }
             if (message?.type !== "zephium-bitwarden-programmatic-script") return;
             const tabId = sender?.tab?.id;
             surface.messageSenderTab = Number.isInteger(tabId) ? "present" : "absent";
@@ -920,6 +993,90 @@ fn background_probe_script() -> &'static str {
     } else {
         surface.messageSenderTab = "runtime-messaging-absent";
         surface.executeScript = "runtime-messaging-absent";
+    }
+
+    const alarmName = "zephium-bitwarden-contract-alarm";
+    try {
+        globalThis.chrome.alarms.create(alarmName, { when: Date.now() + 60_000 });
+        globalThis.chrome.alarms.get(alarmName, (alarm) => {
+            const readError = globalThis.chrome.runtime.lastError;
+            if (readError || alarm?.name !== alarmName || !Number.isFinite(alarm?.scheduledTime)) {
+                surface.alarmsLifecycle = "readback-rejected";
+                void publishSurface();
+                return;
+            }
+            globalThis.chrome.alarms.clear(alarmName, () => {
+                const clearError = globalThis.chrome.runtime.lastError;
+                if (clearError) {
+                    surface.alarmsLifecycle = "clear-rejected";
+                    void publishSurface();
+                    return;
+                }
+                globalThis.chrome.alarms.get(alarmName, (remaining) => {
+                    const verifyError = globalThis.chrome.runtime.lastError;
+                    surface.alarmsLifecycle = !verifyError && remaining == null
+                        ? "created-read-cleared"
+                        : "clear-readback-rejected";
+                    void publishSurface();
+                });
+            });
+        });
+    } catch (_) {
+        surface.alarmsLifecycle = "rejected";
+    }
+
+    try {
+        globalThis.chrome.commands.getAll((commands) => {
+            const error = globalThis.chrome.runtime.lastError;
+            if (error || !Array.isArray(commands)) {
+                surface.commandsReadback = "rejected";
+            } else {
+                surface.commandNames = commands.map((command) => command.name).sort();
+                surface.commandsReadback = "fulfilled";
+            }
+            void publishSurface();
+        });
+    } catch (_) {
+        surface.commandsReadback = "rejected";
+    }
+    try {
+        globalThis.chrome.commands.onCommand.addListener((command) => {
+            surface.commandDispatch = command;
+            void publishSurface();
+        });
+    } catch (_) {
+        surface.commandDispatch = "listener-rejected";
+    }
+
+    const menuId = "zephium-bitwarden-contract-menu";
+    try {
+        globalThis.chrome.contextMenus.create(
+            { id: menuId, title: "Zephium Bitwarden probe", contexts: ["all"] },
+            () => {
+                const createError = globalThis.chrome.runtime.lastError;
+                if (createError) {
+                    surface.contextMenusLifecycle = "create-rejected";
+                    void publishSurface();
+                    return;
+                }
+                globalThis.chrome.contextMenus.update(
+                    menuId,
+                    { title: "Zephium Bitwarden probe updated" },
+                    () => {
+                        const updateError = globalThis.chrome.runtime.lastError;
+                        if (updateError) {
+                            surface.contextMenusLifecycle = "update-rejected";
+                            void publishSurface();
+                            return;
+                        }
+                        surface.contextMenusLifecycle = "created-updated-held";
+                        void publishSurface();
+                    }
+                );
+            }
+        );
+    } catch (_) {
+        surface.contextMenusLifecycle = "rejected";
     }
     void publish();
     void publishSurface();
@@ -1010,6 +1167,13 @@ mod tests {
         assert!(script.contains("scripting.executeScript"));
         assert!(script.contains("ExecutionWorld?.MAIN ?? \"MAIN\""));
         assert!(script.contains("webNavigation.onCommitted.addListener"));
+        assert!(script.contains("alarms.create"));
+        assert!(script.contains("alarms.get"));
+        assert!(script.contains("alarms.clear"));
+        assert!(script.contains("commands.getAll"));
+        assert!(script.contains("contextMenus.create"));
+        assert!(script.contains("contextMenus.update"));
+        assert!(script.contains("contextMenus.remove"));
         for (namespace, _) in EXPECTED_BITWARDEN_RUNTIME_NAMESPACES {
             assert!(script.contains(&format!("{namespace}: type(")));
         }

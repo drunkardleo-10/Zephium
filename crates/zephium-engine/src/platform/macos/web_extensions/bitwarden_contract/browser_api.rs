@@ -10,6 +10,14 @@ use serde_json::Value;
 
 pub(super) const PROBE_TITLE: &str = "zephium-browser-api-pending";
 const SETTLE_POLLS: u16 = 240;
+const EXPECTED_COMMAND_NAMES: [&str; 6] = [
+    "_execute_action",
+    "autofill_card",
+    "autofill_identity",
+    "autofill_login",
+    "generate_password",
+    "lock_vault",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DynamicResourceUrl {
@@ -34,6 +42,21 @@ pub(super) struct Observation {
     dynamic_resource_url: DynamicResourceUrl,
     execution_world_namespace: ExecutionWorldNamespace,
     sandbox_isolation: SandboxIsolation,
+}
+
+#[derive(Clone, Copy)]
+enum ContextMenuPhase {
+    NativeInspection,
+    Cleanup,
+}
+
+impl ContextMenuPhase {
+    const fn expected_lifecycle(self) -> &'static str {
+        match self {
+            Self::NativeInspection => "created-updated-held",
+            Self::Cleanup => "created-updated-native-read-removed",
+        }
+    }
 }
 
 impl Observation {
@@ -175,16 +198,36 @@ pub(super) fn probe_script() -> String {
     const TEMPLATE: &str = r#"(() => {
     const api = globalThis.browser ?? globalThis.chrome;
     const settle = (value) => { document.title = JSON.stringify(value); };
+    const cleanup = new URLSearchParams(location.search).get("cleanup") === "context-menu";
+    let cleanupRequested = false;
     let polls = 0;
-    const poll = () => Promise.all([
+    const poll = () => {
+        if (cleanup && !cleanupRequested) {
+            cleanupRequested = true;
+            try {
+                const request = api.runtime.sendMessage({ type: "zephium-bitwarden-context-menu-cleanup" });
+                request?.catch?.((error) => settle({ error: String(error?.message ?? error) }));
+            } catch (error) {
+                settle({ error: String(error?.message ?? error) });
+                return;
+            }
+        }
+        Promise.all([
         api?.storage?.local?.get("zephiumBitwardenBackgroundApiProbe"),
         api?.storage?.local?.get("zephiumBitwardenContentApiProbe")
     ]).then(([backgroundStored, contentStored]) => {
         const background = backgroundStored?.zephiumBitwardenBackgroundApiProbe;
         const content = contentStored?.zephiumBitwardenContentApiProbe;
+        const contextMenuReady = cleanup
+            ? background?.contextMenusLifecycle === "created-updated-native-read-removed"
+            : background?.contextMenusLifecycle === "created-updated-held";
         const ready = !!background && !!content && content.settled === true
             && background.executeScript !== "pending"
-            && background.webNavigationCommitted !== "pending";
+            && background.webNavigationCommitted !== "pending"
+            && background.alarmsLifecycle !== "pending"
+            && background.commandsReadback !== "pending"
+            && background.commandDispatch !== "pending"
+            && contextMenuReady;
         if (ready || polls >= __ZEPHIUM_SETTLE_POLLS__) {
             settle({ background, content, settled: ready });
             return;
@@ -192,12 +235,21 @@ pub(super) fn probe_script() -> String {
         polls += 1;
         setTimeout(poll, 25);
     }, (error) => settle({ error: String(error?.message ?? error) }));
+    };
     poll();
 })()"#;
     TEMPLATE.replace("__ZEPHIUM_SETTLE_POLLS__", &SETTLE_POLLS.to_string())
 }
 
-pub(super) fn validate(evidence: &Value) -> Result<Observation, String> {
+pub(super) fn validate_for_native_inspection(evidence: &Value) -> Result<Observation, String> {
+    validate(evidence, ContextMenuPhase::NativeInspection)
+}
+
+pub(super) fn validate_after_cleanup(evidence: &Value) -> Result<Observation, String> {
+    validate(evidence, ContextMenuPhase::Cleanup)
+}
+
+fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Observation, String> {
     let background = evidence.get("background").and_then(Value::as_object);
     let content = evidence.get("content").and_then(Value::as_object);
     let execution_world_namespace = match (
@@ -267,10 +319,23 @@ pub(super) fn validate(evidence: &Value) -> Result<Observation, String> {
             .and_then(Value::as_str)
             == Some(expected)
     };
+    let command_names = background
+        .and_then(|value| value.get("commandNames"))
+        .and_then(Value::as_array)
+        .and_then(|names| names.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
     if evidence.get("settled").and_then(Value::as_bool) != Some(true)
         || !matches(background, "messageSenderTab", "present")
         || !matches(background, "executeScript", "fulfilled")
         || !matches(background, "webNavigationCommitted", "observed")
+        || !matches(background, "alarmsLifecycle", "created-read-cleared")
+        || !matches(background, "commandsReadback", "fulfilled")
+        || command_names.as_deref() != Some(EXPECTED_COMMAND_NAMES.as_slice())
+        || !matches(background, "commandDispatch", "autofill_login")
+        || !matches(
+            background,
+            "contextMenusLifecycle",
+            context_menu_phase.expected_lifecycle(),
+        )
         || !matches(content, "dynamicResourceLoad", "loaded")
         || !matches(content, "dynamicResourceExecution", "executed")
         || !matches(content, "programmaticScript", "executed")
@@ -317,7 +382,12 @@ mod tests {
                 "mainWorldValue": "absent",
                 "messageSenderTab": "present",
                 "executeScript": "fulfilled",
-                "webNavigationCommitted": "observed"
+                "webNavigationCommitted": "observed",
+                "alarmsLifecycle": "created-read-cleared",
+                "commandNames": EXPECTED_COMMAND_NAMES,
+                "commandsReadback": "fulfilled",
+                "commandDispatch": "autofill_login",
+                "contextMenusLifecycle": "created-updated-held"
             },
             "content": {
                 "dynamicResourceLoad": "loaded",
@@ -333,7 +403,7 @@ mod tests {
             "settled": true
         });
         assert_eq!(
-            validate(&observed),
+            validate_for_native_inspection(&observed),
             Ok(Observation {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
                 execution_world_namespace: ExecutionWorldNamespace::AdapterRequired,
@@ -349,7 +419,7 @@ mod tests {
         native["content"]["sandboxStorageLocal"] = Value::String("undefined".to_owned());
         native["content"]["sandboxOrigin"] = Value::String("null".to_owned());
         assert_eq!(
-            validate(&native),
+            validate_for_native_inspection(&native),
             Ok(Observation {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
                 execution_world_namespace: ExecutionWorldNamespace::Native,
@@ -359,6 +429,11 @@ mod tests {
 
         let mut ambiguous = observed;
         ambiguous["content"]["sandboxOrigin"] = Value::String("https://example.invalid".to_owned());
-        assert!(validate(&ambiguous).is_err());
+        assert!(validate_for_native_inspection(&ambiguous).is_err());
+
+        let mut cleaned = native;
+        cleaned["background"]["contextMenusLifecycle"] =
+            Value::String("created-updated-native-read-removed".to_owned());
+        assert!(validate_after_cleanup(&cleaned).is_ok());
     }
 }
