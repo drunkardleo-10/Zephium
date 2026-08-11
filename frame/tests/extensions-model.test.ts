@@ -77,6 +77,7 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
         compatibility: "degraded",
       },
     ],
+    candidates: [],
   };
 }
 
@@ -144,6 +145,7 @@ describe("extension management projection admission", () => {
       phase: "unavailable",
       catalog_revision: null,
       entries: [],
+      candidates: [],
     });
   });
 

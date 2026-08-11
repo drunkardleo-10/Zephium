@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use zephium_core::ports::extensions::{
-    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementCatalog,
+    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
+    ExtensionInstalledRuntimeState, ExtensionManagementAdmission, ExtensionManagementCatalog,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
     ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
@@ -28,8 +29,40 @@ pub(super) struct ExtensionManagementState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingExtensionManagementKind {
+    Install {
+        file_access: bool,
+        private_access: bool,
+    },
     SetEnabled(bool),
     Uninstall,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PendingExtensionManagementSubject {
+    Candidate(ExtensionInstallCandidateSelector),
+    Installed(ExtensionInstallSelector),
+}
+
+impl PendingExtensionManagementSubject {
+    fn profile(&self) -> ProfileId {
+        match self {
+            Self::Candidate(selector) => selector.profile(),
+            Self::Installed(selector) => selector.profile(),
+        }
+    }
+
+    fn conflicts_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Candidate(left), Self::Candidate(right)) => {
+                left.profile() == right.profile()
+                    && left.package().update_line() == right.package().update_line()
+            }
+            (Self::Installed(left), Self::Installed(right)) => {
+                left.profile() == right.profile() && left.install() == right.install()
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,7 +73,7 @@ enum ExtensionManagementBeginFailure {
 
 struct PendingExtensionManagement {
     operation_id: String,
-    selector: ExtensionInstallSelector,
+    subject: PendingExtensionManagementSubject,
     kind: PendingExtensionManagementKind,
 }
 
@@ -48,17 +81,17 @@ impl ExtensionManagementState {
     fn begin(
         &mut self,
         operation_id: String,
-        selector: ExtensionInstallSelector,
+        subject: PendingExtensionManagementSubject,
         kind: PendingExtensionManagementKind,
     ) -> Result<u64, ExtensionManagementBeginFailure> {
         if self.unavailable_until_restart {
             return Err(ExtensionManagementBeginFailure::FailedClosed);
         }
         if self.pending.len() >= MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS
-            || self.pending.values().any(|pending| {
-                pending.selector.profile() == selector.profile()
-                    && pending.selector.install() == selector.install()
-            })
+            || self
+                .pending
+                .values()
+                .any(|pending| pending.subject.conflicts_with(&subject))
         {
             return Err(ExtensionManagementBeginFailure::Busy);
         }
@@ -71,7 +104,7 @@ impl ExtensionManagementState {
             request,
             PendingExtensionManagement {
                 operation_id,
-                selector,
+                subject,
                 kind,
             },
         );
@@ -94,6 +127,9 @@ impl ExtensionManagementState {
         let exact = matches!(
             (pending.kind, completion),
             (
+                PendingExtensionManagementKind::Install { .. },
+                ExtensionManagementCompletion::Install(_)
+            ) | (
                 PendingExtensionManagementKind::SetEnabled(_),
                 ExtensionManagementCompletion::SetEnabled(_)
             ) | (
@@ -180,6 +216,24 @@ impl ExtensionManagementState {
                     .iter()
                     .any(|entry| entry.selector() == selector)
         })
+    }
+
+    fn resolve_candidate(
+        &self,
+        profile: ProfileId,
+        expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision,
+        candidate_index: u8,
+        file_access: bool,
+    ) -> Option<ExtensionInstallCandidateSelector> {
+        let catalog = self.catalog.as_ref()?;
+        if catalog.profile() != profile || catalog.catalog_revision() != expected_catalog {
+            return None;
+        }
+        let candidate = catalog.candidates().get(usize::from(candidate_index))?;
+        if file_access && !candidate.supports_file_access() {
+            return None;
+        }
+        Some(candidate.selector().clone())
     }
 }
 
@@ -362,14 +416,44 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             ));
         }
-        let (selector, kind) = match command {
+        let (subject, kind) = match command {
+            Command::InstallFocusedExtension {
+                candidate_index,
+                expected_catalog,
+                file_access,
+                private_access,
+            } => {
+                let Some(selector) = self.extension_management.resolve_candidate(
+                    profile,
+                    expected_catalog,
+                    candidate_index,
+                    file_access,
+                ) else {
+                    return Some(operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreConflict,
+                    ));
+                };
+                (
+                    PendingExtensionManagementSubject::Candidate(selector),
+                    PendingExtensionManagementKind::Install {
+                        file_access,
+                        private_access,
+                    },
+                )
+            }
             Command::SetFocusedExtensionEnabled {
                 install,
                 expected_catalog,
                 expected_install,
                 enabled,
             } => (
-                ExtensionInstallSelector::new(profile, install, expected_catalog, expected_install),
+                PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
+                    profile,
+                    install,
+                    expected_catalog,
+                    expected_install,
+                )),
                 PendingExtensionManagementKind::SetEnabled(enabled),
             ),
             Command::UninstallFocusedExtension {
@@ -377,7 +461,12 @@ impl Shell {
                 expected_catalog,
                 expected_install,
             } => (
-                ExtensionInstallSelector::new(profile, install, expected_catalog, expected_install),
+                PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
+                    profile,
+                    install,
+                    expected_catalog,
+                    expected_install,
+                )),
                 PendingExtensionManagementKind::Uninstall,
             ),
             _ => return None,
@@ -388,15 +477,17 @@ impl Shell {
                 OperationReason::StoreReconciliationFailed,
             ));
         }
-        if !self.extension_management.authorizes(selector) {
-            return Some(operation_result(
-                OperationOutcome::Rejected,
-                OperationReason::StoreConflict,
-            ));
+        if let PendingExtensionManagementSubject::Installed(selector) = &subject {
+            if !self.extension_management.authorizes(*selector) {
+                return Some(operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreConflict,
+                ));
+            }
         }
         let request = match self
             .extension_management
-            .begin(operation_id, selector, kind)
+            .begin(operation_id, subject.clone(), kind)
         {
             Ok(request) => request,
             Err(ExtensionManagementBeginFailure::Busy) => {
@@ -434,8 +525,31 @@ impl Shell {
             ));
         };
         let admission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-            PendingExtensionManagementKind::SetEnabled(enabled) => service
-                .begin_set_install_enabled(
+            PendingExtensionManagementKind::Install {
+                file_access,
+                private_access,
+            } => {
+                let PendingExtensionManagementSubject::Candidate(selector) = subject else {
+                    unreachable!("install request retained a non-candidate selector")
+                };
+                service.begin_install(
+                    selector,
+                    file_access,
+                    private_access,
+                    deadline,
+                    Box::new(move |settlement| {
+                        let _ = callback.dispatch(Command::ExtensionManagementSettled {
+                            request,
+                            completion: ExtensionManagementCompletion::Install(settlement),
+                        });
+                    }),
+                )
+            }
+            PendingExtensionManagementKind::SetEnabled(enabled) => {
+                let PendingExtensionManagementSubject::Installed(selector) = subject else {
+                    unreachable!("enablement request retained a candidate selector")
+                };
+                service.begin_set_install_enabled(
                     selector,
                     enabled,
                     deadline,
@@ -445,17 +559,23 @@ impl Shell {
                             completion: ExtensionManagementCompletion::SetEnabled(settlement),
                         });
                     }),
-                ),
-            PendingExtensionManagementKind::Uninstall => service.begin_uninstall(
-                selector,
-                deadline,
-                Box::new(move |settlement| {
-                    let _ = callback.dispatch(Command::ExtensionManagementSettled {
-                        request,
-                        completion: ExtensionManagementCompletion::Uninstall(settlement),
-                    });
-                }),
-            ),
+                )
+            }
+            PendingExtensionManagementKind::Uninstall => {
+                let PendingExtensionManagementSubject::Installed(selector) = subject else {
+                    unreachable!("uninstall request retained a candidate selector")
+                };
+                service.begin_uninstall(
+                    selector,
+                    deadline,
+                    Box::new(move |settlement| {
+                        let _ = callback.dispatch(Command::ExtensionManagementSettled {
+                            request,
+                            completion: ExtensionManagementCompletion::Uninstall(settlement),
+                        });
+                    }),
+                )
+            }
         }));
         match admission {
             Ok(ExtensionManagementAdmission::Accepted) => None,
@@ -499,6 +619,7 @@ impl Shell {
             return;
         };
         let active_profiles = match completion {
+            ExtensionManagementCompletion::Install(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::SetEnabled(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::Uninstall(settlement) => settlement.active_profiles(),
         };
@@ -524,6 +645,53 @@ impl Shell {
         }
 
         let (outcome, reason, fail_until_restart) = match completion {
+            ExtensionManagementCompletion::Install(settlement) => match settlement.into_outcome() {
+                ExtensionInstallOutcome::Installed { runtime, .. } => (
+                    OperationOutcome::Applied,
+                    match runtime {
+                        ExtensionInstalledRuntimeState::Active(_) => {
+                            OperationReason::MutationApplied
+                        }
+                        ExtensionInstalledRuntimeState::PendingActivation(_) => {
+                            OperationReason::ExtensionActivationPending
+                        }
+                        ExtensionInstalledRuntimeState::Disabled(_) => {
+                            OperationReason::ExtensionEnablementPending
+                        }
+                    },
+                    false,
+                ),
+                ExtensionInstallOutcome::AlreadyInstalled => (
+                    OperationOutcome::NoOp,
+                    OperationReason::StateUnchanged,
+                    false,
+                ),
+                ExtensionInstallOutcome::Conflict => (
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreConflict,
+                    false,
+                ),
+                ExtensionInstallOutcome::Rejected => (
+                    OperationOutcome::Rejected,
+                    OperationReason::InvalidScope,
+                    false,
+                ),
+                ExtensionInstallOutcome::Unavailable => (
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                    false,
+                ),
+                ExtensionInstallOutcome::OutcomeUnknown => (
+                    OperationOutcome::Deferred,
+                    OperationReason::StoreOutcomeUnknown,
+                    true,
+                ),
+                ExtensionInstallOutcome::FailedClosed => (
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreReconciliationFailed,
+                    true,
+                ),
+            },
             ExtensionManagementCompletion::SetEnabled(settlement) => {
                 match settlement.into_outcome() {
                     ExtensionSetEnabledOutcome::Enabled { changed, .. }
@@ -609,7 +777,7 @@ impl Shell {
         if fail_until_restart {
             self.extension_management.fail_until_restart();
         }
-        let profile = pending.selector.profile();
+        let profile = pending.subject.profile();
         self.emit_extension_management_completion(pending.operation_id, outcome, reason);
         self.refresh_extension_management_catalog(profile);
     }

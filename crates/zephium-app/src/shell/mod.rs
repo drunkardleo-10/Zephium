@@ -112,13 +112,14 @@ use zephium_ipc::{
     BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
-    ExtensionActionFailure, ExtensionActionsView, ExtensionManagementCompatibilityView,
-    ExtensionManagementEntryView, ExtensionManagementGrantView, ExtensionManagementPhase,
-    ExtensionManagementRuntimeView, ExtensionManagementView, ItemsState, LayoutState,
-    OperationDisposition, OperationOutcome, OperationReason, ProfileKindView, ProfileView,
-    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
-    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
-    SidebarSectionView, SpaceView, SplitGroupView, TabView,
+    ExtensionActionFailure, ExtensionActionsView, ExtensionInstallCandidateView,
+    ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
+    ExtensionManagementGrantView, ExtensionManagementPhase, ExtensionManagementRuntimeView,
+    ExtensionManagementView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
+    OperationReason, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
+    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
+    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
+    SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -444,7 +445,8 @@ impl Shell {
                 let command = *command;
                 if matches!(
                     &command,
-                    Command::SetFocusedExtensionEnabled { .. }
+                    Command::InstallFocusedExtension { .. }
+                        | Command::SetFocusedExtensionEnabled { .. }
                         | Command::UninstallFocusedExtension { .. }
                 ) {
                     if let Some(mut completion) =
@@ -574,6 +576,7 @@ impl Shell {
             }
             // This privileged mutation must carry a desktop operation id.
             Command::InvokeExtensionAction { .. }
+            | Command::InstallFocusedExtension { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
             Command::SetExtensionManagementVisible(visible) => {

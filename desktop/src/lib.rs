@@ -1312,6 +1312,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_unsplit,
             extension_action_invoke,
             extension_management_set_visible,
+            extension_management_install,
             extension_management_set_enabled,
             extension_management_uninstall,
             blocker_status,
@@ -2199,6 +2200,41 @@ fn extension_management_set_visible(
         "extension_management_set_visible",
     ) && !shutdown_started(caller.app_handle())
         && shell.dispatch(Command::SetExtensionManagementVisible(visible))
+}
+
+/// Installs only a candidate from Shell's latest authenticated, retained
+/// management catalog. The frontend supplies no profile, package path,
+/// manifest declaration, or permission-name authority.
+#[tauri::command]
+#[specta::specta]
+fn extension_management_install(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    candidate_index: u8,
+    catalog_revision: String,
+    file_access: bool,
+    private_access: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "extension_management_install")
+        || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some(expected_catalog) =
+        fixed_nonzero_hex(&catalog_revision).and_then(ExtensionInstallCatalogRevision::new)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::InstallFocusedExtension {
+            candidate_index,
+            expected_catalog,
+            file_access,
+            private_access,
+        },
+    )
 }
 
 #[tauri::command]
@@ -4500,6 +4536,7 @@ mod tests {
         let source = include_str!("lib.rs");
         for command_name in [
             "extension_management_set_visible",
+            "extension_management_install",
             "extension_management_set_enabled",
             "extension_management_uninstall",
         ] {

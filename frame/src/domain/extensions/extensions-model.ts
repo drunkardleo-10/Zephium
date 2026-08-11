@@ -22,6 +22,7 @@ export function initialExtensionManagement(): ExtensionManagementView {
     phase: "unavailable",
     catalog_revision: null,
     entries: [],
+    candidates: [],
   };
 }
 

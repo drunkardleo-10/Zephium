@@ -3,6 +3,7 @@ import type {
   ExtensionActionFailure,
   ExtensionActionView,
   ExtensionActionsView,
+  ExtensionInstallCandidateView,
   ExtensionManagementEntryView,
   ExtensionManagementView,
   OperationAdmission,
@@ -33,7 +34,10 @@ type VisibleFailure = Omit<ExtensionActionFailedView, "projection_revision"> & {
 };
 let failure = $state.raw<VisibleFailure | null>(null);
 const invoking = new SvelteSet<string>();
-type ManagementMutation = { installId: string; kind: "enable" | "disable" | "uninstall" };
+type ManagementMutation = {
+  subject: string;
+  kind: "install" | "enable" | "disable" | "uninstall";
+};
 let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
 let managementVisible = false;
@@ -234,9 +238,13 @@ export async function setManagementVisible(visible: boolean): Promise<boolean> {
 
 function managementDispositionMessage(disposition: OperationDisposition): string | null {
   if (disposition.outcome === "applied" || disposition.outcome === "no_op") {
-    return disposition.reason === "extension_activation_pending"
-      ? "The extension is enabled and will activate when its runtime becomes available."
-      : null;
+    if (disposition.reason === "extension_activation_pending") {
+      return "The extension is enabled and will activate when its runtime becomes available.";
+    }
+    if (disposition.reason === "extension_enablement_pending") {
+      return "The extension was installed, but enabling it is still pending.";
+    }
+    return null;
   }
   switch (disposition.reason) {
     case "store_conflict":
@@ -299,7 +307,7 @@ export function setEnabled(
   enabled: boolean,
 ): void {
   void settleManagementMutation(
-    { installId: entry.install_id, kind: enabled ? "enable" : "disable" },
+    { subject: entry.install_id, kind: enabled ? "enable" : "disable" },
     () =>
       commands.extensionManagementSetEnabled(
         entry.install_id,
@@ -311,11 +319,29 @@ export function setEnabled(
 }
 
 export function uninstall(entry: ExtensionManagementEntryView, catalogRevision: string): void {
-  void settleManagementMutation({ installId: entry.install_id, kind: "uninstall" }, () =>
+  void settleManagementMutation({ subject: entry.install_id, kind: "uninstall" }, () =>
     commands.extensionManagementUninstall(
       entry.install_id,
       catalogRevision,
       entry.install_revision,
     ),
+  );
+}
+
+export function install(
+  candidate: ExtensionInstallCandidateView,
+  catalogRevision: string,
+  fileAccess: boolean,
+  privateAccess: boolean,
+): void {
+  void settleManagementMutation(
+    { subject: String(candidate.candidate_index), kind: "install" },
+    () =>
+      commands.extensionManagementInstall(
+        candidate.candidate_index,
+        catalogRevision,
+        fileAccess,
+        privateAccess,
+      ),
   );
 }

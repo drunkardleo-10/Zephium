@@ -7,6 +7,7 @@
   } from "@hugeicons/core-free-icons";
   import { untrack } from "svelte";
   import type {
+    ExtensionInstallCandidateView,
     ExtensionManagementEntryView,
     ExtensionManagementRuntimeView,
   } from "../../../shared/ipc/bindings";
@@ -24,6 +25,9 @@
   let requestFailed = $state(false);
   let subscribedProfile = $state<string | null>(null);
   let confirming = $state<string | null>(null);
+  let reviewingCandidate = $state<number | null>(null);
+  let allowFileAccess = $state(false);
+  let allowPrivateAccess = $state(false);
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let management = $derived(extensions.management(profileId));
@@ -49,6 +53,7 @@
     if (subscribedProfile === currentProfile) return;
     subscribedProfile = currentProfile;
     confirming = null;
+    reviewingCandidate = null;
     untrack(() => void load());
   });
 
@@ -68,6 +73,7 @@
     open = false;
     subscribedProfile = null;
     confirming = null;
+    reviewingCandidate = null;
     void extensions.setManagementVisible(false);
     if (returnFocus) queueMicrotask(() => trigger?.focus());
   }
@@ -95,7 +101,9 @@
       return;
     }
     if (event.key !== "Tab" || panel === undefined) return;
-    const focusable = [...panel.querySelectorAll<HTMLElement>("button:not([disabled])")];
+    const focusable = [
+      ...panel.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled])"),
+    ];
     if (focusable.length === 0) return;
     const first = focusable.at(0);
     const last = focusable.at(-1);
@@ -119,6 +127,42 @@
     extensions.uninstall(entry, catalogRevision);
     confirming = null;
   }
+
+  function reviewInstall(candidate: ExtensionInstallCandidateView) {
+    if (mutation !== null) return;
+    confirming = null;
+    reviewingCandidate = candidate.candidate_index;
+    allowFileAccess = false;
+    allowPrivateAccess = false;
+  }
+
+  function install(candidate: ExtensionInstallCandidateView) {
+    if (catalogRevision === null || mutation !== null) return;
+    extensions.install(candidate, catalogRevision, allowFileAccess, allowPrivateAccess);
+    reviewingCandidate = null;
+  }
+
+  const permissionLabel = (permission: string) => {
+    const labels: Record<string, string> = {
+      activeTab: "Access the current tab after you use the extension",
+      alarms: "Schedule background tasks",
+      clipboardRead: "Read copied content",
+      clipboardWrite: "Copy content to the clipboard",
+      contextMenus: "Add items to page context menus",
+      idle: "Detect when the device is idle",
+      notifications: "Show notifications",
+      scripting: "Run extension scripts on allowed sites",
+      storage: "Store extension settings and data",
+      tabs: "Read tab titles and addresses",
+      unlimitedStorage: "Store data without the normal extension quota",
+      webNavigation: "Observe navigation on allowed sites",
+      webRequest: "Observe network requests on allowed sites",
+    };
+    return labels[permission] ?? permission;
+  };
+
+  const hostLabel = (pattern: string) =>
+    pattern === "<all_urls>" ? "Read and change data on all websites" : pattern;
 
   const runtimeLabel = (runtime: ExtensionManagementRuntimeView) => {
     switch (runtime) {
@@ -210,110 +254,230 @@
             </button>
           {/if}
         </div>
-      {:else if management.entries.length === 0}
-        <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
-          No extensions are installed in this profile.
-        </p>
       {:else}
-        <div class="space-y-1.5">
-          {#each management.entries as entry (entry.install_id)}
-            <article class="rounded-md bg-fill px-2.5 py-2">
-              <div class="flex items-start gap-2">
-                <span
-                  class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
-                  aria-hidden="true"
-                >
-                  <Icon icon={PuzzleIcon} size={15} />
-                </span>
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-start justify-between gap-2">
-                    <div class="min-w-0">
-                      <h3 class="truncate text-[12.5px] leading-4 font-medium text-text">
-                        {entry.name}
-                      </h3>
-                      <p class="truncate text-[10.5px] leading-4 text-faint">
-                        {entry.version} · {runtimeLabel(entry.runtime)}
-                      </p>
+        {#if management.entries.length === 0}
+          <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
+            No extensions are installed in this profile.
+          </p>
+        {:else}
+          <div class="space-y-1.5">
+            {#each management.entries as entry (entry.install_id)}
+              <article class="rounded-md bg-fill px-2.5 py-2">
+                <div class="flex items-start gap-2">
+                  <span
+                    class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+                    aria-hidden="true"
+                  >
+                    <Icon icon={PuzzleIcon} size={15} />
+                  </span>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="min-w-0">
+                        <h3 class="truncate text-[12.5px] leading-4 font-medium text-text">
+                          {entry.name}
+                        </h3>
+                        <p class="truncate text-[10.5px] leading-4 text-faint">
+                          {entry.version} · {runtimeLabel(entry.runtime)}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-label={`${entry.runtime === "disabled" ? "Enable" : "Disable"} ${entry.name}`}
+                        aria-checked={entry.runtime !== "disabled"}
+                        disabled={mutation !== null}
+                        class="relative mt-0.5 h-[18px] w-8 shrink-0 rounded-full bg-border-strong transition-colors disabled:opacity-45"
+                        class:bg-accent={entry.runtime !== "disabled"}
+                        onclick={() => toggle(entry)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          class="absolute top-[2px] left-[2px] h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
+                          class:translate-x-3.5={entry.runtime !== "disabled"}
+                        ></span>
+                      </button>
                     </div>
+
+                    {#if entry.compatibility === "degraded"}
+                      <p class="mt-1 text-[10.5px] leading-4 text-warning">
+                        Some extension features are limited on this platform.
+                      </p>
+                    {/if}
+                    {#if entry.grants.initialized}
+                      <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                        {entry.grants.api_grants} API · {entry.grants.host_grants} site
+                        {entry.grants.host_grants === 1 ? "permission" : "permissions"}
+                        {#if entry.grants.file_access}
+                          · File access{/if}
+                        {#if entry.grants.private_access}
+                          · Private windows{/if}
+                      </p>
+                    {:else}
+                      <p class="mt-1 text-[10.5px] leading-4 text-muted">No permissions granted</p>
+                    {/if}
+                  </div>
+                </div>
+
+                <div class="mt-1.5 flex min-h-7 items-center justify-end gap-1">
+                  {#if confirming === entry.install_id}
+                    <span class="mr-auto text-[10.5px] leading-4 text-muted">Remove extension?</span
+                    >
                     <button
                       type="button"
-                      role="switch"
-                      aria-label={`${entry.runtime === "disabled" ? "Enable" : "Disable"} ${entry.name}`}
-                      aria-checked={entry.runtime !== "disabled"}
+                      class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] text-muted hover:text-text"
                       disabled={mutation !== null}
-                      class="relative mt-0.5 h-[18px] w-8 shrink-0 rounded-full bg-border-strong transition-colors disabled:opacity-45"
-                      class:bg-accent={entry.runtime !== "disabled"}
-                      onclick={() => toggle(entry)}
+                      onclick={() => (confirming = null)}
                     >
-                      <span
-                        aria-hidden="true"
-                        class="absolute top-[2px] left-[2px] h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
-                        class:translate-x-3.5={entry.runtime !== "disabled"}
-                      ></span>
+                      Cancel
                     </button>
-                  </div>
-
-                  {#if entry.compatibility === "degraded"}
-                    <p class="mt-1 text-[10.5px] leading-4 text-warning">
-                      Some extension features are limited on this platform.
-                    </p>
-                  {/if}
-                  {#if entry.grants.initialized}
-                    <p class="mt-1 text-[10.5px] leading-4 text-muted">
-                      {entry.grants.api_grants} API · {entry.grants.host_grants} site
-                      {entry.grants.host_grants === 1 ? "permission" : "permissions"}
-                      {#if entry.grants.file_access}
-                        · File access{/if}
-                      {#if entry.grants.private_access}
-                        · Private windows{/if}
-                    </p>
+                    <button
+                      type="button"
+                      class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] font-medium text-warning"
+                      disabled={mutation !== null}
+                      onclick={() => remove(entry)}
+                    >
+                      Remove
+                    </button>
                   {:else}
-                    <p class="mt-1 text-[10.5px] leading-4 text-muted">No permissions granted</p>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${entry.name}`}
+                      title={`Remove ${entry.name}`}
+                      disabled={mutation !== null}
+                      class="icon-button text-faint hover:text-warning"
+                      style:--icon-button-size="26px"
+                      onclick={() => (confirming = entry.install_id)}
+                    >
+                      <Icon icon={Delete02Icon} size={13} />
+                    </button>
                   {/if}
                 </div>
-              </div>
+              </article>
+            {/each}
+          </div>
+        {/if}
 
-              <div class="mt-1.5 flex min-h-7 items-center justify-end gap-1">
-                {#if confirming === entry.install_id}
-                  <span class="mr-auto text-[10.5px] leading-4 text-muted">Remove extension?</span>
-                  <button
-                    type="button"
-                    class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] text-muted hover:text-text"
-                    disabled={mutation !== null}
-                    onclick={() => (confirming = null)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] font-medium text-warning"
-                    disabled={mutation !== null}
-                    onclick={() => remove(entry)}
-                  >
-                    Remove
-                  </button>
-                {:else}
-                  <button
-                    type="button"
-                    aria-label={`Remove ${entry.name}`}
-                    title={`Remove ${entry.name}`}
-                    disabled={mutation !== null}
-                    class="icon-button text-faint hover:text-warning"
-                    style:--icon-button-size="26px"
-                    onclick={() => (confirming = entry.install_id)}
-                  >
-                    <Icon icon={Delete02Icon} size={13} />
-                  </button>
-                {/if}
-              </div>
-            </article>
-          {/each}
-        </div>
+        {#if management.candidates.length > 0}
+          <div class="mt-3 border-t border-border pt-2.5">
+            <h3 class="mb-1.5 text-[10.5px] leading-4 font-medium text-faint">Available</h3>
+            <div class="space-y-1.5">
+              {#each management.candidates as candidate (candidate.candidate_index)}
+                <article class="rounded-md bg-fill px-2.5 py-2">
+                  <div class="flex items-start gap-2">
+                    <span
+                      class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+                      aria-hidden="true"
+                    >
+                      <Icon icon={PuzzleIcon} size={15} />
+                    </span>
+                    <div class="min-w-0 flex-1">
+                      <h4 class="truncate text-[12.5px] leading-4 font-medium text-text">
+                        {candidate.name}
+                      </h4>
+                      <p class="truncate text-[10.5px] leading-4 text-faint">
+                        {candidate.version}{candidate.author === null
+                          ? ""
+                          : ` · ${candidate.author}`}
+                      </p>
+                      {#if candidate.description !== null}
+                        <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                          {candidate.description}
+                        </p>
+                      {/if}
+                      {#if candidate.compatibility === "degraded"}
+                        <p class="mt-1 text-[10.5px] leading-4 text-warning">
+                          Some extension features are limited on this platform.
+                        </p>
+                      {/if}
+                    </div>
+                  </div>
+
+                  {#if reviewingCandidate === candidate.candidate_index}
+                    <div class="mt-2 border-t border-border pt-2">
+                      <p class="text-[11px] leading-4 font-medium text-text">Required access</p>
+                      {#if candidate.required_api.length === 0 && candidate.required_hosts.length === 0}
+                        <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                          No additional site or browser access.
+                        </p>
+                      {:else}
+                        <ul class="mt-1 space-y-1 text-[10.5px] leading-4 text-muted">
+                          {#each candidate.required_api as permission (permission)}
+                            <li>• {permissionLabel(permission)}</li>
+                          {/each}
+                          {#each candidate.required_hosts as pattern (pattern)}
+                            <li>• {hostLabel(pattern)}</li>
+                          {/each}
+                        </ul>
+                      {/if}
+                      {#if candidate.supports_file_access}
+                        <label
+                          class="mt-2 flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
+                        >
+                          <input
+                            type="checkbox"
+                            class="mt-0.5 accent-accent"
+                            bind:checked={allowFileAccess}
+                            disabled={mutation !== null}
+                          />
+                          <span>Allow access to local file URLs</span>
+                        </label>
+                      {/if}
+                      <label
+                        class="mt-1.5 flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
+                      >
+                        <input
+                          type="checkbox"
+                          class="mt-0.5 accent-accent"
+                          bind:checked={allowPrivateAccess}
+                          disabled={mutation !== null}
+                        />
+                        <span>Allow in private windows</span>
+                      </label>
+                      <div class="mt-2 flex justify-end gap-1">
+                        <button
+                          type="button"
+                          class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] text-muted hover:text-text"
+                          disabled={mutation !== null}
+                          onclick={() => (reviewingCandidate = null)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          class="h-7 rounded-md bg-accent px-2.5 text-[11px] font-medium text-white disabled:opacity-45"
+                          disabled={mutation !== null}
+                          onclick={() => install(candidate)}
+                        >
+                          Install
+                        </button>
+                      </div>
+                    </div>
+                  {:else}
+                    <div class="mt-1.5 flex justify-end">
+                      <button
+                        type="button"
+                        class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] font-medium text-text"
+                        disabled={mutation !== null}
+                        onclick={() => reviewInstall(candidate)}
+                      >
+                        Install…
+                      </button>
+                    </div>
+                  {/if}
+                </article>
+              {/each}
+            </div>
+          </div>
+        {/if}
       {/if}
 
       {#if mutation !== null}
         <p class="mt-2 text-[10.5px] leading-4 text-muted" role="status" aria-live="polite">
-          {mutation.kind === "uninstall" ? "Removing extension…" : "Applying extension change…"}
+          {mutation.kind === "install"
+            ? "Installing extension…"
+            : mutation.kind === "uninstall"
+              ? "Removing extension…"
+              : "Applying extension change…"}
         </p>
       {:else if notice !== null}
         <p class="mt-2 text-[10.5px] leading-4 text-warning" role="status" aria-live="polite">

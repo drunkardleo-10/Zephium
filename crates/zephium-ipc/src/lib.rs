@@ -149,6 +149,23 @@ pub struct ExtensionManagementEntryView {
     pub compatibility: ExtensionManagementCompatibilityView,
 }
 
+/// One authenticated package offered by Zephium's current curated catalog.
+/// `candidate_index` is an opaque, short-lived selector into the exact
+/// revisioned catalog retained by Shell. Privileged chrome may only echo it;
+/// it conveys no package, repository, profile, or permission authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionInstallCandidateView {
+    pub candidate_index: u8,
+    pub name: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub version: String,
+    pub required_api: Vec<String>,
+    pub required_hosts: Vec<String>,
+    pub supports_file_access: bool,
+    pub compatibility: ExtensionManagementCompatibilityView,
+}
+
 /// Exact replacement management cohort for the focused profile.
 /// Loading and failure phases always carry no catalog revision or rows, so a
 /// delayed failure cannot leave stale selectors actionable in privileged UI.
@@ -159,6 +176,7 @@ pub struct ExtensionManagementView {
     pub phase: ExtensionManagementPhase,
     pub catalog_revision: Option<String>,
     pub entries: Vec<ExtensionManagementEntryView>,
+    pub candidates: Vec<ExtensionInstallCandidateView>,
 }
 
 /// The one retained split group owned by the focused window. Members are
@@ -328,6 +346,7 @@ pub enum OperationReason {
     StoreConflict,
     StoreOutcomeUnknown,
     StoreReconciliationFailed,
+    ExtensionEnablementPending,
     ExtensionActivationPending,
     ContentPolicyApplyFailed,
     ContentPolicySourceUnavailable,

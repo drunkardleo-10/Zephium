@@ -55,6 +55,55 @@ fn empty_extension_management_catalog(
     .expect("empty fixture management catalog must be valid")
 }
 
+fn extension_install_candidate_catalog(
+    profile: ProfileId,
+    catalog_revision: zephium_core::extensions::ExtensionInstallCatalogRevision,
+) -> (
+    zephium_core::ports::extensions::ExtensionManagementCatalog,
+    zephium_core::extensions::ExtensionPackageIdentity,
+) {
+    use zephium_core::extensions::{
+        ExtensionAuthorityId, ExtensionCatalogSetDigest, ExtensionManifestDigest,
+        ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+        ExtensionPackageRevision, ExtensionTreeDigest,
+    };
+    let package = ExtensionPackageIdentity::new(
+        ExtensionAuthorityId::from_bytes([11; 32]),
+        ExtensionPackageKey::from_bytes([12; 32]),
+        ExtensionPackageRevision::INITIAL,
+        ExtensionPackagePayloadIdentity::BundledTree,
+        ExtensionManifestDigest::from_bytes([13; 32]),
+        ExtensionTreeDigest::from_bytes([14; 32]),
+    );
+    let selector = zephium_core::ports::extensions::ExtensionInstallCandidateSelector::new(
+        profile,
+        catalog_revision,
+        ExtensionCatalogSetDigest::from_bytes([15; 32]),
+        package.clone(),
+    );
+    let candidate = zephium_core::ports::extensions::ExtensionInstallCandidateEntry::new(
+        selector,
+        "Fixture candidate",
+        Some("Authenticated candidate metadata".into()),
+        Some("Zephium tests".into()),
+        "1.0.0",
+        vec!["storage".into(), "webRequest".into()],
+        vec!["<all_urls>".into()],
+        zephium_core::ports::extensions::ExtensionManagementCompatibility::Degraded,
+    )
+    .expect("fixture candidate must be valid");
+    (
+        zephium_core::ports::extensions::ExtensionManagementCatalog::with_candidates(
+            profile,
+            catalog_revision,
+            Vec::new(),
+            vec![candidate],
+        )
+        .expect("fixture candidate catalog must be valid"),
+        package,
+    )
+}
+
 fn settle_next_management_catalog(
     state: &FakeExtensionLifecycleState,
     catalog: zephium_core::ports::extensions::ExtensionManagementCatalog,
@@ -78,7 +127,7 @@ fn wait_for_ready_management_catalog(
     expected_profile: ProfileId,
     expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision,
     expected_entries: usize,
-) {
+) -> zephium_ipc::ExtensionManagementView {
     let ready = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
         .find_map(|projection| match projection {
             Projection::ExtensionManagement(view)
@@ -95,6 +144,7 @@ fn wait_for_ready_management_catalog(
         Some(format!("{:016x}", expected_catalog.get()).as_str())
     );
     assert_eq!(ready.entries.len(), expected_entries);
+    ready
 }
 
 struct ActorExitBlocker {
@@ -571,6 +621,161 @@ fn tracked_operation_has_exact_admission_and_actor_disposition_id() {
             command: Box::new(Command::Open),
         },
     ));
+}
+
+#[test]
+fn extension_install_uses_only_the_retained_authenticated_candidate() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let engine = Arc::new(FakeEngine::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
+    let _ = rx.try_iter().count();
+
+    let catalog_revision = zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL;
+    let (catalog, package) = extension_install_candidate_catalog(profile, catalog_revision);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    settle_next_management_catalog(&extension_state, catalog);
+    let ready = wait_for_ready_management_catalog(&rx, profile, catalog_revision, 0);
+    assert_eq!(ready.candidates.len(), 1);
+    assert_eq!(ready.candidates[0].candidate_index, 0);
+    assert!(ready.candidates[0].supports_file_access);
+    assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
+    assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);
+
+    assert!(handle.dispatch_operation(
+        "stale-extension-install".into(),
+        Command::InstallFocusedExtension {
+            candidate_index: 0,
+            expected_catalog: catalog_revision.next().unwrap(),
+            file_access: false,
+            private_access: false,
+        },
+    ));
+    let stale = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "stale-extension-install" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("stale candidate must settle immediately");
+    assert_eq!(stale.outcome, OperationOutcome::Rejected);
+    assert_eq!(stale.reason, OperationReason::StoreConflict);
+    assert!(extension_state.install_calls.lock().unwrap().is_empty());
+
+    assert!(handle.dispatch_operation(
+        "extension-install".into(),
+        Command::InstallFocusedExtension {
+            candidate_index: ready.candidates[0].candidate_index,
+            expected_catalog: catalog_revision,
+            file_access: true,
+            private_access: true,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state.install_callbacks.lock().unwrap().len() == 1
+    ));
+    assert!(rx
+        .try_iter()
+        .all(|projection| !matches!(projection, Projection::OperationProcessed(_))));
+    let install_calls = extension_state.install_calls.lock().unwrap();
+    let (selector, file_access, private_access, deadline) = &install_calls[0];
+    assert_eq!(selector.profile(), profile);
+    assert_eq!(selector.expected_catalog_revision(), catalog_revision);
+    assert_eq!(selector.package(), &package);
+    assert!(*file_access);
+    assert!(*private_access);
+    assert!(*deadline > std::time::Instant::now());
+    drop(install_calls);
+
+    let install = zephium_core::ids::ExtensionInstallId::from(93_000);
+    let mut active_profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+    assert!(active_profiles.try_insert(profile));
+    extension_state
+        .install_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(
+        zephium_core::ports::extensions::ExtensionManagementSettlement::new(
+            zephium_core::ports::extensions::ExtensionInstallOutcome::Installed {
+                install,
+                runtime: zephium_core::ports::extensions::ExtensionInstalledRuntimeState::Active(
+                    zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+                ),
+            },
+            Some(active_profiles),
+        ),
+    );
+    let installed = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "extension-install" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("install settlement must complete the original operation");
+    assert_eq!(installed.outcome, OperationOutcome::Applied);
+    assert_eq!(installed.reason, OperationReason::MutationApplied);
+    assert!(engine
+        .extension_browser_surfaces()
+        .last()
+        .is_some_and(|surface| !surface.windows().is_empty()));
+
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog(
+            profile,
+            install,
+            catalog_revision.next().unwrap().next().unwrap(),
+            zephium_core::extensions::ExtensionInstallRevision::INITIAL
+                .next()
+                .unwrap(),
+            zephium_core::ports::extensions::ExtensionManagementRuntimeState::Active(
+                zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+            ),
+        ),
+    );
+    let _ = wait_for_ready_management_catalog(
+        &rx,
+        profile,
+        catalog_revision.next().unwrap().next().unwrap(),
+        1,
+    );
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
 }
 
 #[test]

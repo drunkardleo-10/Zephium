@@ -25,6 +25,7 @@ impl Shell {
             phase,
             catalog_revision: None,
             entries: Vec::new(),
+            candidates: Vec::new(),
         }));
     }
 
@@ -94,12 +95,45 @@ impl Shell {
                 }
             })
             .collect();
+        let candidates = catalog
+            .candidates()
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| ExtensionInstallCandidateView {
+                candidate_index: u8::try_from(index)
+                    .expect("extension candidate count is statically bounded below u8::MAX"),
+                name: candidate.name().to_owned(),
+                description: candidate.description().map(str::to_owned),
+                author: candidate.author().map(str::to_owned),
+                version: candidate.version().to_owned(),
+                required_api: candidate
+                    .required_api()
+                    .iter()
+                    .map(|permission| permission.to_string())
+                    .collect(),
+                required_hosts: candidate
+                    .required_hosts()
+                    .iter()
+                    .map(|pattern| pattern.to_string())
+                    .collect(),
+                supports_file_access: candidate.supports_file_access(),
+                compatibility: match candidate.compatibility() {
+                    ExtensionManagementCompatibility::Compatible => {
+                        ExtensionManagementCompatibilityView::Compatible
+                    }
+                    ExtensionManagementCompatibility::Degraded => {
+                        ExtensionManagementCompatibilityView::Degraded
+                    }
+                },
+            })
+            .collect();
         (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
             profile_id: catalog.profile().to_string(),
             phase: ExtensionManagementPhase::Ready,
             catalog_revision: Some(format!("{:016x}", catalog.catalog_revision().get())),
             entries,
+            candidates,
         }));
     }
 

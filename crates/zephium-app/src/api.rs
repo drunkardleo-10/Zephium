@@ -15,8 +15,8 @@ use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
 use zephium_core::ports::extensions::ExtensionServiceLifecycle;
 use zephium_core::ports::extensions::{
-    ExtensionManagementCatalogOutcome, ExtensionManagementSettlement, ExtensionSetEnabledOutcome,
-    ExtensionUninstallOutcome,
+    ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
+    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
@@ -40,6 +40,7 @@ pub const MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionManagementCompletion {
+    Install(ExtensionManagementSettlement<ExtensionInstallOutcome>),
     SetEnabled(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>),
     Uninstall(ExtensionManagementSettlement<ExtensionUninstallOutcome>),
 }
@@ -227,6 +228,16 @@ pub enum Command {
         expected_catalog: ExtensionInstallCatalogRevision,
         expected_install: ExtensionInstallRevision,
         enabled: bool,
+    },
+    /// Installs one exact package from the latest privileged management
+    /// projection. Shell derives the focused profile and complete package
+    /// selector; chrome can choose only the projected candidate index and the
+    /// two explicit optional-scope decisions.
+    InstallFocusedExtension {
+        candidate_index: u8,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        file_access: bool,
+        private_access: bool,
     },
     /// Removes one exact installed extension from the focused profile after
     /// the extension service proves regular/private native absence.

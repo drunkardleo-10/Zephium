@@ -28,6 +28,7 @@ type HeldBlockerUpdate = (
     Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>,
 );
 type HeldBlockerLoad = (ProfileId, Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>);
+type HeldExtensionInstall = zephium_core::ports::extensions::ExtensionInstallCallback;
 type HeldExtensionSetEnabled = zephium_core::ports::extensions::ExtensionSetEnabledCallback;
 type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstallCallback;
 type HeldExtensionManagementCatalog =
@@ -162,6 +163,15 @@ pub(super) struct FakeExtensionLifecycleState {
         Mutex<Option<zephium_core::ports::extensions::ExtensionManagementCatalogAdmission>>,
     pub(super) management_catalog_calls: Mutex<Vec<(ProfileId, std::time::Instant)>>,
     pub(super) management_catalog_callbacks: Mutex<Vec<HeldExtensionManagementCatalog>>,
+    pub(super) install_calls: Mutex<
+        Vec<(
+            zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
+            bool,
+            bool,
+            std::time::Instant,
+        )>,
+    >,
+    pub(super) install_callbacks: Mutex<Vec<HeldExtensionInstall>>,
     pub(super) set_enabled_calls: Mutex<
         Vec<(
             zephium_core::ports::extensions::ExtensionInstallSelector,
@@ -316,6 +326,34 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
             .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
         if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
             self.state.set_enabled_callbacks.lock().unwrap().push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
+    fn begin_install(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
+        file_access: bool,
+        private_access: bool,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionInstallCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        self.state.install_calls.lock().unwrap().push((
+            selector,
+            file_access,
+            private_access,
+            deadline,
+        ));
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state.install_callbacks.lock().unwrap().push(done);
         } else {
             drop(done);
         }

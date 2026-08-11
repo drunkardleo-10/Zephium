@@ -23,6 +23,12 @@ export const commands = {
 	 *  displaying it and performs no extension repository work at browser startup.
 	 */
 	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
+	/**
+	 *  Installs only a candidate from Shell's latest authenticated, retained
+	 *  management catalog. The frontend supplies no profile, package path,
+	 *  manifest declaration, or permission-name authority.
+	 */
+	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, fileAccess: boolean, privateAccess: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, fileAccess, privateAccess }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
@@ -291,6 +297,24 @@ export type ExtensionActionsView = {
 	actions: ExtensionActionView[],
 };
 
+/**
+ *  One authenticated package offered by Zephium's current curated catalog.
+ *  `candidate_index` is an opaque, short-lived selector into the exact
+ *  revisioned catalog retained by Shell. Privileged chrome may only echo it;
+ *  it conveys no package, repository, profile, or permission authority.
+ */
+export type ExtensionInstallCandidateView = {
+	candidate_index: number,
+	name: string,
+	description: string | null,
+	author: string | null,
+	version: string,
+	required_api: string[],
+	required_hosts: string[],
+	supports_file_access: boolean,
+	compatibility: ExtensionManagementCompatibilityView,
+};
+
 export type ExtensionManagementChanged = ExtensionManagementView;
 
 /**  Reviewed compatibility of the exact authenticated manifest. */
@@ -338,6 +362,7 @@ export type ExtensionManagementView = {
 	phase: ExtensionManagementPhase,
 	catalog_revision: string | null,
 	entries: ExtensionManagementEntryView[],
+	candidates: ExtensionInstallCandidateView[],
 };
 
 export type ItemsChanged = ItemsState;
@@ -409,7 +434,7 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "extension_activation_pending" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "extension_enablement_pending" | "extension_activation_pending" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
