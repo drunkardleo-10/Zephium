@@ -163,8 +163,8 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         },
         "web_accessible_resources": [{
             "resources": [
-                "fido2-page-script.js", "notification.html", "menu-button.html",
-                "menu-list.html", "menu.html", "fonts/*"
+                "fido2-page-script.js", "notification.html", "menu-button.payload",
+                "fonts/*"
             ],
             "matches": ["<all_urls>"],
             "use_dynamic_url": true
@@ -177,7 +177,7 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         ("background.js", background_probe_script()),
         ("managed-schema.json", "{}"),
         ("menu-list.html", "<!doctype html><title>list</title>"),
-        ("menu.html", "<!doctype html><title>menu</title>"),
+        ("menu.html", "<!doctype html><title>unused menu host</title>"),
         (
             "notification.html",
             "<!doctype html><title>notification</title>",
@@ -1152,6 +1152,28 @@ mod tests {
         assert!(EXPECTED_NATIVE_REQUIRED_PERMISSIONS.contains(&"webRequest"));
         assert!(!EXPECTED_NATIVE_REQUIRED_PERMISSIONS.contains(&"webRequestAuthProvider"));
         assert_eq!(EXPECTED_NATIVE_OPTIONAL_PERMISSIONS, ["nativeMessaging"]);
+    }
+
+    #[test]
+    fn sandbox_leaf_is_private_and_only_its_inert_payload_is_public() {
+        let temp = tempfile::tempdir().expect("temporary contract root");
+        let fixture = write_fixture(temp.path()).expect("contract fixture");
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(fixture.join("manifest.json")).expect("manifest bytes"),
+        )
+        .expect("manifest JSON");
+        let resources = manifest["web_accessible_resources"][0]["resources"]
+            .as_array()
+            .expect("resource array");
+        let publishes = |name: &str| resources.iter().any(|value| value.as_str() == Some(name));
+        assert!(publishes("menu-button.payload"));
+        assert!(!publishes("menu-button.html"));
+        assert!(!publishes("menu-list.html"));
+        assert!(!publishes("menu.html"));
+        let payload =
+            std::fs::read_to_string(fixture.join("menu-button.payload")).expect("inert payload");
+        assert!(payload.contains("parent.postMessage"));
+        assert!(!payload.contains("chrome.runtime.connect"));
     }
 
     #[test]

@@ -40,10 +40,15 @@ Chromium's full site-isolation model.
    contract, not a current product claim: production adapters remain disabled until
    platform-native hostile tests enforce it. A manifest-declared extension sandbox is
    not itself a fifth trust zone on macOS: the live WKWebExtension gate proves such a
-   page retains its `webkit-extension` origin and `chrome` API. Product provisioning
-   must remain disabled until the sealed package either removes that dependency through
-   a reviewed source adaptation or hosts it in a separately attested unprivileged
-   renderer. Native naming or CSP text is never accepted as sandbox evidence.
+   page retains its `webkit-extension` origin and `chrome` API, even when its extension
+   URL is placed in an explicit `sandbox="allow-scripts"` iframe. A separate live gate
+   proves the permitted replacement primitive: an authenticated content script fetches
+   a public inert payload and instantiates it through a Blob-backed `allow-scripts`
+   frame whose message origin is `null`, whose extension APIs are absent, and whose DOM
+   is inaccessible to the parent. Product provisioning remains disabled until the
+   pinned package deterministically adopts that topology and its authenticated message
+   flow passes hostile tests. Native naming, CSP text, or the `sandbox` attribute alone
+   is never accepted as isolation evidence.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.

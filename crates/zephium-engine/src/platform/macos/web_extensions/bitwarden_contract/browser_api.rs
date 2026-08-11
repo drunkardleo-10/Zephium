@@ -33,8 +33,7 @@ enum ExecutionWorldNamespace {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SandboxIsolation {
-    Native,
-    AdapterRequired,
+    SealedBlob,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,8 +75,7 @@ impl Observation {
 
     pub(super) const fn sandbox_isolation(self) -> &'static str {
         match self.sandbox_isolation {
-            SandboxIsolation::Native => "native",
-            SandboxIsolation::AdapterRequired => "adapter-required",
+            SandboxIsolation::SealedBlob => "sealed-blob",
         }
     }
 }
@@ -90,15 +88,15 @@ pub(super) fn write_fixture_assets(path: &Path) -> Result<(), String> {
         ),
         (
             "menu-button.html",
-            "<!doctype html><title>button</title><script src=\"sandbox-probe.js\"></script>",
+            "<!doctype html><title>unused privileged leaf</title>",
+        ),
+        (
+            "menu-button.payload",
+            "<!doctype html><title>button</title><script>parent.postMessage({ kind: 'zephium-bitwarden-sandbox', chromeType: typeof globalThis.chrome, runtimeType: typeof globalThis.chrome?.runtime, storageLocalType: typeof globalThis.chrome?.storage?.local, locationOrigin: location.origin }, '*');</script>",
         ),
         (
             "browser-api-probe.html",
             "<!doctype html><meta charset=\"utf-8\"><title>zephium-browser-api-pending</title><script src=\"browser-api-probe.js\"></script>",
-        ),
-        (
-            "sandbox-probe.js",
-            "parent.postMessage({ kind: 'zephium-bitwarden-sandbox', chromeType: typeof globalThis.chrome, runtimeType: typeof globalThis.chrome?.runtime, storageLocalType: typeof globalThis.chrome?.storage?.local, origin: location.origin }, '*');",
         ),
         (
             "scripting-page-script.js",
@@ -123,6 +121,10 @@ pub(super) fn product_tab_content_script(title: &str) -> String {
         sandboxRuntime: "pending",
         sandboxStorageLocal: "pending",
         sandboxOrigin: "pending",
+        sandboxLocationOrigin: "pending",
+        sandboxDomAccess: "pending",
+        sandboxLeafDirectExposure: "not-exposed",
+        sandboxTransport: "pending",
         settled: false
     }};
     addEventListener("DOMContentLoaded", () => {{
@@ -138,16 +140,40 @@ pub(super) fn product_tab_content_script(title: &str) -> String {
         document.documentElement.append(script);
 
         const sandbox = document.createElement("iframe");
+        sandbox.setAttribute("sandbox", "allow-scripts");
         addEventListener("message", (event) => {{
-            if (event.source !== sandbox.contentWindow || event.data?.kind !== "zephium-bitwarden-sandbox") return;
-            evidence.sandboxChrome = event.data.chromeType;
-            evidence.sandboxRuntime = event.data.runtimeType;
-            evidence.sandboxStorageLocal = event.data.storageLocalType;
-            evidence.sandboxOrigin = event.data.origin;
+            if (event.source === sandbox.contentWindow
+                && event.data?.kind === "zephium-bitwarden-sandbox") {{
+                evidence.sandboxChrome = event.data.chromeType;
+                evidence.sandboxRuntime = event.data.runtimeType;
+                evidence.sandboxStorageLocal = event.data.storageLocalType;
+                evidence.sandboxOrigin = event.origin;
+                evidence.sandboxLocationOrigin = event.data.locationOrigin;
+                try {{
+                    evidence.sandboxDomAccess = sandbox.contentDocument ? "present" : "absent";
+                }} catch (_) {{
+                    evidence.sandboxDomAccess = "denied";
+                }}
+                evidence.sandboxTransport = "sandbox-message";
+                return;
+            }}
         }});
         sandbox.hidden = true;
-        sandbox.src = api.runtime.getURL("menu-button.html");
-        document.documentElement.append(sandbox);
+        void (async () => {{
+            try {{
+                const response = await fetch(api.runtime.getURL("menu-button.payload"));
+                if (!response.ok) throw new Error(`leaf-http-${{response.status}}`);
+                const leafUrl = URL.createObjectURL(
+                    new Blob([await response.text()], {{ type: "text/html" }})
+                );
+                sandbox.addEventListener("load", () => URL.revokeObjectURL(leafUrl), {{ once: true }});
+                sandbox.src = leafUrl;
+                document.documentElement.append(sandbox);
+                evidence.sandboxTransport = "blob-appended";
+            }} catch (error) {{
+                evidence.sandboxTransport = `error:${{String(error?.message ?? error).slice(0, 80)}}`;
+            }}
+        }})();
 
         try {{
             const request = api.runtime.sendMessage({{ type: "zephium-bitwarden-programmatic-script" }});
@@ -163,13 +189,26 @@ pub(super) fn product_tab_content_script(title: &str) -> String {
             evidence.programmaticScript =
                 document.documentElement.dataset.zephiumBitwardenProgrammaticScript
                 ?? evidence.programmaticScript;
+            if (polls >= 40) {{
+                for (const key of [
+                    "sandboxChrome", "sandboxRuntime", "sandboxStorageLocal", "sandboxOrigin",
+                    "sandboxLocationOrigin", "sandboxDomAccess"
+                ]) {{
+                    if (evidence[key] === "pending") evidence[key] = "unobserved";
+                }}
+                if (evidence.sandboxTransport === "pending") evidence.sandboxTransport = "timeout";
+            }}
             const complete = evidence.dynamicResourceLoad !== "pending"
                 && evidence.dynamicResourceExecution !== "pending"
                 && evidence.programmaticScript !== "pending"
                 && evidence.sandboxChrome !== "pending"
                 && evidence.sandboxRuntime !== "pending"
                 && evidence.sandboxStorageLocal !== "pending"
-                && evidence.sandboxOrigin !== "pending";
+                && evidence.sandboxOrigin !== "pending"
+                && evidence.sandboxLocationOrigin !== "pending"
+                && evidence.sandboxDomAccess !== "pending"
+                && evidence.sandboxLeafDirectExposure !== "pending"
+                && evidence.sandboxTransport !== "pending";
             if (complete || polls >= {SETTLE_POLLS}) {{
                 if (evidence.dynamicResourceExecution === "pending") {{
                     evidence.dynamicResourceExecution = "not-executed";
@@ -181,7 +220,11 @@ pub(super) fn product_tab_content_script(title: &str) -> String {
                     && evidence.sandboxChrome !== "pending"
                     && evidence.sandboxRuntime !== "pending"
                     && evidence.sandboxStorageLocal !== "pending"
-                    && evidence.sandboxOrigin !== "pending";
+                    && evidence.sandboxOrigin !== "pending"
+                    && evidence.sandboxLocationOrigin !== "pending"
+                    && evidence.sandboxDomAccess !== "pending"
+                    && evidence.sandboxLeafDirectExposure !== "pending"
+                    && evidence.sandboxTransport !== "pending";
                 void api.storage.local.set({{ zephiumBitwardenContentApiProbe: evidence }});
                 return;
             }}
@@ -293,26 +336,41 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
         content
             .and_then(|value| value.get("sandboxOrigin"))
             .and_then(Value::as_str),
+        content
+            .and_then(|value| value.get("sandboxLeafDirectExposure"))
+            .and_then(Value::as_str),
+        content
+            .and_then(|value| value.get("sandboxTransport"))
+            .and_then(Value::as_str),
+        content
+            .and_then(|value| value.get("sandboxDomAccess"))
+            .and_then(Value::as_str),
     ) {
-        (Some("undefined"), Some("undefined"), Some("undefined"), Some("null")) => {
-            SandboxIsolation::Native
-        }
-        (Some("object"), Some("object"), Some("object"), Some(origin))
-            if origin.len() <= 128
-                && origin
-                    .strip_prefix("webkit-extension://")
-                    .is_some_and(|principal| {
-                        !principal.is_empty() && !principal.as_bytes().contains(&b'/')
-                    }) =>
-        {
-            SandboxIsolation::AdapterRequired
-        }
+        (
+            Some("undefined"),
+            Some("undefined"),
+            Some("undefined"),
+            Some("null"),
+            Some("not-exposed"),
+            Some("sandbox-message"),
+            Some("absent" | "denied"),
+        ) => SandboxIsolation::SealedBlob,
         _ => {
             return Err(format!(
                 "Bitwarden sandbox-page trust-zone contract drifted: {evidence}"
             ))
         }
     };
+    let sandbox_location_origin = content
+        .and_then(|value| value.get("sandboxLocationOrigin"))
+        .and_then(Value::as_str)
+        .filter(|origin| origin.len() <= 2_048)
+        .and_then(|origin| url::Url::parse(origin).ok());
+    if sandbox_location_origin.is_none() {
+        return Err(format!(
+            "Bitwarden sandbox location-origin diagnostic drifted: {evidence}"
+        ));
+    }
     let matches = |object: Option<&serde_json::Map<String, Value>>, name: &str, expected: &str| {
         object
             .and_then(|value| value.get(name))
@@ -366,8 +424,9 @@ mod tests {
         let content = product_tab_content_script("\"loaded\"");
         assert!(content.contains("DOMContentLoaded"));
         assert!(content.contains("runtime.getURL(\"fido2-page-script.js\")"));
-        assert!(content.contains("runtime.getURL(\"menu-button.html\")"));
-        assert!(content.contains("event.source !== sandbox.contentWindow"));
+        assert!(content.contains("fetch(api.runtime.getURL(\"menu-button.payload\"))"));
+        assert!(content.contains("event.source === sandbox.contentWindow"));
+        assert!(content.contains("sandboxTransport"));
         let probe = probe_script();
         assert!(probe.contains("zephiumBitwardenBackgroundApiProbe"));
         assert!(probe.contains("zephiumBitwardenContentApiProbe"));
@@ -394,10 +453,14 @@ mod tests {
                 "dynamicResourceExecution": "executed",
                 "dynamicResourceUrl": "opaque",
                 "programmaticScript": "executed",
-                "sandboxChrome": "object",
-                "sandboxRuntime": "object",
-                "sandboxStorageLocal": "object",
-                "sandboxOrigin": "webkit-extension://00000000-0000-0000-0000-000000000000",
+                "sandboxChrome": "undefined",
+                "sandboxRuntime": "undefined",
+                "sandboxStorageLocal": "undefined",
+                "sandboxOrigin": "null",
+                "sandboxLocationOrigin": "https://fixture.invalid",
+                "sandboxDomAccess": "absent",
+                "sandboxLeafDirectExposure": "not-exposed",
+                "sandboxTransport": "sandbox-message",
                 "settled": true
             },
             "settled": true
@@ -407,7 +470,7 @@ mod tests {
             Ok(Observation {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
                 execution_world_namespace: ExecutionWorldNamespace::AdapterRequired,
-                sandbox_isolation: SandboxIsolation::AdapterRequired,
+                sandbox_isolation: SandboxIsolation::SealedBlob,
             })
         );
 
@@ -418,12 +481,13 @@ mod tests {
         native["content"]["sandboxRuntime"] = Value::String("undefined".to_owned());
         native["content"]["sandboxStorageLocal"] = Value::String("undefined".to_owned());
         native["content"]["sandboxOrigin"] = Value::String("null".to_owned());
+        native["content"]["sandboxLeafDirectExposure"] = Value::String("not-exposed".to_owned());
         assert_eq!(
             validate_for_native_inspection(&native),
             Ok(Observation {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
                 execution_world_namespace: ExecutionWorldNamespace::Native,
-                sandbox_isolation: SandboxIsolation::Native,
+                sandbox_isolation: SandboxIsolation::SealedBlob,
             })
         );
 
