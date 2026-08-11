@@ -186,6 +186,11 @@ pub(crate) enum TryPushError {
     Closed(Command),
 }
 
+// Refusal must return the exact command so lifecycle/native callers can retry
+// or account for it without cloning authority-bearing payloads. Keep that
+// allocation-free failure contract bounded as `Command` evolves.
+const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
     RuntimeRestart,
@@ -335,6 +340,10 @@ impl CommandQueue {
         should_stop
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "mailbox refusal returns the exact command without allocating on saturation"
+    )]
     pub(crate) fn try_push(&self, command: Command) -> Result<(), TryPushError> {
         let mut state = self
             .inner

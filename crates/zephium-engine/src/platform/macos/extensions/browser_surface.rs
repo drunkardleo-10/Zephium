@@ -56,13 +56,13 @@ pub(super) enum BrowserSurfaceError {
 
 /// Bounded, telemetry-free counters for native requests that cannot be
 /// represented by Zephium's logical-tab residency model.
-#[cfg(any(test, feature = "native-web-extension-probes"))]
+#[cfg(feature = "native-web-extension-probes")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BrowserSurfaceDiagnostics {
     discarded_tab_webview_refusals: u64,
 }
 
-#[cfg(any(test, feature = "native-web-extension-probes"))]
+#[cfg(feature = "native-web-extension-probes")]
 impl BrowserSurfaceDiagnostics {
     pub(crate) const fn discarded_tab_webview_refusals(self) -> u64 {
         self.discarded_tab_webview_refusals
