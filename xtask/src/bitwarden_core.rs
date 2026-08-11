@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::io::Read;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 
@@ -16,6 +17,12 @@ const PINNED_COMMIT: &str = "adf0337e4a0f788b895933792fc04fa162669eff";
 const PINNED_TAG: &str = "browser-v2026.7.0";
 const MAX_REVIEWED_SOURCE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: u64 = 16 * 1024;
+const PROBE_OVERLAY_FILES: &[&str] = &[
+    "apps/browser/src/background/main.background.ts",
+    "apps/browser/src/autofill/fido2/background/fido2.background.ts",
+    "apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts",
+    "apps/browser/src/manifest.v3.json",
+];
 
 #[derive(Clone, Copy)]
 struct ReviewedSourceFile {
@@ -234,6 +241,199 @@ pub(crate) fn check_source(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Materializes an exact, non-product source overlay for the first native
+/// Bitwarden vertical probe. The overlay deliberately disables the inline menu
+/// instead of allowing WebKit's ineffective extension-page sandbox. It neither
+/// builds nor authenticates an extension package.
+pub(crate) fn materialize_macos_probe_overlay(root: &Path, output: &Path) -> Result<(), String> {
+    check_source(root)?;
+    ensure_absent_output(output)?;
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize overlay parent: {error}"))?;
+    let output_name = output
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "overlay output has no final component".to_owned())?;
+    let final_output = parent.join(output_name);
+    ensure_absent_output(&final_output)?;
+
+    let staging = tempfile::Builder::new()
+        .prefix(".zephium-bitwarden-overlay-")
+        .tempdir_in(&parent)
+        .map_err(|error| format!("cannot create overlay stage: {error}"))?;
+    for relative in PROBE_OVERLAY_FILES {
+        let source = fs::read_to_string(root.join(relative))
+            .map_err(|error| format!("cannot read overlay source {relative}: {error}"))?;
+        let adapted = adapt_macos_probe_file(relative, &source)?;
+        write_overlay_file(staging.path(), relative, adapted.as_bytes())?;
+    }
+    let metadata = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": 1,
+        "kind": "zephium-bitwarden-core-macos-probe-overlay",
+        "product_authority": false,
+        "source_commit": PINNED_COMMIT,
+        "source_tag": PINNED_TAG,
+        "build_target": {
+            "browser": "chrome",
+            "manifest_version": 3,
+            "node_env": "production",
+        },
+        "limitations": ["inline-menu-disabled", "not-a-product-package"],
+        "files": PROBE_OVERLAY_FILES,
+    }))
+    .map_err(|error| format!("cannot serialize overlay metadata: {error}"))?;
+    write_overlay_file(staging.path(), "ZEPHIUM-OVERLAY.json", &metadata)?;
+
+    let staged_path = staging.keep();
+    fs::rename(&staged_path, &final_output).map_err(|error| {
+        format!(
+            "cannot atomically publish overlay (stage retained at {}): {error}",
+            staged_path.display()
+        )
+    })?;
+    println!(
+        "Bitwarden Core macOS probe overlay materialized: files={}; product_authority=false",
+        PROBE_OVERLAY_FILES.len()
+    );
+    Ok(())
+}
+
+fn adapt_macos_probe_file(path: &str, source: &str) -> Result<String, String> {
+    match path {
+        "apps/browser/src/autofill/fido2/background/fido2.background.ts" => replace_exact(
+            path,
+            source,
+            "world: chrome.scripting.ExecutionWorld.MAIN",
+            "world: \"MAIN\"",
+        ),
+        "apps/browser/src/background/main.background.ts" => {
+            const BEFORE: &str = r#"    const localStorageStorageService = BrowserApi.isManifestVersion(3)
+      ? new OffscreenStorageService(this.offscreenDocumentService)
+      : new WindowStorageService(self.localStorage);
+
+    const storageServiceProvider = new BrowserStorageServiceProvider(
+      this.storageService,
+      this.memoryStorageForStateProviders,
+      this.largeObjectMemoryStorageForStateProviders,
+      new PrimarySecondaryStorageService(this.storageService, localStorageStorageService),
+    );"#;
+            const AFTER: &str = r#"    const diskBackupLocalStorage = BrowserApi.isManifestVersion(3)
+      ? this.offscreenDocumentService.offscreenApiSupported()
+        ? new PrimarySecondaryStorageService(
+            this.storageService,
+            new OffscreenStorageService(this.offscreenDocumentService),
+          )
+        : this.storageService
+      : new PrimarySecondaryStorageService(
+          this.storageService,
+          new WindowStorageService(self.localStorage),
+        );
+
+    const storageServiceProvider = new BrowserStorageServiceProvider(
+      this.storageService,
+      this.memoryStorageForStateProviders,
+      this.largeObjectMemoryStorageForStateProviders,
+      diskBackupLocalStorage,
+    );"#;
+            replace_exact(path, source, BEFORE, AFTER)
+        }
+        "apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts" => {
+            const BEFORE: &str = r#"  initMenuIframe() {
+    this.defaultIframeAttributes.src = BrowserApi.getRuntimeURL("overlay/menu.html");
+    this.defaultIframeAttributes.title = this.iframeTitle;
+
+    this.iframe = globalThis.document.createElement("iframe");
+    for (const [attribute, value] of Object.entries(this.defaultIframeAttributes)) {
+      this.iframe.setAttribute(attribute, value);
+    }
+    this.iframeStyles = { ...this.iframeStyles, ...this.initStyles };
+    this.setElementStyles(this.iframe, this.iframeStyles, true);
+    this.iframe.addEventListener(EVENTS.LOAD, this.setupPortMessageListener);
+
+    if (this.ariaAlert) {
+      this.createAriaAlertElement();
+    }
+
+    this.shadow.appendChild(this.iframe);
+    this.observeIframe();
+  }"#;
+            const AFTER: &str = r#"  initMenuIframe() {
+    // WKWebExtension does not enforce manifest sandbox pages, including when
+    // their extension URL is placed in an explicit sandboxed iframe. The
+    // authenticated probe overlay therefore refuses this UI path until the
+    // sealed inert-payload renderer is applied and attested end to end.
+    this.forceCloseInlineMenu();
+  }"#;
+            replace_exact(path, source, BEFORE, AFTER)
+        }
+        "apps/browser/src/manifest.v3.json" => adapt_probe_manifest(path, source),
+        _ => Err(format!("no macOS probe adaptation is defined for {path}")),
+    }
+}
+
+fn adapt_probe_manifest(path: &str, source: &str) -> Result<String, String> {
+    let without_sandbox = replace_exact(
+        path,
+        source,
+        "  \"sandbox\": {\n    \"pages\": [\"overlay/menu-button.html\", \"overlay/menu-list.html\"]\n  },\n",
+        "",
+    )?;
+    let without_button = replace_exact(
+        path,
+        &without_sandbox,
+        "        \"overlay/menu-button.html\",\n",
+        "",
+    )?;
+    let without_list = replace_exact(
+        path,
+        &without_button,
+        "        \"overlay/menu-list.html\",\n",
+        "",
+    )?;
+    replace_exact(path, &without_list, "        \"overlay/menu.html\",\n", "")
+}
+
+fn replace_exact(path: &str, source: &str, before: &str, after: &str) -> Result<String, String> {
+    let occurrences = source.match_indices(before).count();
+    if occurrences != 1 {
+        return Err(format!(
+            "{path} adaptation preimage drifted: expected one occurrence, observed {occurrences}"
+        ));
+    }
+    Ok(source.replacen(before, after, 1))
+}
+
+fn ensure_absent_output(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(format!("overlay output already exists: {}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot inspect overlay output: {error}")),
+    }
+}
+
+fn write_overlay_file(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
+    validate_relative_path(relative)?;
+    let path = root.join(relative);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("overlay file has no parent: {relative}"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create overlay directory for {relative}: {error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("cannot create overlay file {relative}: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write overlay file {relative}: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot sync overlay file {relative}: {error}"))
+}
+
 fn run_git(root: &Path, arguments: &[&str]) -> Result<String, String> {
     let mut child = Command::new("git")
         .arg("-C")
@@ -390,5 +590,96 @@ mod tests {
         );
         assert!(require_exact_line("fixture", "value", "value").is_ok());
         assert!(require_exact_line("fixture", "value\nother", "value").is_err());
+    }
+
+    #[test]
+    fn main_world_and_offscreen_adaptations_are_exact_and_fail_closed() {
+        let fido = "before world: chrome.scripting.ExecutionWorld.MAIN after";
+        let adapted = adapt_macos_probe_file(
+            "apps/browser/src/autofill/fido2/background/fido2.background.ts",
+            fido,
+        )
+        .unwrap();
+        assert_eq!(adapted, "before world: \"MAIN\" after");
+        assert!(adapt_macos_probe_file(
+            "apps/browser/src/autofill/fido2/background/fido2.background.ts",
+            &format!("{fido} {fido}"),
+        )
+        .is_err());
+
+        let storage = r#"    const localStorageStorageService = BrowserApi.isManifestVersion(3)
+      ? new OffscreenStorageService(this.offscreenDocumentService)
+      : new WindowStorageService(self.localStorage);
+
+    const storageServiceProvider = new BrowserStorageServiceProvider(
+      this.storageService,
+      this.memoryStorageForStateProviders,
+      this.largeObjectMemoryStorageForStateProviders,
+      new PrimarySecondaryStorageService(this.storageService, localStorageStorageService),
+    );"#;
+        let adapted =
+            adapt_macos_probe_file("apps/browser/src/background/main.background.ts", storage)
+                .unwrap();
+        assert!(adapted.contains("offscreenApiSupported()"));
+        assert!(adapted.contains(": this.storageService"));
+        assert!(adapted.contains("diskBackupLocalStorage,"));
+        assert!(!adapted.contains("const localStorageStorageService"));
+    }
+
+    #[test]
+    fn probe_overlay_removes_every_unsafe_inline_menu_entrypoint() {
+        let manifest = r#"{
+  "sandbox": {
+    "pages": ["overlay/menu-button.html", "overlay/menu-list.html"]
+  },
+  "resources": [
+        "overlay/menu-button.html",
+        "overlay/menu-list.html",
+        "overlay/menu.html",
+        "kept.html"
+  ]
+}"#;
+        let adapted = adapt_probe_manifest("manifest", manifest).unwrap();
+        assert!(!adapted.contains("\"sandbox\""));
+        assert!(!adapted.contains("overlay/menu-button.html"));
+        assert!(!adapted.contains("overlay/menu-list.html"));
+        assert!(!adapted.contains("overlay/menu.html"));
+        assert!(adapted.contains("kept.html"));
+
+        let service = r#"  initMenuIframe() {
+    this.defaultIframeAttributes.src = BrowserApi.getRuntimeURL("overlay/menu.html");
+    this.defaultIframeAttributes.title = this.iframeTitle;
+
+    this.iframe = globalThis.document.createElement("iframe");
+    for (const [attribute, value] of Object.entries(this.defaultIframeAttributes)) {
+      this.iframe.setAttribute(attribute, value);
+    }
+    this.iframeStyles = { ...this.iframeStyles, ...this.initStyles };
+    this.setElementStyles(this.iframe, this.iframeStyles, true);
+    this.iframe.addEventListener(EVENTS.LOAD, this.setupPortMessageListener);
+
+    if (this.ariaAlert) {
+      this.createAriaAlertElement();
+    }
+
+    this.shadow.appendChild(this.iframe);
+    this.observeIframe();
+  }"#;
+        let adapted = adapt_macos_probe_file(
+            "apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts",
+            service,
+        )
+        .unwrap();
+        assert!(adapted.contains("this.forceCloseInlineMenu();"));
+        assert!(!adapted.contains("createElement(\"iframe\")"));
+        assert!(!adapted.contains("BrowserApi.getRuntimeURL"));
+    }
+
+    #[test]
+    fn overlay_writer_never_replaces_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        write_overlay_file(temp.path(), "nested/file", b"first").unwrap();
+        assert!(write_overlay_file(temp.path(), "nested/file", b"second").is_err());
+        assert_eq!(fs::read(temp.path().join("nested/file")).unwrap(), b"first");
     }
 }

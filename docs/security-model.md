@@ -483,6 +483,13 @@ file reads are bounded, and canonical file paths must remain beneath the
 admitted root. This protects release operators from building a drifted or
 partially inspected tree; it is not confinement against a malicious process
 running as the release user.
+The first macOS vertical-slice overlay is deliberately non-product. It fixes
+the absent `ExecutionWorld` enum and offscreen fallback, but removes public
+inline-menu pages and forces that UI path closed because WebKit does not enforce
+their sandbox. Its atomic output metadata records both the Chrome MV3 build
+target and `product_authority=false`; package authority must reject any artifact
+derived from this probe overlay. It is evidence-gathering infrastructure, not a
+temporary permission bypass.
 The repository can recover at most eight sealed catalog-set finals and has no
 production materialization GC yet. Repeated distinct catalog selections can
 hard-stop at that bound; a bounded collector that runs only after

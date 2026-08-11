@@ -63,6 +63,17 @@ fn main() {
                 exit(1);
             }
         }
+        Some("materialize-bitwarden-core-macos-probe-overlay")
+            if arguments.len() == 5 && arguments[1] == "--source" && arguments[3] == "--output" =>
+        {
+            if let Err(error) = bitwarden_core::materialize_macos_probe_overlay(
+                std::path::Path::new(&arguments[2]),
+                std::path::Path::new(&arguments[4]),
+            ) {
+                eprintln!("Bitwarden Core macOS probe overlay failed: {error}");
+                exit(1);
+            }
+        }
         Some("materialize-blocker-seed-webkit")
             if arguments.len() == 3 && arguments[1] == "--output" =>
         {
@@ -94,7 +105,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-blocker-seed|check-bitwarden-core-source --source PATH|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-blocker-seed|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }

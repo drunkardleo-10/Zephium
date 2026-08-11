@@ -968,6 +968,21 @@ main-world, manifest, inline-menu, template, and webpack seams. The command
 does not clone, fetch, adapt, build, or authorize a package. Git output and
 individual source reads are bounded; a partial inspection checkout, local
 edit, untracked input, symlink escape, or source drift fails before adaptation.
+The native vertical slice builds the OSS production **Chrome MV3** target. The
+pinned Safari manifest transform deletes the service-worker `background`
+declaration and is therefore not the input to Zephium's WKWebExtension
+controller runtime. This target choice is compiled into generated overlay
+metadata rather than left to a release-shell environment default.
+
+`cargo xtask materialize-bitwarden-core-macos-probe-overlay --source PATH
+--output PATH` emits an atomic, no-replace source overlay only after that exact
+admission succeeds. It substitutes literal `"MAIN"`, selects primary storage
+when `chrome.offscreen` is absent, and fail-closes the unsafe inline-menu path
+while removing its sandbox and public resource declarations. The metadata
+states `product_authority=false` and `inline-menu-disabled`; this overlay exists
+to run the first real native vertical slice and cannot be sealed as the release
+package. The production overlay must replace that degradation with the
+self-contained inert-payload renderer proven by the live native gate.
 
 ---
 
