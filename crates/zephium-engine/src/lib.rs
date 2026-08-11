@@ -518,6 +518,9 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
+            event @ EngineEvent::ExtensionActionsInvalidated { profile } => {
+                self.profile_is_active(profile).then_some(event)
+            }
             // This is an untrusted request, not a native-state fact. Deliver
             // it after profile retirement so Shell can explicitly reject the
             // retained native completion instead of waiting for its timeout.

@@ -36,6 +36,21 @@ fn user_content_settlements_coalesce_by_scope_not_generation() {
 }
 
 #[test]
+fn action_invalidations_coalesce_per_profile() {
+    let first = ProfileId::from(62);
+    let second = ProfileId::from(63);
+    let event = |profile| EngineEvent::ExtensionActionsInvalidated { profile };
+    assert_eq!(
+        CoalescedKey::of(&event(first)),
+        CoalescedKey::of(&event(first))
+    );
+    assert_ne!(
+        CoalescedKey::of(&event(first)),
+        CoalescedKey::of(&event(second))
+    );
+}
+
+#[test]
 fn blocker_preference_retry_timer_is_exact_and_profile_bounded() {
     let queue = CommandQueue::new();
     let profile = ProfileId::from(61);

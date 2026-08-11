@@ -668,9 +668,12 @@ weak webview or accessing `popupWebView`. Labels, badges, and future icon pixels
 cross the boundary only after fixed byte/dimension validation; unchanged
 effective state reuses its prior revision. An applied empty cohort removes stale
 buttons, while a rejected or stale refresh retains the last known-good cohort.
-Scheduled reads remain in a fixed-size pending set until an exact applied
-settlement arrives; the existing low-frequency maintenance tick repairs a
-rejected or lost settlement without adding a timer or idle wakeup.
+`didUpdateAction` is accepted only from the exact profile controller, loaded
+context, and (when present) known logical tab, then reduced to one coalescible
+profile invalidation fact. Scheduled reads remain in a fixed-size pending set
+until an exact applied settlement arrives. The existing low-frequency
+maintenance tick rereads each active profile to repair a rejected or lost
+settlement/invalidation without adding a timer, renderer, or idle wakeup.
 Profile retirement erases both the logical surface and its action cohort. This
 read path is not invocation authority. A toolbar invocation is independently
 versioned by request id, surface generation, runtime generation, and action

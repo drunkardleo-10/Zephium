@@ -91,6 +91,10 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         request: invocation,
         settlement: zephium_core::extensions::ExtensionActionSettlement::Dispatched,
     }));
+    shell.handle(Command::Engine(EngineEvent::ExtensionActionsInvalidated {
+        profile,
+    }));
+    assert_eq!(engine.extension_action_requests().len(), 2);
 
     shell.handle(Command::Engine(
         EngineEvent::ExtensionActionsSnapshotSettled {
@@ -104,7 +108,7 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
     ));
     assert_eq!(shell.extension_actions.snapshot(profile), Some(&snapshot));
     assert!(shell.retry_extension_actions().scheduled);
-    assert_eq!(engine.extension_action_requests().len(), 2);
+    assert_eq!(engine.extension_action_requests().len(), 3);
 
     shell.handle(Command::Engine(
         EngineEvent::ExtensionActionsSnapshotSettled {
@@ -126,7 +130,7 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         },
     ));
     assert_eq!(shell.retry_extension_actions(), NativeWork::default());
-    assert_eq!(engine.extension_action_requests().len(), 2);
+    assert_eq!(engine.extension_action_requests().len(), 3);
 }
 
 #[test]

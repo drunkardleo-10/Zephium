@@ -20,8 +20,9 @@ use objc2_foundation::{
     NSUTF8StringEncoding, NSURL,
 };
 use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionController, WKWebExtensionControllerDelegate,
-    WKWebExtensionTab, WKWebExtensionTabConfiguration, WKWebExtensionWindow, WKWebView,
+    WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
+    WKWebExtensionControllerDelegate, WKWebExtensionTab, WKWebExtensionTabConfiguration,
+    WKWebExtensionWindow, WKWebView,
 };
 use zephium_core::extensions::{
     ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection, ExtensionBrowserSurface,
@@ -739,6 +740,39 @@ define_class!(
                 },
                 completion,
             );
+        }
+
+        #[unsafe(method(webExtensionController:didUpdateAction:forExtensionContext:))]
+        unsafe fn did_update_action(
+            &self,
+            controller: &WKWebExtensionController,
+            action: &WKWebExtensionAction,
+            context: &WKWebExtensionContext,
+        ) {
+            let broker = &self.ivars().broker;
+            if !broker.accepts(Some(controller), context) {
+                return;
+            }
+            let Some(action_context) = (unsafe { action.webExtensionContext() }) else {
+                return;
+            };
+            if !std::ptr::eq(&*action_context, context) {
+                return;
+            }
+            if let Some(tab) = unsafe { action.associatedTab() } {
+                let known = self.ivars().windows.borrow().iter().any(|window| {
+                    window
+                        .ivars()
+                        .tabs
+                        .borrow()
+                        .iter()
+                        .any(|candidate| ProtocolObject::from_ref(&**candidate) == &*tab)
+                });
+                if !known {
+                    return;
+                }
+            }
+            broker.notify_actions_invalidated();
         }
     }
 );

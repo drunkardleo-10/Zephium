@@ -141,6 +141,18 @@ impl BrowserRequestBroker {
         unsafe { expected.extensionContexts() }.containsObject(context)
     }
 
+    pub(super) fn notify_actions_invalidated(&self) {
+        let Some(sink) = self.sink.as_ref() else {
+            return;
+        };
+        let profile = self.profile;
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            sink(EngineEventIngress::global(
+                EngineEvent::ExtensionActionsInvalidated { profile },
+            ));
+        }));
+    }
+
     pub(super) fn begin_tab(
         &self,
         action: ExtensionBrowserRequestAction,
@@ -399,6 +411,7 @@ fn browser_request_error(reason: ExtensionBrowserRequestRejection) -> Retained<N
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn global_pool_enforces_the_exact_process_ceiling() {
@@ -421,6 +434,24 @@ mod tests {
         broker.discarded_tab_webview_refusals.set(u64::MAX);
         broker.record_discarded_tab_webview_refusal();
         assert_eq!(broker.discarded_tab_webview_refusals(), u64::MAX);
+    }
+
+    #[test]
+    fn action_invalidation_emits_only_the_bounded_profile_fact() {
+        let profile = ProfileId::from(3);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = observed.clone();
+        let sink: EngineEventIngressSink = Arc::new(move |ingress| {
+            if let EngineEvent::ExtensionActionsInvalidated { profile } = ingress.event {
+                observed_for_sink.lock().unwrap().push(profile);
+            }
+        });
+        let broker =
+            BrowserRequestBroker::new(profile, Some(sink), Rc::new(BrowserRequestPool::new()));
+
+        broker.notify_actions_invalidated();
+
+        assert_eq!(*observed.lock().unwrap(), vec![profile]);
     }
 
     #[test]

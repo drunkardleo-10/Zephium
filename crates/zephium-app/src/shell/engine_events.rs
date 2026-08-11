@@ -168,6 +168,14 @@ impl Shell {
                     );
                 }
             }
+            EngineEvent::ExtensionActionsInvalidated { profile } => {
+                let refresh = self.refresh_extension_actions(profile);
+                if refresh.rejected {
+                    crate::diagnostic!(
+                        "extensions: native action invalidation awaits maintenance retry"
+                    );
+                }
+            }
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
                 // stale or malformed callback mutate topology, swap tabs, or
@@ -384,6 +392,7 @@ impl Shell {
             EngineEvent::ExtensionBrowserRequested { .. } => None,
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
+            EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::SplitChanged { window, .. } => {
                 self.windows.get(*window).map(|window| window.profile)
             }

@@ -49,7 +49,9 @@ impl ExtensionBrowserSurfaceState {
         self.published.remove(&profile);
     }
 
-    fn active_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    pub(super) fn active_profiles(
+        &self,
+    ) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
         self.active_profiles
     }
 

@@ -43,6 +43,7 @@ enum CoalescedKey {
     Navigation(ItemId),
     Zoom(ItemId),
     NativeAction(ItemId),
+    ExtensionActions(ProfileId),
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
@@ -66,6 +67,9 @@ impl CoalescedKey {
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
             EngineEvent::NativeActionFailed { id, .. } => Self::NativeAction(*id),
+            EngineEvent::ExtensionActionsInvalidated { profile } => {
+                Self::ExtensionActions(*profile)
+            }
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             EngineEvent::ContentRulesSettled {
                 profile, requested, ..
@@ -91,7 +95,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 // one sticky runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
-    + zephium_core::session::MAX_SESSION_PROFILES * 6
+    + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + 3;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
@@ -981,6 +985,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ContentRulesSettled { .. }
                     | EngineEvent::UserContentSettled { .. }
                     | EngineEvent::ExtensionBrowserRequested { .. }
+                    | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }

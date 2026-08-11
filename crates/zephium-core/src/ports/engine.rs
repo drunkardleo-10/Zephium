@@ -789,6 +789,12 @@ pub enum EngineEvent {
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
     },
+    /// Coalescible native notification that one or more effective actions for
+    /// this profile changed. It carries no native or extension identity; the
+    /// Shell responds by requesting a fresh exact replacement cohort.
+    ExtensionActionsInvalidated {
+        profile: ProfileId,
+    },
     TitleChanged {
         id: ItemId,
         title: String,
