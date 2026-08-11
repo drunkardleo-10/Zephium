@@ -19,10 +19,14 @@ mod stages;
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
 #[cfg(target_os = "macos")]
+pub(crate) use dispatch::with_extension_action_popup_terminal;
+#[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use extension_action::ExtensionActionInvocationOutcome;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]
@@ -35,7 +39,8 @@ use dispatch::queue_windows_cleanup_debt;
 use extensions::ExtensionDocumentAuthority;
 use permits::{EventPermit, Sink};
 use profiles::ProfilePersistenceClass;
-use resources::{NativeResourceLease, NativeResourceLedger};
+pub(crate) use resources::NativeResourceLease;
+use resources::NativeResourceLedger;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};

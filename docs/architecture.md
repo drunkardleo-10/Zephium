@@ -642,11 +642,12 @@ exact rejections are retained and counted in readiness evidence.
 An extension-origin page is not navigated in a normal profile view. WebKit
 requires the loaded context's customized
 [`webViewConfiguration`](https://developer.apple.com/documentation/webkit/wkwebextensioncontext/webviewconfiguration),
-so toolbar popups and other extension UI use a separately budgeted view and a
-controlled swap at the extension-origin boundary. One private extension context
-per installed extension lives for the private-session lifetime; its UI views
-may be recreated from that context, while destroying the session context,
-controller, and nonpersistent store is the storage-erasure boundary.
+so toolbar popups use WebKit's native action popover and a separately budgeted
+popup view rather than navigating, replacing, or overlaying a content tab. One
+private extension context per installed extension lives for the private-session
+lifetime; its UI views may be recreated from that context, while destroying the
+session context, controller, and nonpersistent store is the storage-erasure
+boundary.
 
 The macOS Bitwarden contract gate additionally resolves its tab-specific
 `WKWebExtensionAction`, verifies label/enabled/popup state, and opens the
@@ -683,9 +684,18 @@ declared `activeTab` witness to the exact currently-presented HTTP(S) document,
 then revalidates again before `performActionForTab:`. Missing `activeTab` or a
 restricted document never suppresses the separate click event, while capacity
 or identity contradictions fail closed. Non-popup actions are dispatched;
-popup actions remain refused until the delegate has first retained the exact
-request and its one process-wide popup resource lease. Icon rasterization and
-popup presentation remain separate gates.
+popup actions first reserve the one process-wide `ExtensionPopup` lease and an
+exact profile/controller/context/tab callback expectation. A programmatic or
+mismatched WebKit callback is rejected. A matching loaded popup is shown as a
+transient native `NSPopover` relative to the privileged Shell anchor, with
+finite clipped anchor geometry, continuously clamped 64x48--800x600 content,
+outside-click/Escape dismissal, a ten-second load watchdog, and exact-once
+terminal settlement. Surface replacement closes a popup when its tab becomes
+discarded, inactive, or absent; runtime retirement, profile erasure, and host
+shutdown cancel loading and close the native popup before owner release. The
+lease covers only the pending/presented interval and is released even though
+WebKit may cache its popup wrapper. Icon rasterization and the public Shell IPC
+gesture surface remain separate release gates.
 
 The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live
@@ -851,7 +861,7 @@ filtered by the native parser. The reviewed macOS classification is therefore:
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
 | MV3 background startup with declared `webRequest` | Compatible | Product-shaped live background registration gate |
-| Toolbar action and declared popup page | Native-brokered | Native lifecycle and bounded Shell action read path are implemented; icon projection, gesture admission, and overlay presentation remain release work |
+| Toolbar action and declared popup page | Native-brokered | Exact action projection, trusted invocation, native transient popup presentation, resource admission, and teardown are implemented; icon projection and the public Shell IPC gesture surface remain release work |
 | Non-blocking request observation | Unassessed in Zephium's real tab surface | Public WebKit API exists; a product-tab live callback gate remains required |
 | HTTP Basic-auth autofill | Degraded | Startup survives, but the required blocking callback semantics are unavailable |
 | Network blocking/modification through `webRequest` | Unsupported | Zephium never emulates synchronous request control through a generic bridge |

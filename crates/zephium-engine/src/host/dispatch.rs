@@ -31,6 +31,13 @@ thread_local! {
     static EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
     static EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static PENDING_EXTENSION_ACTION_POPUP_TERMINALS: Cell<ExtensionActionPopupTerminalSlots> =
+        const { Cell::new(ExtensionActionPopupTerminalSlots::EMPTY) };
+    #[cfg(target_os = "macos")]
+    static EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(not(target_os = "windows"))]
     static PENDING_CONTENT_POLICY_TERMINALS: Cell<ContentPolicyTerminalSlots> =
         const { Cell::new(ContentPolicyTerminalSlots::EMPTY) };
@@ -55,6 +62,8 @@ type ExtensionRuntimeTerminalSlots = ExactTerminalSlots<EXTENSION_RUNTIME_TERMIN
 #[cfg(target_os = "macos")]
 type ExtensionBrowserRequestTerminalSlots =
     ExactTerminalSlots<EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY>;
+#[cfg(target_os = "macos")]
+type ExtensionActionPopupTerminalSlots = ExactTerminalSlots<1>;
 
 /// Inline, noncoalescing terminal ring.
 ///
@@ -349,6 +358,14 @@ pub(crate) fn install(
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionActionPopupTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -499,6 +516,14 @@ pub(crate) fn make_unavailable_for_test() {
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionActionPopupTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -766,6 +791,78 @@ fn drain_extension_browser_request_terminals_with_host(host: &mut EngineHost) ->
     false
 }
 
+/// Admit the watchdog for the sole process-wide extension popup reservation.
+/// Its exact slot is independent from browser-mutation completions, so a full
+/// mutation cohort cannot strand a native popup lease.
+#[cfg(target_os = "macos")]
+pub(crate) fn with_extension_action_popup_terminal<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let task: HostTask = Box::new(f);
+    let accepted = PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
+        let mut slots = pending.take();
+        let accepted = slots.push_back(task).is_ok();
+        pending.set(slots);
+        accepted
+    });
+    if !accepted {
+        EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
+        HOST_SEALED.with(|sealed| sealed.set(true));
+    }
+    drain_extension_action_popup_terminals() && accepted
+}
+
+#[cfg(target_os = "macos")]
+fn drain_extension_action_popup_terminals() -> bool {
+    enum Drain {
+        Complete(bool),
+        Deferred,
+        Unavailable,
+    }
+    let drain = HOST.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return Drain::Deferred;
+        };
+        let Some(host) = slot.as_mut() else {
+            return Drain::Unavailable;
+        };
+        Drain::Complete(drain_extension_action_popup_terminals_with_host(host))
+    });
+    match drain {
+        Drain::Complete(clean) => clean,
+        Drain::Deferred => true,
+        Drain::Unavailable => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_extension_action_popup_terminals_with_host(host: &mut EngineHost) -> bool {
+    loop {
+        let task = PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            let task = slots.pop_front();
+            pending.set(slots);
+            task
+        });
+        let Some(task) = task else {
+            break;
+        };
+        task(host);
+    }
+    if !EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        return true;
+    }
+    let report =
+        EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
+    if report {
+        (host.native_terminal_failure)(
+            "extension action popup terminals exceeded their proven exact capacity",
+        );
+    }
+    false
+}
+
 /// Admit the sole read-only extension profile-absence fence.
 ///
 /// This separately budgeted slot cannot consume the exact owner lifecycle and
@@ -1007,6 +1104,10 @@ where
                 if !drain_extension_browser_request_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
+                #[cfg(target_os = "macos")]
+                if !drain_extension_action_popup_terminals_with_host(host) {
+                    return Access::TerminalFailed;
+                }
                 // The host exists and the barrier is about to execute. Seal
                 // before native teardown so a callback pumped by teardown
                 // cannot recreate a controller behind it.
@@ -1078,6 +1179,12 @@ where
         return false;
     }
 
+    #[cfg(target_os = "macos")]
+    if !drain_extension_action_popup_terminals() {
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        return false;
+    }
+
     #[cfg(not(target_os = "windows"))]
     if !drain_content_policy_terminal_debts() {
         // An exact native compiler terminal is a lifecycle debt, not a
@@ -1141,6 +1248,11 @@ where
         }
         #[cfg(target_os = "macos")]
         if !drain_extension_browser_request_terminals() {
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if !drain_extension_action_popup_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }

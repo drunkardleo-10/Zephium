@@ -283,6 +283,21 @@ pub(crate) enum MacosNativeActionFailure {
     NativeException,
 }
 
+pub(crate) struct MacosNativeActionPopupOwner {
+    context: Retained<WKWebExtensionContext>,
+    controller: *const WKWebExtensionController,
+}
+
+impl MacosNativeActionPopupOwner {
+    pub(super) fn controller_identity(&self) -> *const WKWebExtensionController {
+        self.controller
+    }
+
+    pub(super) fn into_context(self) -> Retained<WKWebExtensionContext> {
+        self.context
+    }
+}
+
 impl MacosNativeRuntimeOwner {
     pub(crate) const fn owner_id(&self) -> ExtensionRuntimeNativeOwnerId {
         self.owner_id
@@ -298,6 +313,24 @@ impl MacosNativeRuntimeOwner {
             context: Retained::as_ptr(&self.context),
             controller: Retained::as_ptr(&self.controller),
         }
+    }
+
+    /// Retains the exact loaded context for a popup callback reservation. The
+    /// retained object is identity only; it grants neither controller nor tab
+    /// authority and is revalidated again by the delegate.
+    pub(crate) fn action_popup_owner(
+        &self,
+    ) -> Result<MacosNativeActionPopupOwner, MacosNativeActionFailure> {
+        validate_loaded_owner_membership(self)
+            .map_err(|_| MacosNativeActionFailure::OwnerInvalid)?;
+        Ok(MacosNativeActionPopupOwner {
+            context: self.context.clone(),
+            controller: Retained::as_ptr(&self.controller),
+        })
+    }
+
+    pub(crate) fn action_popup_context_identity(&self) -> *const WKWebExtensionContext {
+        Retained::as_ptr(&self.context)
     }
 
     pub(crate) fn retire(mut self) -> MacosNativeRuntimeRetirement {
@@ -433,6 +466,31 @@ impl MacosNativeRuntimeOwner {
         }
         if state.presents_popup() {
             return Err(MacosNativeActionFailure::PopupRequired);
+        }
+        objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            self.context.performActionForTab(Some(tab));
+        }))
+        .map_err(|_| MacosNativeActionFailure::NativeException)
+    }
+
+    /// Enters WebKit only after the host has retained the popup resource lease
+    /// and installed the exact delegate callback expectation.
+    pub(crate) fn perform_popup_action_for_tab(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        tab_id: zephium_core::ids::ItemId,
+        tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+        expected_revision: zephium_core::extensions::ExtensionActionRevision,
+    ) -> Result<(), MacosNativeActionFailure> {
+        let state = self.action_state_for_tab(runtime, tab_id, tab)?;
+        if state.revision() != expected_revision {
+            return Err(MacosNativeActionFailure::StaleAction);
+        }
+        if !state.is_enabled() {
+            return Err(MacosNativeActionFailure::ActionDisabled);
+        }
+        if !state.presents_popup() {
+            return Err(MacosNativeActionFailure::StaleAction);
         }
         objc2::exception::catch(AssertUnwindSafe(|| unsafe {
             self.context.performActionForTab(Some(tab));

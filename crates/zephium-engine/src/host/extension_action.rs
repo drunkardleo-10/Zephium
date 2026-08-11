@@ -9,7 +9,17 @@ use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
 
 use crate::platform::imp::{ControllerRegistryError, MacosNativeActionFailure};
 
+use objc2::rc::Retained;
+use objc2_app_kit::NSView;
+use raw_window_handle::RawWindowHandle;
+
+use super::resources::{NativeResourceAdmissionError, NativeResourceClass};
 use super::{extensions::ToolbarActiveTabGrant, EngineHost};
+
+pub(crate) enum ExtensionActionInvocationOutcome {
+    Settled(ExtensionActionSettlement),
+    Pending,
+}
 
 impl EngineHost {
     /// Reads effective action metadata for all published runtimes in one exact
@@ -76,14 +86,15 @@ impl EngineHost {
         }
     }
 
-    /// Invokes one exact, Shell-versioned, non-popup action. The runtime,
-    /// controller, logical tab and current action revision are rejoined on the
-    /// host thread. `activeTab` is minted only when declared and is never an
-    /// action-dispatch prerequisite.
+    /// Invokes one exact, Shell-versioned action. The runtime, controller,
+    /// logical tab and current action revision are rejoined on the host thread.
+    /// Popup actions additionally reserve native callback and resource
+    /// authority before entering WebKit. `activeTab` is minted only when
+    /// declared and is never an action-dispatch prerequisite.
     pub(crate) fn invoke_extension_action(
         &mut self,
         request: ExtensionActionRequest,
-    ) -> ExtensionActionSettlement {
+    ) -> ExtensionActionInvocationOutcome {
         let profile = request.runtime().profile();
         let (native_tab, resident) = match self.macos_extension_controllers.action_tab(
             profile,
@@ -92,30 +103,26 @@ impl EngineHost {
         ) {
             Ok(Some(tab)) => tab.into_parts(),
             Ok(None) => {
-                return ExtensionActionSettlement::Rejected(
-                    ExtensionActionRejection::TabUnavailable,
-                );
+                return settled(ExtensionActionRejection::TabUnavailable);
             }
             Err(error) => {
-                return ExtensionActionSettlement::Rejected(map_controller_error(error));
+                return settled(map_controller_error(error));
             }
         };
         if !resident {
-            return ExtensionActionSettlement::Rejected(ExtensionActionRejection::TabDiscarded);
+            return settled(ExtensionActionRejection::TabDiscarded);
         }
         let runtimes = match self.extension_runtime_registry.published_runtimes(profile) {
             Ok(runtimes) => runtimes,
             Err(error) => {
-                return ExtensionActionSettlement::Rejected(map_runtime_error(error));
+                return settled(map_runtime_error(error));
             }
         };
         let Some(runtime) = runtimes
             .into_iter()
             .find(|runtime| runtime.instance() == request.runtime())
         else {
-            return ExtensionActionSettlement::Rejected(
-                ExtensionActionRejection::RuntimeUnavailable,
-            );
+            return settled(ExtensionActionRejection::RuntimeUnavailable);
         };
         let state = match self
             .extension_runtime_registry
@@ -124,28 +131,57 @@ impl EngineHost {
             }) {
             Ok(Some(Ok(state))) => state,
             Ok(Some(Err(error))) => {
-                return ExtensionActionSettlement::Rejected(map_native_error(error));
+                return settled(map_native_error(error));
             }
             Ok(None) => {
-                return ExtensionActionSettlement::Rejected(
-                    ExtensionActionRejection::RuntimeUnavailable,
-                );
+                return settled(ExtensionActionRejection::RuntimeUnavailable);
             }
             Err(error) => {
-                return ExtensionActionSettlement::Rejected(map_runtime_error(error));
+                return settled(map_runtime_error(error));
             }
         };
         if state.revision() != request.action_revision() {
-            return ExtensionActionSettlement::Rejected(
-                ExtensionActionRejection::RuntimeSuperseded,
-            );
+            return settled(ExtensionActionRejection::RuntimeSuperseded);
         }
         if !state.is_enabled() {
-            return ExtensionActionSettlement::Rejected(ExtensionActionRejection::ActionDisabled);
+            return settled(ExtensionActionRejection::ActionDisabled);
         }
-        if state.presents_popup() {
-            return ExtensionActionSettlement::Rejected(ExtensionActionRejection::PopupUnavailable);
-        }
+
+        let popup_reserved = if state.presents_popup() {
+            let popup_owner = match self
+                .extension_runtime_registry
+                .with_owned_macos_runtime(&runtime, |owner| owner.action_popup_owner())
+            {
+                Ok(Some(Ok(context))) => context,
+                Ok(Some(Err(error))) => return settled(map_native_error(error)),
+                Ok(None) => return settled(ExtensionActionRejection::RuntimeUnavailable),
+                Err(error) => return settled(map_runtime_error(error)),
+            };
+            let Some(parent) = popup_parent_view(&self.parent) else {
+                return settled(ExtensionActionRejection::NativeAdmissionFailed);
+            };
+            let lease = match self
+                .native_resources
+                .try_acquire(NativeResourceClass::ExtensionPopup)
+            {
+                Ok(lease) => lease,
+                Err(error) => return settled(map_popup_resource_error(error)),
+            };
+            match self.macos_extension_controllers.begin_action_popup(
+                profile,
+                request,
+                popup_owner,
+                native_tab.clone(),
+                parent,
+                lease,
+            ) {
+                Ok(Ok(())) => true,
+                Ok(Err(reason)) => return settled(reason),
+                Err(error) => return settled(map_controller_error(error)),
+            }
+        } else {
+            false
+        };
 
         match self
             .extension_runtime_registry
@@ -154,38 +190,124 @@ impl EngineHost {
             Ok(Some(witness)) => match self.grant_toolbar_active_tab(request.tab(), witness) {
                 ToolbarActiveTabGrant::Granted | ToolbarActiveTabGrant::NotApplicable => {}
                 ToolbarActiveTabGrant::CapacityExceeded => {
-                    return ExtensionActionSettlement::Rejected(
-                        ExtensionActionRejection::CapacityExceeded,
-                    );
+                    let reason = ExtensionActionRejection::CapacityExceeded;
+                    if popup_reserved {
+                        self.macos_extension_controllers.cancel_action_popup(
+                            profile,
+                            request.id(),
+                            reason,
+                        );
+                        return ExtensionActionInvocationOutcome::Pending;
+                    }
+                    return settled(reason);
                 }
                 ToolbarActiveTabGrant::Invalid => {
-                    return ExtensionActionSettlement::Rejected(
-                        ExtensionActionRejection::NativeAdmissionFailed,
-                    );
+                    let reason = ExtensionActionRejection::NativeAdmissionFailed;
+                    if popup_reserved {
+                        self.macos_extension_controllers.cancel_action_popup(
+                            profile,
+                            request.id(),
+                            reason,
+                        );
+                        return ExtensionActionInvocationOutcome::Pending;
+                    }
+                    return settled(reason);
                 }
             },
             Ok(None) => {}
             Err(error) => {
-                return ExtensionActionSettlement::Rejected(map_runtime_error(error));
+                let reason = map_runtime_error(error);
+                if popup_reserved {
+                    self.macos_extension_controllers.cancel_action_popup(
+                        profile,
+                        request.id(),
+                        reason,
+                    );
+                    return ExtensionActionInvocationOutcome::Pending;
+                }
+                return settled(reason);
             }
         }
 
-        match self
-            .extension_runtime_registry
-            .with_owned_macos_runtime(&runtime, |owner| {
-                owner.perform_non_popup_action_for_tab(
-                    runtime.instance(),
-                    request.tab(),
-                    &native_tab,
-                    request.action_revision(),
-                )
-            }) {
-            Ok(Some(Ok(()))) => ExtensionActionSettlement::Dispatched,
-            Ok(Some(Err(error))) => ExtensionActionSettlement::Rejected(map_native_error(error)),
-            Ok(None) => {
-                ExtensionActionSettlement::Rejected(ExtensionActionRejection::RuntimeUnavailable)
+        if popup_reserved {
+            let result =
+                self.extension_runtime_registry
+                    .with_owned_macos_runtime(&runtime, |owner| {
+                        owner.perform_popup_action_for_tab(
+                            runtime.instance(),
+                            request.tab(),
+                            &native_tab,
+                            request.action_revision(),
+                        )
+                    });
+            if !matches!(result, Ok(Some(Ok(())))) {
+                let reason = match result {
+                    Ok(Some(Err(error))) => map_native_error(error),
+                    Ok(None) => ExtensionActionRejection::RuntimeUnavailable,
+                    Err(error) => map_runtime_error(error),
+                    Ok(Some(Ok(()))) => unreachable!(),
+                };
+                self.macos_extension_controllers
+                    .cancel_action_popup(profile, request.id(), reason);
             }
-            Err(error) => ExtensionActionSettlement::Rejected(map_runtime_error(error)),
+            return ExtensionActionInvocationOutcome::Pending;
+        }
+
+        let settlement =
+            match self
+                .extension_runtime_registry
+                .with_owned_macos_runtime(&runtime, |owner| {
+                    owner.perform_non_popup_action_for_tab(
+                        runtime.instance(),
+                        request.tab(),
+                        &native_tab,
+                        request.action_revision(),
+                    )
+                }) {
+                Ok(Some(Ok(()))) => ExtensionActionSettlement::Dispatched,
+                Ok(Some(Err(error))) => {
+                    ExtensionActionSettlement::Rejected(map_native_error(error))
+                }
+                Ok(None) => ExtensionActionSettlement::Rejected(
+                    ExtensionActionRejection::RuntimeUnavailable,
+                ),
+                Err(error) => ExtensionActionSettlement::Rejected(map_runtime_error(error)),
+            };
+        ExtensionActionInvocationOutcome::Settled(settlement)
+    }
+
+    pub(crate) fn timeout_extension_action_popup(
+        &mut self,
+        profile: ProfileId,
+        request: zephium_core::extensions::ExtensionActionRequestId,
+    ) {
+        self.macos_extension_controllers
+            .timeout_action_popup(profile, request);
+    }
+}
+
+fn settled(reason: ExtensionActionRejection) -> ExtensionActionInvocationOutcome {
+    ExtensionActionInvocationOutcome::Settled(ExtensionActionSettlement::Rejected(reason))
+}
+
+fn popup_parent_view(parent: &super::ParentHandle) -> Option<Retained<NSView>> {
+    let RawWindowHandle::AppKit(handle) = parent.0 else {
+        return None;
+    };
+    // SAFETY: the application window outlives the engine host and all popup
+    // requests; retaining its content view gives AppKit a stable anchor.
+    unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
+}
+
+fn map_popup_resource_error(error: NativeResourceAdmissionError) -> ExtensionActionRejection {
+    match error {
+        NativeResourceAdmissionError::ClassExhausted(NativeResourceClass::ExtensionPopup)
+        | NativeResourceAdmissionError::GlobalExhausted => {
+            ExtensionActionRejection::PopupCapacityExceeded
+        }
+        NativeResourceAdmissionError::ClassExhausted(_)
+        | NativeResourceAdmissionError::AccountingInvariant => {
+            ExtensionActionRejection::NativeAdmissionFailed
         }
     }
 }

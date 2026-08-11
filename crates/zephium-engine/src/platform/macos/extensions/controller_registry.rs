@@ -17,13 +17,18 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, Sel};
 use objc2::sel;
 use objc2::MainThreadOnly;
+use objc2_app_kit::NSView;
 use objc2_foundation::MainThreadMarker;
 use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUUID};
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
 use objc2_web_kit::{
-    WKWebExtensionController, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebViewConfiguration,
+    WKWebsiteDataStore,
 };
-use zephium_core::extensions::{ExtensionBrowserSurface, ExtensionNativeNamespaceScope};
+use zephium_core::extensions::{
+    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
+    ExtensionBrowserSurface, ExtensionNativeNamespaceScope,
+};
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit;
 
@@ -457,6 +462,80 @@ impl PersistentControllerRegistry {
             self.slots.poison();
         }
         result.map(|tab| tab.map(|(tab, resident)| ControllerActionTab { tab, resident }))
+    }
+
+    /// Installs the one exact popup callback expectation after the host has
+    /// joined runtime, surface, tab and resource authority.
+    pub(crate) fn begin_action_popup(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionActionRequest,
+        owner: super::native_runtime::MacosNativeActionPopupOwner,
+        tab: super::browser_surface::NativeExtensionTab,
+        parent: Retained<NSView>,
+        lease: crate::host::NativeResourceLease,
+    ) -> Result<Result<(), ExtensionActionRejection>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(Err(ExtensionActionRejection::RuntimeUnavailable));
+        };
+        validate_entry_identity(entry)?;
+        if !std::ptr::eq(
+            Retained::as_ptr(&entry.controller),
+            owner.controller_identity(),
+        ) {
+            return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
+        }
+        let context = owner.into_context();
+        Ok(entry.browser_surface.begin_action_popup(
+            request,
+            entry.controller.clone(),
+            context,
+            tab,
+            parent,
+            lease,
+        ))
+    }
+
+    pub(crate) fn cancel_action_popup(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionActionRequestId,
+        reason: ExtensionActionRejection,
+    ) -> bool {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return false;
+        };
+        entry.browser_surface.cancel_action_popup(request, reason)
+    }
+
+    pub(crate) fn timeout_action_popup(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionActionRequestId,
+    ) -> bool {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return false;
+        };
+        entry.browser_surface.timeout_action_popup(request)
+    }
+
+    pub(crate) fn cancel_action_popup_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const WKWebExtensionContext,
+        reason: ExtensionActionRejection,
+    ) {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return;
+        };
+        entry
+            .browser_surface
+            .cancel_action_popup_context(context, reason);
     }
 
     #[cfg(feature = "native-web-extension-probes")]

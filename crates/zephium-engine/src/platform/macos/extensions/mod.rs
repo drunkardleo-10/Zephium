@@ -4,6 +4,7 @@
 //! bounded, and requires the durable namespace scope; the product runtime
 //! adapter remains disabled until its complete lifecycle is joined.
 
+mod action_popup;
 mod browser_request_broker;
 mod browser_surface;
 mod controller_registry;

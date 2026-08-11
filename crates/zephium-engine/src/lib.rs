@@ -1273,14 +1273,17 @@ impl Engine for WebviewEngine {
                 let request_id = request.id();
                 let application_sink = sink.clone();
                 let admitted = host::try_with(move |host| {
-                    let settlement = host.invoke_extension_action(request);
-                    application_sink(EngineEventIngress::global(
-                        EngineEvent::ExtensionActionSettled {
-                            profile,
-                            request: request_id,
-                            settlement,
-                        },
-                    ));
+                    if let host::ExtensionActionInvocationOutcome::Settled(settlement) =
+                        host.invoke_extension_action(request)
+                    {
+                        application_sink(EngineEventIngress::global(
+                            EngineEvent::ExtensionActionSettled {
+                                profile,
+                                request: request_id,
+                                settlement,
+                            },
+                        ));
+                    }
                 });
                 if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
                 {

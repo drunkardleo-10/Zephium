@@ -15,6 +15,7 @@ use std::sync::Arc;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2_app_kit::NSView;
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSError, NSNotFound, NSObjectProtocol, NSString,
     NSUTF8StringEncoding, NSURL,
@@ -25,6 +26,7 @@ use objc2_web_kit::{
     WKWebExtensionWindow, WKWebView,
 };
 use zephium_core::extensions::{
+    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
     ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection, ExtensionBrowserSurface,
     ExtensionBrowserSurfaceGeneration, MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES,
 };
@@ -32,6 +34,7 @@ use zephium_core::ids::{ItemId, ProfileId, WindowId};
 
 pub(super) type NativeExtensionTab = Retained<ProtocolObject<dyn WKWebExtensionTab>>;
 
+use super::action_popup::ActionPopupBroker;
 use super::browser_request_broker::{
     BrowserRequestBroker, BrowserRequestPool, BrowserRequestSettlementOutcome,
 };
@@ -614,6 +617,7 @@ struct BrowserControllerDelegateIvars {
     windows: RefCell<Vec<Retained<BrowserWindow>>>,
     focused: RefCell<Option<Retained<BrowserWindow>>>,
     broker: Rc<BrowserRequestBroker>,
+    action_popup: Rc<ActionPopupBroker>,
     #[cfg(feature = "native-web-extension-probes")]
     lifecycle_drops: Arc<AtomicUsize>,
 }
@@ -774,6 +778,19 @@ define_class!(
             }
             broker.notify_actions_invalidated();
         }
+
+        #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]
+        unsafe fn present_popup(
+            &self,
+            controller: &WKWebExtensionController,
+            action: &WKWebExtensionAction,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            self.ivars()
+                .action_popup
+                .present(controller, action, context, completion);
+        }
     }
 );
 
@@ -781,12 +798,14 @@ impl BrowserControllerDelegate {
     fn new(
         mtm: MainThreadMarker,
         broker: Rc<BrowserRequestBroker>,
+        action_popup: Rc<ActionPopupBroker>,
         #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
         let object = Self::alloc(mtm).set_ivars(BrowserControllerDelegateIvars {
             windows: RefCell::new(Vec::new()),
             focused: RefCell::new(None),
             broker,
+            action_popup,
             #[cfg(feature = "native-web-extension-probes")]
             lifecycle_drops,
         });
@@ -826,6 +845,7 @@ pub(super) struct MacosExtensionBrowserSurfaceHost {
     generation: Option<ExtensionBrowserSurfaceGeneration>,
     delegate: Retained<BrowserControllerDelegate>,
     broker: Rc<BrowserRequestBroker>,
+    action_popup: Rc<ActionPopupBroker>,
     windows: HashMap<WindowId, Retained<BrowserWindow>>,
     tabs: HashMap<ItemId, Retained<BrowserTab>>,
     #[cfg(feature = "native-web-extension-probes")]
@@ -839,6 +859,7 @@ impl MacosExtensionBrowserSurfaceHost {
         request_pool: Rc<BrowserRequestPool>,
     ) -> Result<Self, BrowserSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
+        let action_popup = ActionPopupBroker::new(profile, sink.clone());
         let broker = BrowserRequestBroker::new(profile, sink, request_pool);
         #[cfg(feature = "native-web-extension-probes")]
         let lifecycle_drops = Arc::new(AtomicUsize::new(0));
@@ -848,10 +869,12 @@ impl MacosExtensionBrowserSurfaceHost {
             delegate: BrowserControllerDelegate::new(
                 mtm,
                 broker.clone(),
+                action_popup.clone(),
                 #[cfg(feature = "native-web-extension-probes")]
                 lifecycle_drops.clone(),
             ),
             broker,
+            action_popup,
             windows: HashMap::new(),
             tabs: HashMap::new(),
             #[cfg(feature = "native-web-extension-probes")]
@@ -961,6 +984,17 @@ impl MacosExtensionBrowserSurfaceHost {
         self.windows = windows;
         self.tabs = tabs;
         self.generation = Some(surface.generation());
+
+        let current = focused
+            .as_ref()
+            .and_then(|window| window.active_id())
+            .filter(|id| {
+                self.tabs
+                    .get(id)
+                    .is_some_and(|tab| tab.ivars().resident.get())
+            });
+        self.action_popup
+            .reconcile_tab(|candidate| current == Some(candidate));
 
         for (id, tab) in &old_tabs {
             if !self.tabs.contains_key(id) {
@@ -1099,6 +1133,39 @@ impl MacosExtensionBrowserSurfaceHost {
         self.broker.timeout(request)
     }
 
+    pub(super) fn begin_action_popup(
+        &self,
+        request: ExtensionActionRequest,
+        controller: Retained<WKWebExtensionController>,
+        context: Retained<WKWebExtensionContext>,
+        tab: NativeExtensionTab,
+        parent: Retained<NSView>,
+        lease: crate::host::NativeResourceLease,
+    ) -> Result<(), ExtensionActionRejection> {
+        self.action_popup
+            .begin(request, controller, context, tab, parent, lease)
+    }
+
+    pub(super) fn cancel_action_popup(
+        &self,
+        request: ExtensionActionRequestId,
+        reason: ExtensionActionRejection,
+    ) -> bool {
+        self.action_popup.cancel_pending(request, reason)
+    }
+
+    pub(super) fn timeout_action_popup(&self, request: ExtensionActionRequestId) -> bool {
+        self.action_popup.timeout(request)
+    }
+
+    pub(super) fn cancel_action_popup_context(
+        &self,
+        context: *const WKWebExtensionContext,
+        reason: ExtensionActionRejection,
+    ) {
+        self.action_popup.cancel_context(context, reason);
+    }
+
     #[cfg(feature = "native-web-extension-probes")]
     pub(super) fn diagnostics(&self) -> BrowserSurfaceDiagnostics {
         BrowserSurfaceDiagnostics {
@@ -1128,6 +1195,7 @@ impl MacosExtensionBrowserSurfaceHost {
     /// a Shell generation: a tombstoned profile cannot publish another
     /// surface, and shutdown has already sealed ingress.
     pub(super) fn clear(&mut self, controller: &WKWebExtensionController) {
+        self.action_popup.seal_and_close();
         self.broker.seal_and_reject();
         let old_windows = std::mem::take(&mut self.windows);
         let old_tabs = std::mem::take(&mut self.tabs);

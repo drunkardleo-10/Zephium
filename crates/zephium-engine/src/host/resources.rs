@@ -211,7 +211,7 @@ impl NativeResourceLedger {
 }
 
 /// Unique RAII ownership of one admitted native resource.
-pub(super) struct NativeResourceLease {
+pub(crate) struct NativeResourceLease {
     shared: Rc<SharedNativeResourceState>,
     class: Option<NativeResourceClass>,
 }

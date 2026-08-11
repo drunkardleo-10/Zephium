@@ -143,6 +143,12 @@ pub(super) fn begin_native_retirement(
         host.extension_runtime_registry.fail_invariant();
         return Err(ExtensionRuntimeHostBindError::InternalInvariant);
     };
+    host.macos_extension_controllers
+        .cancel_action_popup_context(
+            ticket.owner().key.profile(),
+            owner.action_popup_context_identity(),
+            zephium_core::extensions::ExtensionActionRejection::RuntimeUnavailable,
+        );
     let observed_owner = owner.owner_id();
     let (disposition, returned_owner) = match owner.retire() {
         MacosNativeRuntimeRetirement::Absent(audit) => {
