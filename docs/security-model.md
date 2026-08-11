@@ -475,6 +475,14 @@ path-free public errors. Tests cover no-build, pre-marker abort, active and
 rollback completion, source-callback counts, publication/completion crash
 frontiers, stale same-process state, missing closure members, corrupt markers,
 and unrooted markers.
+Bitwarden source acquisition is not delegated to the build adapter. The
+offline source-admission command requires the exact reviewed commit and tag, a
+clean non-sparse checkout, and exact SHA-256 plus marker cardinality for every
+compatibility preimage. It emits no package or authority. Git output and source
+file reads are bounded, and canonical file paths must remain beneath the
+admitted root. This protects release operators from building a drifted or
+partially inspected tree; it is not confinement against a malicious process
+running as the release user.
 The repository can recover at most eight sealed catalog-set finals and has no
 production materialization GC yet. Repeated distinct catalog selections can
 hard-stop at that bound; a bounded collector that runs only after

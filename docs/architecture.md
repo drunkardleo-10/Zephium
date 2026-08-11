@@ -959,6 +959,16 @@ not a claim that the complete Bitwarden workflow is compatible. Product
 authority remains unprovisioned until every declared authority is classified
 and the exact sealed package/catalog digests are compiled in.
 
+The release-side source boundary is offline and separate from package
+authority. `cargo xtask check-bitwarden-core-source --source PATH` accepts only
+an ordinary, non-sparse, clean checkout whose `HEAD` is the exact
+`browser-v2026.7.0` commit and tag. It additionally hashes every reviewed
+compatibility preimage and checks exact marker cardinality for the offscreen,
+main-world, manifest, inline-menu, template, and webpack seams. The command
+does not clone, fetch, adapt, build, or authorize a package. Git output and
+individual source reads are bounded; a partial inspection checkout, local
+edit, untracked input, symlink escape, or source drift fails before adaptation.
+
 ---
 
 ## 11. Frontend (frame)

@@ -1,6 +1,7 @@
 //! Single deterministic entrypoint for the workspace gate: `cargo xtask ci`.
 
 mod adblock_provenance;
+mod bitwarden_core;
 mod blocker_seed;
 mod extension_runtime_acquisition_boundary;
 mod webview2_extension_boundary;
@@ -54,6 +55,14 @@ fn main() {
                 exit(1);
             }
         }
+        Some("check-bitwarden-core-source")
+            if arguments.len() == 3 && arguments[1] == "--source" =>
+        {
+            if let Err(error) = bitwarden_core::check_source(std::path::Path::new(&arguments[2])) {
+                eprintln!("Bitwarden Core source admission failed: {error}");
+                exit(1);
+            }
+        }
         Some("materialize-blocker-seed-webkit")
             if arguments.len() == 3 && arguments[1] == "--output" =>
         {
@@ -85,7 +94,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-blocker-seed|check-bitwarden-core-source --source PATH|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
