@@ -1134,6 +1134,8 @@ fn default_locale_resolution_binds_exact_bytes_and_returns_only_trusted_text() {
 
     let first = resolve_extension_default_locale(&admitted, Some(messages)).unwrap();
     let second = resolve_extension_default_locale(&admitted, Some(messages)).unwrap();
+    let projected =
+        resolve_extension_metadata_default_locale(admitted.metadata(), Some(messages)).unwrap();
     assert_eq!(first.name().as_str(), "Bitwarden Password Manager");
     assert_eq!(
         first.description().unwrap().as_str(),
@@ -1169,6 +1171,7 @@ fn default_locale_resolution_binds_exact_bytes_and_returns_only_trusted_text() {
         ]
     );
     assert_eq!(first, second);
+    assert_eq!(first, projected);
     assert!(first.retained_bytes() <= MAX_EXTENSION_RESOLVED_METADATA_RETAINED_BYTES);
 }
 

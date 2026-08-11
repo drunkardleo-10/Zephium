@@ -2,6 +2,7 @@
 
 mod acquisition_plan;
 mod api;
+mod management_manifests;
 mod manifest_bindings;
 mod policy;
 mod profile_audit;
@@ -20,6 +21,9 @@ pub use api::{
     BundledCurrentCatalogSet, BundledPackageLease, BundledPackageLeaseError,
     BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
     BundledPackageResourceError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
+};
+pub use management_manifests::{
+    BundledCurrentManagementManifests, BundledManagementManifest, BundledManagementManifestsError,
 };
 pub use manifest_bindings::{BundledCurrentManifestBindings, BundledManifestBindingsError};
 pub use profile_audit::{

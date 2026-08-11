@@ -180,11 +180,11 @@ impl ExtensionRepository {
 // current role, so observing the opposite role here is internal incoherence.
 // The shared lease policy leaves WrongRole clean because it is also used by
 // public role-specific lease entry points where a caller can choose wrongly.
-fn manifest_bindings_error_requires_poison(error: &SnapshotLoadError) -> bool {
+pub(super) fn manifest_bindings_error_requires_poison(error: &SnapshotLoadError) -> bool {
     matches!(error, SnapshotLoadError::WrongRole) || snapshot_error_requires_poison(error)
 }
 
-fn map_snapshot_error(error: SnapshotLoadError) -> BundledManifestBindingsError {
+pub(super) fn map_snapshot_error(error: SnapshotLoadError) -> BundledManifestBindingsError {
     match error {
         SnapshotLoadError::Repository(error) => BundledManifestBindingsError::Repository(error),
         SnapshotLoadError::CatalogAuthority(error) => {

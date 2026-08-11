@@ -291,7 +291,23 @@ pub fn resolve_extension_default_locale(
     manifest: &AdmittedExtensionManifest,
     locale_messages_bytes: Option<&[u8]>,
 ) -> Result<ResolvedExtensionManifestMetadata, ExtensionDefaultLocaleResolutionError> {
-    let metadata = manifest.metadata();
+    resolve_extension_metadata_default_locale(manifest.metadata(), locale_messages_bytes)
+}
+
+/// Resolves trusted UI metadata from one already-admitted metadata projection.
+///
+/// This is the read-only counterpart to [`resolve_extension_default_locale`]
+/// for product authorities which deliberately expose bounded manifest metadata
+/// without exposing or cloning their structural admission witness. The
+/// metadata type has no public constructor, and this result remains
+/// non-authorizing: it grants no package, profile, resource, or runtime access.
+/// Exact locale bytes are still mandatory whenever the metadata binds a
+/// default-locale resource, and their admitted length and digest are checked
+/// before any text becomes renderable.
+pub fn resolve_extension_metadata_default_locale(
+    metadata: &ExtensionManifestMetadata,
+    locale_messages_bytes: Option<&[u8]>,
+) -> Result<ResolvedExtensionManifestMetadata, ExtensionDefaultLocaleResolutionError> {
     let needed = referenced_keys(metadata);
     let (messages, resource_identity) = match (metadata.locale_messages(), locale_messages_bytes) {
         (None, None) => {

@@ -13,8 +13,9 @@ use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
     ExtensionActiveProfiles, ExtensionInstallSelector, ExtensionManagementAdmission,
-    ExtensionManagementSettlement, ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome,
-    ExtensionUninstallCallback, ExtensionUninstallOutcome,
+    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
+    ExtensionManagementCatalogOutcome, ExtensionManagementSettlement, ExtensionSetEnabledCallback,
+    ExtensionSetEnabledOutcome, ExtensionUninstallCallback, ExtensionUninstallOutcome,
 };
 
 use crate::cleanup::{
@@ -56,6 +57,7 @@ use crate::{
 };
 
 mod management;
+mod management_catalog;
 mod runtime_operations;
 
 pub use runtime_operations::{
@@ -115,6 +117,11 @@ enum WorkerCommand {
         deadline: Instant,
         settlement: ManagementSettlementSink<ExtensionUninstallOutcome>,
     },
+    LoadManagementCatalog {
+        profile: ProfileId,
+        deadline: Instant,
+        settlement: ManagementCatalogSettlementSink,
+    },
     #[cfg(test)]
     Drive,
     #[cfg(test)]
@@ -133,6 +140,37 @@ enum ManagementSettlementSink<T> {
         done: Option<Box<dyn FnOnce(ExtensionManagementSettlement<T>) + Send>>,
         worker_lost: fn() -> ExtensionManagementSettlement<T>,
     },
+}
+
+struct ManagementCatalogSettlementSink {
+    done: Option<ExtensionManagementCatalogCallback>,
+}
+
+impl ManagementCatalogSettlementSink {
+    fn new(done: ExtensionManagementCatalogCallback) -> Self {
+        Self { done: Some(done) }
+    }
+
+    fn settle(mut self, outcome: ExtensionManagementCatalogOutcome) {
+        if let Some(done) = self.done.take() {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+        }
+    }
+
+    fn cancel(mut self) {
+        drop(self.done.take());
+    }
+}
+
+impl Drop for ManagementCatalogSettlementSink {
+    fn drop(&mut self) {
+        let Some(done) = self.done.take() else {
+            return;
+        };
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            done(ExtensionManagementCatalogOutcome::FailedClosed)
+        }));
+    }
 }
 
 impl<T> ManagementSettlementSink<T> {
@@ -194,6 +232,7 @@ fn cancel_unadmitted_management(command: WorkerCommand) {
     match command {
         WorkerCommand::SetInstallEnabled { settlement, .. } => settlement.cancel(),
         WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
+        WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
     }
 }
@@ -912,6 +951,41 @@ impl ExtensionServiceOwner {
                 cancel_unadmitted_management(command);
                 self.status.publish(ExtensionServicePhase::ShutdownQueued);
                 ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Admits one lazy, read-only management projection for an exact profile.
+    #[must_use = "management catalog admission determines callback ownership"]
+    pub fn begin_load_management_catalog(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+        done: ExtensionManagementCatalogCallback,
+    ) -> ExtensionManagementCatalogAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementCatalogAdmission::Busy;
+        }
+        let command = WorkerCommand::LoadManagementCatalog {
+            profile,
+            deadline,
+            settlement: ManagementCatalogSettlementSink::new(done),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementCatalogAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementCatalogAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementCatalogAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementCatalogAdmission::Unavailable
             }
         }
     }
@@ -1697,6 +1771,24 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::LoadManagementCatalog {
+                profile,
+                deadline,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_management_catalog(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    profile,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             #[cfg(test)]
             WorkerCommand::Drive => {}
             #[cfg(test)]
@@ -1831,6 +1923,42 @@ impl WorkerState {
                 status.publish(ExtensionServicePhase::Failed)
             }
             _ => {}
+        }
+        (outcome, true)
+    }
+
+    fn complete_management_catalog(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> (ExtensionManagementCatalogOutcome, bool) {
+        if cancellation.is_requested() || self.retirements.blocks_ingress(profile) {
+            return (ExtensionManagementCatalogOutcome::Unavailable, true);
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => {}
+            RuntimeIngressReadiness::NotReady => {
+                return (ExtensionManagementCatalogOutcome::Unavailable, true)
+            }
+            RuntimeIngressReadiness::StartupFailed(_) => {
+                return (ExtensionManagementCatalogOutcome::FailedClosed, true)
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                status.publish(ExtensionServicePhase::Failed);
+                return (ExtensionManagementCatalogOutcome::FailedClosed, false);
+            }
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (ExtensionManagementCatalogOutcome::FailedClosed, false);
+        };
+        let outcome = management_catalog::load(startup, &self.runtime, profile, deadline);
+        if matches!(outcome, ExtensionManagementCatalogOutcome::FailedClosed) {
+            status.publish(ExtensionServicePhase::Failed);
         }
         (outcome, true)
     }
@@ -2521,6 +2649,36 @@ mod tests {
             ),
         });
 
+        assert!(!invoked.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn dropped_admitted_management_catalog_callback_fails_closed_once() {
+        let (completed, observation) = mpsc::sync_channel(1);
+        drop(ManagementCatalogSettlementSink::new(Box::new(
+            move |outcome| completed.send(outcome).unwrap(),
+        )));
+        assert_eq!(
+            observation.recv().unwrap(),
+            ExtensionManagementCatalogOutcome::FailedClosed
+        );
+        assert!(matches!(
+            observation.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn unadmitted_management_catalog_callback_is_disarmed() {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked = Arc::clone(&invoked);
+        cancel_unadmitted_management(WorkerCommand::LoadManagementCatalog {
+            profile: ProfileId::from(43),
+            deadline: Instant::now() + Duration::from_secs(1),
+            settlement: ManagementCatalogSettlementSink::new(Box::new(move |_| {
+                callback_invoked.store(true, Ordering::Release);
+            })),
+        });
         assert!(!invoked.load(Ordering::Acquire));
     }
 

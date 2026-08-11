@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use zephium_core::extensions::ExtensionPackagePinReleaseBinding;
+use zephium_core::extensions::{ExtensionInstallCatalog, ExtensionPackagePinReleaseBinding};
 use zephium_core::ids::ProfileId;
 use zephium_extension_repository::{
+    BundledCurrentManagementManifests, BundledManagementManifestsError,
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome,
     BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome, ExtensionRepository,
     ExtensionRepositoryError, ProfilePackageAbsenceEvidence,
@@ -116,6 +117,17 @@ impl ServiceRepository {
             ));
         };
         repository.reconcile_bundled_package_pin_release(binding)
+    }
+
+    /// Authenticates a lazy management projection without acquiring a package pin.
+    pub(crate) fn authenticate_management_manifests(
+        &mut self,
+        installs: &ExtensionInstallCatalog,
+    ) -> Result<BundledCurrentManagementManifests, BundledManagementManifestsError> {
+        let Some(repository) = self.repository.as_mut() else {
+            return Err(ExtensionRepositoryError::Sealed.into());
+        };
+        repository.authenticate_current_bundled_management_manifests(installs)
     }
 
     pub(crate) fn audit_profile_package_obligations(

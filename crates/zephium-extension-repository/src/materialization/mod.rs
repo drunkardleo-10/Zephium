@@ -73,14 +73,16 @@ pub(crate) use objects::{
     verify_completed_rollback_package, PackageObjectError, PackageObjectIntentDisposition,
 };
 pub(crate) use package_lease::{
-    current_catalog_set_projection, load_active_manifest_bindings,
-    load_active_package_pin_admission, load_active_package_snapshot,
-    load_rollback_manifest_bindings, load_rollback_package_pin_admission,
-    load_rollback_package_snapshot, validated_resumable_build_in_progress,
-    verify_active_package_pin_admission, verify_rollback_package_pin_admission,
-    CurrentCatalogSetProjection, PackageLeaseRepositoryIdentity, PackagePinAdmissionError,
-    PackagePinLoadError, SnapshotLoadError, SnapshotObjectPhase, VerifiedActivePackageSnapshot,
-    VerifiedCatalogRole, VerifiedPackagePinAdmission, VerifiedRollbackPackageSnapshot,
+    current_catalog_set_projection, load_active_management_manifests,
+    load_active_manifest_bindings, load_active_package_pin_admission, load_active_package_snapshot,
+    load_rollback_management_manifests, load_rollback_manifest_bindings,
+    load_rollback_package_pin_admission, load_rollback_package_snapshot,
+    validated_resumable_build_in_progress, verify_active_package_pin_admission,
+    verify_rollback_package_pin_admission, AuthenticatedManagementManifest,
+    CurrentCatalogSetProjection, ManagementManifestLoadError, PackageLeaseRepositoryIdentity,
+    PackagePinAdmissionError, PackagePinLoadError, SnapshotLoadError, SnapshotObjectPhase,
+    VerifiedActivePackageSnapshot, VerifiedCatalogRole, VerifiedPackagePinAdmission,
+    VerifiedRollbackPackageSnapshot,
 };
 #[cfg(all(
     test,

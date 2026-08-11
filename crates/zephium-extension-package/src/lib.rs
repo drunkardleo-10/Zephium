@@ -40,7 +40,8 @@ pub use chromium::{
 pub use json::{parse_bounded_json, BoundedJsonError, BoundedJsonLimits, BoundedJsonValue};
 pub use limits::*;
 pub use manifest::{
-    admit_extension_manifest, resolve_extension_default_locale, AdmittedExtensionManifest,
+    admit_extension_manifest, resolve_extension_default_locale,
+    resolve_extension_metadata_default_locale, AdmittedExtensionManifest,
     ExtensionContentScriptResources, ExtensionDeclaredResourcePattern,
     ExtensionDefaultLocaleResolutionError, ExtensionLocalizedMessageKey,
     ExtensionManifestAdmissionDigest, ExtensionManifestAdmissionError,

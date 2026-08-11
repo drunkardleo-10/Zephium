@@ -48,9 +48,9 @@ use self::execution::{
     parse_web_accessible, ParsedAction,
 };
 pub use self::locale::{
-    resolve_extension_default_locale, ExtensionDefaultLocaleResolutionError,
-    ExtensionResolvedMetadataDigest, ResolvedExtensionManifestMetadata,
-    TrustedExtensionDisplayText,
+    resolve_extension_default_locale, resolve_extension_metadata_default_locale,
+    ExtensionDefaultLocaleResolutionError, ExtensionResolvedMetadataDigest,
+    ResolvedExtensionManifestMetadata, TrustedExtensionDisplayText,
 };
 use self::metadata::{parse_chromium_key, parse_inert_metadata, validate_required_metadata};
 pub use self::metadata::{

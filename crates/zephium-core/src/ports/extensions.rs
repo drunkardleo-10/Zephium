@@ -6,6 +6,16 @@ use crate::extensions::{
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 
+#[path = "extensions/management.rs"]
+mod management;
+
+pub use management::{
+    ExtensionManagementCatalog, ExtensionManagementCompatibility, ExtensionManagementEntry,
+    ExtensionManagementGrantState, ExtensionManagementProjectionError,
+    ExtensionManagementRuntimeState, MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES,
+    MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
+};
+
 /// The extension runtime pool has three background slots, so startup can
 /// expose at most three distinct profiles with executable runtime authority.
 /// Keep this projection fixed-size and allocation-free.
@@ -307,12 +317,41 @@ pub enum ExtensionManagementAdmission {
     Unavailable,
 }
 
+/// Exact result of one explicit privileged management-catalog read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExtensionManagementCatalogOutcome {
+    /// Authenticated package identity, atomic grants, and live runtime state
+    /// were joined for the complete profile catalog.
+    Loaded(ExtensionManagementCatalog),
+    /// The request was coherent but could not complete before its deadline or
+    /// while startup/profile state temporarily refused it.
+    Unavailable,
+    /// Exact package metadata cannot be safely represented by this product.
+    Rejected,
+    /// Repository, Store, native-runtime, or protocol integrity was lost.
+    FailedClosed,
+}
+
+/// Non-blocking admission result for one management-catalog read.
+///
+/// `Accepted` transfers exactly-once callback ownership. Refused reads have no
+/// side effects and drop the callback without invoking it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionManagementCatalogAdmission {
+    Accepted,
+    Busy,
+    Unavailable,
+}
+
 /// Exactly-once completion callback for an admitted enable/disable request.
 pub type ExtensionSetEnabledCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>) + Send>;
 /// Exactly-once completion callback for an admitted uninstall request.
 pub type ExtensionUninstallCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionUninstallOutcome>) + Send>;
+/// Exactly-once completion callback for an admitted management-catalog read.
+pub type ExtensionManagementCatalogCallback =
+    Box<dyn FnOnce(ExtensionManagementCatalogOutcome) + Send>;
 
 impl<T> ExtensionManagementSettlement<T> {
     pub const fn new(outcome: T, active_profiles: Option<ExtensionActiveProfiles>) -> Self {
@@ -428,6 +467,22 @@ pub trait ExtensionServiceLifecycle: Send {
     ) -> ExtensionManagementAdmission {
         drop(done);
         ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Starts one lazy, read-only installed-extension management projection.
+    ///
+    /// Implementations must authenticate the complete current catalog, join it
+    /// to one atomic Store grant cohort, and observe runtime state on the same
+    /// serialized worker. The read must not acquire package pins, activate an
+    /// extension, construct native controllers, or add startup work.
+    fn begin_load_management_catalog(
+        &mut self,
+        _profile: ProfileId,
+        _deadline: Instant,
+        done: ExtensionManagementCatalogCallback,
+    ) -> ExtensionManagementCatalogAdmission {
+        drop(done);
+        ExtensionManagementCatalogAdmission::Unavailable
     }
 
     /// Permanently fences `profile`, proves every extension-owned durable,

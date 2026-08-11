@@ -96,6 +96,20 @@ impl RuntimeCoordinator {
         Some(profiles)
     }
 
+    /// Returns the live generation for one exact regular runtime.
+    ///
+    /// Planning, uncertain, publication-pending, and release states are not
+    /// reported as active management state even when a generation has already
+    /// been burned for them.
+    pub(crate) fn live_generation(
+        &self,
+        key: ExtensionNativeOwnershipKey,
+    ) -> Option<ExtensionRuntimeGeneration> {
+        self.slot(key)
+            .filter(|slot| slot.is_live())
+            .and_then(RuntimeSlot::generation)
+    }
+
     pub(crate) fn has_attached_obligation(&self) -> bool {
         self.slots
             .iter()

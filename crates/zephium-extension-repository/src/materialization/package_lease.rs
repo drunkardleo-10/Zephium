@@ -11,6 +11,7 @@ use zephium_core::extensions::{
     ExtensionPackageKey, ExtensionPackagePinAcquisitionBinding, ExtensionRuntimeBackendTarget,
     ExtensionRuntimeEligibility,
 };
+use zephium_core::ids::ExtensionInstallId;
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError,
     BundledPackageAuthority, ProductAdmittedExtensionManifest,
@@ -20,9 +21,10 @@ use zephium_extension_authority::{
     MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 use zephium_extension_package::{
-    CanonicalExtensionTreeIndex, ChromiumManifestKey, ExtensionReleaseCatalog,
-    ExtensionReleaseCatalogRevision, PortableRelativePath, MAX_EXTENSION_MANIFEST_BYTES,
-    MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
+    resolve_extension_metadata_default_locale, CanonicalExtensionTreeIndex, ChromiumManifestKey,
+    ExtensionDefaultLocaleResolutionError, ExtensionManifestMetadata, ExtensionReleaseCatalog,
+    ExtensionReleaseCatalogRevision, PortableRelativePath, ResolvedExtensionManifestMetadata,
+    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
 };
 use zephium_private_fs::{DirectoryIdentity, SealedPrivateDirectory};
 
@@ -234,6 +236,46 @@ pub(crate) enum SnapshotLoadError {
     DurableMismatch,
     #[error("lease snapshot accounting exceeded its fixed bound")]
     AccountingOverflow,
+}
+
+/// One product-authenticated manifest plus its exact resolved default-locale
+/// identity for browser-owned management UI.
+///
+/// This value is deliberately path-free and non-authorizing. The descriptor
+/// is retained only so the repository boundary can construct the same complete
+/// Store binding cohort used by runtime activation.
+#[derive(Debug)]
+pub(crate) struct AuthenticatedManagementManifest {
+    install_id: ExtensionInstallId,
+    descriptor: Arc<ExtensionManifestDescriptor>,
+    version: Box<str>,
+    metadata: ResolvedExtensionManifestMetadata,
+}
+
+impl AuthenticatedManagementManifest {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ExtensionInstallId,
+        Arc<ExtensionManifestDescriptor>,
+        Box<str>,
+        ResolvedExtensionManifestMetadata,
+    ) {
+        (
+            self.install_id,
+            self.descriptor,
+            self.version,
+            self.metadata,
+        )
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ManagementManifestLoadError {
+    #[error("extension management manifest authentication failed")]
+    Snapshot(#[from] SnapshotLoadError),
+    #[error("extension management display metadata failed resolution")]
+    Metadata(#[from] ExtensionDefaultLocaleResolutionError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -559,6 +601,7 @@ pub(crate) fn load_active_package_snapshot(
         index,
         index_bytes,
         manifest_bytes,
+        root: _,
     } = load_repository_package(runtime, current, eligibility.package().key())?;
     let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
     let prepared = prepare_active_package_from_preparsed(
@@ -655,6 +698,38 @@ pub(crate) fn load_active_manifest_bindings(
     finish_manifest_bindings(bindings)
 }
 
+pub(crate) fn load_active_management_manifests(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    exact_catalog_bytes: &[u8],
+    installs: &ExtensionInstallCatalog,
+) -> Result<Box<[AuthenticatedManagementManifest]>, ManagementManifestLoadError> {
+    if current.role != VerifiedCatalogRole::Active {
+        return Err(SnapshotLoadError::WrongRole.into());
+    }
+    let authority =
+        BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
+    let catalog = authority
+        .admit_catalog(exact_catalog_bytes)
+        .map_err(SnapshotLoadError::CatalogAdmission)?;
+    require_catalog_anchor(current, catalog.generation_anchor())?;
+    if installs.installs().is_empty() {
+        return Ok(Box::new([]));
+    }
+    let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
+    let mut manifests = Vec::with_capacity(installs.installs().len());
+    for install in installs.installs() {
+        manifests.push(load_active_management_manifest_from_admitted(
+            runtime,
+            current,
+            &catalog,
+            &manifest_authority,
+            install,
+        )?);
+    }
+    Ok(manifests.into_boxed_slice())
+}
+
 pub(crate) fn load_rollback_package_snapshot(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
@@ -676,6 +751,7 @@ pub(crate) fn load_rollback_package_snapshot(
         index,
         index_bytes,
         manifest_bytes,
+        root: _,
     } = load_repository_package(runtime, current, eligibility.package().key())?;
     let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
     let prepared = prepare_rollback_package_from_preparsed(
@@ -772,6 +848,38 @@ pub(crate) fn load_rollback_manifest_bindings(
     finish_manifest_bindings(bindings)
 }
 
+pub(crate) fn load_rollback_management_manifests(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    exact_catalog_bytes: &[u8],
+    installs: &ExtensionInstallCatalog,
+) -> Result<Box<[AuthenticatedManagementManifest]>, ManagementManifestLoadError> {
+    if current.role != VerifiedCatalogRole::Rollback {
+        return Err(SnapshotLoadError::WrongRole.into());
+    }
+    let authority =
+        BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
+    let catalog = authority
+        .admit_rollback_catalog(exact_catalog_bytes)
+        .map_err(SnapshotLoadError::CatalogAdmission)?;
+    require_catalog_anchor(current, catalog.generation_anchor())?;
+    if installs.installs().is_empty() {
+        return Ok(Box::new([]));
+    }
+    let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
+    let mut manifests = Vec::with_capacity(installs.installs().len());
+    for install in installs.installs() {
+        manifests.push(load_rollback_management_manifest_from_admitted(
+            runtime,
+            current,
+            &catalog,
+            &manifest_authority,
+            install,
+        )?);
+    }
+    Ok(manifests.into_boxed_slice())
+}
+
 // Manifest bootstrap deliberately stops after exact catalog/package-record,
 // tree-index, and manifest admission. Full tree closure verification belongs
 // only to lease acquisition; running it here would make one profile cohort
@@ -790,6 +898,7 @@ fn load_active_manifest_from_admitted(
         index,
         index_bytes,
         manifest_bytes,
+        root: _,
     } = load_repository_package(runtime, current, install.package().key())
         .map_err(map_bootstrap_package_load_error)?;
     let prepared = prepare_active_package_from_preparsed(
@@ -826,6 +935,7 @@ fn load_rollback_manifest_from_admitted(
         index,
         index_bytes,
         manifest_bytes,
+        root: _,
     } = load_repository_package(runtime, current, install.package().key())
         .map_err(map_bootstrap_package_load_error)?;
     let prepared = prepare_rollback_package_from_preparsed(
@@ -846,6 +956,134 @@ fn load_rollback_manifest_from_admitted(
         return Err(SnapshotLoadError::DurableMismatch);
     }
     Ok(Arc::new(manifest.descriptor().clone()))
+}
+
+fn load_active_management_manifest_from_admitted(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    catalog: &AdmittedBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    install: &ExtensionInstall,
+) -> Result<AuthenticatedManagementManifest, ManagementManifestLoadError> {
+    require_install_package(catalog.catalog(), install)?;
+    let LoadedRepositoryPackage {
+        record_id,
+        record: durable_record,
+        index,
+        index_bytes,
+        manifest_bytes,
+        root,
+    } = load_repository_package(runtime, current, install.package().key())
+        .map_err(map_bootstrap_package_load_error)?;
+    let prepared = prepare_active_package_from_preparsed(
+        catalog,
+        manifest_authority,
+        durable_record.manifest.runtime_target.product_target(),
+        install.package().key(),
+        index,
+        index_bytes,
+        manifest_bytes,
+    )
+    .map_err(map_preparation_error)?;
+    if prepared.record() != &durable_record
+        || prepared
+            .record()
+            .record_id()
+            .map_err(SnapshotLoadError::Repository)?
+            != record_id
+    {
+        return Err(SnapshotLoadError::DurableMismatch.into());
+    }
+    let (index, manifest) = prepared.into_lease_parts();
+    if manifest.package_identity() != install.package() {
+        return Err(SnapshotLoadError::DurableMismatch.into());
+    }
+    finish_management_manifest(
+        install.id(),
+        &root,
+        &index,
+        manifest.metadata(),
+        Arc::new(manifest.descriptor().clone()),
+    )
+}
+
+fn load_rollback_management_manifest_from_admitted(
+    runtime: &MaterializationRuntime,
+    current: &CurrentCatalogSetProjection,
+    catalog: &AdmittedRollbackBundledCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    install: &ExtensionInstall,
+) -> Result<AuthenticatedManagementManifest, ManagementManifestLoadError> {
+    require_install_package(catalog.catalog(), install)?;
+    let LoadedRepositoryPackage {
+        record_id,
+        record: durable_record,
+        index,
+        index_bytes,
+        manifest_bytes,
+        root,
+    } = load_repository_package(runtime, current, install.package().key())
+        .map_err(map_bootstrap_package_load_error)?;
+    let prepared = prepare_rollback_package_from_preparsed(
+        catalog,
+        manifest_authority,
+        durable_record.manifest.runtime_target.product_target(),
+        install.package().key(),
+        index,
+        index_bytes,
+        manifest_bytes,
+    )
+    .map_err(map_preparation_error)?;
+    if prepared.record() != &durable_record
+        || prepared
+            .record()
+            .record_id()
+            .map_err(SnapshotLoadError::Repository)?
+            != record_id
+    {
+        return Err(SnapshotLoadError::DurableMismatch.into());
+    }
+    let (index, manifest) = prepared.into_lease_parts();
+    if manifest.package_identity() != install.package() {
+        return Err(SnapshotLoadError::DurableMismatch.into());
+    }
+    finish_management_manifest(
+        install.id(),
+        &root,
+        &index,
+        manifest.metadata(),
+        Arc::new(manifest.descriptor().clone()),
+    )
+}
+
+fn finish_management_manifest(
+    install_id: ExtensionInstallId,
+    root: &Arc<SealedPrivateDirectory>,
+    index: &CanonicalExtensionTreeIndex,
+    metadata: &ExtensionManifestMetadata,
+    descriptor: Arc<ExtensionManifestDescriptor>,
+) -> Result<AuthenticatedManagementManifest, ManagementManifestLoadError> {
+    let locale_messages = match metadata.locale_messages() {
+        None => None,
+        Some(resource) => {
+            let capacity = usize::try_from(resource.length())
+                .map_err(|_| SnapshotLoadError::AccountingOverflow)?;
+            let bytes = with_verified_tree_resource(root, index, resource.path(), |reader| {
+                let mut bytes = Vec::with_capacity(capacity);
+                reader.read_to_end(&mut bytes).map(|_| bytes)
+            })
+            .map_err(map_tree_resource)?
+            .map_err(|_| SnapshotLoadError::DurableMismatch)?;
+            Some(bytes)
+        }
+    };
+    let resolved = resolve_extension_metadata_default_locale(metadata, locale_messages.as_deref())?;
+    Ok(AuthenticatedManagementManifest {
+        install_id,
+        descriptor,
+        version: metadata.version().into(),
+        metadata: resolved,
+    })
 }
 
 // Caller-owned install identity is rejected before any repository package I/O.
@@ -919,6 +1157,7 @@ struct LoadedRepositoryPackage {
     index: CanonicalExtensionTreeIndex,
     index_bytes: Box<[u8]>,
     manifest_bytes: Box<[u8]>,
+    root: Arc<SealedPrivateDirectory>,
 }
 
 fn load_repository_package(
@@ -1007,6 +1246,7 @@ fn load_repository_package(
         index,
         index_bytes: index_bytes.into_boxed_slice(),
         manifest_bytes: manifest_bytes.into_boxed_slice(),
+        root,
     })
 }
 

@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
-    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementSettlement,
+    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
     ExtensionRuntimeRetirementDisposition as CoreExtensionRuntimeRetirementDisposition,
@@ -153,6 +154,15 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         done: ExtensionUninstallCallback,
     ) -> ExtensionManagementAdmission {
         ExtensionServiceOwner::begin_uninstall(self, selector, deadline, done)
+    }
+
+    fn begin_load_management_catalog(
+        &mut self,
+        profile: ProfileId,
+        deadline: Instant,
+        done: ExtensionManagementCatalogCallback,
+    ) -> ExtensionManagementCatalogAdmission {
+        ExtensionServiceOwner::begin_load_management_catalog(self, profile, deadline, done)
     }
 
     fn shutdown_until(self: Box<Self>, deadline: Instant) -> CoreExtensionServiceShutdownOutcome {

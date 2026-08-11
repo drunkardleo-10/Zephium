@@ -1647,6 +1647,36 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
         .package_pins
         .is_empty());
 
+    let management = repository
+        .authenticate_current_bundled_management_manifests(&disabled)
+        .unwrap();
+    assert_eq!(
+        management.current_catalog_set(),
+        BundledCurrentCatalogSet {
+            identity: active_current,
+            role: BundledCatalogGenerationRole::Active,
+        }
+    );
+    assert_eq!(management.bindings().len(), 1);
+    let [manifest] = management.manifests() else {
+        panic!("one authenticated management manifest expected");
+    };
+    assert_eq!(manifest.install_id(), ExtensionInstallId::from(107));
+    assert_eq!(manifest.version(), "1.0.0");
+    assert_eq!(manifest.metadata().name().as_str(), "Fixture");
+    assert_eq!(
+        manifest.metadata().description().map(|text| text.as_str()),
+        Some("Authenticated native product-path fixture.")
+    );
+    assert_eq!(harness.snapshot(), before);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
+    assert_eq!(completed_package_verification_count(), 0);
+
     assert!(matches!(
         repository.authenticate_current_bundled_manifest_bindings(&install_catalog(
             ExtensionInstallId::from(109),

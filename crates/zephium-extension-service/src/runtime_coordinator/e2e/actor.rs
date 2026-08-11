@@ -1,6 +1,8 @@
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ports::extensions::{
-    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionRuntimeActivationDisposition,
+    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogOutcome, ExtensionManagementGrantState,
+    ExtensionManagementRuntimeState, ExtensionRuntimeActivationDisposition,
     ExtensionRuntimeRetirementDisposition, ExtensionServiceLifecycle, ExtensionSetEnabledOutcome,
     ExtensionUninstallOutcome,
 };
@@ -149,6 +151,44 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
         initial_install.revision(),
     );
 
+    let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_load_management_catalog(
+            &mut owner,
+            profile,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = catalog_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementCatalogAdmission::Accepted
+    );
+    let ExtensionManagementCatalogOutcome::Loaded(management) = catalog_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap()
+    else {
+        panic!("authenticated management catalog did not load");
+    };
+    let [entry] = management.entries() else {
+        panic!("one installed extension expected");
+    };
+    assert_eq!(entry.name(), "Fixture");
+    assert_eq!(entry.version(), "1.0.0");
+    assert_eq!(
+        entry.runtime(),
+        ExtensionManagementRuntimeState::Active(ExtensionRuntimeGeneration::INITIAL)
+    );
+    assert!(matches!(
+        entry.grants(),
+        ExtensionManagementGrantState::Initialized {
+            api_grants: 2,
+            host_grants: 1,
+            file_access: false,
+            private_access: false,
+            ..
+        }
+    ));
+
     let (disabled_tx, disabled_rx) = std::sync::mpsc::sync_channel(1);
     assert_eq!(
         ExtensionServiceLifecycle::begin_set_install_enabled(
@@ -237,8 +277,8 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
     else {
         panic!("management actor did not prove clean shutdown")
     };
-    assert_eq!(evidence.accepted_commands(), 4);
-    assert_eq!(evidence.completed_commands(), 4);
+    assert_eq!(evidence.accepted_commands(), 5);
+    assert_eq!(evidence.completed_commands(), 5);
     harness.finish(evidence);
 }
 
