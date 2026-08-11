@@ -8,9 +8,8 @@ use super::host::PublicationMode;
 use super::support::{deadline, ActorAuthorityHarness};
 use crate::{
     ExtensionServiceProfileRetirementOutcome, ExtensionServiceRuntimeActivationOutcome,
-    ExtensionServiceRuntimeRetirementOutcome, ExtensionServiceShutdownOutcome,
-    ExtensionServiceStartupOutcome, ExtensionServiceStartupUnavailableReason,
-    ExtensionServiceStartupWait,
+    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
+    ExtensionServiceStartupUnavailableReason, ExtensionServiceStartupWait,
 };
 
 #[test]
