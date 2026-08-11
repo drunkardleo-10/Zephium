@@ -2,6 +2,7 @@ import type {
   BlockerStatusChanged,
   ExtensionActionFailed,
   ExtensionActionsChanged,
+  ExtensionManagementChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -33,6 +34,9 @@ export const events = {
   tabChanged: scopedEvent<TabChanged>("zephium:tab"),
   extensionActionsChanged: scopedEvent<ExtensionActionsChanged>("zephium:extension-actions"),
   extensionActionFailed: scopedEvent<ExtensionActionFailed>("zephium:extension-action-failed"),
+  extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
+    "zephium:extension-management",
+  ),
   presentationTab: scopedEvent<PresentationTab>("zephium:presentation-tab"),
   uiCommand: scopedEvent<UiCommand>("zephium:ui-command"),
   searchChanged: scopedEvent<SearchChanged>("zephium:search"),

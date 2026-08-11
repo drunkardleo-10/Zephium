@@ -2,6 +2,7 @@ import type {
   ExtensionActionFailedView,
   ExtensionActionFailure,
   ExtensionActionsView,
+  ExtensionManagementView,
 } from "../../shared/ipc/bindings";
 import { ZERO_PROJECTION_REVISION } from "../tabs/tabs-model";
 
@@ -11,6 +12,16 @@ export function initialExtensionActions(): ExtensionActionsView {
     profile_id: "",
     tab_id: null,
     actions: [],
+  };
+}
+
+export function initialExtensionManagement(): ExtensionManagementView {
+  return {
+    projection_revision: ZERO_PROJECTION_REVISION,
+    profile_id: "",
+    phase: "unavailable",
+    catalog_revision: null,
+    entries: [],
   };
 }
 
@@ -58,6 +69,40 @@ export class ExtensionProjectionModel {
     this.#failure = null;
     return true;
   }
+}
+
+/**
+ * Revision admission for the lazy installed-extension catalog. This stream is
+ * intentionally independent from toolbar actions: both use the Shell's global
+ * sequence, but skipping an older event from a different semantic stream could
+ * otherwise preserve an even older catalog in chrome.
+ */
+export class ExtensionManagementProjectionModel {
+  #management: ExtensionManagementView;
+  #appliedRevision: string;
+
+  constructor(initial: ExtensionManagementView = initialExtensionManagement()) {
+    this.#management = initial;
+    this.#appliedRevision = initial.projection_revision;
+  }
+
+  get management(): ExtensionManagementView {
+    return this.#management;
+  }
+
+  apply(candidate: ExtensionManagementView): boolean {
+    if (candidate.projection_revision <= this.#appliedRevision) return false;
+    this.#appliedRevision = candidate.projection_revision;
+    this.#management = candidate;
+    return true;
+  }
+}
+
+export function managementForProfile(
+  management: ExtensionManagementView,
+  profileId: string | null,
+): ExtensionManagementView | null {
+  return profileId !== null && management.profile_id === profileId ? management : null;
 }
 
 export function failureForContext(

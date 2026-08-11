@@ -2,6 +2,7 @@
   import * as extensions from "../../../domain/extensions/extensions.svelte";
   import * as tabs from "../../../domain/tabs/tabs.svelte";
   import ExtensionActionIcon from "./ExtensionActionIcon.svelte";
+  import ExtensionManager from "./ExtensionManager.svelte";
 
   let { compact = false }: { compact?: boolean } = $props();
 
@@ -45,15 +46,15 @@
   }
 </script>
 
-{#if actions.length > 0}
-  <div
-    class="relative flex shrink-0 gap-px px-1.5 pb-1.5"
-    class:flex-wrap={!compact}
-    class:flex-col={compact}
-    class:items-center={compact}
-    aria-label="Extensions"
-    data-zephium-extension-actions
-  >
+<div
+  class="relative flex shrink-0 gap-px px-1.5 pb-1.5"
+  class:flex-wrap={!compact}
+  class:flex-col={compact}
+  class:items-center={compact}
+  aria-label="Extensions"
+  data-zephium-extension-actions
+>
+  {#if actions.length > 0}
     {#each actions as action (action.runtime.install_id)}
       <button
         type="button"
@@ -78,31 +79,21 @@
         {/if}
       </button>
     {/each}
-
-    {#if failure !== null}
-      {#if compact}
-        <p role="status" aria-live="polite" class="sr-only">{failureMessage(failure)}</p>
-      {:else}
-        <p
-          role="status"
-          aria-live="polite"
-          class="absolute top-full right-1.5 left-1.5 z-20 rounded-md border border-border-strong bg-raised px-2.5 py-2 text-[11.5px] leading-4 text-text shadow-[var(--shadow-overlay)]"
-        >
-          {failureMessage(failure)}
-        </p>
-      {/if}
-    {/if}
-  </div>
-{:else if failure !== null}
-  {#if compact}
-    <p class="sr-only" role="status" aria-live="polite">{failureMessage(failure)}</p>
-  {:else}
-    <p
-      role="status"
-      aria-live="polite"
-      class="mx-1.5 mb-1.5 rounded-md border border-border-strong bg-raised px-2.5 py-2 text-[11.5px] leading-4 text-text shadow-[var(--shadow-overlay)]"
-    >
-      {failureMessage(failure)}
-    </p>
   {/if}
-{/if}
+
+  <ExtensionManager {compact} />
+
+  {#if failure !== null}
+    {#if compact}
+      <p role="status" aria-live="polite" class="sr-only">{failureMessage(failure)}</p>
+    {:else}
+      <p
+        role="status"
+        aria-live="polite"
+        class="absolute top-full right-1.5 left-1.5 z-20 rounded-md border border-border-strong bg-raised px-2.5 py-2 text-[11.5px] leading-4 text-text shadow-[var(--shadow-overlay)]"
+      >
+        {failureMessage(failure)}
+      </p>
+    {/if}
+  {/if}
+</div>

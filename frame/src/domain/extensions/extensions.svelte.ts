@@ -3,21 +3,40 @@ import type {
   ExtensionActionFailure,
   ExtensionActionView,
   ExtensionActionsView,
+  ExtensionManagementEntryView,
+  ExtensionManagementView,
+  OperationAdmission,
+  OperationDisposition,
 } from "../../shared/ipc/bindings";
 import { SvelteSet } from "svelte/reactivity";
 import { commands } from "../../shared/ipc/bindings";
 import { events } from "../../shared/ipc/native-events";
-import { ExtensionProjectionModel, failureForContext } from "./extensions-model";
+import * as operations from "../operations/operations";
+import {
+  ExtensionManagementProjectionModel,
+  ExtensionProjectionModel,
+  failureForContext,
+  initialExtensionManagement,
+  managementForProfile,
+} from "./extensions-model";
 
 const NOTICE_LIFETIME_MS = 5_000;
+const MANAGEMENT_IPC_TIMEOUT_MS = 5_000;
+const MANAGEMENT_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 const model = new ExtensionProjectionModel();
+const managementModel = new ExtensionManagementProjectionModel();
 let state = $state.raw<ExtensionActionsView>(model.actions);
+let managementState = $state.raw<ExtensionManagementView>(managementModel.management);
 type VisibleFailure = Omit<ExtensionActionFailedView, "projection_revision"> & {
   projectionRevision?: string;
 };
 let failure = $state.raw<VisibleFailure | null>(null);
 const invoking = new SvelteSet<string>();
+type ManagementMutation = { installId: string; kind: "enable" | "disable" | "uninstall" };
+let managementMutation = $state.raw<ManagementMutation | null>(null);
+let managementNotice = $state<string | null>(null);
+let managementVisible = false;
 
 let lifecycle = 0;
 let initialized = false;
@@ -31,6 +50,10 @@ export const snapshot = () => state;
 export const failureReason = (profileId: string | null, tabId: string | null) =>
   failureForContext(failure, profileId, tabId);
 export const isInvoking = (installId: string) => invoking.has(installId);
+export const management = (profileId: string | null) =>
+  managementForProfile(managementState, profileId);
+export const activeManagementMutation = () => managementMutation;
+export const managementFailure = () => managementNotice;
 
 export function activeActions(profileId: string | null, tabId: string | null) {
   return profileId !== null &&
@@ -83,6 +106,20 @@ async function resolveListeners(promises: readonly Promise<Unlisten>[]): Promise
   return listeners;
 }
 
+async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("bounded privileged IPC timeout")), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function initialize(generation: number) {
   const listeners = await resolveListeners([
     events.extensionActionsChanged.listen((event) => {
@@ -98,6 +135,10 @@ async function initialize(generation: number) {
         event.payload.tab_id,
         event.payload.projection_revision,
       );
+    }),
+    events.extensionManagementChanged.listen((event) => {
+      if (generation !== lifecycle || !managementModel.apply(event.payload)) return;
+      managementState = managementModel.management;
     }),
   ]);
   if (generation !== lifecycle) {
@@ -136,7 +177,11 @@ export function dispose() {
   if (noticeTimer !== null) clearTimeout(noticeTimer);
   noticeTimer = null;
   invoking.clear();
+  managementMutation = null;
+  managementNotice = null;
   failure = null;
+  if (managementVisible) void commands.extensionManagementSetVisible(false).catch(() => {});
+  managementVisible = false;
 }
 
 export async function invoke(
@@ -165,4 +210,112 @@ export async function invoke(
   } finally {
     invoking.delete(key);
   }
+}
+
+export async function setManagementVisible(visible: boolean): Promise<boolean> {
+  managementNotice = null;
+  // Selectors from the previous subscription generation are never rendered
+  // while a new visibility command is in flight (or after close).
+  managementState = initialExtensionManagement();
+  try {
+    const accepted = await boundedIpc(
+      commands.extensionManagementSetVisible(visible),
+      MANAGEMENT_IPC_TIMEOUT_MS,
+    );
+    managementVisible = visible && accepted;
+    if (!accepted && visible) managementNotice = "Extension management is unavailable.";
+    return accepted;
+  } catch {
+    managementVisible = false;
+    if (visible) managementNotice = "Zephium couldn't load extensions.";
+    return false;
+  }
+}
+
+function managementDispositionMessage(disposition: OperationDisposition): string | null {
+  if (disposition.outcome === "applied" || disposition.outcome === "no_op") {
+    return disposition.reason === "extension_activation_pending"
+      ? "The extension is enabled and will activate when its runtime becomes available."
+      : null;
+  }
+  switch (disposition.reason) {
+    case "store_conflict":
+      return "Extensions changed. Review the refreshed list and try again.";
+    case "store_outcome_unknown":
+    case "store_reconciliation_failed":
+      return "Zephium couldn't verify the extension change. Restart before trying again.";
+    case "store_admission_rejected":
+      return "Extension management is temporarily unavailable.";
+    case "invalid_scope":
+      return "This extension can no longer be changed from the current profile.";
+    default:
+      return "Zephium couldn't apply the extension change.";
+  }
+}
+
+async function settleManagementMutation(
+  mutation: ManagementMutation,
+  dispatch: () => Promise<OperationAdmission>,
+): Promise<void> {
+  if (managementMutation !== null) return;
+  managementMutation = mutation;
+  managementNotice = null;
+  try {
+    try {
+      await operations.init();
+    } catch {
+      // The bounded desktop ledger remains available even if event listener
+      // registration races this trusted-UI invocation.
+    }
+    const admission = await boundedIpc(dispatch(), MANAGEMENT_IPC_TIMEOUT_MS);
+    if (!admission.accepted || admission.operation_id === null) {
+      managementNotice = "The extension list changed. Refresh it and try again.";
+      return;
+    }
+    // The admitted write consumes this exact compare-and-swap cohort. Keep
+    // controls absent until Shell publishes its post-settlement replacement.
+    managementState = initialExtensionManagement();
+    const resolution = await operations.waitForDisposition(
+      admission.operation_id,
+      MANAGEMENT_SETTLEMENT_TIMEOUT_MS,
+    );
+    if (resolution.state === "processed") {
+      managementNotice = managementDispositionMessage(resolution.disposition);
+    } else if (resolution.state === "pending") {
+      managementNotice = "The extension change is still pending.";
+    } else {
+      managementNotice = "Zephium couldn't verify the extension change.";
+    }
+  } catch {
+    managementNotice = "Extension management is temporarily unavailable.";
+  } finally {
+    managementMutation = null;
+  }
+}
+
+export function setEnabled(
+  entry: ExtensionManagementEntryView,
+  catalogRevision: string,
+  enabled: boolean,
+): void {
+  void settleManagementMutation(
+    { installId: entry.install_id, kind: enabled ? "enable" : "disable" },
+    () =>
+      commands.extensionManagementSetEnabled(
+        entry.install_id,
+        catalogRevision,
+        entry.install_revision,
+        enabled,
+      ),
+  );
+}
+
+export function uninstall(entry: ExtensionManagementEntryView, catalogRevision: string): void {
+  void settleManagementMutation({ installId: entry.install_id, kind: "uninstall" }, () =>
+    commands.extensionManagementUninstall(
+      entry.install_id,
+      catalogRevision,
+      entry.install_revision,
+    ),
+  );
 }

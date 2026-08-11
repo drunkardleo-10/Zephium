@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { ExtensionActionFailedView, ExtensionActionsView } from "../src/shared/ipc/bindings";
+import type {
+  ExtensionActionFailedView,
+  ExtensionActionsView,
+  ExtensionManagementView,
+} from "../src/shared/ipc/bindings";
 import {
+  ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   failureForContext,
   initialExtensionActions,
+  initialExtensionManagement,
+  managementForProfile,
 } from "../src/domain/extensions/extensions-model";
 import { ZERO_PROJECTION_REVISION } from "../src/domain/tabs/tabs-model";
 
@@ -40,6 +47,36 @@ function failure(value: number): ExtensionActionFailedView {
     profile_id: "profile-a",
     tab_id: "tab-a",
     reason: "tab_discarded",
+  };
+}
+
+function management(value: number, profileId = "profile-a"): ExtensionManagementView {
+  return {
+    projection_revision: revision(value),
+    profile_id: profileId,
+    phase: "ready",
+    catalog_revision: "0000000000000001",
+    entries: [
+      {
+        install_id: "install-a",
+        install_revision: "0000000000000001",
+        name: "Bitwarden",
+        description: "Password manager",
+        author: "Bitwarden Inc.",
+        version: "2026.7.0",
+        runtime: "active",
+        runtime_generation: "0000000000000001",
+        grants: {
+          initialized: true,
+          revision: "0000000000000001",
+          api_grants: 3,
+          host_grants: 2,
+          file_access: false,
+          private_access: false,
+        },
+        compatibility: "degraded",
+      },
+    ],
   };
 }
 
@@ -96,5 +133,34 @@ describe("extension projection admission", () => {
     expect(failureForContext(current, "profile-b", "tab-a")).toBeNull();
     expect(failureForContext(current, "profile-a", "tab-b")).toBeNull();
     expect(failureForContext(current, null, null)).toBeNull();
+  });
+});
+
+describe("extension management projection admission", () => {
+  it("starts unavailable without retaining selectors", () => {
+    expect(initialExtensionManagement()).toEqual({
+      projection_revision: ZERO_PROJECTION_REVISION,
+      profile_id: "",
+      phase: "unavailable",
+      catalog_revision: null,
+      entries: [],
+    });
+  });
+
+  it("replaces the catalog only with a strictly newer management revision", () => {
+    const model = new ExtensionManagementProjectionModel();
+    const current = management(4);
+    expect(model.apply(current)).toBe(true);
+    expect(model.management).toBe(current);
+    expect(model.apply(management(4, "profile-b"))).toBe(false);
+    expect(model.apply(management(3, "profile-b"))).toBe(false);
+    expect(model.management).toBe(current);
+  });
+
+  it("exposes selectors only for the exact focused profile", () => {
+    const current = management(2);
+    expect(managementForProfile(current, "profile-a")).toBe(current);
+    expect(managementForProfile(current, "profile-b")).toBeNull();
+    expect(managementForProfile(current, null)).toBeNull();
   });
 });
