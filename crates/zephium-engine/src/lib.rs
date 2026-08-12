@@ -32,6 +32,17 @@ pub fn run_macos_web_extension_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_probe()
 }
 
+/// Loads one finalized, explicitly non-product Bitwarden Core probe artifact
+/// through the public WKWebExtension runtime on the process main thread.
+///
+/// This debug-only API is absent from ordinary builds. It revalidates the
+/// artifact's closed tree but confers no catalog, package, or product authority.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_bitwarden_core_probe(artifact: &std::path::Path) -> Result<bool, String> {
+    platform::macos::run_bitwarden_core_probe(artifact)
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

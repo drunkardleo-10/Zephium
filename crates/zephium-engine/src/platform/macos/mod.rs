@@ -44,6 +44,8 @@ use objc2::rc::Retained;
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
 pub use stage::ContentStage;
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_bitwarden_core_probe;
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_web_extension_probe;
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 

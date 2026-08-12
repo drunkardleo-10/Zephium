@@ -6,6 +6,7 @@
 //! a product extension catalog or complete the user-facing extension feature.
 
 mod bitwarden_contract;
+mod bitwarden_core_artifact;
 mod persistent_runtime;
 mod profile_isolation;
 
@@ -14,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -31,10 +33,10 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSDate, NSError, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect,
-    NSRunLoop, NSSize, NSString, NSURL,
+    NSRectEdge, NSRunLoop, NSSize, NSString, NSURL,
 };
 use objc2_web_kit::{
-    WKUserScriptInjectionTime, WKWebExtension, WKWebExtensionContext,
+    WKUserScriptInjectionTime, WKWebExtension, WKWebExtensionAction, WKWebExtensionContext,
     WKWebExtensionContextPermissionStatus, WKWebExtensionController,
     WKWebExtensionControllerConfiguration, WKWebExtensionControllerDelegate,
     WKWebExtensionMatchPattern, WKWebExtensionTab, WKWebExtensionWindow, WKWebView,
@@ -276,8 +278,43 @@ define_class!(
         ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
             Some(ProtocolObject::from_retained(self.ivars().window.clone()))
         }
+
+        #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]
+        fn present_popup(
+            &self,
+            _controller: &WKWebExtensionController,
+            action: &WKWebExtensionAction,
+            _context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let shown = objc2::exception::catch(AssertUnwindSafe(|| {
+                let Some(popover) = (unsafe { action.popupPopover() }) else {
+                    return false;
+                };
+                let anchor = &self.ivars().window.ivars().tab.ivars().webview;
+                popover.setContentSize(NSSize::new(400.0, 600.0));
+                popover.showRelativeToRect_ofView_preferredEdge(
+                    NSRect::new(NSPoint::new(8.0, 8.0), NSSize::new(24.0, 24.0)),
+                    anchor,
+                    NSRectEdge::MaxY,
+                );
+                popover.isShown()
+            }))
+            .unwrap_or(false);
+            if shown {
+                completion.call((std::ptr::null_mut(),));
+            } else {
+                complete_probe_popup_error(completion);
+            }
+        }
     }
 );
+
+fn complete_probe_popup_error(completion: &block2::DynBlock<dyn Fn(*mut NSError)>) {
+    let domain = NSString::from_str("app.zephium.web-extension-probe");
+    let error = unsafe { NSError::errorWithDomain_code_userInfo(&domain, 1, None) };
+    completion.call((Retained::as_ptr(&error).cast_mut(),));
+}
 
 impl ProbeControllerDelegate {
     fn new(
@@ -477,6 +514,10 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
     })();
     watchdog_completed.store(true, Ordering::Release);
     result
+}
+
+pub(crate) fn run_bitwarden_core_probe(artifact: &Path) -> Result<bool, String> {
+    bitwarden_core_artifact::run(artifact)
 }
 
 fn set_phase(phase: &'static str) {

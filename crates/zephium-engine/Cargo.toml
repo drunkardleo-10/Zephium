@@ -13,6 +13,8 @@ native-isolation-probes = []
 # the probe fixture, delegate graph, HTTP harness, or diagnostic surfaces.
 native-web-extension-probes = [
     "dep:tempfile",
+    "dep:sha2",
+    "dep:zephium-extension-package",
     "objc2-web-kit/WKWebExtension",
     "objc2-web-kit/WKWebExtensionAction",
     "objc2-web-kit/WKWebExtensionContext",
@@ -42,13 +44,20 @@ name = "macos-web-extension-probe"
 path = "src/bin/macos_web_extension_probe.rs"
 required-features = ["native-web-extension-probes"]
 
+[[bin]]
+name = "macos-bitwarden-core-probe"
+path = "src/bin/macos_bitwarden_core_probe.rs"
+required-features = ["native-web-extension-probes"]
+
 [dependencies]
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true
 wry.workspace = true
 serde_json.workspace = true
+sha2 = { version = "=0.10.9", optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

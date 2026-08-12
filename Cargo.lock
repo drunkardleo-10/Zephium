@@ -6249,6 +6249,7 @@ dependencies = [
  "objc2-web-kit",
  "raw-window-handle",
  "serde_json",
+ "sha2",
  "tempfile",
  "url",
  "webkit2gtk",
@@ -6257,6 +6258,7 @@ dependencies = [
  "windows-core 0.61.2",
  "wry",
  "zephium-core",
+ "zephium-extension-package",
  "zephium-extension-runtime-api",
 ]
 
