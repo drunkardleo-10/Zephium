@@ -624,6 +624,8 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
     #[cfg(target_os = "macos")]
+    run_macos_web_extension_resource_probe();
+    #[cfg(target_os = "macos")]
     run_macos_extension_product_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
 }
@@ -1093,6 +1095,28 @@ fn run_macos_web_extension_probe() {
         "native-web-extension-probes",
         "--bin",
         "macos-web-extension-probe",
+    ];
+
+    let mut clippy = vec!["clippy"];
+    clippy.extend(COMMON);
+    clippy.extend(["--", "-D", "warnings"]);
+    run("cargo", &clippy);
+
+    let mut execute = vec!["run"];
+    execute.extend(COMMON);
+    run("cargo", &execute);
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_web_extension_resource_probe() {
+    const COMMON: [&str; 7] = [
+        "--locked",
+        "-p",
+        "zephium-engine",
+        "--features",
+        "native-web-extension-probes",
+        "--bin",
+        "macos-web-extension-resource-probe",
     ];
 
     let mut clippy = vec!["clippy"];

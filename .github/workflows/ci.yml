@@ -455,6 +455,20 @@ jobs:
             --features native-web-extension-probes \
             --bin macos-web-extension-probe -- --require-supported-runtime
 
+      # Keep the stock-extension resource boundary explicit. The control view
+      # proves our exact handler can preserve WASM MIME; the extension context
+      # must continue to report whether WebKit bypasses that public handler.
+      - name: Classify macOS extension resource transport
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          cargo clippy --locked -p zephium-engine \
+            --features native-web-extension-probes \
+            --bin macos-web-extension-resource-probe -- -D warnings
+          cargo run --locked -p zephium-engine \
+            --features native-web-extension-probes \
+            --bin macos-web-extension-resource-probe -- --require-supported-runtime
+
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
