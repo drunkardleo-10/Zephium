@@ -924,8 +924,11 @@ callback, execution through an opaque dynamic web-accessible-resource URL, and
 the candidate sealed-Blob sandbox boundary. It also verifies alarm create/read/clear,
 exact manifest-command enumeration plus native-to-background dispatch, and
 context-menu create/update/native projection/remove.
-WebKit omits the `ExecutionWorld` enum even
-though literal main-world injection succeeds. A manifest-declared sandbox page,
+WebKit omits the `ExecutionWorld` enum even though literal `"MAIN"` main-world
+injection succeeds. The typed runtime classification is therefore
+`literal-main-only`, not main-world unavailability; a pinned extension that
+dereferences the absent enum still needs an exact reviewed source adaptation.
+A manifest-declared sandbox page,
 including one placed in an explicit `sandbox="allow-scripts"` iframe, retains
 both a `webkit-extension` origin and the `chrome` API. The viable adapter gate
 therefore removes the leaf HTML and privileged intermediate page from public
@@ -945,7 +948,7 @@ classifications before they become floor-wide claims.
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
 | Native messaging | Unsupported in the initial target | The optional permission is parsed, but product grant compilation prohibits it. Native biometric/application integration must be disclosed separately from core vault use. |
-| Programmatic main-world scripting | Requires a sealed Bitwarden Core adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
+| Programmatic main-world scripting | Native literal supported; pinned source requires a sealed adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
 | Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |
 | Dynamic web-accessible resources | Compatible on the exercised runtime | A content script resolves an opaque runtime URL for a `use_dynamic_url` resource; the page loads and executes the declared resource. Revocation, multi-frame behavior, and hostile embedding remain separate gates. |
 | Manifest sandbox pages | Sealed adapter primitive compatible; pinned transform still required | WebKit does not enforce the declared sandbox and also ignores the intended isolation when the extension URL is placed in an explicit sandboxed iframe. The live gate proves the reviewed replacement topology: an inert public payload is fetched by the authenticated content-script host and instantiated through a Blob-backed `allow-scripts` frame; the child has a `null` message origin, no extension APIs, and no parent DOM authority, while the privileged leaf URL is not public. The exact Bitwarden button/list bundle transformation and authenticated message flow still require deterministic source/build adaptation and hostile end-to-end tests. |
@@ -1011,6 +1014,24 @@ vendor webpack fallback is allowed to run, but does not settle within the UX
 deadline on the reviewed machine. This is a release blocker and resource-budget
 input, not authority to increase the timeout, preload a hidden view, install a
 global fetch shim, or claim Bitwarden compatibility.
+
+The separate feature-gated `macos-web-extension-resource-probe` closes the
+public `baseURL` plus `WKURLSchemeHandler` hypothesis with a Zephium-owned MV3
+fixture. An ordinary nonpersistent `WKWebView` routes its HTML, JavaScript, and
+empty WASM module through the exact native handler, preserves
+`application/wasm`, and passes `WebAssembly.instantiateStreaming`. A loaded
+`WKWebExtensionContext` accepts and reads back the custom principal-bound base
+URL, retains its extension runtime identity, and returns a configuration to
+which the same handler is attached. Nevertheless, its private extension
+resources never dispatch to that handler: WebKit's internal extension loader
+serves the WASM as `application/octet-stream`, and streaming compilation is
+rejected. The gate requires zero extension-handler callbacks, denies a foreign
+principal, and proves controller, context, view, data-store, and handler
+teardown. This rules out that public resource override on the exercised runtime;
+it does not claim that future WebKit releases cannot add a supported transport.
+The stock Bitwarden deadline therefore remains blocked unless upstream output
+changes, WebKit changes its private loader, or a separately approved sealed
+adaptation removes the dependency on that resource behavior.
 
 ---
 
