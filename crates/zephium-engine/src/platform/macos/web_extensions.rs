@@ -9,6 +9,7 @@ mod bitwarden_contract;
 mod bitwarden_core_artifact;
 mod persistent_runtime;
 mod profile_isolation;
+mod resource_transport;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -518,6 +519,16 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
 
 pub(crate) fn run_bitwarden_core_probe(artifact: &Path) -> Result<bool, String> {
     bitwarden_core_artifact::run(artifact)
+}
+
+pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
+    let Some(operating_system) = supported_runtime()? else {
+        return Ok(false);
+    };
+    let watchdog_completed = arm_process_watchdog();
+    let result = resource_transport::run(operating_system);
+    watchdog_completed.store(true, Ordering::Release);
+    result.map(|()| true)
 }
 
 fn set_phase(phase: &'static str) {

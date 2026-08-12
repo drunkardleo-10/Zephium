@@ -32,6 +32,19 @@ pub fn run_macos_web_extension_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_probe()
 }
 
+/// Executes the non-product macOS extension-resource transport capability gate.
+///
+/// A successful result means the current behavior was classified exactly: the
+/// native handler preserves strict WASM MIME for an ordinary web view, while a
+/// controller-owned custom extension origin retains extension identity but
+/// bypasses the attached handler and serves private WASM as
+/// `application/octet-stream`. It does not provision a product catalog or
+/// enable extensions in release builds.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+pub fn run_macos_web_extension_resource_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_resource_probe()
+}
+
 /// Loads one finalized, explicitly non-product Bitwarden Core probe artifact
 /// through the public WKWebExtension runtime on the process main thread.
 ///

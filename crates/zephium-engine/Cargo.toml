@@ -25,6 +25,8 @@ native-web-extension-probes = [
     "objc2-web-kit/WKWebExtensionMatchPattern",
     "objc2-web-kit/WKWebExtensionPermission",
     "objc2-web-kit/WKHTTPCookieStore",
+    "objc2-web-kit/WKURLSchemeHandler",
+    "objc2-web-kit/WKURLSchemeTask",
 ]
 # Adds only redacted native-adapter phase diagnostics consumed by the separate
 # authenticated product-path probe. Ordinary engine and desktop builds do not
@@ -47,6 +49,11 @@ required-features = ["native-web-extension-probes"]
 [[bin]]
 name = "macos-bitwarden-core-probe"
 path = "src/bin/macos_bitwarden_core_probe.rs"
+required-features = ["native-web-extension-probes"]
+
+[[bin]]
+name = "macos-web-extension-resource-probe"
+path = "src/bin/macos_web_extension_resource_probe.rs"
 required-features = ["native-web-extension-probes"]
 
 [dependencies]
