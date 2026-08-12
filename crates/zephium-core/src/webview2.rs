@@ -41,14 +41,14 @@ pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str =
     "https://developer.microsoft.com/en-us/microsoft-edge/webview2/";
 
 /// Newest Stable security release included in this review. It is intentionally
-/// separate from the hard floor even though both currently name the same
-/// release: when they differ, falling behind by one serviced patch produces an
-/// actionable advisory rather than a wall-clock or latest-version kill switch.
-pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(151, 0, 4129, 59);
-pub const LATEST_REVIEWED_TEXT: &str = "151.0.4129.59";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-07-31";
-/// 2026-07-31T00:00:00Z.
-pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_785_456_000;
+/// separate from the hard floor: falling behind by one serviced patch produces
+/// an actionable advisory rather than a wall-clock or latest-version kill
+/// switch.
+pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(151, 0, 4129, 78);
+pub const LATEST_REVIEWED_TEXT: &str = "151.0.4129.78";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-08-10";
+/// 2026-08-10T00:00:00Z.
+pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_786_320_000;
 pub const REVIEWED_STABLE_MAJOR: u32 = 151;
 
 /// Microsoft reported a pending Chromium security update on 2026-07-14 and
@@ -61,13 +61,13 @@ pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-07-14";
-pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-08-04";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-08-12";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-11";
-/// 2026-08-12T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_786_492_800;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-08-17";
+/// 2026-08-18T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_787_011_200;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -500,10 +500,17 @@ mod tests {
     }
 
     #[test]
-    fn assessment_separates_current_floor_review_age_and_future_stable_line() {
+    fn assessment_separates_floor_recommendation_review_age_and_future_stable_line() {
         assert_eq!(
             assess_runtime(SECURITY_FLOOR_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
-            Ok((SECURITY_FLOOR, RuntimeSecurityAdvisories::new()))
+            Ok((
+                SECURITY_FLOOR,
+                RuntimeSecurityAdvisories::from_advisory(
+                    RuntimeSecurityAdvisory::update_recommended(
+                        RuntimeSecurityUpdateTarget::BrowserRuntime,
+                    ),
+                )
+            ))
         );
         assert_eq!(
             assess_runtime(LATEST_REVIEWED_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
