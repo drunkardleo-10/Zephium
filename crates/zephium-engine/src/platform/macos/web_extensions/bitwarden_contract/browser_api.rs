@@ -28,7 +28,7 @@ enum DynamicResourceUrl {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionWorldNamespace {
     Native,
-    AdapterRequired,
+    LiteralMainOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +69,7 @@ impl Observation {
     pub(super) const fn execution_world_namespace(self) -> &'static str {
         match self.execution_world_namespace {
             ExecutionWorldNamespace::Native => "native",
-            ExecutionWorldNamespace::AdapterRequired => "adapter-required",
+            ExecutionWorldNamespace::LiteralMainOnly => "literal-main-only",
         }
     }
 
@@ -304,7 +304,11 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
             .and_then(Value::as_str),
     ) {
         (Some("object"), Some("MAIN")) => ExecutionWorldNamespace::Native,
-        (Some("undefined"), Some("absent")) => ExecutionWorldNamespace::AdapterRequired,
+        // The same behavioral gate requires the exact programmatic script to
+        // have executed in the product page below. An absent enum therefore
+        // means WebKit supports the literal protocol value, not that MAIN-world
+        // execution itself is unavailable.
+        (Some("undefined"), Some("absent")) => ExecutionWorldNamespace::LiteralMainOnly,
         _ => {
             return Err(format!(
                 "Bitwarden scripting execution-world contract drifted: {evidence}"
@@ -469,7 +473,7 @@ mod tests {
             validate_for_native_inspection(&observed),
             Ok(Observation {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
-                execution_world_namespace: ExecutionWorldNamespace::AdapterRequired,
+                execution_world_namespace: ExecutionWorldNamespace::LiteralMainOnly,
                 sandbox_isolation: SandboxIsolation::SealedBlob,
             })
         );
