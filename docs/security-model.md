@@ -490,6 +490,17 @@ their sandbox. Its atomic output metadata records both the Chrome MV3 build
 target and `product_authority=false`; package authority must reject any artifact
 derived from this probe overlay. It is evidence-gathering infrastructure, not a
 temporary permission bypass.
+The corresponding artifact finalizer is also non-authoritative. It admits only
+the reviewed build inventory, strips the exact debug and disabled privileged
+outputs, adds explicitly identified diagnostics/canaries, and writes an atomic
+closed tree plus canonical path/length/SHA-256 index. It records
+`build_toolchain_attested=false` and cannot mint catalog, install, grant, or
+runtime authority. The debug native consumer distrusts even that output: it
+requires exactly two bounded root files plus one extension directory, reparses
+the canonical index, rejects links/special files/path escapes, and reads and
+hashes each bounded regular file before WebKit receives the root. Probe failure
+at popup startup therefore cannot be converted into product authority, and
+probe diagnostics can never enter a release package unnoticed.
 The repository can recover at most eight sealed catalog-set finals and has no
 production materialization GC yet. Repeated distinct catalog selections can
 hard-stop at that bound; a bounded collector that runs only after

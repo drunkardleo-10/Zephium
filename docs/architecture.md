@@ -977,12 +977,40 @@ metadata rather than left to a release-shell environment default.
 `cargo xtask materialize-bitwarden-core-macos-probe-overlay --source PATH
 --output PATH` emits an atomic, no-replace source overlay only after that exact
 admission succeeds. It substitutes literal `"MAIN"`, selects primary storage
-when `chrome.offscreen` is absent, and fail-closes the unsafe inline-menu path
-while removing its sandbox and public resource declarations. The metadata
-states `product_authority=false` and `inline-menu-disabled`; this overlay exists
-to run the first real native vertical slice and cannot be sealed as the release
-package. The production overlay must replace that degradation with the
-self-contained inert-payload renderer proven by the live native gate.
+when `chrome.offscreen` is absent, classifies the unbranded WK service-worker
+environment as Safari-extension shaped, guards the absent notification
+subscription surface, and fail-closes the unsafe inline-menu path while removing
+its sandbox and public resource declarations. Popup stage markers are explicitly
+probe-only. The metadata states `product_authority=false` and
+`inline-menu-disabled`; this overlay exists to run the first real native vertical
+slice and cannot be sealed as the release package. The production overlay must
+replace that degradation with the self-contained inert-payload renderer proven
+by the live native gate.
+
+`cargo xtask finalize-bitwarden-core-macos-probe-artifact --build PATH --output
+PATH` is the next offline boundary, not a release sealer. It accepts only the
+exact reviewed Chrome-MV3 output shape, rejects links and special files, removes
+exactly nine source maps and nine disabled inline-menu outputs, injects four
+explicit probe resources, and atomically emits a closed 173-file extension tree.
+Every retained byte is bound into the same canonical path/length/SHA-256 tree
+format used by package authority. The sibling metadata binds the source commit,
+target, manifest, tree/index hashes, adaptation inventory, stripped counts, and
+the negative claims `product_authority=false` and
+`build_toolchain_attested=false`.
+
+The debug-only `macos-bitwarden-core-probe` independently reopens that artifact,
+checks its closed root inventory, reparses the canonical index, and re-hashes
+every extension file before invoking WebKit. It then exercises exact native
+grants, real content registration, action-owned background/popup startup, an
+extension-page canary, and full native teardown. As of the August 12, 2026 gate,
+the exact build reaches registered content and a real Bitwarden popup with every
+static/dynamic script loaded, but fails the 12-second executable-popup deadline
+while importing the 7.04 MiB SDK WebAssembly module. WebKit serves the private
+extension resource with a MIME type that rejects streaming compilation; the
+vendor webpack fallback is allowed to run, but does not settle within the UX
+deadline on the reviewed machine. This is a release blocker and resource-budget
+input, not authority to increase the timeout, preload a hidden view, install a
+global fetch shim, or claim Bitwarden compatibility.
 
 ---
 
