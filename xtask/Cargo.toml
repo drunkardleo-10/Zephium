@@ -12,6 +12,7 @@ blocker-seed-webkit = ["dep:zephium-blocker", "zephium-blocker/webkit"]
 
 [dependencies]
 zephium-core.workspace = true
+zephium-extension-package = { path = "../crates/zephium-extension-package", version = "=0.1.0" }
 zephium-blocker = { workspace = true, optional = true }
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 serde.workspace = true

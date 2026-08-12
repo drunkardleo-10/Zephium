@@ -5,23 +5,197 @@
 //! repository at the exact reviewed commit and tag. The per-file digests bind
 //! the compatibility preimages which later adaptation is allowed to change.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::io::{ErrorKind, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zephium_extension_package::{
+    parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, MAX_EXTENSION_TREE_BYTES,
+    MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILE_BYTES,
+};
 
 const PINNED_COMMIT: &str = "adf0337e4a0f788b895933792fc04fa162669eff";
 const PINNED_TAG: &str = "browser-v2026.7.0";
 const MAX_REVIEWED_SOURCE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: u64 = 16 * 1024;
+const EXPECTED_BUILD_FILE_COUNT: usize = 187;
+const EXPECTED_FINAL_FILE_COUNT: usize = 169;
+const EXPECTED_INSTRUMENTED_FILE_COUNT: usize = EXPECTED_FINAL_FILE_COUNT + 4;
+const PROBE_ARTIFACT_EXTENSION_DIRECTORY: &str = "extension";
+const PROBE_ARTIFACT_INDEX: &str = "extension-tree.json";
+const PROBE_ARTIFACT_METADATA: &str = "ZEPHIUM-PROBE-ARTIFACT.json";
+const PROBE_BACKGROUND_WRAPPER: &str = "zephium-probe-background.js";
+const PROBE_PAGE_DIAGNOSTICS: &str = "zephium-probe-page-diagnostics.js";
+const PROBE_PAGE_CANARY: &str = "zephium-probe-canary.html";
+const PROBE_PAGE_CANARY_SCRIPT: &str = "zephium-probe-canary.js";
+const SOURCE_POPUP_ENTRYPOINT: &str = "popup/index.html";
+const PROBE_BACKGROUND_WRAPPER_SOURCE: &str = r#"(() => {
+  'use strict';
+  const prefix = 'ZEPHIUM_BACKGROUND_DIAGNOSTIC:';
+  const render = value => {
+    try {
+      if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ''}`;
+      if (typeof value === 'string') return value;
+      return JSON.stringify(value);
+    } catch (_) {
+      try { return String(value); } catch (_) { return '<unprintable>'; }
+    }
+  };
+  const publish = (kind, values) => {
+    const message = `${prefix}${kind}: ${values.map(render).join(' | ')}`.slice(0, 2048);
+    try { chrome.action.setTitle({ title: message }); } catch (_) {}
+  };
+  const originalError = console.error.bind(console);
+  console.error = (...values) => {
+    publish('console.error', values);
+    originalError(...values);
+  };
+  addEventListener('error', event => publish('error', [event.message, event.error]));
+  addEventListener('unhandledrejection', event => publish('unhandledrejection', [event.reason]));
+  try {
+    importScripts('background.js');
+  } catch (error) {
+    publish('importScripts', [error]);
+  }
+})();
+"#;
+const PROBE_PAGE_DIAGNOSTICS_SOURCE: &str = r#"(() => {
+  'use strict';
+  const prefix = 'ZEPHIUM_POPUP_DIAGNOSTIC:';
+  const render = value => {
+    try {
+      if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ''}`;
+      if (typeof value === 'string') return value;
+      return JSON.stringify(value);
+    } catch (_) {
+      try { return String(value); } catch (_) { return '<unprintable>'; }
+    }
+  };
+  const publish = (kind, values) => {
+    document.title = `${prefix}${kind}: ${values.map(render).join(' | ')}`.slice(0, 2048);
+  };
+  const scriptStates = [];
+  let wasmState = 'idle';
+  const publishState = () => {
+    document.title = `ZEPHIUM_POPUP_STATE:${JSON.stringify({
+      ready: document.readyState,
+      loading: !!document.querySelector('#loading'),
+      rootChildren: document.querySelector('app-root')?.childElementCount ?? -1,
+      chrome: typeof chrome,
+      runtime: typeof chrome === 'object' ? typeof chrome.runtime : 'absent',
+      initStage: globalThis.__zephiumPopupInitStage ?? 'not-started',
+      scripts: scriptStates.map(({ src, loaded }) => ({ src, loaded })),
+      wasm: wasmState,
+    })}`.slice(0, 2048);
+  };
+  const trackScript = script => {
+    const src = script.getAttribute('src');
+    if (!src || scriptStates.some(state => state.script === script)) return;
+    const state = { script, src, loaded: false };
+    scriptStates.push(state);
+    state.script.addEventListener('load', () => { state.loaded = true; publishState(); }, { once: true });
+    state.script.addEventListener('error', () => publish('script-error', [state.src]), { once: true });
+  };
+  for (const script of document.scripts) trackScript(script);
+  new MutationObserver(records => {
+    for (const record of records) for (const node of record.addedNodes) {
+      if (node instanceof HTMLScriptElement) trackScript(node);
+      if (node instanceof Element) for (const script of node.querySelectorAll('script')) trackScript(script);
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true });
+  if (typeof WebAssembly?.instantiateStreaming === 'function') {
+    const instantiateStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
+    WebAssembly.instantiateStreaming = (...args) => {
+      wasmState = 'instantiate-streaming';
+      publishState();
+      return instantiateStreaming(...args).then(
+        value => { wasmState = 'ready'; publishState(); return value; },
+        error => { wasmState = 'streaming-rejected'; publishState(); throw error; },
+      );
+    };
+  }
+  const originalError = console.error.bind(console);
+  console.error = (...values) => {
+    publish('console.error', values);
+    originalError(...values);
+  };
+  addEventListener('error', event => publish('error', [event.message, event.error]));
+  addEventListener('unhandledrejection', event => publish('unhandledrejection', [event.reason]));
+  const readyTitle = 'zephium-bitwarden-core-popup-ready';
+  const observeReadiness = () => {
+    const root = document.querySelector('app-root');
+    const update = () => {
+      if (!document.querySelector('#loading') && root?.childElementCount) {
+        document.title = readyTitle;
+        return true;
+      }
+      return false;
+    };
+    if (!update() && root) new MutationObserver(update).observe(root, { childList: true, subtree: true });
+  };
+  observeReadiness();
+  document.addEventListener('readystatechange', publishState);
+  addEventListener('DOMContentLoaded', publishState, { once: true });
+  addEventListener('load', publishState, { once: true });
+  publishState();
+  setTimeout(() => {
+    if (document.title !== readyTitle && !document.title.startsWith(prefix)) publishState();
+  }, 5000);
+})();
+"#;
+const PROBE_PAGE_CANARY_SOURCE: &str =
+    "<!doctype html><meta charset=\"utf-8\"><title>zephium-canary-pending</title><script src=\"zephium-probe-canary.js\"></script>";
+const PROBE_PAGE_CANARY_SCRIPT_SOURCE: &str =
+    "document.title='zephium-bitwarden-extension-page-ready';";
+const EXPECTED_SOURCE_MAPS: &[&str] = &[
+    "719.background.js.map",
+    "assets/635.js.map",
+    "background.js.map",
+    "offscreen-document/offscreen-document.js.map",
+    "popup/main.css.map",
+    "popup/main.js.map",
+    "popup/polyfills.js.map",
+    "popup/vendor-angular.js.map",
+    "popup/vendor.js.map",
+];
+const UNSAFE_INLINE_MENU_FILES: &[&str] = &[
+    "overlay/menu-button.css",
+    "overlay/menu-button.html",
+    "overlay/menu-button.js",
+    "overlay/menu-list.css",
+    "overlay/menu-list.html",
+    "overlay/menu-list.js",
+    "overlay/menu.css",
+    "overlay/menu.html",
+    "overlay/menu.js",
+];
+const REQUIRED_PROBE_ARTIFACT_FILES: &[&str] = &[
+    "background.js",
+    "background.js.LICENSE.txt",
+    "content/bootstrap-autofill-overlay-menu.js",
+    "content/content-message-handler.js",
+    "content/trigger-autofill-script-injection.js",
+    "manifest.json",
+    "offscreen-document/offscreen-document.js.LICENSE.txt",
+    "popup/index.html",
+    "popup/main.js",
+    "popup/polyfills.js.LICENSE.txt",
+    "popup/vendor-angular.js.LICENSE.txt",
+    "popup/vendor.js.LICENSE.txt",
+];
 const PROBE_OVERLAY_FILES: &[&str] = &[
     "apps/browser/src/background/main.background.ts",
     "apps/browser/src/autofill/fido2/background/fido2.background.ts",
     "apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts",
     "apps/browser/src/manifest.v3.json",
+    "apps/browser/src/popup/services/init.service.ts",
+    "apps/browser/src/platform/services/platform-utils/browser-platform-utils.service.ts",
+    "apps/browser/src/platform/services/sdk/browser-sdk-load.service.ts",
 ];
 
 #[derive(Clone, Copy)]
@@ -52,6 +226,10 @@ const SOURCE_FILES: &[ReviewedSourceFile] = &[
             },
             SourceMarker {
                 text: "new PrimarySecondaryStorageService(this.storageService, localStorageStorageService)",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "  initNotificationSubscriptions() {",
                 occurrences: 1,
             },
         ],
@@ -103,6 +281,64 @@ const SOURCE_FILES: &[ReviewedSourceFile] = &[
             text: "return typeof chrome.offscreen !== \"undefined\";",
             occurrences: 1,
         }],
+    },
+    ReviewedSourceFile {
+        path: "apps/browser/src/popup/services/init.service.ts",
+        sha256: "cac0632fdf525443e5082fa6383fabb618bf6cd535561b4828152e8b52ada9d5",
+        markers: &[
+            SourceMarker {
+                text: "      await this.sdkLoadService.loadAndInit();",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "      await this.migrationRunner.waitForCompletion(); // Browser background is responsible for migrations",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "      await this.i18nService.init();",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "      await this.viewCacheService.init();",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "      await this.sizeService.init();",
+                occurrences: 1,
+            },
+        ],
+    },
+    ReviewedSourceFile {
+        path: "apps/browser/src/platform/services/platform-utils/browser-platform-utils.service.ts",
+        sha256: "335303846f567e751bb6bcc82006fb974d4615b0c4f606ed4728dda5180f38ca",
+        markers: &[
+            SourceMarker {
+                text: "} else if (BrowserPlatformUtilsService.isSafari(globalContext)) {",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "this.deviceCache = DeviceType.SafariExtension;",
+                occurrences: 1,
+            },
+        ],
+    },
+    ReviewedSourceFile {
+        path: "apps/browser/src/platform/services/sdk/browser-sdk-load.service.ts",
+        sha256: "2de5f76834123da44e0cab4329c280b1570d47b7f93a763e1d75220790d333c1",
+        markers: &[
+            SourceMarker {
+                text: "const supported = (() => {",
+                occurrences: 1,
+            },
+            SourceMarker {
+                text: "WebAssembly.instantiateStreaming",
+                occurrences: 0,
+            },
+            SourceMarker {
+                text: "loadingPromise = import(\"./wasm\");",
+                occurrences: 1,
+            },
+        ],
     },
     ReviewedSourceFile {
         path: "apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts",
@@ -282,6 +518,13 @@ pub(crate) fn materialize_macos_probe_overlay(root: &Path, output: &Path) -> Res
             "manifest_version": 3,
             "node_env": "production",
         },
+        "compatibility_adaptations": [
+            "webkit-extension-device-classification",
+            "unsupported-notification-subscription-guard",
+            "unsupported-offscreen-storage-fallback",
+            "typed-main-world-enum"
+        ],
+        "probe_diagnostics": ["popup-init-stage", "popup-wasm-state"],
         "limitations": ["inline-menu-disabled", "not-a-product-package"],
         "files": PROBE_OVERLAY_FILES,
     }))
@@ -302,13 +545,547 @@ pub(crate) fn materialize_macos_probe_overlay(root: &Path, output: &Path) -> Res
     Ok(())
 }
 
+#[derive(Clone)]
+struct ProbeBuildFile {
+    relative: String,
+    source: PathBuf,
+    length: u64,
+    sha256: String,
+}
+
+#[derive(Default)]
+struct ProbeBuildInventory {
+    files: Vec<ProbeBuildFile>,
+    source_maps: BTreeSet<String>,
+    unsafe_inline_menu_files: BTreeSet<String>,
+    entry_count: usize,
+    total_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ProbeTreeIndex<'a> {
+    schema_version: u32,
+    files: &'a [ProbeTreeFile],
+}
+
+#[derive(Serialize)]
+struct ProbeTreeFile {
+    path: String,
+    length: u64,
+    sha256: String,
+}
+
+/// Produces the closed, non-product extension tree consumed by the live native
+/// Bitwarden probe. This step intentionally does not authenticate a release:
+/// it strips debug maps and the fail-closed privileged inline-menu pages,
+/// validates the exact reviewed manifest/adaptation invariants, and emits a
+/// canonical resource index beside (not inside) the extension root.
+pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Result<(), String> {
+    let build = build
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize probe build root: {error}"))?;
+    if !build.is_dir() {
+        return Err("probe build root is not a directory".into());
+    }
+    ensure_absent_output(output)?;
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize artifact parent: {error}"))?;
+    let output_name = output
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "artifact output has no final component".to_owned())?;
+    let final_output = parent.join(output_name);
+    ensure_absent_output(&final_output)?;
+    if final_output.starts_with(&build) {
+        return Err("probe artifact output may not be nested inside its build input".into());
+    }
+
+    let mut inventory = ProbeBuildInventory::default();
+    collect_probe_build_tree(&build, Path::new(""), 0, &mut inventory)?;
+    inventory
+        .files
+        .sort_unstable_by(|left, right| left.relative.cmp(&right.relative));
+    validate_probe_build_inventory(&inventory)?;
+    validate_probe_build_semantics(&inventory)?;
+
+    let staging = tempfile::Builder::new()
+        .prefix(".zephium-bitwarden-artifact-")
+        .tempdir_in(&parent)
+        .map_err(|error| format!("cannot create artifact stage: {error}"))?;
+    let extension_root = staging.path().join(PROBE_ARTIFACT_EXTENSION_DIRECTORY);
+    fs::create_dir(&extension_root)
+        .map_err(|error| format!("cannot create staged extension root: {error}"))?;
+
+    let mut index_files = Vec::with_capacity(EXPECTED_INSTRUMENTED_FILE_COUNT);
+    for file in &inventory.files {
+        let mut bytes = read_bounded_regular_file(&file.source, file.length, &file.relative)?;
+        if sha256_hex(&bytes) != file.sha256 {
+            return Err(format!(
+                "probe build file changed during finalization: {}",
+                file.relative
+            ));
+        }
+        if file.relative == "manifest.json" {
+            bytes = instrument_probe_manifest(&bytes)?;
+        } else if file.relative == "popup/index.html" {
+            bytes = instrument_probe_popup(&bytes)?;
+        }
+        let output_relative = &file.relative;
+        write_overlay_file(&extension_root, output_relative, &bytes)?;
+        index_files.push(ProbeTreeFile {
+            path: output_relative.to_owned(),
+            length: bytes.len() as u64,
+            sha256: sha256_hex(&bytes),
+        });
+    }
+    write_overlay_file(
+        &extension_root,
+        PROBE_BACKGROUND_WRAPPER,
+        PROBE_BACKGROUND_WRAPPER_SOURCE.as_bytes(),
+    )?;
+    index_files.push(ProbeTreeFile {
+        path: PROBE_BACKGROUND_WRAPPER.to_owned(),
+        length: PROBE_BACKGROUND_WRAPPER_SOURCE.len() as u64,
+        sha256: sha256_hex(PROBE_BACKGROUND_WRAPPER_SOURCE.as_bytes()),
+    });
+    write_overlay_file(
+        &extension_root,
+        PROBE_PAGE_DIAGNOSTICS,
+        PROBE_PAGE_DIAGNOSTICS_SOURCE.as_bytes(),
+    )?;
+    index_files.push(ProbeTreeFile {
+        path: PROBE_PAGE_DIAGNOSTICS.to_owned(),
+        length: PROBE_PAGE_DIAGNOSTICS_SOURCE.len() as u64,
+        sha256: sha256_hex(PROBE_PAGE_DIAGNOSTICS_SOURCE.as_bytes()),
+    });
+    for (path, bytes) in [
+        (PROBE_PAGE_CANARY, PROBE_PAGE_CANARY_SOURCE.as_bytes()),
+        (
+            PROBE_PAGE_CANARY_SCRIPT,
+            PROBE_PAGE_CANARY_SCRIPT_SOURCE.as_bytes(),
+        ),
+    ] {
+        write_overlay_file(&extension_root, path, bytes)?;
+        index_files.push(ProbeTreeFile {
+            path: path.to_owned(),
+            length: bytes.len() as u64,
+            sha256: sha256_hex(bytes),
+        });
+    }
+    index_files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+
+    let index_bytes = serde_json::to_vec(&ProbeTreeIndex {
+        schema_version: 1,
+        files: &index_files,
+    })
+    .map_err(|error| format!("cannot serialize probe tree index: {error}"))?;
+    let parsed_index = CanonicalExtensionTreeIndex::parse_canonical(&index_bytes)
+        .map_err(|error| format!("finalized probe tree index is invalid: {error}"))?;
+    write_overlay_file(staging.path(), PROBE_ARTIFACT_INDEX, &index_bytes)?;
+
+    let metadata = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": 1,
+        "kind": "zephium-bitwarden-core-macos-probe-artifact",
+        "product_authority": false,
+        "source_commit": PINNED_COMMIT,
+        "source_tag": PINNED_TAG,
+        "build_target": {
+            "browser": "chrome",
+            "manifest_version": 3,
+            "node_env": "production",
+        },
+        "build_toolchain_attested": false,
+        "background_diagnostics": true,
+        "popup_diagnostics": true,
+        "probe_diagnostics": ["popup-init-stage", "popup-wasm-state"],
+        "extension_page_canary": true,
+        "compatibility_adaptations": [
+            "webkit-extension-device-classification",
+            "unsupported-notification-subscription-guard",
+            "unsupported-offscreen-storage-fallback",
+            "typed-main-world-enum"
+        ],
+        "extension_root": PROBE_ARTIFACT_EXTENSION_DIRECTORY,
+        "tree_index": PROBE_ARTIFACT_INDEX,
+        "file_count": parsed_index.files().len(),
+        "total_bytes": parsed_index.total_bytes(),
+        "manifest_sha256": lower_hex(parsed_index.manifest_sha256().as_bytes()),
+        "tree_sha256": lower_hex(parsed_index.tree_sha256().as_bytes()),
+        "tree_index_sha256": lower_hex(parsed_index.index_sha256().as_bytes()),
+        "stripped": {
+            "source_maps": EXPECTED_SOURCE_MAPS.len(),
+            "unsafe_inline_menu_files": UNSAFE_INLINE_MENU_FILES.len(),
+        },
+        "limitations": [
+            "inline-menu-disabled",
+            "build-toolchain-unattested",
+            "probe-background-instrumented",
+            "probe-popup-instrumented",
+            "not-a-product-package"
+        ],
+    }))
+    .map_err(|error| format!("cannot serialize probe artifact metadata: {error}"))?;
+    write_overlay_file(staging.path(), PROBE_ARTIFACT_METADATA, &metadata)?;
+
+    let staged_path = staging.keep();
+    fs::rename(&staged_path, &final_output).map_err(|error| {
+        format!(
+            "cannot atomically publish probe artifact (stage retained at {}): {error}",
+            staged_path.display()
+        )
+    })?;
+    println!(
+        "Bitwarden Core macOS probe artifact finalized: files={}; bytes={}; product_authority=false",
+        parsed_index.files().len(),
+        parsed_index.total_bytes(),
+    );
+    Ok(())
+}
+
+fn instrument_probe_manifest(source: &[u8]) -> Result<Vec<u8>, String> {
+    let mut manifest = parse_bounded_json(source, BoundedJsonLimits::extension_manifest())
+        .map_err(|error| format!("cannot instrument invalid probe manifest: {error}"))?
+        .into_value();
+    let service_worker = manifest
+        .pointer_mut("/background/service_worker")
+        .ok_or_else(|| "probe manifest omitted its background worker".to_owned())?;
+    if service_worker.as_str() != Some("background.js") {
+        return Err("probe manifest background worker drifted before instrumentation".into());
+    }
+    *service_worker = serde_json::Value::String(PROBE_BACKGROUND_WRAPPER.to_owned());
+    let popup = manifest
+        .pointer_mut("/action/default_popup")
+        .ok_or_else(|| "probe manifest omitted its action popup".to_owned())?;
+    if popup.as_str() != Some(SOURCE_POPUP_ENTRYPOINT) {
+        return Err("probe manifest action popup drifted before instrumentation".into());
+    }
+    serde_json::to_vec(&manifest)
+        .map_err(|error| format!("cannot serialize instrumented probe manifest: {error}"))
+}
+
+fn instrument_probe_popup(source: &[u8]) -> Result<Vec<u8>, String> {
+    let source = std::str::from_utf8(source)
+        .map_err(|_| "probe popup entrypoint is not UTF-8".to_owned())?;
+    let before = "</body>";
+    let after = "<script src=\"../zephium-probe-page-diagnostics.js\"></script></body>";
+    if !source.contains("../popup/") {
+        return Err("probe popup entrypoint contains no generated parent-relative assets".into());
+    }
+    replace_exact(SOURCE_POPUP_ENTRYPOINT, source, before, after).map(String::into_bytes)
+}
+
+fn collect_probe_build_tree(
+    root: &Path,
+    relative_directory: &Path,
+    depth: usize,
+    inventory: &mut ProbeBuildInventory,
+) -> Result<(), String> {
+    if depth > 32 {
+        return Err("probe build directory depth exceeds the extension ceiling".into());
+    }
+    let directory = root.join(relative_directory);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|error| format!("cannot enumerate probe build directory: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot enumerate probe build entry: {error}"))?;
+    entries.sort_unstable_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        inventory.entry_count = inventory
+            .entry_count
+            .checked_add(1)
+            .ok_or_else(|| "probe build entry accounting overflowed".to_owned())?;
+        if inventory.entry_count > MAX_EXTENSION_TREE_ENTRIES {
+            return Err("probe build exceeds the extension entry ceiling".into());
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "probe build contains a non-UTF-8 path".to_owned())?;
+        let relative = relative_directory.join(name);
+        let relative_text = portable_relative_path(&relative)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            format!("cannot inspect probe build entry {relative_text}: {error}")
+        })?;
+        if metadata.is_dir() {
+            collect_probe_build_tree(root, &relative, depth + 1, inventory)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(format!(
+                "probe build entry is not a regular file or directory: {relative_text}"
+            ));
+        }
+        if metadata.len() > MAX_EXTENSION_TREE_FILE_BYTES {
+            return Err(format!(
+                "probe build file exceeds the per-file extension ceiling: {relative_text}"
+            ));
+        }
+        inventory.total_bytes = inventory
+            .total_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| "probe build byte accounting overflowed".to_owned())?;
+        if inventory.total_bytes > MAX_EXTENSION_TREE_BYTES {
+            return Err("probe build exceeds the extension tree byte ceiling".into());
+        }
+
+        if EXPECTED_SOURCE_MAPS.contains(&relative_text.as_str()) {
+            inventory.source_maps.insert(relative_text);
+            continue;
+        }
+        if relative_text.ends_with(".map") {
+            return Err(format!(
+                "probe build emitted an unreviewed source map: {relative_text}"
+            ));
+        }
+        if UNSAFE_INLINE_MENU_FILES.contains(&relative_text.as_str()) {
+            inventory.unsafe_inline_menu_files.insert(relative_text);
+            continue;
+        }
+        if relative_text.starts_with("overlay/") {
+            return Err(format!(
+                "probe build emitted an unreviewed privileged overlay resource: {relative_text}"
+            ));
+        }
+        let bytes = read_bounded_regular_file(&entry.path(), metadata.len(), &relative_text)?;
+        inventory.files.push(ProbeBuildFile {
+            relative: relative_text,
+            source: entry.path(),
+            length: metadata.len(),
+            sha256: sha256_hex(&bytes),
+        });
+    }
+    Ok(())
+}
+
+fn validate_probe_build_inventory(inventory: &ProbeBuildInventory) -> Result<(), String> {
+    let expected_maps = EXPECTED_SOURCE_MAPS
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>();
+    let expected_menu = UNSAFE_INLINE_MENU_FILES
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>();
+    if inventory.source_maps != expected_maps {
+        return Err("probe build source-map inventory drifted".into());
+    }
+    if inventory.unsafe_inline_menu_files != expected_menu {
+        return Err("probe build unsafe inline-menu inventory drifted".into());
+    }
+    let input_files = inventory
+        .files
+        .len()
+        .checked_add(inventory.source_maps.len())
+        .and_then(|count| count.checked_add(inventory.unsafe_inline_menu_files.len()))
+        .ok_or_else(|| "probe build file accounting overflowed".to_owned())?;
+    if input_files != EXPECTED_BUILD_FILE_COUNT
+        || inventory.files.len() != EXPECTED_FINAL_FILE_COUNT
+    {
+        return Err(format!(
+            "probe build file inventory drifted: input={input_files}, finalized={}",
+            inventory.files.len()
+        ));
+    }
+    let retained = inventory
+        .files
+        .iter()
+        .map(|file| file.relative.as_str())
+        .collect::<BTreeSet<_>>();
+    for required in REQUIRED_PROBE_ARTIFACT_FILES {
+        if !retained.contains(required) {
+            return Err(format!(
+                "probe build omitted required artifact file {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_probe_build_semantics(inventory: &ProbeBuildInventory) -> Result<(), String> {
+    let manifest = probe_build_file_bytes(inventory, "manifest.json")?;
+    let manifest = parse_bounded_json(&manifest, BoundedJsonLimits::extension_manifest())
+        .map_err(|error| format!("probe manifest failed bounded JSON admission: {error}"))?
+        .into_value();
+    let expected_permissions = serde_json::json!([
+        "activeTab",
+        "alarms",
+        "clipboardRead",
+        "clipboardWrite",
+        "contextMenus",
+        "idle",
+        "offscreen",
+        "scripting",
+        "sidePanel",
+        "storage",
+        "tabs",
+        "unlimitedStorage",
+        "webNavigation",
+        "webRequest",
+        "webRequestAuthProvider",
+        "notifications"
+    ]);
+    let expected_optional_permissions = serde_json::json!(["nativeMessaging", "privacy"]);
+    let expected_hosts = serde_json::json!(["https://*/*", "http://*/*"]);
+    let expected_content_scripts = serde_json::json!([
+        {
+            "all_frames": false,
+            "js": ["content/content-message-handler.js"],
+            "matches": ["*://*/*", "file:///*"],
+            "exclude_matches": ["*://*/*.xml*", "file:///*.xml*"],
+            "run_at": "document_start"
+        },
+        {
+            "all_frames": true,
+            "css": ["content/autofill.css"],
+            "js": ["content/trigger-autofill-script-injection.js"],
+            "matches": ["*://*/*", "file:///*"],
+            "exclude_matches": ["*://*/*.xml*", "file:///*.xml*"],
+            "run_at": "document_start"
+        }
+    ]);
+    let expected_web_resources = serde_json::json!([{
+        "resources": [
+            "content/fido2-page-script.js", "notification/bar.html", "images/icon38.png",
+            "images/icon38_locked.png", "popup/fonts/*"
+        ],
+        "matches": ["<all_urls>"],
+        "use_dynamic_url": true
+    }]);
+    let required = [
+        ("/manifest_version", serde_json::json!(3)),
+        ("/version", serde_json::json!("2026.7.0")),
+        ("/minimum_chrome_version", serde_json::json!("102.0")),
+        ("/default_locale", serde_json::json!("en")),
+        (
+            "/background/service_worker",
+            serde_json::json!("background.js"),
+        ),
+        ("/permissions", expected_permissions),
+        ("/optional_permissions", expected_optional_permissions),
+        ("/host_permissions", expected_hosts),
+        ("/content_scripts", expected_content_scripts),
+        ("/web_accessible_resources", expected_web_resources),
+        (
+            "/action/default_popup",
+            serde_json::json!("popup/index.html"),
+        ),
+        ("/action/default_title", serde_json::json!("Bitwarden")),
+        (
+            "/storage/managed_schema",
+            serde_json::json!("managed_schema.json"),
+        ),
+    ];
+    for (pointer, expected) in required {
+        if manifest.pointer(pointer) != Some(&expected) {
+            return Err(format!("probe manifest field drifted: {pointer}"));
+        }
+    }
+    let object = manifest
+        .as_object()
+        .ok_or_else(|| "probe manifest root is not an object".to_owned())?;
+    for prohibited in ["sandbox", "key", "update_url"] {
+        if object.contains_key(prohibited) {
+            return Err(format!(
+                "probe manifest contains prohibited field {prohibited}"
+            ));
+        }
+    }
+
+    let background = probe_build_file_bytes(inventory, "background.js")?;
+    let background = std::str::from_utf8(&background)
+        .map_err(|_| "probe background bundle is not UTF-8".to_owned())?;
+    if background.contains("chrome.scripting.ExecutionWorld.MAIN")
+        || !background.contains("\"MAIN\"")
+        || !background.contains("offscreenApiSupported")
+    {
+        return Err(
+            "probe background bundle does not contain the reviewed macOS adaptations".into(),
+        );
+    }
+    let inline_menu =
+        probe_build_file_bytes(inventory, "content/bootstrap-autofill-overlay-menu.js")?;
+    let inline_menu = std::str::from_utf8(&inline_menu)
+        .map_err(|_| "probe inline-menu bootstrap is not UTF-8".to_owned())?;
+    if inline_menu.contains("overlay/menu.html") || !inline_menu.contains("forceCloseInlineMenu") {
+        return Err("probe inline-menu bootstrap is not fail-closed".into());
+    }
+    Ok(())
+}
+
+fn probe_build_file_bytes(
+    inventory: &ProbeBuildInventory,
+    relative: &str,
+) -> Result<Vec<u8>, String> {
+    let file = inventory
+        .files
+        .iter()
+        .find(|file| file.relative == relative)
+        .ok_or_else(|| format!("probe build omitted required file {relative}"))?;
+    read_bounded_regular_file(&file.source, file.length, relative)
+}
+
+fn read_bounded_regular_file(
+    path: &Path,
+    expected_length: u64,
+    relative: &str,
+) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path)
+        .map_err(|error| format!("cannot open probe build file {relative}: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect open probe build file {relative}: {error}"))?;
+    if !metadata.is_file()
+        || metadata.len() != expected_length
+        || metadata.len() > MAX_EXTENSION_TREE_FILE_BYTES
+    {
+        return Err(format!(
+            "probe build file changed shape while open: {relative}"
+        ));
+    }
+    let capacity = usize::try_from(expected_length)
+        .map_err(|_| format!("probe build file length does not fit memory: {relative}"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(expected_length + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read probe build file {relative}: {error}"))?;
+    if bytes.len() as u64 != expected_length {
+        return Err(format!(
+            "probe build file changed length while reading: {relative}"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn portable_relative_path(path: &Path) -> Result<String, String> {
+    let mut encoded = String::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err("probe build contains a non-portable path".into());
+        };
+        let component = component
+            .to_str()
+            .ok_or_else(|| "probe build contains a non-UTF-8 path".to_owned())?;
+        if !encoded.is_empty() {
+            encoded.push('/');
+        }
+        encoded.push_str(component);
+    }
+    validate_relative_path(&encoded)?;
+    Ok(encoded)
+}
+
 fn adapt_macos_probe_file(path: &str, source: &str) -> Result<String, String> {
     match path {
         "apps/browser/src/autofill/fido2/background/fido2.background.ts" => replace_exact(
             path,
             source,
             "world: chrome.scripting.ExecutionWorld.MAIN",
-            "world: \"MAIN\"",
+            "world: \"MAIN\" as chrome.scripting.ExecutionWorld",
         ),
         "apps/browser/src/background/main.background.ts" => {
             const BEFORE: &str = r#"    const localStorageStorageService = BrowserApi.isManifestVersion(3)
@@ -339,7 +1116,16 @@ fn adapt_macos_probe_file(path: &str, source: &str) -> Result<String, String> {
       this.largeObjectMemoryStorageForStateProviders,
       diskBackupLocalStorage,
     );"#;
-            replace_exact(path, source, BEFORE, AFTER)
+            let adapted = replace_exact(path, source, BEFORE, AFTER)?;
+            const NOTIFICATION_BEFORE: &str = r#"  initNotificationSubscriptions() {
+    const handlers: Array<{"#;
+            const NOTIFICATION_AFTER: &str = r#"  initNotificationSubscriptions() {
+    if (!this.systemNotificationService.isSupported()) {
+      return;
+    }
+
+    const handlers: Array<{"#;
+            replace_exact(path, &adapted, NOTIFICATION_BEFORE, NOTIFICATION_AFTER)
         }
         "apps/browser/src/autofill/overlay/inline-menu/iframe-content/autofill-inline-menu-iframe.service.ts" => {
             const BEFORE: &str = r#"  initMenuIframe() {
@@ -371,6 +1157,70 @@ fn adapt_macos_probe_file(path: &str, source: &str) -> Result<String, String> {
             replace_exact(path, source, BEFORE, AFTER)
         }
         "apps/browser/src/manifest.v3.json" => adapt_probe_manifest(path, source),
+        "apps/browser/src/popup/services/init.service.ts" => {
+            const BEFORE: &str = r#"    return async () => {
+      await this.sdkLoadService.loadAndInit();
+      await this.migrationRunner.waitForCompletion(); // Browser background is responsible for migrations
+      await this.i18nService.init();
+      this.twoFactorService.init();
+      await this.viewCacheService.init();
+      await this.sizeService.init();"#;
+            const AFTER: &str = r#"    return async () => {
+      const probeGlobal = globalThis as typeof globalThis & {
+        __zephiumPopupInitStage?: string;
+      };
+      probeGlobal.__zephiumPopupInitStage = "sdk";
+      await this.sdkLoadService.loadAndInit();
+      probeGlobal.__zephiumPopupInitStage = "migrations";
+      await this.migrationRunner.waitForCompletion(); // Browser background is responsible for migrations
+      probeGlobal.__zephiumPopupInitStage = "i18n";
+      await this.i18nService.init();
+      probeGlobal.__zephiumPopupInitStage = "two-factor";
+      this.twoFactorService.init();
+      probeGlobal.__zephiumPopupInitStage = "view-cache";
+      await this.viewCacheService.init();
+      probeGlobal.__zephiumPopupInitStage = "size";
+      await this.sizeService.init();
+      probeGlobal.__zephiumPopupInitStage = "complete";"#;
+            replace_exact(path, source, BEFORE, AFTER)
+        }
+        "apps/browser/src/platform/services/platform-utils/browser-platform-utils.service.ts" => {
+            const BEFORE: &str = r#"    } else if (BrowserPlatformUtilsService.isSafari(globalContext)) {
+      this.deviceCache = DeviceType.SafariExtension;
+    }
+
+    return this.deviceCache;"#;
+            const AFTER: &str = r#"    } else if (BrowserPlatformUtilsService.isSafari(globalContext)) {
+      this.deviceCache = DeviceType.SafariExtension;
+    } else {
+      // WKWebExtension service workers do not expose a branded Safari user
+      // agent. This source is admitted only into Zephium's sealed macOS build,
+      // whose native API and lifecycle semantics are Safari-extension shaped.
+      this.deviceCache = DeviceType.SafariExtension;
+    }
+
+    return this.deviceCache;"#;
+            replace_exact(path, source, BEFORE, AFTER)
+        }
+        "apps/browser/src/platform/services/sdk/browser-sdk-load.service.ts" => {
+            let adapted = source.to_owned();
+            const LOAD_BEFORE: &str = r#"  async load(): Promise<void> {
+    const startTime = performance.now();
+    await importModule().then((initSdk) => initSdk());
+    const endTime = performance.now();"#;
+            const LOAD_AFTER: &str = r#"  async load(): Promise<void> {
+    const probeGlobal = globalThis as typeof globalThis & {
+      __zephiumPopupInitStage?: string;
+    };
+    const startTime = performance.now();
+    probeGlobal.__zephiumPopupInitStage = "sdk-import";
+    const initSdk = await importModule();
+    probeGlobal.__zephiumPopupInitStage = "sdk-bindings";
+    initSdk();
+    probeGlobal.__zephiumPopupInitStage = "sdk-bindings-ready";
+    const endTime = performance.now();"#;
+            replace_exact(path, &adapted, LOAD_BEFORE, LOAD_AFTER)
+        }
         _ => Err(format!("no macOS probe adaptation is defined for {path}")),
     }
 }
@@ -409,7 +1259,7 @@ fn replace_exact(path: &str, source: &str, before: &str, after: &str) -> Result<
 
 fn ensure_absent_output(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(format!("overlay output already exists: {}", path.display())),
+        Ok(_) => Err(format!("output already exists: {}", path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("cannot inspect overlay output: {error}")),
     }
@@ -543,9 +1393,12 @@ fn validate_relative_path(path: &str) -> Result<(), String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    lower_hex(&Sha256::digest(bytes))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         use std::fmt::Write as _;
         write!(&mut encoded, "{byte:02x}").expect("writing into a String cannot fail");
     }
@@ -555,6 +1408,92 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "manifest_version": 3,
+            "minimum_chrome_version": "102.0",
+            "name": "__MSG_extName__",
+            "version": "2026.7.0",
+            "default_locale": "en",
+            "background": {"service_worker": "background.js"},
+            "permissions": [
+                "activeTab", "alarms", "clipboardRead", "clipboardWrite", "contextMenus",
+                "idle", "offscreen", "scripting", "sidePanel", "storage", "tabs",
+                "unlimitedStorage", "webNavigation", "webRequest", "webRequestAuthProvider",
+                "notifications"
+            ],
+            "optional_permissions": ["nativeMessaging", "privacy"],
+            "host_permissions": ["https://*/*", "http://*/*"],
+            "content_security_policy": {
+                "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+            },
+            "content_scripts": [
+                {
+                    "all_frames": false,
+                    "js": ["content/content-message-handler.js"],
+                    "matches": ["*://*/*", "file:///*"],
+                    "exclude_matches": ["*://*/*.xml*", "file:///*.xml*"],
+                    "run_at": "document_start"
+                },
+                {
+                    "all_frames": true,
+                    "css": ["content/autofill.css"],
+                    "js": ["content/trigger-autofill-script-injection.js"],
+                    "matches": ["*://*/*", "file:///*"],
+                    "exclude_matches": ["*://*/*.xml*", "file:///*.xml*"],
+                    "run_at": "document_start"
+                }
+            ],
+            "web_accessible_resources": [{
+                "resources": [
+                    "content/fido2-page-script.js", "notification/bar.html", "images/icon38.png",
+                    "images/icon38_locked.png", "popup/fonts/*"
+                ],
+                "matches": ["<all_urls>"],
+                "use_dynamic_url": true
+            }],
+            "action": {
+                "default_popup": "popup/index.html",
+                "default_title": "Bitwarden"
+            },
+            "storage": {"managed_schema": "managed_schema.json"}
+        })
+    }
+
+    fn write_probe_build_fixture(root: &Path) {
+        let manifest = serde_json::to_vec(&probe_manifest()).unwrap();
+        for required in REQUIRED_PROBE_ARTIFACT_FILES {
+            let bytes: &[u8] = match *required {
+                "manifest.json" => &manifest,
+                "background.js" => b"const world=\"MAIN\";function offscreenApiSupported(){}",
+                "content/bootstrap-autofill-overlay-menu.js" => {
+                    b"function forceCloseInlineMenu(){}"
+                }
+                SOURCE_POPUP_ENTRYPOINT => {
+                    b"<!doctype html><base href=\"\"/><script defer=\"defer\" src=\"../popup/polyfills.js\"></script><script defer=\"defer\" src=\"../popup/vendor.js\"></script><script defer=\"defer\" src=\"../popup/vendor-angular.js\"></script><script defer=\"defer\" src=\"../popup/main.js\"></script><body><app-root></app-root></body>"
+                }
+                _ => b"fixture",
+            };
+            write_overlay_file(root, required, bytes).unwrap();
+        }
+        for path in EXPECTED_SOURCE_MAPS {
+            write_overlay_file(root, path, b"source map").unwrap();
+        }
+        for path in UNSAFE_INLINE_MENU_FILES {
+            write_overlay_file(root, path, b"unsafe menu").unwrap();
+        }
+
+        let required_count = REQUIRED_PROBE_ARTIFACT_FILES.len();
+        for index in 0..(EXPECTED_FINAL_FILE_COUNT - required_count) {
+            write_overlay_file(
+                root,
+                &format!("fixture/resource-{index:03}.bin"),
+                b"fixture",
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn reviewed_inventory_is_unique_portable_and_bounded() {
@@ -600,7 +1539,10 @@ mod tests {
             fido,
         )
         .unwrap();
-        assert_eq!(adapted, "before world: \"MAIN\" after");
+        assert_eq!(
+            adapted,
+            "before world: \"MAIN\" as chrome.scripting.ExecutionWorld after"
+        );
         assert!(adapt_macos_probe_file(
             "apps/browser/src/autofill/fido2/background/fido2.background.ts",
             &format!("{fido} {fido}"),
@@ -616,7 +1558,10 @@ mod tests {
       this.memoryStorageForStateProviders,
       this.largeObjectMemoryStorageForStateProviders,
       new PrimarySecondaryStorageService(this.storageService, localStorageStorageService),
-    );"#;
+    );
+
+  initNotificationSubscriptions() {
+    const handlers: Array<{"#;
         let adapted =
             adapt_macos_probe_file("apps/browser/src/background/main.background.ts", storage)
                 .unwrap();
@@ -624,6 +1569,57 @@ mod tests {
         assert!(adapted.contains(": this.storageService"));
         assert!(adapted.contains("diskBackupLocalStorage,"));
         assert!(!adapted.contains("const localStorageStorageService"));
+        assert!(adapted.contains("!this.systemNotificationService.isSupported()"));
+
+        let platform = r#"    } else if (BrowserPlatformUtilsService.isSafari(globalContext)) {
+      this.deviceCache = DeviceType.SafariExtension;
+    }
+
+    return this.deviceCache;"#;
+        let adapted = adapt_macos_probe_file(
+            "apps/browser/src/platform/services/platform-utils/browser-platform-utils.service.ts",
+            platform,
+        )
+        .unwrap();
+        assert!(adapted.contains("WKWebExtension service workers"));
+        assert_eq!(
+            adapted
+                .match_indices("this.deviceCache = DeviceType.SafariExtension;")
+                .count(),
+            2
+        );
+
+        let sdk = r#"before
+// https://stackoverflow.com/a/47880734
+const supported = (() => {
+after
+  async load(): Promise<void> {
+    const startTime = performance.now();
+    await importModule().then((initSdk) => initSdk());
+    const endTime = performance.now();"#;
+        let adapted = adapt_macos_probe_file(
+            "apps/browser/src/platform/services/sdk/browser-sdk-load.service.ts",
+            sdk,
+        )
+        .unwrap();
+        assert!(!adapted.contains("__zephiumWasmCompatibilityStage"));
+        assert_eq!(adapted.matches("const supported = (() => {").count(), 1);
+        assert!(adapted.contains("__zephiumPopupInitStage = \"sdk-import\""));
+        assert!(adapted.contains("__zephiumPopupInitStage = \"sdk-bindings-ready\""));
+
+        let init = r#"    return async () => {
+      await this.sdkLoadService.loadAndInit();
+      await this.migrationRunner.waitForCompletion(); // Browser background is responsible for migrations
+      await this.i18nService.init();
+      this.twoFactorService.init();
+      await this.viewCacheService.init();
+      await this.sizeService.init();"#;
+        let adapted =
+            adapt_macos_probe_file("apps/browser/src/popup/services/init.service.ts", init)
+                .unwrap();
+        assert!(adapted.contains("__zephiumPopupInitStage = \"sdk\""));
+        assert!(adapted.contains("__zephiumPopupInitStage = \"migrations\""));
+        assert!(adapted.contains("__zephiumPopupInitStage = \"complete\""));
     }
 
     #[test]
@@ -681,5 +1677,55 @@ mod tests {
         write_overlay_file(temp.path(), "nested/file", b"first").unwrap();
         assert!(write_overlay_file(temp.path(), "nested/file", b"second").is_err());
         assert_eq!(fs::read(temp.path().join("nested/file")).unwrap(), b"first");
+    }
+
+    #[test]
+    fn probe_artifact_is_closed_canonical_non_product_and_no_replace() {
+        let temp = tempfile::tempdir().unwrap();
+        let build = temp.path().join("build");
+        fs::create_dir(&build).unwrap();
+        write_probe_build_fixture(&build);
+        let output = temp.path().join("artifact");
+
+        finalize_macos_probe_artifact(&build, &output).unwrap();
+        assert!(!output
+            .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+            .join("background.js.map")
+            .exists());
+        assert!(!output
+            .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+            .join("overlay/menu.html")
+            .exists());
+        assert!(output
+            .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+            .join(SOURCE_POPUP_ENTRYPOINT)
+            .exists());
+        let index = fs::read(output.join(PROBE_ARTIFACT_INDEX)).unwrap();
+        let index = CanonicalExtensionTreeIndex::parse_canonical(&index).unwrap();
+        assert_eq!(index.files().len(), EXPECTED_INSTRUMENTED_FILE_COUNT);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.join(PROBE_ARTIFACT_METADATA)).unwrap())
+                .unwrap();
+        assert_eq!(metadata["product_authority"], false);
+        assert_eq!(metadata["file_count"], EXPECTED_INSTRUMENTED_FILE_COUNT);
+        assert_eq!(metadata["background_diagnostics"], true);
+        assert_eq!(metadata["popup_diagnostics"], true);
+        assert_eq!(
+            metadata["compatibility_adaptations"][0],
+            "webkit-extension-device-classification"
+        );
+        assert_eq!(
+            metadata["tree_sha256"],
+            lower_hex(index.tree_sha256().as_bytes())
+        );
+        assert_eq!(
+            metadata["tree_index_sha256"],
+            lower_hex(index.index_sha256().as_bytes())
+        );
+        assert_eq!(
+            metadata["manifest_sha256"],
+            lower_hex(index.manifest_sha256().as_bytes())
+        );
+        assert!(finalize_macos_probe_artifact(&build, &output).is_err());
     }
 }
