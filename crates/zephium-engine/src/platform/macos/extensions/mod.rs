@@ -36,3 +36,10 @@ pub(crate) use native_runtime::{
     MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
     MacosNativeRuntimeRetirement,
 };
+
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) fn clear_all_probe_grants(
+    context: &objc2_web_kit::WKWebExtensionContext,
+) -> Result<(), grant_application::MacosGrantApplicationError> {
+    grant_application::clear_all_grants_and_verify(context).map(drop)
+}

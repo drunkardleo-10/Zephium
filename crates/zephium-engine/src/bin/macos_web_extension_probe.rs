@@ -2,7 +2,14 @@
 fn main() {
     let require_supported_runtime =
         std::env::args().any(|argument| argument == "--require-supported-runtime");
-    match zephium_engine::run_macos_web_extension_probe() {
+    let interactive_permissions =
+        std::env::args().any(|argument| argument == "--interactive-permission-gate");
+    let result = if interactive_permissions {
+        zephium_engine::run_macos_web_extension_permission_probe()
+    } else {
+        zephium_engine::run_macos_web_extension_probe()
+    };
+    match result {
         Ok(true) => {}
         Ok(false) if require_supported_runtime => {
             eprintln!(

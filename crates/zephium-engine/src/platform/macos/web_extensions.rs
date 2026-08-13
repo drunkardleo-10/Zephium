@@ -8,6 +8,7 @@
 mod artifact_tree;
 mod bitwarden_contract;
 mod bitwarden_core_artifact;
+mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
 mod resource_transport;
@@ -36,14 +37,14 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSDate, NSError, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect,
-    NSRectEdge, NSRunLoop, NSSize, NSString, NSURL,
+    NSRectEdge, NSRunLoop, NSSet, NSSize, NSString, NSURL,
 };
 use objc2_web_kit::{
     WKUserScriptInjectionTime, WKWebExtension, WKWebExtensionAction, WKWebExtensionContext,
     WKWebExtensionContextPermissionStatus, WKWebExtensionController,
     WKWebExtensionControllerConfiguration, WKWebExtensionControllerDelegate,
-    WKWebExtensionMatchPattern, WKWebExtensionTab, WKWebExtensionWindow, WKWebView,
-    WKWebViewConfiguration, WKWebsiteDataStore,
+    WKWebExtensionMatchPattern, WKWebExtensionPermission, WKWebExtensionTab, WKWebExtensionWindow,
+    WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
@@ -63,7 +64,6 @@ const MAX_HTTP_REQUESTS: usize = 128;
 const MAX_EXTENSION_SCRIPT_DELTA: usize = 16;
 const MAX_WEBVIEW_CALLBACKS: usize = 1_024;
 const EXPECTED_NATIVE_CONTROLLERS: usize = 3;
-const EXPECTED_NATIVE_CONTEXTS: usize = 4;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
 const PERSISTENT_PROFILE_A: u128 = 0xf0cc_44f2_4355_4cf9_a74f_27fe_6cb3_7eda;
 const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
@@ -250,6 +250,7 @@ impl Drop for ProbeWindow {
 
 struct ProbeControllerDelegateIvars {
     window: Retained<ProbeWindow>,
+    permission_requests: Rc<permission_requests::PermissionRequestProbe>,
     lifecycle_drops: Arc<AtomicUsize>,
 }
 
@@ -280,6 +281,55 @@ define_class!(
             _context: &WKWebExtensionContext,
         ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
             Some(ProtocolObject::from_retained(self.ivars().window.clone()))
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissions:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_for_permissions(
+            &self,
+            _controller: &WKWebExtensionController,
+            permissions: &NSSet<WKWebExtensionPermission>,
+            tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<
+                dyn Fn(NonNull<NSSet<WKWebExtensionPermission>>, *mut NSDate),
+            >,
+        ) {
+            self.ivars().permission_requests.complete_permissions(
+                permissions,
+                tab,
+                context,
+                completion,
+            );
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissionToAccessURLs:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_for_urls(
+            &self,
+            _controller: &WKWebExtensionController,
+            urls: &NSSet<NSURL>,
+            tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(NonNull<NSSet<NSURL>>, *mut NSDate)>,
+        ) {
+            self.ivars()
+                .permission_requests
+                .reject_urls(urls, tab, context, completion);
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissionMatchPatterns:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_for_patterns(
+            &self,
+            _controller: &WKWebExtensionController,
+            patterns: &NSSet<WKWebExtensionMatchPattern>,
+            tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<
+                dyn Fn(NonNull<NSSet<WKWebExtensionMatchPattern>>, *mut NSDate),
+            >,
+        ) {
+            self.ivars()
+                .permission_requests
+                .complete_patterns(patterns, tab, context, completion);
         }
 
         #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]
@@ -325,8 +375,23 @@ impl ProbeControllerDelegate {
         window: Retained<ProbeWindow>,
         lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
+        Self::new_with_permission_requests(
+            mtm,
+            window,
+            Rc::new(permission_requests::PermissionRequestProbe::default()),
+            lifecycle_drops,
+        )
+    }
+
+    fn new_with_permission_requests(
+        mtm: MainThreadMarker,
+        window: Retained<ProbeWindow>,
+        permission_requests: Rc<permission_requests::PermissionRequestProbe>,
+        lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
         let object = Self::alloc(mtm).set_ivars(ProbeControllerDelegateIvars {
             window,
+            permission_requests,
             lifecycle_drops,
         });
         // SAFETY: NSObject is the declared superclass and the ivars are fully
@@ -366,6 +431,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     primary_path: std::path::PathBuf,
     peer_path: std::path::PathBuf,
+    permission_path: std::path::PathBuf,
     bitwarden_contract_path: std::path::PathBuf,
     runtime_paths: persistent_runtime::RuntimeFixturePaths,
 }
@@ -378,6 +444,7 @@ impl Fixture {
             .map_err(|error| format!("cannot create extension probe directory: {error}"))?;
         let primary_path = temp.path().join("primary");
         let peer_path = temp.path().join("peer");
+        let permission_path = temp.path().join("runtime-permission");
         std::fs::create_dir(&primary_path)
             .map_err(|error| format!("cannot create primary extension directory: {error}"))?;
         std::fs::create_dir(&peer_path)
@@ -385,12 +452,14 @@ impl Fixture {
 
         write_primary_extension(&primary_path)?;
         write_peer_extension(&peer_path)?;
+        permission_requests::write_fixture(&permission_path)?;
         let bitwarden_contract_path = bitwarden_contract::write_fixture(temp.path())?;
         let runtime_paths = persistent_runtime::write_runtime_extensions(temp.path())?;
         Ok(Self {
             _temp: temp,
             primary_path,
             peer_path,
+            permission_path,
             bitwarden_contract_path,
             runtime_paths,
         })
@@ -454,6 +523,8 @@ struct ProbeTeardown {
     extension_ui_views: Vec<Weak<WKWebView>>,
     controllers: Vec<Weak<WKWebExtensionController>>,
     contexts: Vec<Weak<WKWebExtensionContext>>,
+    expected_contexts: usize,
+    expected_extension_ui_views: usize,
     lifecycle_drops: Arc<AtomicUsize>,
     baseline_script_count: usize,
     peak_extension_script_delta: usize,
@@ -471,22 +542,40 @@ struct ProbeTeardown {
     bitwarden_dynamic_resource_url: &'static str,
     bitwarden_execution_world_namespace: &'static str,
     bitwarden_sandbox_isolation: &'static str,
+    runtime_permission_status: &'static str,
+    runtime_permission_readback: String,
     operating_system: String,
 }
 
 pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
+    run_web_extension_probe_with_permissions(false)
+}
+
+pub(crate) fn run_web_extension_permission_probe() -> Result<bool, String> {
+    run_web_extension_probe_with_permissions(true)
+}
+
+fn run_web_extension_probe_with_permissions(interactive_permissions: bool) -> Result<bool, String> {
     let Some(operating_system) = supported_runtime()? else {
         return Ok(false);
     };
-    let watchdog_completed = arm_process_watchdog();
+    let watchdog_completed = arm_process_watchdog_with_timeout(if interactive_permissions {
+        Duration::from_secs(600)
+    } else {
+        PROCESS_WATCHDOG_TIMEOUT
+    });
     let result = (|| {
         set_phase("live-probe");
-        let teardown = objc2::rc::autoreleasepool(|_| run_supported_probe(operating_system))?;
+        let teardown = objc2::rc::autoreleasepool(|_| {
+            run_supported_probe(operating_system, interactive_permissions)
+        })?;
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
+            teardown.runtime_permission_status,
+            teardown.runtime_permission_readback,
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
             teardown.bitwarden_dynamic_resource_url,
@@ -548,10 +637,14 @@ fn set_phase(phase: &'static str) {
 }
 
 fn arm_process_watchdog() -> Arc<AtomicBool> {
+    arm_process_watchdog_with_timeout(PROCESS_WATCHDOG_TIMEOUT)
+}
+
+fn arm_process_watchdog_with_timeout(timeout: Duration) -> Arc<AtomicBool> {
     let completed = Arc::new(AtomicBool::new(false));
     let watchdog_completed = completed.clone();
     thread::spawn(move || {
-        thread::sleep(PROCESS_WATCHDOG_TIMEOUT);
+        thread::sleep(timeout);
         if watchdog_completed.load(Ordering::Acquire) {
             return;
         }
@@ -599,7 +692,10 @@ fn supported_runtime() -> Result<Option<String>, String> {
     Ok(Some(operating_system))
 }
 
-fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String> {
+fn run_supported_probe(
+    operating_system: String,
+    interactive_permissions: bool,
+) -> Result<ProbeTeardown, String> {
     set_phase("appkit-launch");
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| "WKWebExtension probe must run on the process main thread".to_owned())?;
@@ -616,6 +712,9 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     let primary_extension = load_extension(&fixture.primary_path, &run_loop, mtm)?;
     set_phase("peer-extension-parse");
     let peer_extension = load_extension(&fixture.peer_path, &run_loop, mtm)?;
+    set_phase("runtime-permission-extension-parse");
+    let permission_extension = load_extension(&fixture.permission_path, &run_loop, mtm)?;
+    permission_requests::validate_declaration(&permission_extension)?;
     set_phase("bitwarden-contract-parse");
     let bitwarden_contract_extension =
         load_extension(&fixture.bitwarden_contract_path, &run_loop, mtm)?;
@@ -705,7 +804,7 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     assert_private_data_access(&primary_context, true, "primary explicit grant")?;
     assert_private_data_access(&peer_context, true, "peer explicit grant")?;
     assert_private_data_access(&secondary_context, false, "secondary separation")?;
-    let context_weaks = vec![
+    let mut context_weaks = vec![
         bitwarden_contract_teardown.context,
         Weak::from_retained(&primary_context),
         Weak::from_retained(&peer_context),
@@ -765,8 +864,13 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     );
     let extension_window = ProbeWindow::new(mtm, tab.clone(), true, lifecycle_drops.clone());
     tab.set_window(&extension_window);
-    let delegate =
-        ProbeControllerDelegate::new(mtm, extension_window.clone(), lifecycle_drops.clone());
+    let permission_request_state = Rc::new(permission_requests::PermissionRequestProbe::default());
+    let delegate = ProbeControllerDelegate::new_with_permission_requests(
+        mtm,
+        extension_window.clone(),
+        permission_request_state.clone(),
+        lifecycle_drops.clone(),
+    );
 
     let delegate_protocol = ProtocolObject::from_ref(&*delegate);
     let window_protocol = ProtocolObject::from_ref(&*extension_window);
@@ -823,6 +927,26 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         "secondary controller separation",
     )?;
     assert_exact_inventory(&native_view, &baseline_inventory, "context load")?;
+
+    set_phase("runtime-permission-request-gates");
+    let permission_request_evidence = if interactive_permissions {
+        permission_requests::run(
+            &permission_extension,
+            &primary_bundle.controller,
+            window_protocol,
+            tab_protocol,
+            &run_loop,
+            mtm,
+            &permission_request_state,
+        )?
+    } else {
+        permission_requests::PermissionRequestEvidence {
+            contexts: Vec::new(),
+            extension_views: Vec::new(),
+            readback: "interactive-not-run".to_owned(),
+        }
+    };
+    context_weaks.extend(permission_request_evidence.contexts.iter().cloned());
 
     let match_pattern = exact_host_pattern(mtm)?;
     validate_requested_patterns(&primary_extension, "primary")?;
@@ -1200,6 +1324,8 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
     drop(secondary_context);
     drop(primary_extension);
     drop(peer_extension);
+    drop(permission_extension);
+    drop(permission_request_state);
     drop(runtime_writer);
     drop(runtime_verifier_one);
     drop(runtime_verifier_two);
@@ -1215,9 +1341,15 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         view: view_weak,
         extension_product_views: vec![bitwarden_contract_teardown.product_view],
         extension_product_stores: vec![bitwarden_contract_teardown.product_store],
-        extension_ui_views: bitwarden_contract_teardown.popup_views,
+        extension_ui_views: bitwarden_contract_teardown
+            .popup_views
+            .into_iter()
+            .chain(permission_request_evidence.extension_views)
+            .collect(),
         controllers: controller_weaks,
         contexts: context_weaks,
+        expected_contexts: if interactive_permissions { 7 } else { 4 },
+        expected_extension_ui_views: if interactive_permissions { 5 } else { 2 },
         lifecycle_drops,
         baseline_script_count: baseline_inventory.len(),
         peak_extension_script_delta: script_multiset_len(&both_delta),
@@ -1235,6 +1367,12 @@ fn run_supported_probe(operating_system: String) -> Result<ProbeTeardown, String
         bitwarden_dynamic_resource_url: bitwarden_contract_teardown.dynamic_resource_url,
         bitwarden_execution_world_namespace: bitwarden_contract_teardown.execution_world_namespace,
         bitwarden_sandbox_isolation: bitwarden_contract_teardown.sandbox_isolation,
+        runtime_permission_status: if interactive_permissions {
+            "passed"
+        } else {
+            "interactive-not-run"
+        },
+        runtime_permission_readback: permission_request_evidence.readback,
         operating_system,
     })
 }
@@ -1574,6 +1712,12 @@ fn assert_attached_controller(
 
 fn user_script_inventory(view: &WKWebView) -> Vec<UserScriptFingerprint> {
     let controller = unsafe { view.configuration().userContentController() };
+    user_content_controller_inventory(&controller)
+}
+
+fn user_content_controller_inventory(
+    controller: &objc2_web_kit::WKUserContentController,
+) -> Vec<UserScriptFingerprint> {
     let scripts = unsafe { controller.userScripts() };
     let count = scripts.count();
     let mut inventory = Vec::with_capacity(count);
@@ -1588,12 +1732,17 @@ fn user_script_inventory(view: &WKWebView) -> Vec<UserScriptFingerprint> {
     inventory
 }
 
-fn validate_protected_inventory(inventory: &[UserScriptFingerprint]) -> Result<(), String> {
-    for (source, all_frames) in crate::host::protected_script_specs_for_native_probe() {
+fn protected_inventory_is_installed(inventory: &[UserScriptFingerprint]) -> Result<bool, String> {
+    let specs = crate::host::protected_script_specs_for_native_probe();
+    let mut installed = 0;
+    for (source, all_frames) in specs {
         let matching = inventory
             .iter()
             .filter(|entry| entry.source == source)
             .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
         if matching.len() != 1
             || matching[0].main_frame_only == all_frames
             || matching[0].injection_time != WKUserScriptInjectionTime::AtDocumentStart.0
@@ -1603,8 +1752,26 @@ fn validate_protected_inventory(inventory: &[UserScriptFingerprint]) -> Result<(
                     .into(),
             );
         }
+        installed += 1;
     }
-    Ok(())
+    if installed != 0 && installed != specs.len() {
+        return Err(
+            "protected script is missing, duplicated, or has changed native installation metadata"
+                .into(),
+        );
+    }
+    Ok(installed == specs.len())
+}
+
+fn validate_protected_inventory(inventory: &[UserScriptFingerprint]) -> Result<(), String> {
+    if protected_inventory_is_installed(inventory)? {
+        Ok(())
+    } else {
+        Err(
+            "protected script is missing, duplicated, or has changed native installation metadata"
+                .into(),
+        )
+    }
 }
 
 type ScriptMultiset = HashMap<UserScriptFingerprint, usize>;
@@ -1826,7 +1993,6 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
 }
 
 fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
-    const EXPECTED_EXTENSION_UI_VIEWS: usize = 2;
     const EXPECTED_EXTENSION_PRODUCT_VIEWS: usize = 1;
     const EXPECTED_EXTENSION_PRODUCT_STORES: usize = 1;
     const EXPECTED_PROFILE_VIEWS: usize = 7;
@@ -1836,9 +2002,9 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS.len();
     if teardown.extension_product_views.len() != EXPECTED_EXTENSION_PRODUCT_VIEWS
         || teardown.extension_product_stores.len() != EXPECTED_EXTENSION_PRODUCT_STORES
-        || teardown.extension_ui_views.len() != EXPECTED_EXTENSION_UI_VIEWS
+        || teardown.extension_ui_views.len() != teardown.expected_extension_ui_views
         || teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
-        || teardown.contexts.len() != EXPECTED_NATIVE_CONTEXTS
+        || teardown.contexts.len() != teardown.expected_contexts
         || teardown.profile_views.len() != EXPECTED_PROFILE_VIEWS
         || teardown.profile_contexts.len() != EXPECTED_PROFILE_CONTEXTS
         || teardown.profile_controllers.len() != EXPECTED_PROFILE_OWNERS
@@ -1846,12 +2012,14 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         || teardown.profile_lifecycle_drops.len() != EXPECTED_PROFILE_LIFECYCLE_GROUPS
     {
         return Err(format!(
-            "native teardown inventory mismatch: extension_product_views={}/{EXPECTED_EXTENSION_PRODUCT_VIEWS}, extension_product_stores={}/{EXPECTED_EXTENSION_PRODUCT_STORES}, extension_ui_views={}/{EXPECTED_EXTENSION_UI_VIEWS}, controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{EXPECTED_NATIVE_CONTEXTS}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
+            "native teardown inventory mismatch: extension_product_views={}/{EXPECTED_EXTENSION_PRODUCT_VIEWS}, extension_product_stores={}/{EXPECTED_EXTENSION_PRODUCT_STORES}, extension_ui_views={}/{}, controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
             teardown.extension_product_views.len(),
             teardown.extension_product_stores.len(),
             teardown.extension_ui_views.len(),
+            teardown.expected_extension_ui_views,
             teardown.controllers.len(),
             teardown.contexts.len(),
+            teardown.expected_contexts,
             teardown.profile_views.len(),
             teardown.profile_contexts.len(),
             teardown.profile_controllers.len(),

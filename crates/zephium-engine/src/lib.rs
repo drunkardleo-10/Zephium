@@ -32,6 +32,18 @@ pub fn run_macos_web_extension_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_probe()
 }
 
+/// Runs the interactive WebKit optional-permission settlement gate.
+///
+/// This feature-only probe requires three real clicks in temporary
+/// extension-origin page windows so WebKit recognizes the calls as user
+/// gestures. It is intentionally separate from unattended CI and is absent
+/// from ordinary product builds.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_permission_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_permission_probe()
+}
+
 /// Executes the non-product macOS extension-resource transport capability gate.
 ///
 /// A successful result means the current behavior was classified exactly: the

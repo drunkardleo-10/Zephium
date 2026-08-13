@@ -30,7 +30,7 @@ use zephium_core::extensions::{
     ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
     ExtensionBrowserTab, ExtensionBrowserWindow, ExtensionNativeNamespaceScope,
 };
-use zephium_core::ids::ItemId;
+use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 
 use super::persistent_runtime::{NamespaceLock, EXTENSION_PRINCIPAL};
@@ -738,6 +738,30 @@ impl ProfileGeneration {
             return Err("foreign extension context crossed the browser mutation broker".into());
         }
 
+        self.validate_unit_browser_mutation(
+            profile,
+            ExtensionBrowserRequestAction::ReloadTab { tab: item },
+            |completion| unsafe {
+                tab.reloadFromOrigin_forWebExtensionContext_completionHandler(
+                    false, context, completion,
+                )
+            },
+        )?;
+        self.validate_unit_browser_mutation(
+            profile,
+            ExtensionBrowserRequestAction::GoBack { tab: item },
+            |completion| unsafe {
+                tab.goBackForWebExtensionContext_completionHandler(context, completion)
+            },
+        )?;
+        self.validate_unit_browser_mutation(
+            profile,
+            ExtensionBrowserRequestAction::GoForward { tab: item },
+            |completion| unsafe {
+                tab.goForwardForWebExtensionContext_completionHandler(context, completion)
+            },
+        )?;
+
         let unsupported_count = Rc::new(Cell::new(0));
         let unsupported_failed = Rc::new(Cell::new(false));
         let callback_count = unsupported_count.clone();
@@ -747,11 +771,11 @@ impl ProfileGeneration {
                 callback_count.set(callback_count.get() + 1);
                 callback_failed.set(!error.is_null());
             });
-        // SAFETY: reload is intentionally represented as an explicit refusal
-        // so WebKit cannot fall back to mutating the WKWebView directly.
+        // SAFETY: cache-bypassing reload remains an explicit refusal because
+        // the Engine contract exposes ordinary reload only.
         unsafe {
             tab.reloadFromOrigin_forWebExtensionContext_completionHandler(
-                false,
+                true,
                 context,
                 &unsupported_completion,
             )
@@ -763,6 +787,55 @@ impl ProfileGeneration {
             return Err("unsupported native mutation did not fail closed".into());
         }
         Ok(updated)
+    }
+
+    fn validate_unit_browser_mutation(
+        &mut self,
+        profile: ProfileId,
+        expected: ExtensionBrowserRequestAction,
+        invoke: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>),
+    ) -> Result<(), String> {
+        let completion_count = Rc::new(Cell::new(0));
+        let completion_error = Rc::new(Cell::new(false));
+        let callback_count = completion_count.clone();
+        let callback_error = completion_error.clone();
+        let completion: block2::RcBlock<dyn Fn(*mut NSError)> =
+            block2::RcBlock::new(move |error: *mut NSError| {
+                callback_count.set(callback_count.get() + 1);
+                callback_error.set(!error.is_null());
+            });
+
+        invoke(&completion);
+        if completion_count.get() != 0 {
+            return Err("native browser mutation completed before Shell settlement".into());
+        }
+        let request = self.take_browser_request()?;
+        if request.profile() != profile || request.action() != &expected {
+            return Err(format!(
+                "native browser mutation projection drifted: expected={expected:?}, actual={:?}",
+                request.action()
+            ));
+        }
+        let settlement = self
+            .registry
+            .settle_browser_request(
+                profile,
+                request.id(),
+                ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
+            )
+            .map_err(|error| format!("cannot settle native browser mutation: {error}"))?;
+        if settlement != ControllerBrowserRequestSettlement::Settled
+            || completion_count.get() != 1
+            || completion_error.get()
+            || !self.browser_requests_is_empty()
+        {
+            return Err(format!(
+                "native browser mutation did not settle exactly once: settlement={settlement:?}, count={}, error={}",
+                completion_count.get(),
+                completion_error.get()
+            ));
+        }
+        Ok(())
     }
 
     fn take_browser_request(&self) -> Result<ExtensionBrowserRequest, String> {
@@ -1034,9 +1107,20 @@ pub(super) fn build_profile_view(
     host: &ProbeHostView,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
 ) -> Result<wry::WebView, String> {
+    let user_content_controller = unsafe { configuration.userContentController() };
+    let inventory = super::user_content_controller_inventory(&user_content_controller);
+    let protected_scripts_installed = super::protected_inventory_is_installed(&inventory)?;
     let mut builder = wry::WebViewBuilder::new().with_webview_configuration(configuration);
-    for (source, all_frames) in crate::host::protected_script_specs_for_native_probe() {
-        builder = builder.with_initialization_script_for_main_only(source, !all_frames);
+    // `WKWebExtensionContext.webViewConfiguration()` can share its user
+    // content controller with an existing profile surface. macOS has no
+    // per-script removal API, so reinstalling the host safety scripts would
+    // permanently duplicate them across every subsequent page. A fresh
+    // controller receives the complete set; an exact existing set is reused;
+    // partial or metadata-drifted state is rejected above.
+    if !protected_scripts_installed {
+        for (source, all_frames) in crate::host::protected_script_specs_for_native_probe() {
+            builder = builder.with_initialization_script_for_main_only(source, !all_frames);
+        }
     }
     builder
         .build_as_child(host)
