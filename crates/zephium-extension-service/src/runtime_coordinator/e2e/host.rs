@@ -9,7 +9,8 @@ use zephium_core::extensions::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
     ExtensionNativeGrantRequirement, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase, ExtensionOperationAuthorityDenial,
-    ExtensionRuntimeFingerprint, ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
+    ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint, ExtensionRuntimeOperationAuthority,
+    ExtensionUserInvocationKind,
 };
 use zephium_core::ids::ProfileId;
 use zephium_extension_runtime_api::{
@@ -18,14 +19,15 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeFailure,
     ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
     ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
-    ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
-    ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostPublicationPort,
-    ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
-    ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeLifecyclePort,
-    ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeNativeIdentityExpectation,
-    ExtensionRuntimeNativeRootLease, ExtensionRuntimeOwnerAddress,
-    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
-    ExtensionRuntimeOwnershipPort, ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
+    ExtensionRuntimeHostGrantRebindPortRefusal, ExtensionRuntimeHostLifecyclePort,
+    ExtensionRuntimeHostOwnershipPort, ExtensionRuntimeHostProfileAbsenceDisposition,
+    ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
+    ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
+    ExtensionRuntimeLifecyclePort, ExtensionRuntimeMacosAbsenceAudit,
+    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeNativeRootLease,
+    ExtensionRuntimeOwnerAddress, ExtensionRuntimeOwnershipDisposition,
+    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeOwnershipPort,
+    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
@@ -48,6 +50,7 @@ pub(super) struct HostProbe {
     bind_calls: AtomicUsize,
     activation_calls: AtomicUsize,
     publication_calls: AtomicUsize,
+    grant_rebind_calls: AtomicUsize,
     retirement_calls: AtomicUsize,
     reclaim_calls: AtomicUsize,
     profile_absence_calls: AtomicUsize,
@@ -83,6 +86,7 @@ impl Default for HostProbe {
             bind_calls: AtomicUsize::new(0),
             activation_calls: AtomicUsize::new(0),
             publication_calls: AtomicUsize::new(0),
+            grant_rebind_calls: AtomicUsize::new(0),
             retirement_calls: AtomicUsize::new(0),
             reclaim_calls: AtomicUsize::new(0),
             profile_absence_calls: AtomicUsize::new(0),
@@ -105,6 +109,10 @@ impl HostProbe {
 
     pub(super) fn publication_calls(&self) -> usize {
         self.publication_calls.load(Ordering::Acquire)
+    }
+
+    pub(super) fn grant_rebind_calls(&self) -> usize {
+        self.grant_rebind_calls.load(Ordering::Acquire)
     }
 
     pub(super) fn retirement_calls(&self) -> usize {
@@ -375,6 +383,34 @@ impl HostProbe {
             .ok_or(ExtensionRuntimeHostBindError::Unavailable)?;
         registry.records[index] = None;
         Ok(authority)
+    }
+
+    fn rebind_grants(
+        &self,
+        reservation: &ReservationControl,
+        current: &ExtensionNativeOwnershipEntry,
+        rebound: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), Box<ExtensionRuntimeEligibility>> {
+        let Ok(mut registry) = self.registry.lock() else {
+            return Err(Box::new(eligibility));
+        };
+        let Ok(record) = find_record_mut(&mut registry, reservation.owner, reservation.generation)
+        else {
+            return Err(Box::new(eligibility));
+        };
+        if record.phase != RegistryPhase::Active {
+            return Err(Box::new(eligibility));
+        }
+        let Some(authority) = record.authority.as_mut() else {
+            return Err(Box::new(eligibility));
+        };
+        authority
+            .try_rebind_grants(current, rebound, eligibility)
+            .map(|_| {
+                self.grant_rebind_calls.fetch_add(1, Ordering::AcqRel);
+            })
+            .map_err(|refusal| Box::new(refusal.into_eligibility()))
     }
 
     fn with_authority<T>(
@@ -1061,6 +1097,34 @@ impl ExtensionRuntimeHostPublicationPort for ScriptedPublication {
                 ExtensionRuntimeHostPublicationPortRefusal::new(
                     ExtensionRuntimeHostBindError::InternalInvariant,
                     *authority,
+                )
+            })
+    }
+
+    fn rebind_operation_authority(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), ExtensionRuntimeHostGrantRebindPortRefusal> {
+        if !self.addressed_by(owner, generation)
+            || !entry_matches_reservation(current_entry, &self.reservation)
+            || !entry_matches_reservation(rebound_entry, &self.reservation)
+        {
+            return Err(ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                ExtensionRuntimeHostBindError::OwnerConflict,
+                eligibility,
+            ));
+        }
+        self.reservation
+            .probe
+            .rebind_grants(&self.reservation, current_entry, rebound_entry, eligibility)
+            .map_err(|eligibility| {
+                ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                    ExtensionRuntimeHostBindError::InternalInvariant,
+                    *eligibility,
                 )
             })
     }

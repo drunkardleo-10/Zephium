@@ -10,7 +10,8 @@ use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
 
 use super::{
     RuntimeActivationOutcome, RuntimeActivationUnavailableReason, RuntimeCoordinator,
-    RuntimeCoordinatorFailureReason, RuntimeDrainOutcome, RuntimeRetirementOutcome,
+    RuntimeCoordinatorFailureReason, RuntimeDrainOutcome, RuntimeGrantRebindOutcome,
+    RuntimeRetirementOutcome,
 };
 use host::{AbsenceEvidenceMode, PublicationMode};
 use support::{deadline, RealAuthorityHarness};
@@ -70,6 +71,69 @@ fn real_authority_activation_reloads_unknown_projection_and_retires_exact_runtim
     assert_eq!(harness.probe.registry_obligation_count(), 0);
     assert_eq!(harness.probe.live_reservation_count(), 0);
 
+    drop(coordinator);
+    harness.finish();
+}
+
+#[test]
+fn real_authority_grant_rebind_preserves_generation_native_owner_and_clean_release() {
+    let mut harness = RealAuthorityHarness::new(1, PublicationMode::Immediate);
+    let key = harness.keys[0];
+    let mut coordinator = RuntimeCoordinator::new();
+
+    assert_eq!(
+        coordinator.activate_until(harness.resources(), key, false, deadline()),
+        RuntimeActivationOutcome::Activated(ExtensionRuntimeGeneration::INITIAL)
+    );
+    let before = harness.journal().get(key).expect("owned row").clone();
+    let eligibility = harness.commit_optional_tabs_grant(key);
+    assert_eq!(
+        harness
+            .journal()
+            .get(key)
+            .expect("journal remains at pre-rebind authority")
+            .store_grant_revision(),
+        before.store_grant_revision()
+    );
+
+    assert_eq!(
+        coordinator.rebind_live_grants_until(
+            harness.resources(),
+            key,
+            ExtensionRuntimeGeneration::INITIAL,
+            eligibility,
+            deadline(),
+        ),
+        RuntimeGrantRebindOutcome::Rebound(
+            before
+                .store_grant_revision()
+                .next()
+                .expect("next grant revision")
+        )
+    );
+    assert_eq!(
+        coordinator.live_generation(key),
+        Some(ExtensionRuntimeGeneration::INITIAL)
+    );
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 1);
+    assert_eq!(harness.probe.grant_rebind_calls(), 1);
+    assert_eq!(harness.probe.retirement_calls(), 0);
+    let rebound = harness.journal().get(key).expect("rebound owner").clone();
+    assert_eq!(rebound.operation(), before.operation());
+    assert_eq!(rebound.native_incarnation(), before.native_incarnation());
+    assert_eq!(rebound.native_identity(), before.native_identity());
+    assert_eq!(rebound.store_grant_revision().get(), 2);
+
+    assert_eq!(
+        coordinator.retire_key_until(harness.resources(), key, deadline()),
+        RuntimeRetirementOutcome::Retired
+    );
+    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.reclaim_calls(), 1);
+    assert_eq!(harness.probe.registry_obligation_count(), 0);
+    harness.assert_repository_absent_after_reopen();
     drop(coordinator);
     harness.finish();
 }

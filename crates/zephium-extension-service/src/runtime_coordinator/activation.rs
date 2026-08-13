@@ -272,6 +272,12 @@ impl RuntimeCoordinator {
             RuntimeSlotState::Release(state) => {
                 activation_from_retirement_drive(drive_release(resources, *state, deadline))
             }
+            RuntimeSlotState::GrantRebindPending(operation) => ActivationDrive::Stop {
+                state: Some(RuntimeSlotState::GrantRebindPending(operation)),
+                outcome: RuntimeActivationOutcome::Unavailable(
+                    RuntimeActivationUnavailableReason::StoreObservationPending,
+                ),
+            },
             RuntimeSlotState::FailStop(state) => ActivationDrive::Stop {
                 outcome: RuntimeActivationOutcome::FailedClosed(state.reason),
                 state: Some(RuntimeSlotState::FailStop(state)),

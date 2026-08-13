@@ -1,6 +1,7 @@
 //! Worker-private, serialized extension-runtime lifecycle coordination.
 
 mod activation;
+mod grant_rebind;
 mod outcome;
 mod reconciliation;
 mod retirement;
@@ -19,7 +20,8 @@ use crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 
 pub(crate) use outcome::{
     RuntimeActivationOutcome, RuntimeActivationRejectionReason, RuntimeActivationUnavailableReason,
-    RuntimeCoordinatorFailureReason, RuntimeDrainOutcome, RuntimeRetirementOutcome,
+    RuntimeCoordinatorFailureReason, RuntimeDrainOutcome, RuntimeGrantRebindOutcome,
+    RuntimeGrantRebindUnavailableReason, RuntimeRetirementOutcome,
     RuntimeRetirementUnavailableReason,
 };
 use slot::RuntimeSlot;
@@ -108,6 +110,21 @@ impl RuntimeCoordinator {
         self.slot(key)
             .filter(|slot| slot.is_live())
             .and_then(RuntimeSlot::generation)
+    }
+
+    /// Exact structural CAS for a fully published owner. Pending grant-rebind
+    /// states remain live for routing but cannot authorize a second Store
+    /// patch until their first durable edge is reconciled.
+    pub(crate) fn published_owner_cas(
+        &self,
+        key: ExtensionNativeOwnershipKey,
+        generation: ExtensionRuntimeGeneration,
+    ) -> Option<zephium_core::extensions::ExtensionNativeOwnershipEntryCas> {
+        let slot = self.slot(key)?;
+        if slot.generation() != Some(generation) {
+            return None;
+        }
+        slot.published_owned_entry().map(|entry| entry.cas())
     }
 
     pub(crate) fn has_attached_obligation(&self) -> bool {

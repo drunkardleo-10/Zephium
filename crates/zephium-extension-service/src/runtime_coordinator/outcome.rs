@@ -80,3 +80,26 @@ pub(crate) enum RuntimeDrainOutcome {
     Unavailable(RuntimeRetirementUnavailableReason),
     FailedClosed(RuntimeCoordinatorFailureReason),
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeGrantRebindUnavailableReason {
+    DeadlineReached,
+    StoreNotAdmitted,
+    StoreObservationPending,
+}
+
+/// Settlement of one durable-journal plus live-host grant authority rebind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub(crate) enum RuntimeGrantRebindOutcome {
+    /// The exact generation now holds the supplied later grant authority.
+    Rebound(zephium_core::extensions::ExtensionGrantRevision),
+    /// No earlier rebind settlement was pending for this owner.
+    NoPending,
+    /// The addressed runtime or generation is no longer the live owner.
+    Conflict,
+    /// Settlement remains safely retryable with authority retained in-slot.
+    Unavailable(RuntimeGrantRebindUnavailableReason),
+    /// An invariant failed after authority may have crossed a durable seam.
+    FailedClosed(RuntimeCoordinatorFailureReason),
+}

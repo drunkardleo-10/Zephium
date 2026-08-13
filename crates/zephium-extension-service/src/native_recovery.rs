@@ -1127,6 +1127,7 @@ mod tests {
         retire: VecDeque<ScriptedRetirement>,
     }
 
+    #[allow(clippy::large_enum_variant)] // Test script favors readable Copy-like values.
     enum ScriptedReconciliation {
         Disposition(ExtensionRuntimeOwnershipDisposition),
         Absent,

@@ -1,6 +1,8 @@
 //! Exact durable-row mutation and ambiguity reconciliation.
 
 use std::mem::size_of;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::Arc;
 use std::time::Instant;
 
 use zephium_core::extensions::ExtensionNativeOwnershipEntry;
@@ -159,19 +161,23 @@ fn settle_known_row_fence(
     operation: RuntimeRowFenceOperation,
     deadline: Instant,
 ) -> RowFenceProgress {
-    let Some(caller_retained_bytes) = operation.authority.caller_retained_bytes() else {
+    let Some(caller_retained_bytes) = operation
+        .authority
+        .caller_retained_bytes()
+        .and_then(|bytes| bytes.checked_add(operation.mutation.additional_retained_bytes()))
+    else {
         return fail_stop_authority(
             operation.authority,
             RuntimeCoordinatorFailureReason::RetainedBytesOverflow,
         );
     };
-    let settlement = match operation.mutation {
+    let settlement = match &operation.mutation {
         RuntimeRowFenceMutation::Transition { intent, phase } => {
             resources.projection.settle_exact_row_transition(
                 resources.store,
                 operation.authority.current_entry(),
-                intent,
-                phase,
+                *intent,
+                *phase,
                 caller_retained_bytes,
                 deadline,
             )
@@ -180,7 +186,18 @@ fn settle_known_row_fence(
             resources.projection.settle_native_identity_attachment(
                 resources.store,
                 operation.authority.current_entry(),
-                identity,
+                *identity,
+                caller_retained_bytes,
+                deadline,
+            )
+        }
+        RuntimeRowFenceMutation::RebindGrants(eligibility) => {
+            resources.projection.settle_live_grant_rebind(
+                resources.store,
+                operation.authority.current_entry(),
+                eligibility.grant_revision(),
+                eligibility.grant_digest(),
+                Arc::clone(eligibility.manifest_arc()),
                 caller_retained_bytes,
                 deadline,
             )
@@ -201,9 +218,17 @@ fn settle_known_row_fence(
                 }
                 RowFencePreparationFailureReason::ReloadRequired => {
                     return match resources.projection.reload(resources.store, deadline) {
+                        Ok(_) if operation.is_live_grant_rebind() => RowFenceProgress::Wait {
+                            state: RuntimeSlotState::GrantRebindPending(Box::new(operation)),
+                            reason: RowFenceWait::StoreObservationPending,
+                        },
                         Ok(_) => RowFenceProgress::Continue(operation.authority.into_state()),
                         Err(failure) => retain_row_state_for_load_failure(
-                            operation.authority.into_state(),
+                            if operation.is_live_grant_rebind() {
+                                RuntimeSlotState::GrantRebindPending(Box::new(operation))
+                            } else {
+                                operation.authority.into_state()
+                            },
                             failure,
                         ),
                     };
@@ -223,7 +248,11 @@ fn settle_known_row_fence(
     match settlement {
         RowFenceSettlement::Applied(applied) => finish_applied(operation, applied.entry().cloned()),
         RowFenceSettlement::NotAdmitted => RowFenceProgress::Wait {
-            state: operation.authority.into_state(),
+            state: if operation.is_live_grant_rebind() {
+                RuntimeSlotState::GrantRebindPending(Box::new(operation))
+            } else {
+                operation.authority.into_state()
+            },
             reason: RowFenceWait::StoreNotAdmitted,
         },
         RowFenceSettlement::Refused(refusal) => {
@@ -332,11 +361,15 @@ pub(super) fn reconcile_row_ambiguity(
 }
 
 fn finish_applied(
-    mut operation: RuntimeRowFenceOperation,
+    operation: RuntimeRowFenceOperation,
     applied_entry: Option<ExtensionNativeOwnershipEntry>,
 ) -> RowFenceProgress {
-    match (operation.mutation, applied_entry) {
-        (RuntimeRowFenceMutation::Clear, None) => match operation.authority {
+    let RuntimeRowFenceOperation {
+        mutation,
+        mut authority,
+    } = operation;
+    match (mutation, applied_entry) {
+        (RuntimeRowFenceMutation::Clear, None) => match authority {
             RuntimeRowFenceAuthority::Release(state) => RowFenceProgress::Cleared(state.completion),
             RuntimeRowFenceAuthority::Owned(state) => fail_stop_authority(
                 RuntimeRowFenceAuthority::Owned(state),
@@ -345,13 +378,85 @@ fn finish_applied(
         },
         (RuntimeRowFenceMutation::Transition { .. }, Some(entry))
         | (RuntimeRowFenceMutation::AttachNativeIdentity(_), Some(entry)) => {
-            operation.authority.install_entry(entry);
-            RowFenceProgress::Continue(operation.authority.into_state())
+            authority.install_entry(entry);
+            RowFenceProgress::Continue(authority.into_state())
         }
-        (_, _) => fail_stop_authority(
-            operation.authority,
-            RuntimeCoordinatorFailureReason::JournalDiverged,
-        ),
+        (RuntimeRowFenceMutation::RebindGrants(eligibility), Some(entry)) => {
+            finish_grant_rebind(authority, entry, *eligibility)
+        }
+        (_, _) => fail_stop_authority(authority, RuntimeCoordinatorFailureReason::JournalDiverged),
+    }
+}
+
+fn finish_grant_rebind(
+    authority: RuntimeRowFenceAuthority,
+    rebound_entry: ExtensionNativeOwnershipEntry,
+    eligibility: zephium_core::extensions::ExtensionRuntimeEligibility,
+) -> RowFenceProgress {
+    let RuntimeRowFenceAuthority::Owned(state) = authority else {
+        return fail_stop_authority(
+            authority,
+            RuntimeCoordinatorFailureReason::InternalProtocolViolation,
+        );
+    };
+    let OwnedRuntimeState {
+        current_entry: _,
+        owner,
+        operation,
+        recovery,
+    } = *state;
+    let RuntimeOperationControl::Published(receipt) = operation else {
+        return fail_stop_authority(
+            RuntimeRowFenceAuthority::Owned(Box::new(OwnedRuntimeState {
+                current_entry: rebound_entry,
+                owner,
+                operation,
+                recovery,
+            })),
+            RuntimeCoordinatorFailureReason::InternalProtocolViolation,
+        );
+    };
+
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        receipt.rebind_grants(rebound_entry.clone(), eligibility)
+    })) {
+        Ok(Ok(receipt)) => {
+            RowFenceProgress::Continue(RuntimeSlotState::Owned(Box::new(OwnedRuntimeState {
+                current_entry: rebound_entry,
+                owner,
+                operation: RuntimeOperationControl::Published(Box::new(receipt)),
+                recovery,
+            })))
+        }
+        Ok(Err(refusal)) => {
+            let reason = match refusal.reason() {
+                zephium_extension_runtime_api::ExtensionRuntimeHostBindError::RetainedBytesOverflow => {
+                    RuntimeCoordinatorFailureReason::RetainedBytesOverflow
+                }
+                _ => RuntimeCoordinatorFailureReason::HostInvariant,
+            };
+            RowFenceProgress::FailStop {
+                retained: RuntimeFailStopRetained::GrantRebind(Box::new(
+                    super::slot::GrantRebindFailStopAuthority {
+                        owner,
+                        refusal,
+                        recovery,
+                        current_entry: rebound_entry,
+                    },
+                )),
+                reason,
+            }
+        }
+        Err(_) => RowFenceProgress::FailStop {
+            retained: RuntimeFailStopRetained::GrantRebindCallPanicked(Box::new(
+                super::slot::GrantRebindCallPanicAuthority {
+                    owner,
+                    recovery,
+                    current_entry: rebound_entry,
+                },
+            )),
+            reason: RuntimeCoordinatorFailureReason::NativeCallPanicked,
+        },
     }
 }
 

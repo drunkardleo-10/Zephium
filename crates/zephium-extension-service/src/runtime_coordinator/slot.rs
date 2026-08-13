@@ -5,14 +5,15 @@ use std::mem::size_of;
 use zephium_core::extensions::{
     ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipIdentity,
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase,
-    ExtensionRuntimeGeneration,
+    ExtensionRuntimeEligibility, ExtensionRuntimeGeneration,
 };
 use zephium_extension_runtime_api::{
     ExtensionPackageAccess, ExtensionRuntimeAbsenceEvidence, ExtensionRuntimeActivationRequest,
     ExtensionRuntimeFailure, ExtensionRuntimeOwner, ExtensionRuntimePendingPublication,
-    ExtensionRuntimePublicationReceipt, ExtensionRuntimePublicationReclaimRefusal,
-    ExtensionRuntimePublicationRefusal, ExtensionRuntimePublicationRequest,
-    ExtensionRuntimeRetirementRequest, ExtensionRuntimeUncertainOwner,
+    ExtensionRuntimePublicationGrantRebindRefusal, ExtensionRuntimePublicationReceipt,
+    ExtensionRuntimePublicationReclaimRefusal, ExtensionRuntimePublicationRefusal,
+    ExtensionRuntimePublicationRequest, ExtensionRuntimeRetirementRequest,
+    ExtensionRuntimeUncertainOwner,
 };
 
 use crate::journal_store::{
@@ -97,6 +98,10 @@ pub(super) const MAX_COORDINATOR_HOST_COMPANION_RETAINED_BYTES: usize = size_of:
         size_of::<PublicationCallPanicAuthority>(),
         size_of::<PublicationReclaimCallPanicAuthority>(),
     )
+    + max2(
+        size_of::<GrantRebindFailStopAuthority>(),
+        size_of::<GrantRebindCallPanicAuthority>(),
+    )
     + (2 * HEAP_ALLOCATION_OVERHEAD_BYTES)
     + MAX_ROW_FENCE_ADDITIONAL_RETAINED_BYTES
     + zephium_extension_repository::MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES
@@ -152,19 +157,31 @@ pub(super) enum RuntimeSlotState {
     NativeRetirementUncertain(Box<NativeRetirementUncertainState>),
     Owned(Box<OwnedRuntimeState>),
     Release(Box<ReleaseRuntimeState>),
+    GrantRebindPending(Box<RuntimeRowFenceOperation>),
     RowFenceConflict(Box<RuntimeRowFenceConflictState>),
     RowFenceAmbiguous(Box<RuntimeRowFenceAmbiguousState>),
     FailStop(Box<RuntimeFailStopState>),
 }
 
-#[derive(Clone, Copy)]
 pub(super) enum RuntimeRowFenceMutation {
     Transition {
         intent: ExtensionNativeOwnershipIntent,
         phase: ExtensionNativeOwnershipPhase,
     },
     AttachNativeIdentity(ExtensionNativeOwnershipIdentity),
+    RebindGrants(Box<ExtensionRuntimeEligibility>),
     Clear,
+}
+
+impl RuntimeRowFenceMutation {
+    pub(super) fn additional_retained_bytes(&self) -> usize {
+        match self {
+            Self::RebindGrants(eligibility) => eligibility
+                .retained_bytes()
+                .saturating_add(HEAP_ALLOCATION_OVERHEAD_BYTES),
+            Self::Transition { .. } | Self::AttachNativeIdentity(_) | Self::Clear => 0,
+        }
+    }
 }
 
 pub(super) enum RuntimeRowFenceAuthority {
@@ -180,7 +197,7 @@ pub(super) struct RuntimeRowFenceOperation {
 impl RuntimeRowFenceOperation {
     pub(super) const fn is_owned_retirement_transition(&self) -> bool {
         matches!(
-            (&self.authority, self.mutation),
+            (&self.authority, &self.mutation),
             (
                 RuntimeRowFenceAuthority::Owned(_),
                 RuntimeRowFenceMutation::Transition {
@@ -188,6 +205,16 @@ impl RuntimeRowFenceOperation {
                     phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
                 }
             )
+        )
+    }
+
+    pub(super) const fn is_live_grant_rebind(&self) -> bool {
+        matches!(
+            (&self.authority, &self.mutation),
+            (
+                RuntimeRowFenceAuthority::Owned(state),
+                RuntimeRowFenceMutation::RebindGrants(_),
+            ) if matches!(state.operation, RuntimeOperationControl::Published(_))
         )
     }
 }
@@ -298,6 +325,10 @@ pub(super) struct PostHostReleaseAuthority {
     pub(super) absence: PostHostAbsenceBasis,
 }
 
+// Absence evidence is deliberately inline and Copy. This state already lives
+// inside a bounded boxed release authority; another allocation would add a
+// fallible teardown edge without reducing any steady-state live-runtime slot.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy)]
 pub(super) enum PostHostAbsenceBasis {
     /// The bound activation request never crossed the lifecycle port. This is
@@ -344,6 +375,8 @@ pub(super) enum RuntimeFailStopRetained {
     PublicationReclaim(Box<PublicationReclaimFailStopAuthority>),
     PublicationCallPanicked(Box<PublicationCallPanicAuthority>),
     PublicationReclaimCallPanicked(Box<PublicationReclaimCallPanicAuthority>),
+    GrantRebind(Box<GrantRebindFailStopAuthority>),
+    GrantRebindCallPanicked(Box<GrantRebindCallPanicAuthority>),
 }
 
 #[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
@@ -398,6 +431,21 @@ pub(super) struct PublicationReclaimCallPanicAuthority {
     pub(super) absence: PostHostAbsenceBasis,
 }
 
+#[allow(dead_code)] // Captive authority; see `RuntimeFailStopRetained` above.
+pub(super) struct GrantRebindFailStopAuthority {
+    pub(super) owner: ExtensionRuntimeOwner,
+    pub(super) refusal: ExtensionRuntimePublicationGrantRebindRefusal,
+    pub(super) recovery: ServiceRuntimeRecovery,
+    pub(super) current_entry: ExtensionNativeOwnershipEntry,
+}
+
+#[allow(dead_code)] // Engine authority remains captive after an unwinding host call.
+pub(super) struct GrantRebindCallPanicAuthority {
+    pub(super) owner: ExtensionRuntimeOwner,
+    pub(super) recovery: ServiceRuntimeRecovery,
+    pub(super) current_entry: ExtensionNativeOwnershipEntry,
+}
+
 impl RuntimeSlot {
     pub(super) const fn planning(key: ExtensionNativeOwnershipKey) -> Self {
         Self {
@@ -440,7 +488,30 @@ impl RuntimeSlot {
             self.state,
             Some(RuntimeSlotState::Owned(ref state))
                 if matches!(state.operation, RuntimeOperationControl::Published(_))
+        ) || matches!(
+            self.state,
+            Some(RuntimeSlotState::GrantRebindPending(ref operation))
+                if operation.is_live_grant_rebind()
+        ) || matches!(
+            self.state,
+            Some(RuntimeSlotState::RowFenceConflict(ref state))
+                if state.operation.is_live_grant_rebind()
+        ) || matches!(
+            self.state,
+            Some(RuntimeSlotState::RowFenceAmbiguous(ref state))
+                if state.operation.is_live_grant_rebind()
         )
+    }
+
+    pub(super) fn published_owned_entry(&self) -> Option<&ExtensionNativeOwnershipEntry> {
+        match self.state.as_ref()? {
+            RuntimeSlotState::Owned(state)
+                if matches!(state.operation, RuntimeOperationControl::Published(_)) =>
+            {
+                Some(&state.current_entry)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn has_attached_obligation(&self) -> bool {
@@ -498,6 +569,7 @@ impl RuntimeSlotState {
             | Self::NativeRetirementUncertain(_)
             | Self::Owned(_)
             | Self::Release(_)
+            | Self::GrantRebindPending(_)
             | Self::FailStop(_) => false,
         }
     }
@@ -509,6 +581,7 @@ impl RuntimeSlotState {
             | Self::NativeRetirementUncertain(_)
             | Self::Owned(_) => true,
             Self::Release(state) => state.has_attached_obligation(),
+            Self::GrantRebindPending(operation) => operation.has_attached_obligation(),
             Self::RowFenceConflict(state) => state.operation.has_attached_obligation(),
             Self::RowFenceAmbiguous(state) => state.operation.has_attached_obligation(),
             Self::FailStop(state) => state.retained.has_attached_obligation(),
@@ -620,7 +693,9 @@ impl RuntimeFailStopRetained {
             | Self::NativeRetirementCallPanicked(_)
             | Self::PublicationReclaim(_)
             | Self::PublicationCallPanicked(_)
-            | Self::PublicationReclaimCallPanicked(_) => true,
+            | Self::PublicationReclaimCallPanicked(_)
+            | Self::GrantRebind(_)
+            | Self::GrantRebindCallPanicked(_) => true,
             Self::RowFenceDiverged(state) => state.operation.has_attached_obligation(),
             Self::BeginDiverged(_)
             | Self::MayOwnDiverged(_)

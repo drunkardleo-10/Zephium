@@ -8,15 +8,17 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
-    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionInstallCatalogMutation,
+    ApiPermissionName, ExtensionGrantAuthority, ExtensionGrantBrowsingContext,
+    ExtensionGrantMutation, ExtensionGrantPatch, ExtensionInstallCatalogMutation,
     ExtensionInstallCatalogRevision, ExtensionManifestDescriptor, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
-    ExtensionPackageKey,
+    ExtensionPackageKey, ExtensionRuntimeEligibility,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::ports::store::{
-    ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogMutationOutcome,
+    ExtensionGrantCohortLoadOutcome, ExtensionGrantMutationOutcome, ExtensionGrantWrite,
+    ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationOutcome,
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
     Store, StoreShutdownOutcome,
 };
@@ -150,6 +152,77 @@ impl RealAuthorityHarness {
                 ExtensionNativeOwnershipJournalMutationOutcome::Applied(_)
             )
         ));
+    }
+
+    pub(super) fn commit_optional_tabs_grant(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+    ) -> ExtensionRuntimeEligibility {
+        let catalog = match self
+            .authority
+            .load_install_catalog_until(key.profile(), deadline())
+        {
+            ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionInstallCatalogLoadOutcome::Loaded(catalog),
+            ) => catalog,
+            outcome => panic!("catalog unavailable for grant rebind: {outcome:?}"),
+        };
+        let authenticated = self
+            .repository
+            .authenticate_runtime_manifest_bindings(&catalog)
+            .expect("authenticated runtime bindings");
+        let (_, bindings, manifest) = authenticated
+            .into_store_bindings_and_manifest(key.install_id())
+            .expect("exact installed package");
+        let cohort =
+            match self
+                .authority
+                .load_grant_cohort_until(key.profile(), bindings, deadline())
+            {
+                ExtensionServiceStoreCallOutcome::Completed(
+                    ExtensionGrantCohortLoadOutcome::Loaded(cohort),
+                ) => cohort,
+                outcome => panic!("grant cohort unavailable: {outcome:?}"),
+            };
+        let authority = cohort
+            .get(key.install_id())
+            .and_then(zephium_core::extensions::ExtensionGrantInitializationState::authority_arc)
+            .map(Arc::as_ref)
+            .expect("initialized grant authority");
+        let owner = self.journal().get(key).expect("live owner row").cas();
+        let patch = ExtensionGrantPatch::new(vec![ExtensionGrantMutation::SetApi {
+            name: ApiPermissionName::parse_exact("tabs").expect("fixture permission"),
+            granted: true,
+        }])
+        .expect("positive optional patch");
+        let applied = match self.authority.apply_live_grant_patch_until(
+            key.profile(),
+            catalog.revision(),
+            catalog
+                .get(key.install_id())
+                .expect("fixture install")
+                .revision(),
+            key.install_id(),
+            Arc::clone(&manifest),
+            authority.revision(),
+            patch,
+            owner,
+            deadline(),
+        ) {
+            ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionGrantMutationOutcome::Applied(applied),
+            ) => applied,
+            outcome => panic!("live grant patch did not apply: {outcome:?}"),
+        };
+        ExtensionRuntimeEligibility::from_committed_grant_authority(
+            key.profile(),
+            applied.catalog_revision,
+            *applied.install,
+            manifest,
+            *applied.authority,
+            key.browsing_context(),
+        )
+        .expect("committed grant result projects exactly")
     }
 
     pub(super) fn assert_repository_has_one_obligation(&mut self, profile: ProfileId) {

@@ -465,6 +465,9 @@ pub(super) fn drive_retirement_state(
             reconcile_retirement_uncertainty(*state, deadline)
         }
         RuntimeSlotState::Release(state) => drive_release(resources, *state, deadline),
+        RuntimeSlotState::GrantRebindPending(operation) => {
+            retirement_from_row_fence(settle_row_fence(resources, *operation, deadline))
+        }
         RuntimeSlotState::RowFenceConflict(state) => {
             retirement_from_row_fence(reconcile_row_conflict(resources, *state, deadline))
         }
