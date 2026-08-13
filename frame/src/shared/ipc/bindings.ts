@@ -23,12 +23,7 @@ export const commands = {
 	 *  displaying it and performs no extension repository work at browser startup.
 	 */
 	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
-	/**
-	 *  Installs only a candidate from Shell's latest authenticated, retained
-	 *  management catalog. The frontend supplies no profile, package path,
-	 *  manifest declaration, or permission-name authority.
-	 */
-	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, fileAccess: boolean, privateAccess: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, fileAccess, privateAccess }),
+	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
@@ -311,8 +306,27 @@ export type ExtensionInstallCandidateView = {
 	version: string,
 	required_api: string[],
 	required_hosts: string[],
+	/**
+	 *  Canonically ordered optional API grants. The frontend returns only
+	 *  selected array indexes; Shell rejoins them to its retained candidate.
+	 */
+	optional_api: string[],
+	/**  Canonically ordered optional host grants. */
+	optional_hosts: string[],
 	supports_file_access: boolean,
 	compatibility: ExtensionManagementCompatibilityView,
+};
+
+/**
+ *  Installs only a candidate from Shell's latest authenticated, retained
+ *  management catalog. The frontend supplies no profile, package path,
+ *  manifest declaration, or permission-name authority.
+ */
+export type ExtensionInstallGrantSelectionInput = {
+	optional_api_indices: number[],
+	optional_host_indices: number[],
+	file_access: boolean,
+	private_access: boolean,
 };
 
 export type ExtensionManagementChanged = ExtensionManagementView;

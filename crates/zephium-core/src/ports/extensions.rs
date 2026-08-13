@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::extensions::{
     ExtensionCatalogSetDigest, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionNativeOwnershipKey, ExtensionPackageIdentity, ExtensionRuntimeGeneration,
+    MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_HOST_PERMISSION_PATTERNS,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 
@@ -260,6 +261,113 @@ impl ExtensionInstallCandidateSelector {
         &self.package
     }
 }
+
+/// Bounded user selection for optional grants during curated installation.
+///
+/// Indices address the canonical optional-permission arrays in the exact
+/// revisioned candidate retained by Shell. They deliberately carry no API
+/// name, host pattern, package path, or profile authority. The serialized
+/// extension service reauthenticates the candidate and resolves every index
+/// against the same canonically sorted manifest declarations before writing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionInitialGrantSelection {
+    optional_api_indices: Box<[u8]>,
+    optional_host_indices: Box<[u8]>,
+    file_access: bool,
+    private_access: bool,
+}
+
+const _: () = assert!(MAX_EXTENSION_API_PERMISSIONS <= (u8::MAX as usize) + 1);
+const _: () = assert!(MAX_EXTENSION_HOST_PERMISSION_PATTERNS <= (u8::MAX as usize) + 1);
+
+impl ExtensionInitialGrantSelection {
+    /// Canonicalizes one browser-owned selection and rejects duplicates or
+    /// entries outside the candidate projection supplied by Shell.
+    pub fn new(
+        mut optional_api_indices: Vec<u8>,
+        optional_api_count: usize,
+        mut optional_host_indices: Vec<u8>,
+        optional_host_count: usize,
+        file_access: bool,
+        private_access: bool,
+    ) -> Result<Self, ExtensionInitialGrantSelectionError> {
+        if optional_api_count > MAX_EXTENSION_API_PERMISSIONS
+            || optional_host_count > MAX_EXTENSION_HOST_PERMISSION_PATTERNS
+            || optional_api_indices.len() > optional_api_count
+            || optional_host_indices.len() > optional_host_count
+        {
+            return Err(ExtensionInitialGrantSelectionError::OutOfBounds);
+        }
+        optional_api_indices.sort_unstable();
+        optional_host_indices.sort_unstable();
+        if optional_api_indices
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+            || optional_host_indices
+                .windows(2)
+                .any(|pair| pair[0] == pair[1])
+        {
+            return Err(ExtensionInitialGrantSelectionError::DuplicateIndex);
+        }
+        if optional_api_indices
+            .last()
+            .is_some_and(|index| usize::from(*index) >= optional_api_count)
+            || optional_host_indices
+                .last()
+                .is_some_and(|index| usize::from(*index) >= optional_host_count)
+        {
+            return Err(ExtensionInitialGrantSelectionError::OutOfBounds);
+        }
+        Ok(Self {
+            optional_api_indices: optional_api_indices.into_boxed_slice(),
+            optional_host_indices: optional_host_indices.into_boxed_slice(),
+            file_access,
+            private_access,
+        })
+    }
+
+    /// Canonical optional API indexes selected by the user.
+    pub fn optional_api_indices(&self) -> &[u8] {
+        &self.optional_api_indices
+    }
+
+    /// Canonical optional host indexes selected by the user.
+    pub fn optional_host_indices(&self) -> &[u8] {
+        &self.optional_host_indices
+    }
+
+    /// Whether matching `file://` host declarations may be granted.
+    pub const fn file_access(&self) -> bool {
+        self.file_access
+    }
+
+    /// Whether the extension may run in private browsing contexts.
+    pub const fn private_access(&self) -> bool {
+        self.private_access
+    }
+}
+
+/// Stable refusal for a malformed browser-owned optional selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionInitialGrantSelectionError {
+    /// An index or declared count exceeds its exact bounded candidate array.
+    OutOfBounds,
+    /// The same optional declaration was selected more than once.
+    DuplicateIndex,
+}
+
+impl std::fmt::Display for ExtensionInitialGrantSelectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfBounds => formatter.write_str("optional grant selection is out of bounds"),
+            Self::DuplicateIndex => {
+                formatter.write_str("optional grant selection contains a duplicate index")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExtensionInitialGrantSelectionError {}
 
 impl ExtensionInstallSelector {
     pub const fn new(
@@ -531,14 +639,14 @@ pub trait ExtensionServiceLifecycle: Send {
     /// Installs one authenticated current-catalog package with its required
     /// declarations, then enters ordinary enablement and activation.
     ///
-    /// `file_access` and `private_access` are independent explicit user
-    /// decisions. Callers cannot submit API names or host patterns; the
-    /// serialized service derives those only from the reauthenticated manifest.
+    /// The selection contains only indexes into Shell's exact canonical
+    /// optional arrays plus independent file/private decisions. Callers cannot
+    /// submit API names or host patterns; the serialized service derives those
+    /// only from the reauthenticated manifest.
     fn install_until(
         &mut self,
         _selector: ExtensionInstallCandidateSelector,
-        _file_access: bool,
-        _private_access: bool,
+        _selection: ExtensionInitialGrantSelection,
         _deadline: Instant,
     ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
         ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
@@ -548,8 +656,7 @@ pub trait ExtensionServiceLifecycle: Send {
     fn begin_install(
         &mut self,
         _selector: ExtensionInstallCandidateSelector,
-        _file_access: bool,
-        _private_access: bool,
+        _selection: ExtensionInitialGrantSelection,
         _deadline: Instant,
         done: ExtensionInstallCallback,
     ) -> ExtensionManagementAdmission {
@@ -665,6 +772,39 @@ mod tests {
     fn assert_send<T: Send>() {}
 
     #[test]
+    fn initial_grant_selection_canonicalizes_bounded_indices() {
+        let selection =
+            ExtensionInitialGrantSelection::new(vec![2, 0], 3, vec![1, 0], 2, true, false).unwrap();
+        assert_eq!(selection.optional_api_indices(), [0, 2]);
+        assert_eq!(selection.optional_host_indices(), [0, 1]);
+        assert!(selection.file_access());
+        assert!(!selection.private_access());
+    }
+
+    #[test]
+    fn initial_grant_selection_rejects_duplicates_and_stale_indices() {
+        assert_eq!(
+            ExtensionInitialGrantSelection::new(vec![0, 0], 2, Vec::new(), 0, false, false),
+            Err(ExtensionInitialGrantSelectionError::DuplicateIndex)
+        );
+        assert_eq!(
+            ExtensionInitialGrantSelection::new(Vec::new(), 0, vec![1], 1, false, false),
+            Err(ExtensionInitialGrantSelectionError::OutOfBounds)
+        );
+        assert_eq!(
+            ExtensionInitialGrantSelection::new(
+                Vec::new(),
+                0,
+                Vec::new(),
+                MAX_EXTENSION_HOST_PERMISSION_PATTERNS + 1,
+                false,
+                false,
+            ),
+            Err(ExtensionInitialGrantSelectionError::OutOfBounds)
+        );
+    }
+
+    #[test]
     fn lifecycle_is_send_object_safe_and_consumed_by_shutdown() {
         assert_send::<Box<dyn ExtensionServiceLifecycle>>();
         let consumed = Arc::new(AtomicBool::new(false));
@@ -714,7 +854,12 @@ mod tests {
             package,
         );
         assert_eq!(
-            lifecycle.install_until(candidate, false, false, Instant::now()),
+            lifecycle.install_until(
+                candidate,
+                ExtensionInitialGrantSelection::new(Vec::new(), 0, Vec::new(), 0, false, false,)
+                    .unwrap(),
+                Instant::now(),
+            ),
             ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
         );
         assert_eq!(

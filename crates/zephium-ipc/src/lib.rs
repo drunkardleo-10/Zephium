@@ -162,6 +162,11 @@ pub struct ExtensionInstallCandidateView {
     pub version: String,
     pub required_api: Vec<String>,
     pub required_hosts: Vec<String>,
+    /// Canonically ordered optional API grants. The frontend returns only
+    /// selected array indexes; Shell rejoins them to its retained candidate.
+    pub optional_api: Vec<String>,
+    /// Canonically ordered optional host grants.
+    pub optional_hosts: Vec<String>,
     pub supports_file_access: bool,
     pub compatibility: ExtensionManagementCompatibilityView,
 }

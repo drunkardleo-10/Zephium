@@ -89,6 +89,8 @@ fn extension_install_candidate_catalog(
         "1.0.0",
         vec!["storage".into(), "webRequest".into()],
         vec!["<all_urls>".into()],
+        vec!["notifications".into(), "tabs".into()],
+        vec!["https://optional.example/*".into()],
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Degraded,
     )
     .expect("fixture candidate must be valid");
@@ -662,12 +664,19 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
     assert!(ready.candidates[0].supports_file_access);
     assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
     assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);
+    assert_eq!(ready.candidates[0].optional_api, ["notifications", "tabs"]);
+    assert_eq!(
+        ready.candidates[0].optional_hosts,
+        ["https://optional.example/*"]
+    );
 
     assert!(handle.dispatch_operation(
         "stale-extension-install".into(),
         Command::InstallFocusedExtension {
             candidate_index: 0,
             expected_catalog: catalog_revision.next().unwrap(),
+            optional_api_indices: Vec::new(),
+            optional_host_indices: Vec::new(),
             file_access: false,
             private_access: false,
         },
@@ -687,10 +696,37 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
     assert!(extension_state.install_calls.lock().unwrap().is_empty());
 
     assert!(handle.dispatch_operation(
+        "invalid-extension-grants".into(),
+        Command::InstallFocusedExtension {
+            candidate_index: ready.candidates[0].candidate_index,
+            expected_catalog: catalog_revision,
+            optional_api_indices: vec![2],
+            optional_host_indices: vec![0, 0],
+            file_access: false,
+            private_access: false,
+        },
+    ));
+    let invalid = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "invalid-extension-grants" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("invalid optional selection must settle immediately");
+    assert_eq!(invalid.outcome, OperationOutcome::Rejected);
+    assert_eq!(invalid.reason, OperationReason::StoreConflict);
+    assert!(extension_state.install_calls.lock().unwrap().is_empty());
+
+    assert!(handle.dispatch_operation(
         "extension-install".into(),
         Command::InstallFocusedExtension {
             candidate_index: ready.candidates[0].candidate_index,
             expected_catalog: catalog_revision,
+            optional_api_indices: vec![1, 0],
+            optional_host_indices: vec![0],
             file_access: true,
             private_access: true,
         },
@@ -703,12 +739,14 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
         .try_iter()
         .all(|projection| !matches!(projection, Projection::OperationProcessed(_))));
     let install_calls = extension_state.install_calls.lock().unwrap();
-    let (selector, file_access, private_access, deadline) = &install_calls[0];
+    let (selector, selection, deadline) = &install_calls[0];
     assert_eq!(selector.profile(), profile);
     assert_eq!(selector.expected_catalog_revision(), catalog_revision);
     assert_eq!(selector.package(), &package);
-    assert!(*file_access);
-    assert!(*private_access);
+    assert_eq!(selection.optional_api_indices(), [0, 1]);
+    assert_eq!(selection.optional_host_indices(), [0]);
+    assert!(selection.file_access());
+    assert!(selection.private_access());
     assert!(*deadline > std::time::Instant::now());
     drop(install_calls);
 

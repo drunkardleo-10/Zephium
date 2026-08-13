@@ -166,8 +166,7 @@ pub(super) struct FakeExtensionLifecycleState {
     pub(super) install_calls: Mutex<
         Vec<(
             zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
-            bool,
-            bool,
+            zephium_core::ports::extensions::ExtensionInitialGrantSelection,
             std::time::Instant,
         )>,
     >,
@@ -335,17 +334,15 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
     fn begin_install(
         &mut self,
         selector: zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selection: zephium_core::ports::extensions::ExtensionInitialGrantSelection,
         deadline: std::time::Instant,
         done: zephium_core::ports::extensions::ExtensionInstallCallback,
     ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state.install_calls.lock().unwrap().push((
-            selector,
-            file_access,
-            private_access,
-            deadline,
-        ));
+        self.state
+            .install_calls
+            .lock()
+            .unwrap()
+            .push((selector, selection, deadline));
         let admission = self
             .state
             .management_admission

@@ -231,11 +231,13 @@ pub enum Command {
     },
     /// Installs one exact package from the latest privileged management
     /// projection. Shell derives the focused profile and complete package
-    /// selector; chrome can choose only the projected candidate index and the
-    /// two explicit optional-scope decisions.
+    /// selector; chrome can choose only projected optional-entry indexes and
+    /// the two explicit browsing-scope decisions.
     InstallFocusedExtension {
         candidate_index: u8,
         expected_catalog: ExtensionInstallCatalogRevision,
+        optional_api_indices: Vec<u8>,
+        optional_host_indices: Vec<u8>,
         file_access: bool,
         private_access: bool,
     },

@@ -12,11 +12,12 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
-    ExtensionActiveProfiles, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
-    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionManagementAdmission,
-    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
-    ExtensionManagementCatalogOutcome, ExtensionManagementSettlement, ExtensionSetEnabledCallback,
-    ExtensionSetEnabledOutcome, ExtensionUninstallCallback, ExtensionUninstallOutcome,
+    ExtensionActiveProfiles, ExtensionInitialGrantSelection, ExtensionInstallCallback,
+    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
+    ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogCallback, ExtensionManagementCatalogOutcome,
+    ExtensionManagementSettlement, ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome,
+    ExtensionUninstallCallback, ExtensionUninstallOutcome,
 };
 
 use crate::cleanup::{
@@ -115,9 +116,8 @@ enum WorkerCommand {
         settlement: ManagementSettlementSink<ExtensionSetEnabledOutcome>,
     },
     Install {
-        selector: ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selector: Box<ExtensionInstallCandidateSelector>,
+        selection: ExtensionInitialGrantSelection,
         deadline: Instant,
         settlement: ManagementSettlementSink<ExtensionInstallOutcome>,
     },
@@ -889,8 +889,7 @@ impl ExtensionServiceOwner {
     pub fn install_until(
         &mut self,
         selector: ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selection: ExtensionInitialGrantSelection,
         deadline: Instant,
     ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
         if Instant::now() >= deadline {
@@ -898,9 +897,8 @@ impl ExtensionServiceOwner {
         }
         let (settlement, observation) = mpsc::sync_channel(1);
         let command = WorkerCommand::Install {
-            selector,
-            file_access,
-            private_access,
+            selector: Box::new(selector),
+            selection,
             deadline,
             settlement: ManagementSettlementSink::Waiting(settlement),
         };
@@ -940,8 +938,7 @@ impl ExtensionServiceOwner {
     pub fn begin_install(
         &mut self,
         selector: ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selection: ExtensionInitialGrantSelection,
         deadline: Instant,
         done: ExtensionInstallCallback,
     ) -> ExtensionManagementAdmission {
@@ -950,9 +947,8 @@ impl ExtensionServiceOwner {
             return ExtensionManagementAdmission::Busy;
         }
         let command = WorkerCommand::Install {
-            selector,
-            file_access,
-            private_access,
+            selector: Box::new(selector),
+            selection,
             deadline,
             settlement: ManagementSettlementSink::callback(done, install_worker_lost),
         };
@@ -1860,8 +1856,7 @@ impl WorkerState {
             }
             WorkerCommand::Install {
                 selector,
-                file_access,
-                private_access,
+                selection,
                 deadline,
                 settlement,
             } => {
@@ -1870,9 +1865,8 @@ impl WorkerState {
                     status,
                     startup_outcome,
                     cancellation,
-                    selector,
-                    file_access,
-                    private_access,
+                    *selector,
+                    selection,
                     deadline,
                 );
                 settlement.settle(outcome);
@@ -2007,8 +2001,7 @@ impl WorkerState {
         startup_outcome: &SharedStartupOutcome,
         cancellation: &WorkerCancellation,
         selector: ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selection: ExtensionInitialGrantSelection,
         deadline: Instant,
     ) -> (ExtensionManagementSettlement<ExtensionInstallOutcome>, bool) {
         if let Err(failure) = self.management_ingress_readiness(
@@ -2038,14 +2031,8 @@ impl WorkerState {
                 false,
             );
         };
-        let outcome = installation::install_until(
-            startup,
-            &mut self.runtime,
-            selector,
-            file_access,
-            private_access,
-            deadline,
-        );
+        let outcome =
+            installation::install_until(startup, &mut self.runtime, selector, selection, deadline);
         match outcome.outcome() {
             ExtensionInstallOutcome::OutcomeUnknown => {
                 self.management_write_state = ManagementWriteState::OutcomeUnknown;

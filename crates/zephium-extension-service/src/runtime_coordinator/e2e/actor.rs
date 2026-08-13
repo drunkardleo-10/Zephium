@@ -1,12 +1,17 @@
 use zephium_core::extensions::{ExtensionCatalogSetDigest, ExtensionRuntimeGeneration};
 use zephium_core::ports::extensions::{
-    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
-    ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
+    ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
+    ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
     ExtensionManagementGrantState, ExtensionManagementRuntimeState,
     ExtensionRuntimeActivationDisposition, ExtensionRuntimeRetirementDisposition,
     ExtensionServiceLifecycle, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
+
+fn grant_selection(file_access: bool, private_access: bool) -> ExtensionInitialGrantSelection {
+    ExtensionInitialGrantSelection::new(Vec::new(), 0, Vec::new(), 0, file_access, private_access)
+        .expect("empty optional grant selection must be valid")
+}
 
 use super::host::PublicationMode;
 use super::support::{deadline, ActorAuthorityHarness};
@@ -325,8 +330,12 @@ fn actor_installs_authenticated_candidate_atomically_then_activates_it() {
     );
     let selector = candidate.selector().clone();
 
-    let installed =
-        ExtensionServiceLifecycle::install_until(&mut owner, selector, false, false, deadline());
+    let installed = ExtensionServiceLifecycle::install_until(
+        &mut owner,
+        selector,
+        grant_selection(false, false),
+        deadline(),
+    );
     let ExtensionInstallOutcome::Installed {
         install,
         runtime: ExtensionInstalledRuntimeState::Active(generation),
@@ -376,8 +385,12 @@ fn actor_install_reauthenticates_selection_and_refuses_unrequested_file_scope() 
         )
     };
 
-    let file_scope =
-        ExtensionServiceLifecycle::install_until(&mut owner, candidate(), true, false, deadline());
+    let file_scope = ExtensionServiceLifecycle::install_until(
+        &mut owner,
+        candidate(),
+        grant_selection(true, false),
+        deadline(),
+    );
     assert_eq!(file_scope.outcome(), &ExtensionInstallOutcome::Rejected);
     assert!(harness.install_catalog(profile).installs().is_empty());
 
@@ -387,19 +400,30 @@ fn actor_install_reauthenticates_selection_and_refuses_unrequested_file_scope() 
         ExtensionCatalogSetDigest::from_bytes([0xA5; 32]),
         harness.package.clone(),
     );
-    let stale =
-        ExtensionServiceLifecycle::install_until(&mut owner, stale, false, false, deadline());
+    let stale = ExtensionServiceLifecycle::install_until(
+        &mut owner,
+        stale,
+        grant_selection(false, false),
+        deadline(),
+    );
     assert_eq!(stale.outcome(), &ExtensionInstallOutcome::Conflict);
     assert!(harness.install_catalog(profile).installs().is_empty());
     assert_eq!(harness.probe.bind_calls(), 0);
     assert_eq!(harness.probe.activation_calls(), 0);
 
+    let out_of_range =
+        ExtensionInitialGrantSelection::new(vec![0], 1, Vec::new(), 0, false, false).unwrap();
+    let out_of_range =
+        ExtensionServiceLifecycle::install_until(&mut owner, candidate(), out_of_range, deadline());
+    assert_eq!(out_of_range.outcome(), &ExtensionInstallOutcome::Conflict);
+    assert!(harness.install_catalog(profile).installs().is_empty());
+
     let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
     else {
         panic!("refused-install actor did not prove clean shutdown");
     };
-    assert_eq!(evidence.accepted_commands(), 2);
-    assert_eq!(evidence.completed_commands(), 2);
+    assert_eq!(evidence.accepted_commands(), 3);
+    assert_eq!(evidence.completed_commands(), 3);
     harness.finish(evidence);
 }
 
@@ -414,8 +438,12 @@ fn actor_install_refuses_an_already_installed_update_line_without_new_native_wor
         ExtensionCatalogSetDigest::from_bytes(harness.catalog_set.bytes()),
         harness.package.clone(),
     );
-    let duplicate =
-        ExtensionServiceLifecycle::install_until(&mut owner, selector, false, false, deadline());
+    let duplicate = ExtensionServiceLifecycle::install_until(
+        &mut owner,
+        selector,
+        grant_selection(false, false),
+        deadline(),
+    );
     assert_eq!(
         duplicate.outcome(),
         &ExtensionInstallOutcome::AlreadyInstalled

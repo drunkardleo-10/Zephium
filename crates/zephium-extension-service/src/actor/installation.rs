@@ -8,9 +8,9 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::extensions::{
-    ExtensionInstallCandidateSelector, ExtensionInstallEnablementPendingReason,
-    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionInstalledRuntimeState,
-    ExtensionManagementSettlement, ExtensionSetEnabledOutcome,
+    ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector,
+    ExtensionInstallEnablementPendingReason, ExtensionInstallOutcome, ExtensionInstallSelector,
+    ExtensionInstalledRuntimeState, ExtensionManagementSettlement, ExtensionSetEnabledOutcome,
 };
 use zephium_core::ports::store::{
     ExtensionInstallCatalogLoadOutcome, ExtensionInstallProvisionOutcome,
@@ -25,8 +25,7 @@ pub(super) fn install_until(
     startup: &mut WorkerStartupState,
     runtime: &mut RuntimeCoordinator,
     selector: ExtensionInstallCandidateSelector,
-    file_access: bool,
-    private_access: bool,
+    selection: ExtensionInitialGrantSelection,
     deadline: Instant,
 ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
     if Instant::now() >= deadline {
@@ -84,19 +83,53 @@ pub(super) fn install_until(
     };
     let provisional = ExtensionInstall::new(install_id, selector.package().clone());
     let declarations = manifest.declarations();
+    let required_api = declarations.required_api().names();
+    let mut optional_api = declarations.optional_api().names().to_vec();
+    optional_api.sort_unstable();
+    let mut granted_api = Vec::with_capacity(
+        required_api
+            .len()
+            .saturating_add(selection.optional_api_indices().len()),
+    );
+    granted_api.extend(required_api.iter().cloned());
+    for index in selection.optional_api_indices() {
+        let Some(permission) = optional_api.get(usize::from(*index)) else {
+            return settle(runtime, ExtensionInstallOutcome::Conflict);
+        };
+        granted_api.push(permission.clone());
+    }
+
     let required_hosts = declarations.required_host_authorities();
-    let exposes_files = required_hosts
+    let mut optional_hosts = declarations
+        .optional_hosts()
+        .into_iter()
+        .flat_map(|hosts| hosts.patterns())
+        .collect::<Vec<_>>();
+    optional_hosts.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    let mut granted_hosts = Vec::with_capacity(
+        required_hosts
+            .len()
+            .saturating_add(selection.optional_host_indices().len()),
+    );
+    granted_hosts.extend(required_hosts.iter().map(|pattern| (*pattern).clone()));
+    for index in selection.optional_host_indices() {
+        let Some(pattern) = optional_hosts.get(usize::from(*index)) else {
+            return settle(runtime, ExtensionInstallOutcome::Conflict);
+        };
+        granted_hosts.push((*pattern).clone());
+    }
+    let exposes_files = granted_hosts
         .iter()
         .any(|pattern| pattern.components().includes_file());
-    if file_access && !exposes_files {
+    if selection.file_access() && !exposes_files {
         return settle(runtime, ExtensionInstallOutcome::Rejected);
     }
     let grants = match ExtensionGrantAuthority::initialize(
         &provisional,
-        declarations.required_api().names().to_vec(),
-        required_hosts.into_iter().cloned().collect(),
-        file_access,
-        private_access,
+        granted_api,
+        granted_hosts,
+        selection.file_access(),
+        selection.private_access(),
         &manifest,
     ) {
         Ok(grants) => grants,

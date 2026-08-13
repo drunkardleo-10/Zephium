@@ -203,6 +203,18 @@ pub(super) fn load(
                 .into_iter()
                 .map(|pattern| Box::<str>::from(pattern.as_str()))
                 .collect(),
+            declarations
+                .optional_api()
+                .names()
+                .iter()
+                .map(|name| Box::<str>::from(name.as_str()))
+                .collect(),
+            declarations
+                .optional_hosts()
+                .into_iter()
+                .flat_map(|hosts| hosts.patterns())
+                .map(|pattern| Box::<str>::from(pattern.as_str()))
+                .collect(),
             compatibility,
         ) {
             Ok(entry) => entry,

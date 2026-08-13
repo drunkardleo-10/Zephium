@@ -2205,6 +2205,14 @@ fn extension_management_set_visible(
 /// Installs only a candidate from Shell's latest authenticated, retained
 /// management catalog. The frontend supplies no profile, package path,
 /// manifest declaration, or permission-name authority.
+#[derive(Debug, Deserialize, specta::Type)]
+struct ExtensionInstallGrantSelectionInput {
+    optional_api_indices: Vec<u8>,
+    optional_host_indices: Vec<u8>,
+    file_access: bool,
+    private_access: bool,
+}
+
 #[tauri::command]
 #[specta::specta]
 fn extension_management_install(
@@ -2212,8 +2220,7 @@ fn extension_management_install(
     shell: State<'_, Handle>,
     candidate_index: u8,
     catalog_revision: String,
-    file_access: bool,
-    private_access: bool,
+    selection: ExtensionInstallGrantSelectionInput,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(&caller, CallerPolicy::Main, "extension_management_install")
         || shutdown_started(caller.app_handle())
@@ -2225,14 +2232,23 @@ fn extension_management_install(
     else {
         return rejected_operation();
     };
+    if selection.optional_api_indices.len()
+        > zephium_core::extensions::MAX_EXTENSION_API_PERMISSIONS
+        || selection.optional_host_indices.len()
+            > zephium_core::extensions::MAX_EXTENSION_HOST_PERMISSION_PATTERNS
+    {
+        return rejected_operation();
+    }
     dispatch_operation(
         caller.app_handle(),
         &shell,
         Command::InstallFocusedExtension {
             candidate_index,
             expected_catalog,
-            file_access,
-            private_access,
+            optional_api_indices: selection.optional_api_indices,
+            optional_host_indices: selection.optional_host_indices,
+            file_access: selection.file_access,
+            private_access: selection.private_access,
         },
     )
 }

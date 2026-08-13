@@ -8,7 +8,7 @@ use crate::extensions::{
     ApiPermissionName, ExtensionCompatibilityLevel, ExtensionGrantRevision,
     ExtensionInstallCatalogRevision, ExtensionRuntimeGeneration, MAX_EXTENSION_API_PERMISSIONS,
     MAX_EXTENSION_API_PERMISSION_NAME_BYTES, MAX_EXTENSION_HOST_GRANTS,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    MAX_EXTENSION_HOST_PERMISSION_PATTERNS, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use crate::ids::ProfileId;
 use crate::injection::{MatchPattern, MAX_MATCH_PATTERN_BYTES};
@@ -204,6 +204,8 @@ pub struct ExtensionInstallCandidateEntry {
     version: Box<str>,
     required_api: Box<[Box<str>]>,
     required_hosts: Box<[Box<str>]>,
+    optional_api: Box<[Box<str>]>,
+    optional_hosts: Box<[Box<str>]>,
     supports_file_access: bool,
     compatibility: ExtensionManagementCompatibility,
     retained_bytes: usize,
@@ -220,6 +222,8 @@ impl ExtensionInstallCandidateEntry {
         version: impl Into<Box<str>>,
         required_api: Vec<Box<str>>,
         required_hosts: Vec<Box<str>>,
+        optional_api: Vec<Box<str>>,
+        optional_hosts: Vec<Box<str>>,
         compatibility: ExtensionManagementCompatibility,
     ) -> Result<Self, ExtensionManagementProjectionError> {
         let name = name.into();
@@ -235,29 +239,30 @@ impl ExtensionInstallCandidateEntry {
         if let Some(author) = author.as_deref() {
             validate_display_text(author, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES, false)?;
         }
-        if required_api.len() > MAX_EXTENSION_API_PERMISSIONS
-            || required_hosts.len() > MAX_EXTENSION_HOST_GRANTS
+        if required_api.len().saturating_add(optional_api.len()) > MAX_EXTENSION_API_PERMISSIONS
+            || required_hosts.len().saturating_add(optional_hosts.len()) > MAX_EXTENSION_HOST_GRANTS
+            || optional_hosts.len() > MAX_EXTENSION_HOST_PERMISSION_PATTERNS
         {
             return Err(ExtensionManagementProjectionError::TooManyPermissions);
         }
-        let mut required_api = required_api;
-        required_api.sort_unstable();
-        if required_api.windows(2).any(|pair| pair[0] == pair[1])
-            || required_api.iter().any(|name| {
-                ApiPermissionName::parse_exact(name)
-                    .ok()
-                    .is_none_or(|parsed| parsed.as_str() != name.as_ref())
-            })
+        let required_api = canonical_api_permissions(required_api)?;
+        let optional_api = canonical_api_permissions(optional_api)?;
+        if required_api
+            .iter()
+            .any(|required| optional_api.binary_search(required).is_ok())
         {
             return Err(ExtensionManagementProjectionError::InvalidPermission);
         }
-        let mut required_hosts = required_hosts;
-        required_hosts.sort_unstable();
-        if required_hosts.windows(2).any(|pair| pair[0] == pair[1]) {
+        let required_hosts = canonical_host_permissions(required_hosts)?;
+        let optional_hosts = canonical_host_permissions(optional_hosts)?;
+        if required_hosts
+            .iter()
+            .any(|required| optional_hosts.binary_search(required).is_ok())
+        {
             return Err(ExtensionManagementProjectionError::InvalidPermission);
         }
         let mut supports_file_access = false;
-        for pattern in &required_hosts {
+        for pattern in required_hosts.iter().chain(optional_hosts.iter()) {
             let parsed = MatchPattern::parse(pattern)
                 .map_err(|_| ExtensionManagementProjectionError::InvalidPermission)?;
             if parsed.as_str() != pattern.as_ref() {
@@ -276,15 +281,23 @@ impl ExtensionInstallCandidateEntry {
                 required_api
                     .iter()
                     .chain(required_hosts.iter())
+                    .chain(optional_api.iter())
+                    .chain(optional_hosts.iter())
                     .try_fold(bytes, |bytes, value| bytes.checked_add(value.len()))
             })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        let permission_count = required_api
+            .len()
+            .checked_add(required_hosts.len())
+            .and_then(|count| count.checked_add(optional_api.len()))
+            .and_then(|count| count.checked_add(optional_hosts.len()))
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         let retained_bytes = size_of::<Self>()
             .checked_add(text_bytes)
             .and_then(|bytes| {
-                bytes.checked_add(
-                    (required_api.len() + required_hosts.len()) * size_of::<Box<str>>(),
-                )
+                permission_count
+                    .checked_mul(size_of::<Box<str>>())
+                    .and_then(|permission_bytes| bytes.checked_add(permission_bytes))
             })
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         Ok(Self {
@@ -295,6 +308,8 @@ impl ExtensionInstallCandidateEntry {
             version,
             required_api: required_api.into_boxed_slice(),
             required_hosts: required_hosts.into_boxed_slice(),
+            optional_api: optional_api.into_boxed_slice(),
+            optional_hosts: optional_hosts.into_boxed_slice(),
             supports_file_access,
             compatibility,
             retained_bytes,
@@ -329,8 +344,31 @@ impl ExtensionInstallCandidateEntry {
         &self.required_hosts
     }
 
+    pub fn optional_api(&self) -> &[Box<str>] {
+        &self.optional_api
+    }
+
+    pub fn optional_hosts(&self) -> &[Box<str>] {
+        &self.optional_hosts
+    }
+
     pub const fn supports_file_access(&self) -> bool {
         self.supports_file_access
+    }
+
+    /// Whether required hosts plus the exact selected optional indexes expose
+    /// a file-scheme declaration. Invalid indexes fail closed.
+    pub fn selected_hosts_support_file_access(&self, optional_indices: &[u8]) -> bool {
+        self.required_hosts.iter().any(|pattern| {
+            MatchPattern::parse(pattern).is_ok_and(|parsed| parsed.components().includes_file())
+        }) || optional_indices.iter().any(|index| {
+            self.optional_hosts
+                .get(usize::from(*index))
+                .is_some_and(|pattern| {
+                    MatchPattern::parse(pattern)
+                        .is_ok_and(|parsed| parsed.components().includes_file())
+                })
+        })
     }
 
     pub const fn compatibility(&self) -> ExtensionManagementCompatibility {
@@ -340,6 +378,34 @@ impl ExtensionInstallCandidateEntry {
     pub const fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+}
+
+fn canonical_api_permissions(
+    mut entries: Vec<Box<str>>,
+) -> Result<Vec<Box<str>>, ExtensionManagementProjectionError> {
+    entries.sort_unstable();
+    if entries.windows(2).any(|pair| pair[0] == pair[1])
+        || entries.iter().any(|name| {
+            ApiPermissionName::parse_exact(name)
+                .ok()
+                .is_none_or(|parsed| parsed.as_str() != name.as_ref())
+        })
+    {
+        return Err(ExtensionManagementProjectionError::InvalidPermission);
+    }
+    entries.shrink_to_fit();
+    Ok(entries)
+}
+
+fn canonical_host_permissions(
+    mut entries: Vec<Box<str>>,
+) -> Result<Vec<Box<str>>, ExtensionManagementProjectionError> {
+    entries.sort_unstable();
+    if entries.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ExtensionManagementProjectionError::InvalidPermission);
+    }
+    entries.shrink_to_fit();
+    Ok(entries)
 }
 
 /// Complete exact-revision management snapshot for one profile.
@@ -601,6 +667,8 @@ mod tests {
             "1.0.0",
             required_api,
             required_hosts,
+            Vec::new(),
+            Vec::new(),
             ExtensionManagementCompatibility::Compatible,
         )
         .unwrap()
@@ -703,6 +771,37 @@ mod tests {
             &[1; 32]
         );
         assert!(catalog.retained_bytes() <= MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES);
+
+        let optional = ExtensionInstallCandidateEntry::new(
+            candidate(profile, 3, Vec::new(), Vec::new())
+                .selector()
+                .clone(),
+            "Optional fixture",
+            None,
+            None,
+            "1.0.0",
+            vec!["storage".into()],
+            vec!["https://required.example/*".into()],
+            vec!["tabs".into(), "notifications".into()],
+            vec!["file:///*".into(), "https://optional.example/*".into()],
+            ExtensionManagementCompatibility::Compatible,
+        )
+        .unwrap();
+        assert_eq!(
+            optional.optional_api(),
+            &[Box::<str>::from("notifications"), Box::<str>::from("tabs")]
+        );
+        assert_eq!(
+            optional.optional_hosts(),
+            &[
+                Box::<str>::from("file:///*"),
+                Box::<str>::from("https://optional.example/*")
+            ]
+        );
+        assert!(optional.supports_file_access());
+        assert!(!optional.selected_hosts_support_file_access(&[]));
+        assert!(optional.selected_hosts_support_file_access(&[0]));
+        assert!(!optional.selected_hosts_support_file_access(&[2]));
     }
 
     #[test]
@@ -718,6 +817,25 @@ mod tests {
                 None,
                 "1.0.0",
                 vec!["storage".into(), "storage".into()],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                ExtensionManagementCompatibility::Compatible,
+            ),
+            Err(ExtensionManagementProjectionError::InvalidPermission)
+        ));
+        assert!(matches!(
+            ExtensionInstallCandidateEntry::new(
+                candidate(profile, 2, Vec::new(), Vec::new())
+                    .selector()
+                    .clone(),
+                "Fixture",
+                None,
+                None,
+                "1.0.0",
+                vec!["storage".into()],
+                Vec::new(),
+                vec!["storage".into()],
                 Vec::new(),
                 ExtensionManagementCompatibility::Compatible,
             ),

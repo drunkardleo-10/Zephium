@@ -26,6 +26,9 @@
   let subscribedProfile = $state<string | null>(null);
   let confirming = $state<string | null>(null);
   let reviewingCandidate = $state<number | null>(null);
+  let selectedOptionalApi = $state.raw<number[]>([]);
+  let selectedOptionalHosts = $state.raw<number[]>([]);
+  let showAllRequiredHosts = $state(false);
   let allowFileAccess = $state(false);
   let allowPrivateAccess = $state(false);
 
@@ -54,6 +57,9 @@
     subscribedProfile = currentProfile;
     confirming = null;
     reviewingCandidate = null;
+    selectedOptionalApi = [];
+    selectedOptionalHosts = [];
+    showAllRequiredHosts = false;
     untrack(() => void load());
   });
 
@@ -74,6 +80,9 @@
     subscribedProfile = null;
     confirming = null;
     reviewingCandidate = null;
+    selectedOptionalApi = [];
+    selectedOptionalHosts = [];
+    showAllRequiredHosts = false;
     void extensions.setManagementVisible(false);
     if (returnFocus) queueMicrotask(() => trigger?.focus());
   }
@@ -132,14 +141,41 @@
     if (mutation !== null) return;
     confirming = null;
     reviewingCandidate = candidate.candidate_index;
+    selectedOptionalApi = [];
+    selectedOptionalHosts = [];
+    showAllRequiredHosts = false;
     allowFileAccess = false;
     allowPrivateAccess = false;
   }
 
   function install(candidate: ExtensionInstallCandidateView) {
     if (catalogRevision === null || mutation !== null) return;
-    extensions.install(candidate, catalogRevision, allowFileAccess, allowPrivateAccess);
+    extensions.install(
+      candidate,
+      catalogRevision,
+      selectedOptionalApi,
+      selectedOptionalHosts,
+      allowFileAccess,
+      allowPrivateAccess,
+    );
     reviewingCandidate = null;
+  }
+
+  function selectOptionalApi(index: number, selected: boolean) {
+    selectedOptionalApi = selected
+      ? [...selectedOptionalApi, index].sort((left, right) => left - right)
+      : selectedOptionalApi.filter((entry) => entry !== index);
+  }
+
+  function selectOptionalHost(
+    candidate: ExtensionInstallCandidateView,
+    index: number,
+    selected: boolean,
+  ) {
+    selectedOptionalHosts = selected
+      ? [...selectedOptionalHosts, index].sort((left, right) => left - right)
+      : selectedOptionalHosts.filter((entry) => entry !== index);
+    if (!fileAccessAvailable(candidate)) allowFileAccess = false;
   }
 
   const permissionLabel = (permission: string) => {
@@ -163,6 +199,18 @@
 
   const hostLabel = (pattern: string) =>
     pattern === "<all_urls>" ? "Read and change data on all websites" : pattern;
+
+  const COLLAPSED_REQUIRED_HOST_COUNT = 6;
+
+  const patternIncludesFiles = (pattern: string) =>
+    pattern === "<all_urls>" || pattern.startsWith("file://");
+
+  const fileAccessAvailable = (candidate: ExtensionInstallCandidateView) =>
+    candidate.required_hosts.some(patternIncludesFiles) ||
+    selectedOptionalHosts.some((index) => {
+      const pattern = candidate.optional_hosts[index];
+      return pattern !== undefined && patternIncludesFiles(pattern);
+    });
 
   const runtimeLabel = (runtime: ExtensionManagementRuntimeView) => {
     switch (runtime) {
@@ -404,20 +452,76 @@
                           {#each candidate.required_api as permission (permission)}
                             <li>• {permissionLabel(permission)}</li>
                           {/each}
-                          {#each candidate.required_hosts as pattern (pattern)}
+                          {#each showAllRequiredHosts ? candidate.required_hosts : candidate.required_hosts.slice(0, COLLAPSED_REQUIRED_HOST_COUNT) as pattern (pattern)}
                             <li>• {hostLabel(pattern)}</li>
                           {/each}
                         </ul>
+                        {#if candidate.required_hosts.length > COLLAPSED_REQUIRED_HOST_COUNT}
+                          <button
+                            type="button"
+                            class="hover:bg-fill-strong mt-1 h-6 rounded-md px-1.5 text-[10.5px] font-medium text-muted hover:text-text"
+                            onclick={() => (showAllRequiredHosts = !showAllRequiredHosts)}
+                          >
+                            {showAllRequiredHosts
+                              ? "Show fewer sites"
+                              : `Show ${candidate.required_hosts.length - COLLAPSED_REQUIRED_HOST_COUNT} more sites`}
+                          </button>
+                        {/if}
+                      {/if}
+                      {#if candidate.optional_api.length > 0 || candidate.optional_hosts.length > 0}
+                        <fieldset class="mt-2 border-0 p-0">
+                          <legend class="text-[11px] leading-4 font-medium text-text">
+                            Optional access
+                          </legend>
+                          <div class="mt-1 space-y-1.5">
+                            {#each candidate.optional_api as permission, index (permission)}
+                              <label
+                                class="flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
+                              >
+                                <input
+                                  type="checkbox"
+                                  class="mt-0.5 accent-accent"
+                                  checked={selectedOptionalApi.includes(index)}
+                                  disabled={mutation !== null}
+                                  onchange={(event) =>
+                                    selectOptionalApi(index, event.currentTarget.checked)}
+                                />
+                                <span>{permissionLabel(permission)}</span>
+                              </label>
+                            {/each}
+                            {#each candidate.optional_hosts as pattern, index (pattern)}
+                              <label
+                                class="flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
+                              >
+                                <input
+                                  type="checkbox"
+                                  class="mt-0.5 accent-accent"
+                                  checked={selectedOptionalHosts.includes(index)}
+                                  disabled={mutation !== null}
+                                  onchange={(event) =>
+                                    selectOptionalHost(
+                                      candidate,
+                                      index,
+                                      event.currentTarget.checked,
+                                    )}
+                                />
+                                <span>{hostLabel(pattern)}</span>
+                              </label>
+                            {/each}
+                          </div>
+                        </fieldset>
                       {/if}
                       {#if candidate.supports_file_access}
                         <label
                           class="mt-2 flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
+                          class:cursor-not-allowed={!fileAccessAvailable(candidate)}
+                          class:opacity-55={!fileAccessAvailable(candidate)}
                         >
                           <input
                             type="checkbox"
                             class="mt-0.5 accent-accent"
                             bind:checked={allowFileAccess}
-                            disabled={mutation !== null}
+                            disabled={mutation !== null || !fileAccessAvailable(candidate)}
                           />
                           <span>Allow access to local file URLs</span>
                         </label>

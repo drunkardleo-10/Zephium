@@ -740,8 +740,15 @@ Shell-owned window/tab delegate, and real content-script execution. Production
 provisioning remains deliberately empty; ordinary release builds therefore
 expose no extension runtime. Authenticated catalog management and install UX,
 native action projection, and transient popup hosting are implemented; the
-remaining release gaps include the complete permission and API matrix,
-permission-prompt integration, quotas, release-build resource evidence, and
+install review always includes required API/host authority, defaults every
+optional declaration to denied, and can return only bounded indexes into the
+exact canonical candidate retained by Shell. The serialized service
+reauthenticates that package, resolves the selected declarations from its
+manifest, and atomically initializes the grant cohort; local-file and private
+browsing access remain separate explicit decisions. Dynamic optional-grant
+requests are still denied by the native default and have no user prompt. The
+remaining release gaps include that runtime permission broker, the complete
+permission and API matrix, quotas, release-build resource evidence, and
 endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact

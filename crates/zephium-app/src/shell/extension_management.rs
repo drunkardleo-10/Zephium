@@ -1,12 +1,12 @@
-//! Non-blocking Shell coordination for extension enablement and uninstall.
+//! Non-blocking Shell coordination for extension installation and management.
 
 use std::collections::HashMap;
 
 use zephium_core::ports::extensions::{
-    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
-    ExtensionInstalledRuntimeState, ExtensionManagementAdmission, ExtensionManagementCatalog,
-    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
-    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
+    ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
+    ExtensionManagementCatalog, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogOutcome, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 
 use super::*;
@@ -27,12 +27,16 @@ pub(super) struct ExtensionManagementState {
     catalog: Option<ExtensionManagementCatalog>,
 }
 
+struct ExtensionInstallGrantRequest {
+    optional_api_indices: Vec<u8>,
+    optional_host_indices: Vec<u8>,
+    file_access: bool,
+    private_access: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingExtensionManagementKind {
-    Install {
-        file_access: bool,
-        private_access: bool,
-    },
+    Install,
     SetEnabled(bool),
     Uninstall,
 }
@@ -125,9 +129,9 @@ impl ExtensionManagementState {
     )> {
         let pending = self.pending.remove(&request)?;
         let exact = matches!(
-            (pending.kind, completion),
+            (&pending.kind, &completion),
             (
-                PendingExtensionManagementKind::Install { .. },
+                PendingExtensionManagementKind::Install,
                 ExtensionManagementCompletion::Install(_)
             ) | (
                 PendingExtensionManagementKind::SetEnabled(_),
@@ -223,17 +227,34 @@ impl ExtensionManagementState {
         profile: ProfileId,
         expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision,
         candidate_index: u8,
-        file_access: bool,
-    ) -> Option<ExtensionInstallCandidateSelector> {
+        request: ExtensionInstallGrantRequest,
+    ) -> Option<(
+        ExtensionInstallCandidateSelector,
+        ExtensionInitialGrantSelection,
+    )> {
         let catalog = self.catalog.as_ref()?;
         if catalog.profile() != profile || catalog.catalog_revision() != expected_catalog {
             return None;
         }
         let candidate = catalog.candidates().get(usize::from(candidate_index))?;
-        if file_access && !candidate.supports_file_access() {
+        if request.file_access && !candidate.supports_file_access() {
             return None;
         }
-        Some(candidate.selector().clone())
+        let selection = ExtensionInitialGrantSelection::new(
+            request.optional_api_indices,
+            candidate.optional_api().len(),
+            request.optional_host_indices,
+            candidate.optional_hosts().len(),
+            request.file_access,
+            request.private_access,
+        )
+        .ok()?;
+        if selection.file_access()
+            && !candidate.selected_hosts_support_file_access(selection.optional_host_indices())
+        {
+            return None;
+        }
+        Some((candidate.selector().clone(), selection))
     }
 }
 
@@ -416,18 +437,25 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             ));
         }
-        let (subject, kind) = match command {
+        let (subject, kind, install_selection) = match command {
             Command::InstallFocusedExtension {
                 candidate_index,
                 expected_catalog,
+                optional_api_indices,
+                optional_host_indices,
                 file_access,
                 private_access,
             } => {
-                let Some(selector) = self.extension_management.resolve_candidate(
+                let Some((selector, selection)) = self.extension_management.resolve_candidate(
                     profile,
                     expected_catalog,
                     candidate_index,
-                    file_access,
+                    ExtensionInstallGrantRequest {
+                        optional_api_indices,
+                        optional_host_indices,
+                        file_access,
+                        private_access,
+                    },
                 ) else {
                     return Some(operation_result(
                         OperationOutcome::Rejected,
@@ -436,10 +464,8 @@ impl Shell {
                 };
                 (
                     PendingExtensionManagementSubject::Candidate(selector),
-                    PendingExtensionManagementKind::Install {
-                        file_access,
-                        private_access,
-                    },
+                    PendingExtensionManagementKind::Install,
+                    Some(selection),
                 )
             }
             Command::SetFocusedExtensionEnabled {
@@ -455,6 +481,7 @@ impl Shell {
                     expected_install,
                 )),
                 PendingExtensionManagementKind::SetEnabled(enabled),
+                None,
             ),
             Command::UninstallFocusedExtension {
                 install,
@@ -468,6 +495,7 @@ impl Shell {
                     expected_install,
                 )),
                 PendingExtensionManagementKind::Uninstall,
+                None,
             ),
             _ => return None,
         };
@@ -525,17 +553,15 @@ impl Shell {
             ));
         };
         let admission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-            PendingExtensionManagementKind::Install {
-                file_access,
-                private_access,
-            } => {
+            PendingExtensionManagementKind::Install => {
                 let PendingExtensionManagementSubject::Candidate(selector) = subject else {
                     unreachable!("install request retained a non-candidate selector")
                 };
+                let selection = install_selection
+                    .expect("install request retained its validated initial grant selection");
                 service.begin_install(
                     selector,
-                    file_access,
-                    private_access,
+                    selection,
                     deadline,
                     Box::new(move |settlement| {
                         let _ = callback.dispatch(Command::ExtensionManagementSettled {

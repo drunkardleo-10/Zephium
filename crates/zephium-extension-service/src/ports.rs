@@ -3,9 +3,10 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
-    ExtensionInstallCallback, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
-    ExtensionInstallSelector, ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
-    ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
+    ExtensionInitialGrantSelection, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
+    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionManagementAdmission,
+    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
+    ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
     ExtensionRuntimeRetirementDisposition as CoreExtensionRuntimeRetirementDisposition,
@@ -143,29 +144,20 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
     fn install_until(
         &mut self,
         selector: ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selection: ExtensionInitialGrantSelection,
         deadline: Instant,
     ) -> ExtensionManagementSettlement<ExtensionInstallOutcome> {
-        ExtensionServiceOwner::install_until(self, selector, file_access, private_access, deadline)
+        ExtensionServiceOwner::install_until(self, selector, selection, deadline)
     }
 
     fn begin_install(
         &mut self,
         selector: ExtensionInstallCandidateSelector,
-        file_access: bool,
-        private_access: bool,
+        selection: ExtensionInitialGrantSelection,
         deadline: Instant,
         done: ExtensionInstallCallback,
     ) -> ExtensionManagementAdmission {
-        ExtensionServiceOwner::begin_install(
-            self,
-            selector,
-            file_access,
-            private_access,
-            deadline,
-            done,
-        )
+        ExtensionServiceOwner::begin_install(self, selector, selection, deadline, done)
     }
 
     fn uninstall_until(

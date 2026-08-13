@@ -331,17 +331,19 @@ export function uninstall(entry: ExtensionManagementEntryView, catalogRevision: 
 export function install(
   candidate: ExtensionInstallCandidateView,
   catalogRevision: string,
+  optionalApiIndices: number[],
+  optionalHostIndices: number[],
   fileAccess: boolean,
   privateAccess: boolean,
 ): void {
   void settleManagementMutation(
     { subject: String(candidate.candidate_index), kind: "install" },
     () =>
-      commands.extensionManagementInstall(
-        candidate.candidate_index,
-        catalogRevision,
-        fileAccess,
-        privateAccess,
-      ),
+      commands.extensionManagementInstall(candidate.candidate_index, catalogRevision, {
+        optional_api_indices: optionalApiIndices,
+        optional_host_indices: optionalHostIndices,
+        file_access: fileAccess,
+        private_access: privateAccess,
+      }),
   );
 }

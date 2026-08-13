@@ -116,6 +116,16 @@ impl Shell {
                     .iter()
                     .map(|pattern| pattern.to_string())
                     .collect(),
+                optional_api: candidate
+                    .optional_api()
+                    .iter()
+                    .map(|permission| permission.to_string())
+                    .collect(),
+                optional_hosts: candidate
+                    .optional_hosts()
+                    .iter()
+                    .map(|pattern| pattern.to_string())
+                    .collect(),
                 supports_file_access: candidate.supports_file_access(),
                 compatibility: match candidate.compatibility() {
                     ExtensionManagementCompatibility::Compatible => {
