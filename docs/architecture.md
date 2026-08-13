@@ -626,8 +626,24 @@ ownership row, native grant snapshot, and operation authority. A delegate may
 therefore never persist a grant and patch only `WKWebExtensionContext`, nor may
 it return an allowed set before those authorities agree. Runtime optional
 permission requests remain denied until the serialized coordinator implements
-a crash-consistent upgrade protocol and a live gate proves its WebKit promise
-semantics. That protocol must either atomically supersede every fingerprint-
+a crash-consistent upgrade protocol. The manual native gate now proves the
+platform settlement semantics with genuine clicks in an extension-origin page:
+WebKit invokes the API-permission and host-pattern callbacks separately with no
+tab for this context-scoped request; complete denial leaves all four native
+grant/denial dictionaries empty; partial approval of a combined API-plus-host
+request settles JavaScript as denied and retains neither subset; and complete
+approval settles JavaScript as allowed and retains exactly both grants. The
+delegate must therefore collect and authorize the complete request without
+depending on callback order or tab presence. The gate runs explicitly with:
+
+```sh
+cargo run --locked -p zephium-engine --features native-web-extension-probes --bin macos-web-extension-probe -- --interactive-permission-gate --require-supported-runtime
+```
+
+Normal unattended CI compiles this path but reports it as
+`interactive-not-run` because WebKit rejects `permissions.request()` without a
+trusted user gesture. The upgrade protocol must either atomically supersede
+every fingerprint-
 bound authority around a verified complete live native replacement, or retire
 the old owner before persistence and prove that WebKit can truthfully settle
 the originating request across replacement. Live context grant replacement
