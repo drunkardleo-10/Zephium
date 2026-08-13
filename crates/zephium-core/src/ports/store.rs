@@ -1,12 +1,13 @@
 use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use crate::extensions::{
     ExtensionGrantAuthority, ExtensionGrantCohort, ExtensionGrantManifestBindings,
-    ExtensionGrantMutation, ExtensionGrantRevision, ExtensionInstall, ExtensionInstallCatalog,
-    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionNativeIncarnation, ExtensionNativeNamespaceScope,
-    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournal,
+    ExtensionGrantMutation, ExtensionGrantPatch, ExtensionGrantRevision, ExtensionInstall,
+    ExtensionInstallCatalog, ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionNativeIncarnation,
+    ExtensionNativeNamespaceScope, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournal,
     ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipOperation,
-    ExtensionRuntimeEligibilityDenial, MAX_EXTENSION_GRANT_RETAINED_BYTES,
+    ExtensionRuntimeEligibilityDenial, MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES,
+    MAX_EXTENSION_GRANT_RETAINED_BYTES,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 use crate::permissions::{
@@ -315,11 +316,23 @@ pub enum ExtensionGrantWrite {
         expected: ExtensionGrantRevision,
         mutation: ExtensionGrantMutation,
     },
+    /// Applies a canonical multi-target patch as one grant revision and one
+    /// profile-database transaction.
+    ApplyPatch {
+        expected: ExtensionGrantRevision,
+        patch: ExtensionGrantPatch,
+    },
 }
 
 /// Conservative maximum logical retained bytes of one grant-write payload.
 pub const MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES: usize =
-    std::mem::size_of::<ExtensionGrantWrite>() + MAX_EXTENSION_GRANT_RETAINED_BYTES + 256;
+    std::mem::size_of::<ExtensionGrantWrite>()
+        + if MAX_EXTENSION_GRANT_RETAINED_BYTES > MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES {
+            MAX_EXTENSION_GRANT_RETAINED_BYTES
+        } else {
+            MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES
+        }
+        + 256;
 
 impl ExtensionGrantWrite {
     pub fn retained_bytes(&self) -> usize {
@@ -335,6 +348,7 @@ impl ExtensionGrantWrite {
                     std::mem::size_of::<ExtensionGrantMutation>()
                 }
             },
+            Self::ApplyPatch { patch, .. } => patch.retained_bytes(),
         };
         let retained = std::mem::size_of::<Self>().saturating_add(payload);
         debug_assert!(retained <= MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES);

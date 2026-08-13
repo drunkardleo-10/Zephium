@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::mem::size_of;
 
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -30,6 +31,13 @@ pub const MAX_EXTENSION_GRANT_RETAINED_BYTES: usize = GRANT_ACCOUNTING_FIXED_BYT
         * (std::mem::size_of::<ApiPermissionName>()
             + 4 * std::mem::size_of::<usize>()
             + super::MAX_EXTENSION_API_PERMISSION_NAME_BYTES);
+pub const MAX_EXTENSION_GRANT_PATCH_CHANGES: usize =
+    MAX_EXTENSION_API_PERMISSIONS + MAX_EXTENSION_HOST_GRANTS + 2;
+pub const MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES: usize = size_of::<ExtensionGrantPatch>()
+    + MAX_EXTENSION_GRANT_PATCH_CHANGES * size_of::<ExtensionGrantMutation>()
+    + MAX_EXTENSION_API_PERMISSIONS * super::MAX_EXTENSION_API_PERMISSION_NAME_BYTES
+    + MAX_EXTENSION_HOST_GRANTS * MAX_MATCH_PATTERN_RETAINED_BUDGET_BYTES
+    + 512;
 
 /// Per-row optimistic concurrency token for one install's grants.
 ///
@@ -566,6 +574,21 @@ impl ExtensionGrantAuthority {
         manifest: &ExtensionManifestDescriptor,
         mutation: ExtensionGrantMutation,
     ) -> Result<ExtensionGrantApplication, ExtensionGrantApplyError> {
+        self.apply_patch(expected, manifest, ExtensionGrantPatch::single(mutation))
+    }
+
+    /// Applies one exact bounded grant batch under a single row revision.
+    ///
+    /// The complete patch is validated before authority changes. Semantic
+    /// no-ops consume no revision, while any number of actual changes consume
+    /// exactly one revision so a combined runtime request can never become a
+    /// durable partial grant.
+    pub fn apply_patch(
+        self,
+        expected: ExtensionGrantRevision,
+        manifest: &ExtensionManifestDescriptor,
+        patch: ExtensionGrantPatch,
+    ) -> Result<ExtensionGrantApplication, ExtensionGrantApplyError> {
         if self.revision != expected {
             return Err(ExtensionGrantApplyError::RevisionConflict {
                 expected,
@@ -575,40 +598,45 @@ impl ExtensionGrantAuthority {
         self.validate_manifest(manifest)
             .map_err(ExtensionGrantApplyError::AuthorityRejected)?;
 
-        let changed = match &mutation {
-            ExtensionGrantMutation::SetApi { name, granted } => {
-                if !manifest.declarations().required_api().contains(name)
-                    && !manifest.declarations().optional_api().contains(name)
-                {
-                    return Err(ExtensionGrantApplyError::UndeclaredApiPermission(
-                        name.clone(),
-                    ));
+        let mut changed = false;
+        for mutation in patch.changes() {
+            changed |= match mutation {
+                ExtensionGrantMutation::SetApi { name, granted } => {
+                    if !manifest.declarations().required_api().contains(name)
+                        && !manifest.declarations().optional_api().contains(name)
+                    {
+                        return Err(ExtensionGrantApplyError::UndeclaredApiPermission(
+                            name.clone(),
+                        ));
+                    }
+                    self.contains_api_internal(name) != *granted
                 }
-                self.contains_api_internal(name) != *granted
-            }
-            ExtensionGrantMutation::SetHost { pattern, granted } => {
-                let declared = manifest
-                    .declarations()
-                    .is_required_host_authority(pattern.as_str())
-                    || manifest
+                ExtensionGrantMutation::SetHost { pattern, granted } => {
+                    let declared = manifest
                         .declarations()
-                        .optional_hosts()
-                        .is_some_and(|set| set.contains_canonical(pattern.as_str()));
-                if !declared {
-                    return Err(ExtensionGrantApplyError::UndeclaredHostPermission(
-                        pattern.as_str().into(),
-                    ));
+                        .is_required_host_authority(pattern.as_str())
+                        || manifest
+                            .declarations()
+                            .optional_hosts()
+                            .is_some_and(|set| set.contains_canonical(pattern.as_str()));
+                    if !declared {
+                        return Err(ExtensionGrantApplyError::UndeclaredHostPermission(
+                            pattern.as_str().into(),
+                        ));
+                    }
+                    self.contains_host_internal(pattern.as_str()) != *granted
                 }
-                self.contains_host_internal(pattern.as_str()) != *granted
-            }
-            ExtensionGrantMutation::SetFileAccess { granted } => {
-                if *granted && !manifest_declares_file_access(manifest) {
-                    return Err(ExtensionGrantApplyError::FileAccessNotDeclared);
+                ExtensionGrantMutation::SetFileAccess { granted } => {
+                    if *granted && !manifest_declares_file_access(manifest) {
+                        return Err(ExtensionGrantApplyError::FileAccessNotDeclared);
+                    }
+                    self.file_access != *granted
                 }
-                self.file_access != *granted
-            }
-            ExtensionGrantMutation::SetPrivateAccess { granted } => self.private_access != *granted,
-        };
+                ExtensionGrantMutation::SetPrivateAccess { granted } => {
+                    self.private_access != *granted
+                }
+            };
+        }
 
         if !changed {
             return Ok(ExtensionGrantApplication {
@@ -637,23 +665,25 @@ impl ExtensionGrantAuthority {
         granted_hosts.extend(optional_hosts.into_vec());
         let mut file_access = file_access;
         let mut private_access = private_access;
-        match mutation {
-            ExtensionGrantMutation::SetApi { name, granted } => {
-                if granted {
-                    granted_api.push(name);
-                } else {
-                    granted_api.retain(|candidate| candidate != &name);
+        for mutation in patch.into_changes() {
+            match mutation {
+                ExtensionGrantMutation::SetApi { name, granted } => {
+                    if granted {
+                        granted_api.push(name);
+                    } else {
+                        granted_api.retain(|candidate| candidate != &name);
+                    }
                 }
-            }
-            ExtensionGrantMutation::SetHost { pattern, granted } => {
-                if granted {
-                    granted_hosts.push(pattern);
-                } else {
-                    granted_hosts.retain(|candidate| candidate.as_str() != pattern.as_str());
+                ExtensionGrantMutation::SetHost { pattern, granted } => {
+                    if granted {
+                        granted_hosts.push(pattern);
+                    } else {
+                        granted_hosts.retain(|candidate| candidate.as_str() != pattern.as_str());
+                    }
                 }
+                ExtensionGrantMutation::SetFileAccess { granted } => file_access = granted,
+                ExtensionGrantMutation::SetPrivateAccess { granted } => private_access = granted,
             }
-            ExtensionGrantMutation::SetFileAccess { granted } => file_access = granted,
-            ExtensionGrantMutation::SetPrivateAccess { granted } => private_access = granted,
         }
         let authority = Self::build(
             install_id,
@@ -810,6 +840,150 @@ pub enum ExtensionGrantMutation {
         granted: bool,
     },
 }
+
+/// Canonical bounded set of distinct grant targets changed atomically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionGrantPatch {
+    changes: Box<[ExtensionGrantMutation]>,
+    retained_bytes: usize,
+}
+
+impl ExtensionGrantPatch {
+    pub fn new(mut changes: Vec<ExtensionGrantMutation>) -> Result<Self, ExtensionGrantPatchError> {
+        if changes.is_empty() {
+            return Err(ExtensionGrantPatchError::Empty);
+        }
+        if changes.len() > MAX_EXTENSION_GRANT_PATCH_CHANGES {
+            return Err(ExtensionGrantPatchError::TooManyChanges {
+                count: changes.len(),
+                max: MAX_EXTENSION_GRANT_PATCH_CHANGES,
+            });
+        }
+        changes.sort_unstable_by(compare_grant_mutation_target);
+        if changes
+            .windows(2)
+            .any(|pair| compare_grant_mutation_target(&pair[0], &pair[1]).is_eq())
+        {
+            return Err(ExtensionGrantPatchError::DuplicateTarget);
+        }
+        let retained_bytes = changes.iter().try_fold(
+            size_of::<Self>()
+                .checked_add(
+                    changes
+                        .len()
+                        .saturating_mul(size_of::<ExtensionGrantMutation>()),
+                )
+                .ok_or(ExtensionGrantPatchError::AccountingOverflow)?,
+            |bytes, mutation| {
+                bytes.checked_add(match mutation {
+                    ExtensionGrantMutation::SetApi { name, .. } => name.len(),
+                    ExtensionGrantMutation::SetHost { pattern, .. } => {
+                        pattern.retained_budget_bytes()
+                    }
+                    ExtensionGrantMutation::SetFileAccess { .. }
+                    | ExtensionGrantMutation::SetPrivateAccess { .. } => 0,
+                })
+            },
+        );
+        let retained_bytes = retained_bytes.ok_or(ExtensionGrantPatchError::AccountingOverflow)?;
+        if retained_bytes > MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES {
+            return Err(ExtensionGrantPatchError::RetainedBytesExceeded {
+                bytes: retained_bytes,
+                max: MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES,
+            });
+        }
+        Ok(Self {
+            changes: changes.into_boxed_slice(),
+            retained_bytes,
+        })
+    }
+
+    fn single(change: ExtensionGrantMutation) -> Self {
+        let retained_bytes = size_of::<Self>()
+            .saturating_add(size_of::<ExtensionGrantMutation>())
+            .saturating_add(match &change {
+                ExtensionGrantMutation::SetApi { name, .. } => name.len(),
+                ExtensionGrantMutation::SetHost { pattern, .. } => pattern.retained_budget_bytes(),
+                ExtensionGrantMutation::SetFileAccess { .. }
+                | ExtensionGrantMutation::SetPrivateAccess { .. } => 0,
+            });
+        debug_assert!(retained_bytes <= MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES);
+        Self {
+            changes: vec![change].into_boxed_slice(),
+            retained_bytes,
+        }
+    }
+
+    pub fn changes(&self) -> &[ExtensionGrantMutation] {
+        &self.changes
+    }
+
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn into_changes(self) -> Box<[ExtensionGrantMutation]> {
+        self.changes
+    }
+}
+
+fn compare_grant_mutation_target(
+    left: &ExtensionGrantMutation,
+    right: &ExtensionGrantMutation,
+) -> std::cmp::Ordering {
+    use ExtensionGrantMutation::{SetApi, SetFileAccess, SetHost, SetPrivateAccess};
+
+    let rank = |mutation: &ExtensionGrantMutation| match mutation {
+        SetApi { .. } => 0_u8,
+        SetHost { .. } => 1,
+        SetFileAccess { .. } => 2,
+        SetPrivateAccess { .. } => 3,
+    };
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (SetApi { name: left, .. }, SetApi { name: right, .. }) => left.cmp(right),
+            (SetHost { pattern: left, .. }, SetHost { pattern: right, .. }) => {
+                left.as_str().cmp(right.as_str())
+            }
+            _ => std::cmp::Ordering::Equal,
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionGrantPatchError {
+    Empty,
+    TooManyChanges { count: usize, max: usize },
+    DuplicateTarget,
+    AccountingOverflow,
+    RetainedBytesExceeded { bytes: usize, max: usize },
+}
+
+impl fmt::Display for ExtensionGrantPatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("extension grant patch is empty"),
+            Self::TooManyChanges { count, max } => {
+                write!(
+                    formatter,
+                    "extension grant patch has {count} changes, maximum is {max}"
+                )
+            }
+            Self::DuplicateTarget => {
+                formatter.write_str("extension grant patch contains a duplicate target")
+            }
+            Self::AccountingOverflow => {
+                formatter.write_str("extension grant patch accounting overflowed")
+            }
+            Self::RetainedBytesExceeded { bytes, max } => write!(
+                formatter,
+                "extension grant patch retains {bytes} bytes, maximum is {max}"
+            ),
+        }
+    }
+}
+
+impl Error for ExtensionGrantPatchError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionGrantApplication {
@@ -2036,6 +2210,149 @@ mod tests {
     }
 
     #[test]
+    fn grant_patch_is_one_exact_revision_for_combined_api_host_and_toggles() {
+        let manifest = manifest_for(
+            package(1, 1),
+            &["storage"],
+            &["tabs"],
+            &["https://required.example/*"],
+            &["file:///*"],
+        );
+        let authority =
+            ExtensionGrantAuthority::new(&install(manifest.package().clone()), &manifest).unwrap();
+        let initial_digest = authority.digest();
+        let patch = ExtensionGrantPatch::new(vec![
+            ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            ExtensionGrantMutation::SetHost {
+                pattern: MatchPattern::parse("file:///*").unwrap(),
+                granted: true,
+            },
+            ExtensionGrantMutation::SetApi {
+                name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                granted: true,
+            },
+            ExtensionGrantMutation::SetFileAccess { granted: true },
+            ExtensionGrantMutation::SetApi {
+                name: ApiPermissionName::parse_exact("storage").unwrap(),
+                granted: true,
+            },
+            ExtensionGrantMutation::SetHost {
+                pattern: MatchPattern::parse("https://required.example/*").unwrap(),
+                granted: true,
+            },
+        ])
+        .unwrap();
+
+        let applied = authority
+            .apply_patch(ExtensionGrantRevision::INITIAL, &manifest, patch)
+            .unwrap();
+        assert!(applied.changed());
+        let authority = applied.into_authority();
+        let projection = authority.persistence_projection();
+        assert_eq!(projection.revision().get(), 2);
+        assert_eq!(projection.api_grant_count(), 2);
+        assert_eq!(projection.host_grant_count(), 2);
+        assert!(projection.persisted_file_access());
+        assert!(projection.persisted_private_access());
+        assert_ne!(authority.digest(), initial_digest);
+        assert_eq!(persisted_api_grants(&authority), ["storage", "tabs"]);
+        assert_eq!(
+            persisted_host_grants(&authority),
+            ["https://required.example/*", "file:///*"]
+        );
+
+        let no_op = authority
+            .clone()
+            .apply_patch(
+                authority.revision(),
+                &manifest,
+                ExtensionGrantPatch::new(vec![
+                    ExtensionGrantMutation::SetApi {
+                        name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                        granted: true,
+                    },
+                    ExtensionGrantMutation::SetHost {
+                        pattern: MatchPattern::parse("file:///*").unwrap(),
+                        granted: true,
+                    },
+                    ExtensionGrantMutation::SetFileAccess { granted: true },
+                    ExtensionGrantMutation::SetPrivateAccess { granted: true },
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(!no_op.changed());
+        assert_eq!(no_op.authority(), &authority);
+    }
+
+    #[test]
+    fn grant_patch_rejects_empty_duplicate_and_oversized_target_sets() {
+        assert_eq!(
+            ExtensionGrantPatch::new(Vec::new()),
+            Err(ExtensionGrantPatchError::Empty)
+        );
+        for second_value in [false, true] {
+            assert_eq!(
+                ExtensionGrantPatch::new(vec![
+                    ExtensionGrantMutation::SetApi {
+                        name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                        granted: true,
+                    },
+                    ExtensionGrantMutation::SetApi {
+                        name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                        granted: second_value,
+                    },
+                ]),
+                Err(ExtensionGrantPatchError::DuplicateTarget)
+            );
+        }
+
+        let changes = (0..=MAX_EXTENSION_GRANT_PATCH_CHANGES)
+            .map(|index| ExtensionGrantMutation::SetApi {
+                name: ApiPermissionName::parse_exact(&format!("permission{index}")).unwrap(),
+                granted: true,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ExtensionGrantPatch::new(changes),
+            Err(ExtensionGrantPatchError::TooManyChanges {
+                count: MAX_EXTENSION_GRANT_PATCH_CHANGES + 1,
+                max: MAX_EXTENSION_GRANT_PATCH_CHANGES,
+            })
+        );
+    }
+
+    #[test]
+    fn grant_patch_validates_every_target_before_applying_any_change() {
+        let manifest = manifest_for(package(1, 1), &["storage"], &[], &[], &[]);
+        let authority =
+            ExtensionGrantAuthority::new(&install(manifest.package().clone()), &manifest).unwrap();
+        let initial_digest = authority.digest();
+        let result = authority.clone().apply_patch(
+            authority.revision(),
+            &manifest,
+            ExtensionGrantPatch::new(vec![
+                ExtensionGrantMutation::SetPrivateAccess { granted: true },
+                ExtensionGrantMutation::SetApi {
+                    name: ApiPermissionName::parse_exact("history").unwrap(),
+                    granted: true,
+                },
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(
+            result,
+            Err(ExtensionGrantApplyError::UndeclaredApiPermission(name))
+                if name.as_str() == "history"
+        ));
+        assert_eq!(authority.revision(), ExtensionGrantRevision::INITIAL);
+        assert_eq!(authority.digest(), initial_digest);
+        assert!(!authority
+            .persistence_projection()
+            .persisted_private_access());
+    }
+
+    #[test]
     fn stale_cas_wins_before_manifest_or_mutation_validation() {
         let current = manifest_for(package(1, 1), &["storage"], &[], &[], &[]);
         let authority =
@@ -2235,6 +2552,21 @@ mod tests {
             ExtensionGrantWrite::Apply {
                 expected: ExtensionGrantRevision::INITIAL,
                 mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
+            },
+            ExtensionGrantWrite::ApplyPatch {
+                expected: ExtensionGrantRevision::INITIAL,
+                patch: ExtensionGrantPatch::new(vec![
+                    ExtensionGrantMutation::SetApi {
+                        name: ApiPermissionName::parse_exact("storage").unwrap(),
+                        granted: true,
+                    },
+                    ExtensionGrantMutation::SetHost {
+                        pattern: MatchPattern::parse("https://example.com/*").unwrap(),
+                        granted: true,
+                    },
+                    ExtensionGrantMutation::SetPrivateAccess { granted: true },
+                ])
+                .unwrap(),
             },
         ];
         for write in writes {

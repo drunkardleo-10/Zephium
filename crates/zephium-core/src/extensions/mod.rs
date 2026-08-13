@@ -48,9 +48,11 @@ pub use cohort::{
 pub use grants::{
     ExtensionApiGrantDecision, ExtensionGrantApplication, ExtensionGrantApplyError,
     ExtensionGrantAuthority, ExtensionGrantAuthorityError, ExtensionGrantBrowsingContext,
-    ExtensionGrantDenial, ExtensionGrantDigest, ExtensionGrantMutation,
-    ExtensionGrantPersistenceProjection, ExtensionGrantRevision, ExtensionUrlScopeDecision,
-    MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_HOST_GRANTS,
+    ExtensionGrantDenial, ExtensionGrantDigest, ExtensionGrantMutation, ExtensionGrantPatch,
+    ExtensionGrantPatchError, ExtensionGrantPersistenceProjection, ExtensionGrantRevision,
+    ExtensionUrlScopeDecision, MAX_EXTENSION_GRANT_PATCH_CHANGES,
+    MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES, MAX_EXTENSION_GRANT_RETAINED_BYTES,
+    MAX_EXTENSION_HOST_GRANTS,
 };
 pub use identity::{
     ExtensionArchiveDigest, ExtensionArchiveLength, ExtensionAuthorityId, ExtensionManifestDigest,

@@ -38,6 +38,9 @@ enum GrantPersistence {
         expected: ExtensionGrantRevision,
         mutation: ExtensionGrantMutation,
     },
+    Patch {
+        expected: ExtensionGrantRevision,
+    },
 }
 
 pub(super) fn ensure_install_id_has_no_grant_rows(
@@ -242,6 +245,34 @@ impl Hub {
                 let authority = application.into_authority();
                 (authority, persistence)
             }
+            ExtensionGrantWrite::ApplyPatch { expected, patch } => {
+                let Some(current) = load_authority(&tx, install, &manifest)? else {
+                    return Ok(ExtensionGrantMutationOutcome::Uninitialized);
+                };
+                let application = match current.apply_patch(expected, &manifest, patch) {
+                    Ok(application) => application,
+                    Err(ExtensionGrantApplyError::RevisionConflict { current, .. }) => {
+                        return Ok(ExtensionGrantMutationOutcome::Conflict(
+                            ExtensionGrantConflict::new(
+                                catalog.revision(),
+                                Some(install.revision()),
+                                Some(current),
+                            ),
+                        ));
+                    }
+                    Err(ExtensionGrantApplyError::RevisionExhausted) => {
+                        return Ok(ExtensionGrantMutationOutcome::RevisionExhausted)
+                    }
+                    Err(_) => return Ok(ExtensionGrantMutationOutcome::Invalid),
+                };
+                let persistence = if application.changed() {
+                    GrantPersistence::Patch { expected }
+                } else {
+                    GrantPersistence::None
+                };
+                let authority = application.into_authority();
+                (authority, persistence)
+            }
         };
 
         if matches!(persistence, GrantPersistence::None) {
@@ -265,6 +296,9 @@ impl Hub {
             GrantPersistence::Initialize => insert_authority(&tx, &authority)?,
             GrantPersistence::Apply { expected, mutation } => {
                 persist_authority_mutation(&tx, expected, &authority, &mutation)?;
+            }
+            GrantPersistence::Patch { expected } => {
+                persist_authority_patch(&tx, expected, &authority)?;
             }
         }
 
@@ -780,6 +814,16 @@ pub(super) fn insert_authority(
             "extension grant authority was not inserted exactly once",
         ));
     }
+    insert_authority_members(conn, authority, "initialized")
+}
+
+fn insert_authority_members(
+    conn: &Connection,
+    authority: &ExtensionGrantAuthority,
+    operation: &str,
+) -> rusqlite::Result<()> {
+    let projection = authority.persistence_projection();
+    let id = projection.install_id().bytes();
     for name in projection.api_grants() {
         let inserted = conn.execute(
             "INSERT INTO extension_grant_api_permissions(install_id, name)
@@ -787,9 +831,9 @@ pub(super) fn insert_authority(
             params![&id[..], name.as_str()],
         )?;
         if inserted != 1 {
-            return Err(invalid_data(
-                "extension API grant was not initialized exactly once",
-            ));
+            return Err(invalid_data(&format!(
+                "extension API grant was not {operation} exactly once"
+            )));
         }
     }
     for pattern in projection.host_grants() {
@@ -799,12 +843,55 @@ pub(super) fn insert_authority(
             params![&id[..], pattern.as_str()],
         )?;
         if inserted != 1 {
-            return Err(invalid_data(
-                "extension host grant was not initialized exactly once",
-            ));
+            return Err(invalid_data(&format!(
+                "extension host grant was not {operation} exactly once"
+            )));
         }
     }
     Ok(())
+}
+
+fn persist_authority_patch(
+    conn: &Connection,
+    expected: ExtensionGrantRevision,
+    authority: &ExtensionGrantAuthority,
+) -> rusqlite::Result<()> {
+    let projection = authority.persistence_projection();
+    let id = projection.install_id().bytes();
+    let digest = projection.digest().bytes();
+    let updated = conn.execute(
+        "UPDATE extension_grants
+         SET revision = ?3, grant_sha256 = ?4,
+             file_access = ?5, private_access = ?6
+         WHERE install_id = ?1 AND revision = ?2",
+        params![
+            &id[..],
+            super::extensions::revision_i64(expected.get())?,
+            super::extensions::revision_i64(projection.revision().get())?,
+            &digest[..],
+            i64::from(projection.persisted_file_access()),
+            i64::from(projection.persisted_private_access()),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(invalid_data(
+            "extension grant patch changed during compare-and-swap",
+        ));
+    }
+    let deleted_api = conn.execute(
+        "DELETE FROM extension_grant_api_permissions WHERE install_id = ?1",
+        [&id[..]],
+    )?;
+    let deleted_hosts = conn.execute(
+        "DELETE FROM extension_grant_host_permissions WHERE install_id = ?1",
+        [&id[..]],
+    )?;
+    if deleted_api > MAX_EXTENSION_API_PERMISSIONS || deleted_hosts > MAX_EXTENSION_HOST_GRANTS {
+        return Err(invalid_data(
+            "extension grant patch replaced an over-limit authority",
+        ));
+    }
+    insert_authority_members(conn, authority, "replaced")
 }
 
 fn persist_authority_mutation(

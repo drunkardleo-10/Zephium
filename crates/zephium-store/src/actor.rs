@@ -19,12 +19,12 @@ use std::time::{Duration, Instant};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
-    ExtensionGrantManifestBindings, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
-    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipJournalMutation,
-    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
-    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
-    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+    ExtensionGrantManifestBindings, ExtensionGrantPatch, ExtensionGrantRevision,
+    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipKey, MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+    MAX_EXTENSION_MANIFEST_RETAINED_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::item::sanitize_page_title;
@@ -798,9 +798,10 @@ pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
 /// vocabulary required by the service's high-level management transactions;
 /// raw Store ownership and mutation callbacks never cross into Shell. The one
 /// install-construction operation atomically persists a disabled row and its
-/// complete initial grants; later grant mutation remains outside this boundary
-/// until the permission coordinator joins the same serialized model. One concrete
-/// [`SqliteStore`] actor lifetime can mint this authority once, after which the
+/// complete initial grants. Later grant mutation crosses this boundary only as
+/// one exact bounded patch, allowing the permission coordinator to preserve
+/// native-retirement/durable-authority ordering. One concrete [`SqliteStore`]
+/// actor lifetime can mint this authority once, after which the
 /// coordinator may move it onto its single worker thread. It is `Send` but
 /// deliberately neither `Clone` nor `Sync`.
 ///
@@ -814,15 +815,6 @@ pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
 /// use zephium_store::ExtensionServiceStoreAuthority;
 /// fn require_sync<T: Sync>() {}
 /// require_sync::<ExtensionServiceStoreAuthority>();
-/// ```
-///
-/// Grant mutation authority does not cross this boundary:
-///
-/// ```compile_fail
-/// use zephium_store::ExtensionServiceStoreAuthority;
-/// fn cannot_mutate_grants(authority: &ExtensionServiceStoreAuthority) {
-///     authority.mutate_extension_grants();
-/// }
 /// ```
 ///
 /// ```compile_fail
@@ -1172,6 +1164,52 @@ impl ExtensionServiceStoreAuthority {
         }
         observe_extension_service_store_call(result, deadline)
     }
+
+    /// Applies one exact bounded grant patch after native ownership for the
+    /// install has been retired.
+    ///
+    /// The Store independently authenticates the exact install revision,
+    /// package-bound manifest, grant revision, and absence of unresolved
+    /// native ownership in the same serialized mutation. A semantic no-op is
+    /// acknowledged without consuming a revision and remains safe while an
+    /// owner exists; a changed patch is refused until ownership is absent.
+    /// Timeouts after admission are uncertain and require a fresh cohort read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_grant_patch_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+        install: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        expected_grant: ExtensionGrantRevision,
+        patch: ExtensionGrantPatch,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionGrantMutationOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self.store.try_mutate_extension_grants(
+            profile,
+            expected_catalog,
+            expected_install,
+            install,
+            manifest,
+            ExtensionGrantWrite::ApplyPatch {
+                expected: expected_grant,
+                patch,
+            },
+            deadline,
+            done,
+        ) {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
 }
 
 fn observe_extension_service_store_call<T>(
@@ -1433,6 +1471,61 @@ impl SqliteStore {
         self.tx
             .try_send(Cmd::LoadExtensionGrantCohort(
                 profile, bindings, permit, done,
+            ))
+            .is_ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_mutate_extension_grants(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+        install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        write: ExtensionGrantWrite,
+        deadline: Instant,
+        done: ExtensionGrantMutationDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(retained_bytes) = manifest
+            .retained_bytes()
+            .checked_add(write.retained_bytes())
+        else {
+            return false;
+        };
+        if retained_bytes > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES {
+            return false;
+        }
+        let Some(permit) = ExtensionGrantRequestPermit::try_acquire(
+            &self.extension_grant_request_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::MutateExtensionGrants(
+                profile,
+                expected_catalog,
+                expected_install,
+                install_id,
+                manifest,
+                write,
+                permit,
+                done,
             ))
             .is_ok()
     }
