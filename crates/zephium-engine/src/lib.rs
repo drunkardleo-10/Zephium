@@ -44,6 +44,17 @@ pub fn run_macos_web_extension_permission_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_permission_probe()
 }
 
+/// Runs the focused one-click WebKit permission callback-cohort gate.
+///
+/// The probe withholds the first API/host delegate completion and requires
+/// WebKit to deliver the peer callback first. Passing proves Zephium can form
+/// one bounded decision and durable transaction for one JavaScript request.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_permission_callback_cohort_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_permission_callback_cohort_probe()
+}
+
 /// Executes the non-product macOS extension-resource transport capability gate.
 ///
 /// A successful result means the current behavior was classified exactly: the

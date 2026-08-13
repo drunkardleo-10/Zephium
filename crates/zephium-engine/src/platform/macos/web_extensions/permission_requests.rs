@@ -8,9 +8,10 @@
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use objc2::rc::Weak;
+use block2::RcBlock;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
 use objc2::MainThreadOnly;
 use objc2_app_kit::{NSApplication, NSBackingStoreType, NSWindow, NSWindowStyleMask};
@@ -27,6 +28,20 @@ const OPTIONAL_API_PERMISSION: &str = "clipboardWrite";
 const OPTIONAL_HOST_PATTERN: &str = "https://optional.zephium.invalid/*";
 const MAX_REQUEST_ENTRIES: usize = 8;
 const INTERACTIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const CALLBACK_COHORT_OBSERVATION_WINDOW: Duration = Duration::from_secs(1);
+
+type PermissionCompletion = RcBlock<dyn Fn(NonNull<NSSet<WKWebExtensionPermission>>, *mut NSDate)>;
+type PatternCompletion = RcBlock<dyn Fn(NonNull<NSSet<WKWebExtensionMatchPattern>>, *mut NSDate)>;
+
+struct DeferredPermissionCompletion {
+    requested: Retained<NSSet<WKWebExtensionPermission>>,
+    completion: PermissionCompletion,
+}
+
+struct DeferredPatternCompletion {
+    requested: Retained<NSSet<WKWebExtensionMatchPattern>>,
+    completion: PatternCompletion,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ResponsePolicy {
@@ -62,6 +77,10 @@ pub(super) struct PermissionRequestProbe {
     tab_scoped_calls: Cell<usize>,
     permission_names: RefCell<Vec<String>>,
     pattern_names: RefCell<Vec<String>>,
+    deferred_permission: RefCell<Option<DeferredPermissionCompletion>>,
+    deferred_pattern: RefCell<Option<DeferredPatternCompletion>>,
+    deferred_since: Cell<Option<Instant>>,
+    callbacks_coalesced_before_settlement: Cell<bool>,
     failure: RefCell<Option<String>>,
 }
 
@@ -76,6 +95,10 @@ impl PermissionRequestProbe {
         self.tab_scoped_calls.set(0);
         self.permission_names.borrow_mut().clear();
         self.pattern_names.borrow_mut().clear();
+        self.deferred_permission.borrow_mut().take();
+        self.deferred_pattern.borrow_mut().take();
+        self.deferred_since.set(None);
+        self.callbacks_coalesced_before_settlement.set(false);
         self.failure.replace(None);
     }
 
@@ -98,10 +121,29 @@ impl PermissionRequestProbe {
         }
         self.permission_names.replace(names);
 
-        if matches!(
-            self.policy.get(),
-            Some(ResponsePolicy::ApiOnly | ResponsePolicy::AllowAll)
-        ) {
+        if self.policy.get() == Some(ResponsePolicy::AllowAll) {
+            let Some(requested) =
+                (unsafe { Retained::retain(permissions as *const NSSet<_> as *mut NSSet<_>) })
+            else {
+                self.fail("permission request set could not be retained");
+                let empty = NSSet::<WKWebExtensionPermission>::new();
+                completion.call((NonNull::from(&*empty), std::ptr::null_mut()));
+                return;
+            };
+            if self.deferred_permission.borrow().is_some() {
+                self.fail("permission request produced a duplicate unsettled callback");
+                let empty = NSSet::<WKWebExtensionPermission>::new();
+                completion.call((NonNull::from(&*empty), std::ptr::null_mut()));
+                return;
+            }
+            self.deferred_permission
+                .replace(Some(DeferredPermissionCompletion {
+                    requested,
+                    completion: completion.copy(),
+                }));
+            self.deferred_since.set(Some(Instant::now()));
+            self.complete_deferred_cohort_if_ready();
+        } else if self.policy.get() == Some(ResponsePolicy::ApiOnly) {
             completion.call((NonNull::from(permissions), std::ptr::null_mut()));
         } else {
             let empty = NSSet::<WKWebExtensionPermission>::new();
@@ -129,7 +171,29 @@ impl PermissionRequestProbe {
         self.pattern_names.replace(names);
 
         if self.policy.get() == Some(ResponsePolicy::AllowAll) {
-            completion.call((NonNull::from(patterns), std::ptr::null_mut()));
+            let Some(requested) =
+                (unsafe { Retained::retain(patterns as *const NSSet<_> as *mut NSSet<_>) })
+            else {
+                self.fail("match-pattern request set could not be retained");
+                let empty = NSSet::<WKWebExtensionMatchPattern>::new();
+                completion.call((NonNull::from(&*empty), std::ptr::null_mut()));
+                return;
+            };
+            if self.deferred_pattern.borrow().is_some() {
+                self.fail("match-pattern request produced a duplicate unsettled callback");
+                let empty = NSSet::<WKWebExtensionMatchPattern>::new();
+                completion.call((NonNull::from(&*empty), std::ptr::null_mut()));
+                return;
+            }
+            self.deferred_pattern
+                .replace(Some(DeferredPatternCompletion {
+                    requested,
+                    completion: completion.copy(),
+                }));
+            if self.deferred_since.get().is_none() {
+                self.deferred_since.set(Some(Instant::now()));
+            }
+            self.complete_deferred_cohort_if_ready();
         } else {
             let empty = NSSet::<WKWebExtensionMatchPattern>::new();
             completion.call((NonNull::from(&*empty), std::ptr::null_mut()));
@@ -170,6 +234,40 @@ impl PermissionRequestProbe {
         }
     }
 
+    fn complete_deferred_cohort_if_ready(&self) {
+        if self.deferred_permission.borrow().is_none() || self.deferred_pattern.borrow().is_none() {
+            return;
+        }
+        self.callbacks_coalesced_before_settlement.set(true);
+        self.complete_deferred();
+    }
+
+    fn release_deferred_if_observation_elapsed(&self) {
+        if self
+            .deferred_since
+            .get()
+            .is_some_and(|since| since.elapsed() >= CALLBACK_COHORT_OBSERVATION_WINDOW)
+        {
+            self.complete_deferred();
+        }
+    }
+
+    fn complete_deferred(&self) {
+        self.deferred_since.set(None);
+        let permission = self.deferred_permission.borrow_mut().take();
+        let pattern = self.deferred_pattern.borrow_mut().take();
+        if let Some(pending) = permission {
+            pending
+                .completion
+                .call((NonNull::from(&*pending.requested), std::ptr::null_mut()));
+        }
+        if let Some(pending) = pattern {
+            pending
+                .completion
+                .call((NonNull::from(&*pending.requested), std::ptr::null_mut()));
+        }
+    }
+
     fn validate_callbacks(&self, policy: ResponsePolicy) -> Result<(), String> {
         if let Some(failure) = self.failure.borrow().as_deref() {
             return Err(failure.to_owned());
@@ -205,6 +303,7 @@ pub(super) struct PermissionRequestEvidence {
     pub(super) contexts: Vec<Weak<WKWebExtensionContext>>,
     pub(super) extension_views: Vec<Weak<objc2_web_kit::WKWebView>>,
     pub(super) readback: String,
+    pub(super) callbacks_coalesced_before_settlement: bool,
 }
 
 pub(super) fn write_fixture(path: &std::path::Path) -> Result<(), String> {
@@ -294,19 +393,26 @@ pub(super) fn run(
     window: &ProtocolObject<dyn WKWebExtensionWindow>,
     tab: &ProtocolObject<dyn WKWebExtensionTab>,
     run_loop: &NSRunLoop,
-    mtm: MainThreadMarker,
     state: &Rc<PermissionRequestProbe>,
+    callback_cohort_only: bool,
 ) -> Result<PermissionRequestEvidence, String> {
     validate_declaration(extension)?;
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| "runtime permission probe left the process main thread".to_owned())?;
     let mut contexts = Vec::with_capacity(3);
     let mut extension_views = Vec::with_capacity(3);
     let mut readbacks = Vec::with_capacity(3);
+    let policies: &[ResponsePolicy] = if callback_cohort_only {
+        &[ResponsePolicy::AllowAll]
+    } else {
+        &[
+            ResponsePolicy::Deny,
+            ResponsePolicy::ApiOnly,
+            ResponsePolicy::AllowAll,
+        ]
+    };
 
-    for policy in [
-        ResponsePolicy::Deny,
-        ResponsePolicy::ApiOnly,
-        ResponsePolicy::AllowAll,
-    ] {
+    for &policy in policies {
         let identifier = format!(
             "zephium-probe-runtime-permission-{}",
             policy.identifier_suffix()
@@ -360,6 +466,7 @@ pub(super) fn run(
             &native_page,
             "READY",
             run_loop,
+            state,
             super::PROBE_TIMEOUT,
         )?;
         // Loading can replace WebKit's responder chain. Establish foreground
@@ -384,6 +491,7 @@ pub(super) fn run(
             &native_page,
             policy.expected_badge(),
             run_loop,
+            state,
             INTERACTIVE_TIMEOUT,
         )?;
         state.validate_callbacks(policy)?;
@@ -411,6 +519,7 @@ pub(super) fn run(
         contexts,
         extension_views,
         readback: readbacks.join(","),
+        callbacks_coalesced_before_settlement: state.callbacks_coalesced_before_settlement.get(),
     })
 }
 
@@ -437,6 +546,7 @@ fn wait_for_badge(
     extension_page: &objc2_web_kit::WKWebView,
     expected: &str,
     run_loop: &NSRunLoop,
+    permission_requests: &PermissionRequestProbe,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
@@ -461,6 +571,7 @@ fn wait_for_badge(
             ));
         }
         super::drain_run_loop_once(run_loop);
+        permission_requests.release_deferred_if_observation_elapsed();
     }
 }
 

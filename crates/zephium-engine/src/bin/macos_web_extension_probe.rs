@@ -1,10 +1,22 @@
 #[cfg(target_os = "macos")]
 fn main() {
-    let require_supported_runtime =
-        std::env::args().any(|argument| argument == "--require-supported-runtime");
-    let interactive_permissions =
-        std::env::args().any(|argument| argument == "--interactive-permission-gate");
-    let result = if interactive_permissions {
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let require_supported_runtime = arguments
+        .iter()
+        .any(|argument| argument == "--require-supported-runtime");
+    let interactive_permissions = arguments
+        .iter()
+        .any(|argument| argument == "--interactive-permission-gate");
+    let callback_cohort = arguments
+        .iter()
+        .any(|argument| argument == "--permission-callback-cohort-gate");
+    if interactive_permissions && callback_cohort {
+        eprintln!("choose only one interactive permission gate");
+        std::process::exit(2);
+    }
+    let result = if callback_cohort {
+        zephium_engine::run_macos_web_extension_permission_callback_cohort_probe()
+    } else if interactive_permissions {
         zephium_engine::run_macos_web_extension_permission_probe()
     } else {
         zephium_engine::run_macos_web_extension_probe()

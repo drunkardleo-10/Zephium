@@ -544,38 +544,59 @@ struct ProbeTeardown {
     bitwarden_sandbox_isolation: &'static str,
     runtime_permission_status: &'static str,
     runtime_permission_readback: String,
+    runtime_permission_callbacks_coalesced_before_settlement: bool,
     operating_system: String,
 }
 
 pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
-    run_web_extension_probe_with_permissions(false)
+    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::None)
 }
 
 pub(crate) fn run_web_extension_permission_probe() -> Result<bool, String> {
-    run_web_extension_probe_with_permissions(true)
+    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::Full)
 }
 
-fn run_web_extension_probe_with_permissions(interactive_permissions: bool) -> Result<bool, String> {
+pub(crate) fn run_web_extension_permission_callback_cohort_probe() -> Result<bool, String> {
+    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::CallbackCohort)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RuntimePermissionProbeMode {
+    None,
+    Full,
+    CallbackCohort,
+}
+
+impl RuntimePermissionProbeMode {
+    const fn is_interactive(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+fn run_web_extension_probe_with_permissions(
+    permission_mode: RuntimePermissionProbeMode,
+) -> Result<bool, String> {
     let Some(operating_system) = supported_runtime()? else {
         return Ok(false);
     };
-    let watchdog_completed = arm_process_watchdog_with_timeout(if interactive_permissions {
-        Duration::from_secs(600)
-    } else {
-        PROCESS_WATCHDOG_TIMEOUT
-    });
+    let watchdog_completed =
+        arm_process_watchdog_with_timeout(if permission_mode.is_interactive() {
+            Duration::from_secs(600)
+        } else {
+            PROCESS_WATCHDOG_TIMEOUT
+        });
     let result = (|| {
         set_phase("live-probe");
-        let teardown = objc2::rc::autoreleasepool(|_| {
-            run_supported_probe(operating_system, interactive_permissions)
-        })?;
+        let teardown =
+            objc2::rc::autoreleasepool(|_| run_supported_probe(operating_system, permission_mode))?;
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
+            teardown.runtime_permission_callbacks_coalesced_before_settlement,
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
             teardown.bitwarden_dynamic_resource_url,
@@ -694,13 +715,21 @@ fn supported_runtime() -> Result<Option<String>, String> {
 
 fn run_supported_probe(
     operating_system: String,
-    interactive_permissions: bool,
+    permission_mode: RuntimePermissionProbeMode,
 ) -> Result<ProbeTeardown, String> {
     set_phase("appkit-launch");
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| "WKWebExtension probe must run on the process main thread".to_owned())?;
     let app = NSApplication::sharedApplication(mtm);
-    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let activation_policy = if permission_mode.is_interactive() {
+        // Keep the user-gesture gate visible to accessibility automation and
+        // ordinary app switching. Unattended probes remain accessory apps and
+        // do not perturb the developer's foreground application.
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    let _ = app.setActivationPolicy(activation_policy);
     app.finishLaunching();
     let run_loop = NSRunLoop::mainRunLoop();
 
@@ -929,23 +958,26 @@ fn run_supported_probe(
     assert_exact_inventory(&native_view, &baseline_inventory, "context load")?;
 
     set_phase("runtime-permission-request-gates");
-    let permission_request_evidence = if interactive_permissions {
+    let permission_request_evidence = if permission_mode.is_interactive() {
         permission_requests::run(
             &permission_extension,
             &primary_bundle.controller,
             window_protocol,
             tab_protocol,
             &run_loop,
-            mtm,
             &permission_request_state,
+            permission_mode == RuntimePermissionProbeMode::CallbackCohort,
         )?
     } else {
         permission_requests::PermissionRequestEvidence {
             contexts: Vec::new(),
             extension_views: Vec::new(),
             readback: "interactive-not-run".to_owned(),
+            callbacks_coalesced_before_settlement: false,
         }
     };
+    let runtime_permission_contexts = permission_request_evidence.contexts.len();
+    let runtime_permission_views = permission_request_evidence.extension_views.len();
     context_weaks.extend(permission_request_evidence.contexts.iter().cloned());
 
     let match_pattern = exact_host_pattern(mtm)?;
@@ -1348,8 +1380,8 @@ fn run_supported_probe(
             .collect(),
         controllers: controller_weaks,
         contexts: context_weaks,
-        expected_contexts: if interactive_permissions { 7 } else { 4 },
-        expected_extension_ui_views: if interactive_permissions { 5 } else { 2 },
+        expected_contexts: 4 + runtime_permission_contexts,
+        expected_extension_ui_views: 2 + runtime_permission_views,
         lifecycle_drops,
         baseline_script_count: baseline_inventory.len(),
         peak_extension_script_delta: script_multiset_len(&both_delta),
@@ -1367,12 +1399,14 @@ fn run_supported_probe(
         bitwarden_dynamic_resource_url: bitwarden_contract_teardown.dynamic_resource_url,
         bitwarden_execution_world_namespace: bitwarden_contract_teardown.execution_world_namespace,
         bitwarden_sandbox_isolation: bitwarden_contract_teardown.sandbox_isolation,
-        runtime_permission_status: if interactive_permissions {
-            "passed"
-        } else {
-            "interactive-not-run"
+        runtime_permission_status: match permission_mode {
+            RuntimePermissionProbeMode::None => "interactive-not-run",
+            RuntimePermissionProbeMode::Full => "passed",
+            RuntimePermissionProbeMode::CallbackCohort => "callback-cohort-passed",
         },
         runtime_permission_readback: permission_request_evidence.readback,
+        runtime_permission_callbacks_coalesced_before_settlement: permission_request_evidence
+            .callbacks_coalesced_before_settlement,
         operating_system,
     })
 }
