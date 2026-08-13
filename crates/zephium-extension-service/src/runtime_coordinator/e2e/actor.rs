@@ -1,11 +1,16 @@
-use zephium_core::extensions::{ExtensionCatalogSetDigest, ExtensionRuntimeGeneration};
+use zephium_core::extensions::{
+    ApiPermissionName, ExtensionCatalogSetDigest, ExtensionRuntimeGeneration,
+};
+use zephium_core::injection::MatchPattern;
 use zephium_core::ports::extensions::{
     ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
     ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
     ExtensionManagementGrantState, ExtensionManagementRuntimeState,
-    ExtensionRuntimeActivationDisposition, ExtensionRuntimeRetirementDisposition,
-    ExtensionServiceLifecycle, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionRuntimeActivationDisposition, ExtensionRuntimeGrantOutcome,
+    ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState,
+    ExtensionRuntimeRetirementDisposition, ExtensionServiceLifecycle, ExtensionSetEnabledOutcome,
+    ExtensionUninstallOutcome,
 };
 
 fn grant_selection(file_access: bool, private_access: bool) -> ExtensionInitialGrantSelection {
@@ -188,7 +193,7 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
     assert!(matches!(
         entry.grants(),
         ExtensionManagementGrantState::Initialized {
-            api_grants: 2,
+            api_grants: 1,
             host_grants: 1,
             file_access: false,
             private_access: false,
@@ -283,6 +288,131 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
     let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
     else {
         panic!("management actor did not prove clean shutdown")
+    };
+    assert_eq!(evidence.accepted_commands(), 5);
+    assert_eq!(evidence.completed_commands(), 5);
+    harness.finish(evidence);
+}
+
+#[test]
+fn actor_runtime_optional_grants_retire_commit_and_reactivate_one_exact_generation() {
+    let (harness, mut owner) = ActorAuthorityHarness::launch(1);
+    let profile = harness.profiles[0];
+    let key = harness.keys[0];
+    let request = || {
+        ExtensionRuntimeGrantRequest::new(
+            vec![ApiPermissionName::parse_exact("tabs").unwrap()],
+            vec![MatchPattern::parse("https://optional.example/*").unwrap()],
+        )
+        .unwrap()
+    };
+
+    let granted = ExtensionServiceLifecycle::request_runtime_grants_until(
+        &mut owner,
+        key,
+        ExtensionRuntimeGeneration::INITIAL,
+        request(),
+        deadline(),
+    );
+    let ExtensionRuntimeGrantOutcome::Granted {
+        revision,
+        runtime: ExtensionRuntimeGrantRuntimeState::Active(generation),
+    } = granted.outcome()
+    else {
+        panic!("optional runtime grants did not settle active: {granted:?}");
+    };
+    assert_eq!(revision.get(), 2);
+    assert!(*generation > ExtensionRuntimeGeneration::INITIAL);
+    assert_eq!(
+        granted
+            .active_profiles()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [profile]
+    );
+    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.reclaim_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 2);
+
+    let already = ExtensionServiceLifecycle::request_runtime_grants_until(
+        &mut owner,
+        key,
+        *generation,
+        request(),
+        deadline(),
+    );
+    assert_eq!(
+        already.outcome(),
+        &ExtensionRuntimeGrantOutcome::AlreadyGranted {
+            revision: *revision,
+            generation: *generation,
+        }
+    );
+    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 2);
+
+    let stale = ExtensionServiceLifecycle::request_runtime_grants_until(
+        &mut owner,
+        key,
+        ExtensionRuntimeGeneration::INITIAL,
+        request(),
+        deadline(),
+    );
+    assert_eq!(stale.outcome(), &ExtensionRuntimeGrantOutcome::Conflict);
+    let required = ExtensionServiceLifecycle::request_runtime_grants_until(
+        &mut owner,
+        key,
+        *generation,
+        ExtensionRuntimeGrantRequest::new(
+            vec![ApiPermissionName::parse_exact("storage").unwrap()],
+            Vec::new(),
+        )
+        .unwrap(),
+        deadline(),
+    );
+    assert_eq!(required.outcome(), &ExtensionRuntimeGrantOutcome::Rejected);
+    assert_eq!(harness.probe.retirement_calls(), 1);
+
+    let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_load_management_catalog(
+            &mut owner,
+            profile,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = catalog_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementCatalogAdmission::Accepted
+    );
+    let ExtensionManagementCatalogOutcome::Loaded(management) = catalog_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap()
+    else {
+        panic!("post-grant management catalog did not load");
+    };
+    let [entry] = management.entries() else {
+        panic!("one installed extension expected");
+    };
+    assert_eq!(
+        entry.runtime(),
+        ExtensionManagementRuntimeState::Active(*generation)
+    );
+    assert!(matches!(
+        entry.grants(),
+        ExtensionManagementGrantState::Initialized {
+            revision,
+            api_grants: 2,
+            host_grants: 2,
+            file_access: false,
+            private_access: false,
+        } if revision.get() == 2
+    ));
+
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("runtime-grant actor did not prove clean shutdown");
     };
     assert_eq!(evidence.accepted_commands(), 5);
     assert_eq!(evidence.completed_commands(), 5);

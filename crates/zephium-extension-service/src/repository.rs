@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use zephium_core::extensions::ExtensionPackagePinReleaseBinding;
+use zephium_core::extensions::{ExtensionInstallCatalog, ExtensionPackagePinReleaseBinding};
 use zephium_core::ids::ProfileId;
 use zephium_extension_repository::{
-    BundledCurrentInstallCandidates, BundledManagementManifestsError,
+    BundledCurrentInstallCandidates, BundledCurrentManifestBindings,
+    BundledManagementManifestsError, BundledManifestBindingsError,
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome,
     BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome, ExtensionRepository,
     ExtensionRepositoryError, ProfilePackageAbsenceEvidence,
@@ -128,6 +129,18 @@ impl ServiceRepository {
             return Err(ExtensionRepositoryError::Sealed.into());
         };
         repository.authenticate_current_bundled_install_candidates()
+    }
+
+    /// Authenticates one complete installed-manifest cohort without acquiring
+    /// package pins or locale/UI metadata.
+    pub(crate) fn authenticate_manifest_bindings(
+        &mut self,
+        catalog: &ExtensionInstallCatalog,
+    ) -> Result<BundledCurrentManifestBindings, BundledManifestBindingsError> {
+        let Some(repository) = self.repository.as_mut() else {
+            return Err(ExtensionRepositoryError::Sealed.into());
+        };
+        repository.authenticate_current_bundled_manifest_bindings(catalog)
     }
 
     pub(crate) fn audit_profile_package_obligations(

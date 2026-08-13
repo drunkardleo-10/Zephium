@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -16,8 +16,10 @@ use zephium_core::ports::extensions::{
     ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
     ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
     ExtensionManagementCatalogCallback, ExtensionManagementCatalogOutcome,
-    ExtensionManagementSettlement, ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome,
-    ExtensionUninstallCallback, ExtensionUninstallOutcome,
+    ExtensionManagementSettlement, ExtensionRuntimeGrantCallback, ExtensionRuntimeGrantOutcome,
+    ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState, ExtensionSetEnabledCallback,
+    ExtensionSetEnabledOutcome, ExtensionUninstallCallback, ExtensionUninstallOutcome,
+    MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
 };
 
 use crate::cleanup::{
@@ -61,6 +63,7 @@ use crate::{
 mod installation;
 mod management;
 mod management_catalog;
+mod runtime_grants;
 mod runtime_operations;
 
 pub use runtime_operations::{
@@ -76,6 +79,9 @@ pub const EXTENSION_SERVICE_DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_
 
 const EXTENSION_SERVICE_DROP_GRACE: Duration = Duration::from_millis(100);
 const THREAD_FINISH_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_PENDING_RUNTIME_GRANT_REQUESTS: usize = 8;
+const MAX_PENDING_RUNTIME_GRANT_RETAINED_BYTES: usize =
+    2 * MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES;
 
 #[cfg(test)]
 struct TestDropProbe(Arc<AtomicBool>);
@@ -84,6 +90,66 @@ struct TestDropProbe(Arc<AtomicBool>);
 impl Drop for TestDropProbe {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct RuntimeGrantRequestAdmission {
+    count: usize,
+    retained_bytes: usize,
+}
+
+struct RuntimeGrantRequestPermit {
+    admission: Arc<Mutex<RuntimeGrantRequestAdmission>>,
+    retained_bytes: usize,
+}
+
+impl RuntimeGrantRequestPermit {
+    fn try_acquire(
+        admission: &Arc<Mutex<RuntimeGrantRequestAdmission>>,
+        retained_bytes: usize,
+    ) -> Option<Self> {
+        if retained_bytes > MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES {
+            return None;
+        }
+        let mut state = match admission.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        let next_count = state.count.checked_add(1)?;
+        let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
+        if next_count > MAX_PENDING_RUNTIME_GRANT_REQUESTS
+            || next_bytes > MAX_PENDING_RUNTIME_GRANT_RETAINED_BYTES
+        {
+            return None;
+        }
+        state.count = next_count;
+        state.retained_bytes = next_bytes;
+        drop(state);
+        Some(Self {
+            admission: Arc::clone(admission),
+            retained_bytes,
+        })
+    }
+}
+
+impl Drop for RuntimeGrantRequestPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (Some(count), Some(retained_bytes)) = (
+            state.count.checked_sub(1),
+            state.retained_bytes.checked_sub(self.retained_bytes),
+        ) else {
+            state.count = usize::MAX;
+            state.retained_bytes = usize::MAX;
+            return;
+        };
+        state.count = count;
+        state.retained_bytes = retained_bytes;
     }
 }
 
@@ -125,6 +191,14 @@ enum WorkerCommand {
         selector: ExtensionInstallSelector,
         deadline: Instant,
         settlement: ManagementSettlementSink<ExtensionUninstallOutcome>,
+    },
+    RequestRuntimeGrants {
+        key: ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: ExtensionRuntimeGrantRequest,
+        deadline: Instant,
+        _permit: RuntimeGrantRequestPermit,
+        settlement: ManagementSettlementSink<ExtensionRuntimeGrantOutcome>,
     },
     LoadManagementCatalog {
         profile: ProfileId,
@@ -241,11 +315,16 @@ fn install_worker_lost() -> ExtensionManagementSettlement<ExtensionInstallOutcom
     ExtensionManagementSettlement::new(ExtensionInstallOutcome::FailedClosed, None)
 }
 
+fn runtime_grant_worker_lost() -> ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome> {
+    ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::FailedClosed, None)
+}
+
 fn cancel_unadmitted_management(command: WorkerCommand) {
     match command {
         WorkerCommand::SetInstallEnabled { settlement, .. } => settlement.cancel(),
         WorkerCommand::Install { settlement, .. } => settlement.cancel(),
         WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
+        WorkerCommand::RequestRuntimeGrants { settlement, .. } => settlement.cancel(),
         WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
     }
@@ -380,6 +459,7 @@ pub struct ExtensionServiceOwner {
     status: Arc<SharedStatus>,
     startup: Arc<SharedStartupOutcome>,
     cancellation: Arc<WorkerCancellation>,
+    runtime_grant_admission: Arc<Mutex<RuntimeGrantRequestAdmission>>,
     completion: Receiver<ExtensionServiceShutdownEvidence>,
     thread: Option<JoinHandle<()>>,
     _not_sync: PhantomData<Cell<()>>,
@@ -496,6 +576,7 @@ impl ExtensionServiceOwner {
         let initial_attempt = launch.is_some().then_some(StartupAttempt::INITIAL);
         let startup = Arc::new(SharedStartupOutcome::new(initial_attempt));
         let cancellation = Arc::new(WorkerCancellation::new());
+        let runtime_grant_admission = Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default()));
         let (completion_tx, completion) = mpsc::sync_channel(1);
         let worker_mailbox = Arc::clone(&mailbox);
         let worker_status = Arc::clone(&status);
@@ -619,6 +700,7 @@ impl ExtensionServiceOwner {
             status,
             startup,
             cancellation,
+            runtime_grant_admission,
             completion,
             thread: Some(thread),
             _not_sync: PhantomData,
@@ -1037,6 +1119,118 @@ impl ExtensionServiceOwner {
             selector,
             deadline,
             settlement: ManagementSettlementSink::callback(done, uninstall_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Applies one live runtime's optional API/host request as one durable
+    /// revision with native retirement on both sides of the write.
+    #[must_use = "runtime grant settlement must be checked"]
+    pub fn request_runtime_grants_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: ExtensionRuntimeGrantRequest,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionManagementSettlement::new(
+                ExtensionRuntimeGrantOutcome::Unavailable,
+                None,
+            );
+        }
+        let Some(permit) = RuntimeGrantRequestPermit::try_acquire(
+            &self.runtime_grant_admission,
+            request.retained_bytes(),
+        ) else {
+            return ExtensionManagementSettlement::new(
+                ExtensionRuntimeGrantOutcome::Unavailable,
+                None,
+            );
+        };
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::RequestRuntimeGrants {
+            key,
+            generation,
+            request,
+            deadline,
+            _permit: permit,
+            settlement: ManagementSettlementSink::Waiting(settlement),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionRuntimeGrantOutcome::Unavailable,
+                            None,
+                        )
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionManagementSettlement::new(
+                            ExtensionRuntimeGrantOutcome::FailedClosed,
+                            None,
+                        )
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => {
+                ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::Unavailable, None)
+            }
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::FailedClosed, None)
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::FailedClosed, None)
+            }
+        }
+    }
+
+    /// Admits a non-blocking live-runtime optional-grant transaction.
+    #[must_use = "management admission determines callback ownership"]
+    pub fn begin_request_runtime_grants(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: ExtensionRuntimeGrantRequest,
+        deadline: Instant,
+        done: ExtensionRuntimeGrantCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let Some(permit) = RuntimeGrantRequestPermit::try_acquire(
+            &self.runtime_grant_admission,
+            request.retained_bytes(),
+        ) else {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        };
+        let command = WorkerCommand::RequestRuntimeGrants {
+            key,
+            generation,
+            request,
+            deadline,
+            _permit: permit,
+            settlement: ManagementSettlementSink::callback(done, runtime_grant_worker_lost),
         };
         match self.mailbox.try_push_normal(command) {
             NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
@@ -1892,6 +2086,29 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::RequestRuntimeGrants {
+                key,
+                generation,
+                request,
+                deadline,
+                _permit,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_runtime_grants(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    key,
+                    generation,
+                    request,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             WorkerCommand::LoadManagementCatalog {
                 profile,
                 deadline,
@@ -2102,6 +2319,78 @@ impl WorkerState {
             ExtensionUninstallOutcome::FailedClosed => {
                 self.management_write_state = ManagementWriteState::FailedClosed;
                 status.publish(ExtensionServicePhase::Failed)
+            }
+            _ => {}
+        }
+        (outcome, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_runtime_grants(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        key: ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: ExtensionRuntimeGrantRequest,
+        deadline: Instant,
+    ) -> (
+        ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>,
+        bool,
+    ) {
+        if let Err(failure) =
+            self.management_ingress_readiness(worker, startup_outcome, cancellation, key.profile())
+        {
+            let outcome = match failure {
+                ManagementIngressFailure::Unavailable => ExtensionRuntimeGrantOutcome::Unavailable,
+                ManagementIngressFailure::OutcomeUnknown => {
+                    ExtensionRuntimeGrantOutcome::OutcomeUnknown
+                }
+                ManagementIngressFailure::FailedClosed
+                | ManagementIngressFailure::ProtocolViolation => {
+                    status.publish(ExtensionServicePhase::Failed);
+                    ExtensionRuntimeGrantOutcome::FailedClosed
+                }
+            };
+            return (
+                ExtensionManagementSettlement::new(outcome, self.runtime.active_profiles()),
+                failure != ManagementIngressFailure::ProtocolViolation,
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionManagementSettlement::new(
+                    ExtensionRuntimeGrantOutcome::FailedClosed,
+                    None,
+                ),
+                false,
+            );
+        };
+        let outcome = runtime_grants::request_until(
+            startup,
+            &mut self.runtime,
+            key,
+            generation,
+            request,
+            deadline,
+        );
+        match outcome.outcome() {
+            ExtensionRuntimeGrantOutcome::OutcomeUnknown => {
+                self.management_write_state = ManagementWriteState::OutcomeUnknown;
+            }
+            ExtensionRuntimeGrantOutcome::FailedClosed
+            | ExtensionRuntimeGrantOutcome::Granted {
+                runtime:
+                    ExtensionRuntimeGrantRuntimeState::PendingActivation(
+                        zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
+                    ),
+                ..
+            } => {
+                self.management_write_state = ManagementWriteState::FailedClosed;
+                status.publish(ExtensionServicePhase::Failed);
             }
             _ => {}
         }
@@ -2834,6 +3123,43 @@ mod tests {
     }
 
     #[test]
+    fn unadmitted_runtime_grant_callback_releases_exact_memory_permit() {
+        let admission = Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default()));
+        let request = ExtensionRuntimeGrantRequest::new(
+            vec![zephium_core::extensions::ApiPermissionName::parse_exact("tabs").unwrap()],
+            Vec::new(),
+        )
+        .unwrap();
+        let permit = RuntimeGrantRequestPermit::try_acquire(&admission, request.retained_bytes())
+            .expect("bounded runtime grant request must be admitted");
+        let invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked = Arc::clone(&invoked);
+        cancel_unadmitted_management(WorkerCommand::RequestRuntimeGrants {
+            key: ExtensionNativeOwnershipKey::new(
+                ProfileId::from(44),
+                zephium_core::ids::ExtensionInstallId::from(45),
+                zephium_core::extensions::ExtensionGrantBrowsingContext::Regular,
+            ),
+            generation: zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+            request,
+            deadline: Instant::now() + Duration::from_secs(1),
+            _permit: permit,
+            settlement: ManagementSettlementSink::callback(
+                Box::new(move |_| callback_invoked.store(true, Ordering::Release)),
+                runtime_grant_worker_lost,
+            ),
+        });
+
+        assert!(!invoked.load(Ordering::Acquire));
+        assert_eq!(
+            *admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            RuntimeGrantRequestAdmission::default()
+        );
+    }
+
+    #[test]
     fn dropped_admitted_management_catalog_callback_fails_closed_once() {
         let (completed, observation) = mpsc::sync_channel(1);
         drop(ManagementCatalogSettlementSink::new(Box::new(
@@ -2945,6 +3271,7 @@ mod tests {
             status,
             startup,
             cancellation: Arc::new(WorkerCancellation::new()),
+            runtime_grant_admission: Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default())),
             completion,
             thread: None,
             _not_sync: PhantomData,

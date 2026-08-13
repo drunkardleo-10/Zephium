@@ -9,6 +9,7 @@ use zephium_core::ports::extensions::{
     ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeGrantCallback, ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest,
     ExtensionRuntimeRetirementDisposition as CoreExtensionRuntimeRetirementDisposition,
     ExtensionServiceLifecycle,
     ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
@@ -175,6 +176,31 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         done: ExtensionUninstallCallback,
     ) -> ExtensionManagementAdmission {
         ExtensionServiceOwner::begin_uninstall(self, selector, deadline, done)
+    }
+
+    fn request_runtime_grants_until(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: ExtensionRuntimeGrantRequest,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome> {
+        ExtensionServiceOwner::request_runtime_grants_until(
+            self, key, generation, request, deadline,
+        )
+    }
+
+    fn begin_request_runtime_grants(
+        &mut self,
+        key: ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: ExtensionRuntimeGrantRequest,
+        deadline: Instant,
+        done: ExtensionRuntimeGrantCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_request_runtime_grants(
+            self, key, generation, request, deadline, done,
+        )
     }
 
     fn begin_load_management_catalog(

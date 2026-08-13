@@ -9,12 +9,18 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 
 #[path = "extensions/management.rs"]
 mod management;
+#[path = "extensions/runtime_grants.rs"]
+mod runtime_grants;
 
 pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
     ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementProjectionError,
     ExtensionManagementRuntimeState, MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES,
     MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
+};
+pub use runtime_grants::{
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRequestError,
+    ExtensionRuntimeGrantRuntimeState, MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
 };
 
 /// The extension runtime pool has three background slots, so startup can
@@ -538,6 +544,9 @@ pub type ExtensionUninstallCallback =
 /// Exactly-once completion callback for an admitted curated install request.
 pub type ExtensionInstallCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionInstallOutcome>) + Send>;
+/// Exactly-once completion callback for an admitted live-runtime grant request.
+pub type ExtensionRuntimeGrantCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>) + Send>;
 /// Exactly-once completion callback for an admitted management-catalog read.
 pub type ExtensionManagementCatalogCallback =
     Box<dyn FnOnce(ExtensionManagementCatalogOutcome) + Send>;
@@ -681,6 +690,35 @@ pub trait ExtensionServiceLifecycle: Send {
         _selector: ExtensionInstallSelector,
         _deadline: Instant,
         done: ExtensionUninstallCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Applies one live runtime's declared optional API/host request only
+    /// after retiring every native context for the exact install.
+    ///
+    /// The generation is a process-local stale-context fence. Implementations
+    /// must reauthenticate the manifest and durable grant cohort, commit the
+    /// request as one revision, and reactivate only contexts that were live.
+    fn request_runtime_grants_until(
+        &mut self,
+        _key: ExtensionNativeOwnershipKey,
+        _generation: ExtensionRuntimeGeneration,
+        _request: ExtensionRuntimeGrantRequest,
+        _deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome> {
+        ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::FailedClosed, None)
+    }
+
+    /// Non-blocking live-runtime grant form used by native permission bridges.
+    fn begin_request_runtime_grants(
+        &mut self,
+        _key: ExtensionNativeOwnershipKey,
+        _generation: ExtensionRuntimeGeneration,
+        _request: ExtensionRuntimeGrantRequest,
+        _deadline: Instant,
+        done: ExtensionRuntimeGrantCallback,
     ) -> ExtensionManagementAdmission {
         drop(done);
         ExtensionManagementAdmission::Unavailable

@@ -366,12 +366,12 @@ fn classify_disable_store_outcome(
 }
 
 #[derive(Clone, Copy, Default)]
-struct RetiredContexts {
+pub(super) struct RetiredContexts {
     regular: bool,
     private: bool,
 }
 
-fn retire_all_contexts(
+pub(super) fn retire_all_contexts(
     startup: &mut WorkerStartupState,
     runtime: &mut RuntimeCoordinator,
     selector: ExtensionInstallSelector,
@@ -406,7 +406,7 @@ fn retire_all_contexts(
     Ok(retired)
 }
 
-fn restore_contexts(
+pub(super) fn restore_contexts(
     startup: &mut WorkerStartupState,
     runtime: &mut RuntimeCoordinator,
     selector: ExtensionInstallSelector,
