@@ -1,9 +1,11 @@
 //! Bounded exact-row fences for post-activation ownership transitions.
 
 use std::mem::size_of;
+use std::sync::Arc;
 use std::time::Instant;
 
 use zephium_core::extensions::{
+    ExtensionGrantDigest, ExtensionGrantRevision, ExtensionManifestDescriptor,
     ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipIdentity,
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
@@ -13,7 +15,7 @@ use zephium_core::ports::store::ExtensionNativeOwnershipJournalMutationOutcome;
 use zephium_extension_runtime_api::MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES;
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
-use super::{applied_matches, JournalBackend, JournalProjection};
+use super::{applied_matches, JournalBackend, JournalGrantRebindBackend, JournalProjection};
 
 const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 const MAX_RETAINED_ROWS: usize = 2;
@@ -355,6 +357,55 @@ impl RowFenceSettlement {
 }
 
 impl JournalProjection {
+    /// Rebinds an exact positively-owned row to a later Store grant cohort.
+    ///
+    /// Unlike lifecycle edges, this can only use the dedicated Store-fenced
+    /// backend. The backend independently proves the exact manifest, newly
+    /// committed grant authority, and sole live requester before mutating the
+    /// meta journal. Generic journal mutation remains unable to authorize this
+    /// cross-database transition.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn settle_live_grant_rebind(
+        &mut self,
+        backend: &impl JournalGrantRebindBackend,
+        current: &ExtensionNativeOwnershipEntry,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        caller_retained_bytes: usize,
+        deadline: Instant,
+    ) -> Result<RowFenceSettlement, RowFencePreparationFailure> {
+        preflight_retained_bytes(caller_retained_bytes)?;
+        if current.intent() != ExtensionNativeOwnershipIntent::Acquire
+            || current.phase() != ExtensionNativeOwnershipPhase::NativeOwned
+            || store_grant_revision <= current.store_grant_revision()
+        {
+            return Err(preparation_failure(
+                RowFencePreparationFailureReason::ForbiddenLifecycleEdge,
+            ));
+        }
+        let mutation = ExtensionNativeOwnershipJournalMutation::rebind_grants(
+            current.cas(),
+            store_grant_revision,
+            grant_digest,
+        );
+        let application = self.prepare_exact_row_mutation(current, &mutation)?;
+        let journal = self
+            .journal
+            .as_ref()
+            .expect("prepared grant rebind requires a known projection");
+        let outcome = backend.rebind_grants_until(
+            journal.revision(),
+            current.cas(),
+            store_grant_revision,
+            grant_digest,
+            manifest,
+            deadline,
+        );
+        Ok(self.finish_exact_row_mutation(current, application, outcome))
+    }
+
     /// Applies one exact allowed lifecycle edge for the current durable row.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn settle_exact_row_transition(
@@ -439,6 +490,23 @@ impl JournalProjection {
         mutation: ExtensionNativeOwnershipJournalMutation,
         deadline: Instant,
     ) -> Result<RowFenceSettlement, RowFencePreparationFailure> {
+        let application = self.prepare_exact_row_mutation(expected_row, &mutation)?;
+        let current = self
+            .journal
+            .as_ref()
+            .expect("prepared row mutation requires a known projection");
+        let outcome = backend.mutate_until(current, mutation, deadline);
+        Ok(self.finish_exact_row_mutation(expected_row, application, outcome))
+    }
+
+    fn prepare_exact_row_mutation(
+        &self,
+        expected_row: &ExtensionNativeOwnershipEntry,
+        mutation: &ExtensionNativeOwnershipJournalMutation,
+    ) -> Result<
+        zephium_core::extensions::ExtensionNativeOwnershipJournalApplication,
+        RowFencePreparationFailure,
+    > {
         let Some(current) = self.journal.as_ref() else {
             return Err(preparation_failure(
                 RowFencePreparationFailureReason::ReloadRequired,
@@ -449,19 +517,26 @@ impl JournalProjection {
                 RowFencePreparationFailureReason::CurrentRowMismatch,
             ));
         }
-        let application = current
+        current
             .clone()
             .apply(current.revision(), mutation.clone())
             .map_err(|_| {
                 preparation_failure(RowFencePreparationFailureReason::InvalidLocalTransition)
-            })?;
-        let outcome = backend.mutate_until(current, mutation, deadline);
+            })
+    }
+
+    fn finish_exact_row_mutation(
+        &mut self,
+        expected_row: &ExtensionNativeOwnershipEntry,
+        application: zephium_core::extensions::ExtensionNativeOwnershipJournalApplication,
+        outcome: ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>,
+    ) -> RowFenceSettlement {
         let current = self
             .journal
             .take()
             .expect("checked row mutation requires a known projection");
         let key = expected_row.key();
-        Ok(match outcome {
+        match outcome {
             ExtensionServiceStoreCallOutcome::Completed(
                 ExtensionNativeOwnershipJournalMutationOutcome::Applied(applied),
             ) if applied_matches(&application, &applied) => {
@@ -498,7 +573,7 @@ impl JournalProjection {
                         .expect("remaining journal outcomes are definite refusals"),
                 })
             }
-        })
+        }
     }
 }
 

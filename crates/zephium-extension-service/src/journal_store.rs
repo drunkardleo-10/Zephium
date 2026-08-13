@@ -1,9 +1,12 @@
 //! Exact local projection of the Store-owned native-ownership journal.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use zephium_core::extensions::{
-    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
+    ExtensionGrantDigest, ExtensionGrantRevision, ExtensionManifestDescriptor,
+    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipJournal,
+    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
 };
 use zephium_core::ports::store::{
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationApplied,
@@ -55,6 +58,46 @@ impl JournalBackend for ExtensionServiceStoreAuthority {
         deadline: Instant,
     ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
         self.mutate_native_ownership_until(journal.revision(), mutation, deadline)
+    }
+}
+
+/// Store-fenced backend for the only journal mutation whose authorization
+/// depends on profile grant state in another durable database.
+///
+/// Keeping this separate from [`JournalBackend::mutate_until`] prevents a
+/// caller from bypassing Store's exact post-patch cohort validation by issuing
+/// a raw `RebindGrants` mutation through the generic journal port.
+pub(crate) trait JournalGrantRebindBackend {
+    #[allow(clippy::too_many_arguments)]
+    fn rebind_grants_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        owned: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome>;
+}
+
+impl JournalGrantRebindBackend for ExtensionServiceStoreAuthority {
+    fn rebind_grants_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        owned: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
+        self.rebind_native_ownership_grants_until(
+            expected,
+            owned,
+            store_grant_revision,
+            grant_digest,
+            manifest,
+            deadline,
+        )
     }
 }
 

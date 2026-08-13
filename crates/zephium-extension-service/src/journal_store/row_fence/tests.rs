@@ -1,15 +1,22 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use super::*;
 use crate::journal_store::JournalMutationFailure;
 use zephium_core::extensions::{
-    ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ApiPermissionName, ExtensionApiPermissionSet, ExtensionAuthorityId,
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
+    ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
+    ExtensionCompatibilityTargetId, ExtensionContentSecurityPolicyDeclaration,
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
     ExtensionGrantRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDigest, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPreparation,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
-    ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
+    ExtensionManifestDeclarations, ExtensionManifestDescriptor, ExtensionManifestDigest,
+    ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
+    ExtensionNativeOwnershipEntryCas, ExtensionNativeOwnershipJournalRevision,
+    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
+    ExtensionRuntimeBackendTarget, ExtensionTreeDigest,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::ports::store::{
@@ -115,6 +122,58 @@ impl JournalBackend for RejectingBackend {
     }
 }
 
+struct RebindStep {
+    expected_journal: ExtensionNativeOwnershipJournalRevision,
+    expected_owner: ExtensionNativeOwnershipEntryCas,
+    expected_grant_revision: ExtensionGrantRevision,
+    expected_grant_digest: ExtensionGrantDigest,
+    expected_package: ExtensionPackageIdentity,
+    outcome: Call<ExtensionNativeOwnershipJournalMutationOutcome>,
+}
+
+struct RebindBackend {
+    steps: RefCell<VecDeque<RebindStep>>,
+    calls: Cell<usize>,
+}
+
+impl RebindBackend {
+    fn new(steps: impl IntoIterator<Item = RebindStep>) -> Self {
+        Self {
+            steps: RefCell::new(steps.into_iter().collect()),
+            calls: Cell::new(0),
+        }
+    }
+
+    fn assert_drained(&self) {
+        assert!(self.steps.borrow().is_empty(), "unused grant rebind");
+    }
+}
+
+impl JournalGrantRebindBackend for RebindBackend {
+    fn rebind_grants_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        owned: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        _deadline: Instant,
+    ) -> Call<ExtensionNativeOwnershipJournalMutationOutcome> {
+        self.calls.set(self.calls.get() + 1);
+        let step = self
+            .steps
+            .borrow_mut()
+            .pop_front()
+            .expect("unexpected grant rebind");
+        assert_eq!(expected, step.expected_journal);
+        assert_eq!(owned, step.expected_owner);
+        assert_eq!(store_grant_revision, step.expected_grant_revision);
+        assert_eq!(grant_digest, step.expected_grant_digest);
+        assert_eq!(manifest.package(), &step.expected_package);
+        step.outcome
+    }
+}
+
 #[derive(Clone, Copy)]
 enum State {
     Preparing,
@@ -164,6 +223,50 @@ fn native_identity() -> ExtensionNativeOwnershipIdentity {
         "abcdefghijklmnopabcdefghijklmnop",
     )
     .unwrap()
+}
+
+fn manifest_for(package: ExtensionPackageIdentity) -> Arc<ExtensionManifestDescriptor> {
+    let declarations = ExtensionManifestDeclarations::new(
+        ExtensionApiPermissionSet::new(vec![ApiPermissionName::parse_exact("storage").unwrap()])
+            .unwrap(),
+        ExtensionApiPermissionSet::new(Vec::new()).unwrap(),
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        ExtensionManifestExecutionSurfaces::new(
+            Vec::new(),
+            ExtensionContentSecurityPolicyDeclaration::new(
+                ExtensionManifestResourceDigest::from_bytes([7; 32]),
+            ),
+            None,
+            Vec::new(),
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let compatibility = declarations
+        .declaration_keys()
+        .into_iter()
+        .map(|declaration| {
+            ExtensionCompatibilityClassification::new(
+                declaration,
+                ExtensionCompatibilityLevel::Compatible,
+            )
+        })
+        .collect();
+    Arc::new(
+        ExtensionManifestDescriptor::new(
+            package,
+            3,
+            declarations,
+            ExtensionCompatibilityTargetId::parse_exact("test.journal.rebind.v1").unwrap(),
+            compatibility,
+        )
+        .unwrap(),
+    )
 }
 
 fn apply(
@@ -341,6 +444,172 @@ fn assert_transition_applied(
     assert_eq!(settled.journal_revision(), predicted.revision());
     assert_eq!(projection.known(), Some(&predicted));
     backend.assert_drained();
+}
+
+#[test]
+fn live_grant_rebind_uses_only_the_store_fenced_backend_and_projects_exactly() {
+    let (journal, row) = fixture(State::Owned);
+    let next_revision = row
+        .store_grant_revision()
+        .next()
+        .expect("next grant revision");
+    let next_digest = ExtensionGrantDigest::from_bytes([9; 32]);
+    let mutation = ExtensionNativeOwnershipJournalMutation::rebind_grants(
+        row.cas(),
+        next_revision,
+        next_digest,
+    );
+    let (predicted, applied) = apply(journal.clone(), mutation);
+    let manifest = manifest_for(row.package().clone());
+    let backend = RebindBackend::new([RebindStep {
+        expected_journal: journal.revision(),
+        expected_owner: row.cas(),
+        expected_grant_revision: next_revision,
+        expected_grant_digest: next_digest,
+        expected_package: row.package().clone(),
+        outcome: completed(ExtensionNativeOwnershipJournalMutationOutcome::Applied(
+            applied,
+        )),
+    }]);
+    let mut projection = known_projection(journal);
+
+    let RowFenceSettlement::Applied(applied) = settled(projection.settle_live_grant_rebind(
+        &backend,
+        &row,
+        next_revision,
+        next_digest,
+        manifest,
+        0,
+        Instant::now(),
+    )) else {
+        panic!("exact grant rebind did not apply");
+    };
+    let rebound = applied.entry().expect("rebound owner row");
+    assert_eq!(rebound.store_grant_revision(), next_revision);
+    assert_eq!(rebound.grant_digest(), next_digest);
+    assert_eq!(projection.known(), Some(&predicted));
+    backend.assert_drained();
+}
+
+#[test]
+fn live_grant_rebind_rejects_wrong_phase_nonadvance_and_projection_mismatch_pre_store() {
+    let backend = RebindBackend::new([]);
+    for state in [
+        State::Preparing,
+        State::MayOwnUnidentified,
+        State::MayOwnIdentified,
+        State::ReleaseMayOwn,
+        State::ReleaseAbsent,
+    ] {
+        let (journal, row) = fixture(state);
+        let manifest = manifest_for(row.package().clone());
+        let mut projection = known_projection(journal.clone());
+        let failure = rejected(
+            projection.settle_live_grant_rebind(
+                &backend,
+                &row,
+                row.store_grant_revision()
+                    .next()
+                    .expect("next grant revision"),
+                ExtensionGrantDigest::from_bytes([9; 32]),
+                manifest,
+                0,
+                Instant::now(),
+            ),
+        );
+        assert_eq!(
+            failure.reason(),
+            RowFencePreparationFailureReason::ForbiddenLifecycleEdge
+        );
+        assert_eq!(projection.known(), Some(&journal));
+    }
+
+    let (journal, row) = fixture(State::Owned);
+    let manifest = manifest_for(row.package().clone());
+    let mut projection = known_projection(journal.clone());
+    assert_eq!(
+        rejected(projection.settle_live_grant_rebind(
+            &backend,
+            &row,
+            row.store_grant_revision(),
+            ExtensionGrantDigest::from_bytes([9; 32]),
+            Arc::clone(&manifest),
+            0,
+            Instant::now(),
+        ))
+        .reason(),
+        RowFencePreparationFailureReason::ForbiddenLifecycleEdge
+    );
+
+    let (other_journal, _) = fixture(State::Preparing);
+    let mut projection = known_projection(other_journal.clone());
+    assert_eq!(
+        rejected(
+            projection.settle_live_grant_rebind(
+                &backend,
+                &row,
+                row.store_grant_revision()
+                    .next()
+                    .expect("next grant revision"),
+                ExtensionGrantDigest::from_bytes([9; 32]),
+                manifest,
+                0,
+                Instant::now(),
+            )
+        )
+        .reason(),
+        RowFencePreparationFailureReason::CurrentRowMismatch
+    );
+    assert_eq!(projection.known(), Some(&other_journal));
+    assert_eq!(backend.calls.get(), 0);
+}
+
+#[test]
+fn live_grant_rebind_timeout_reconciles_the_exact_after_frontier() {
+    let (before, row) = fixture(State::Owned);
+    let next_revision = row
+        .store_grant_revision()
+        .next()
+        .expect("next grant revision");
+    let next_digest = ExtensionGrantDigest::from_bytes([9; 32]);
+    let mutation = ExtensionNativeOwnershipJournalMutation::rebind_grants(
+        row.cas(),
+        next_revision,
+        next_digest,
+    );
+    let (after, _) = apply(before.clone(), mutation);
+    let rebind = RebindBackend::new([RebindStep {
+        expected_journal: before.revision(),
+        expected_owner: row.cas(),
+        expected_grant_revision: next_revision,
+        expected_grant_digest: next_digest,
+        expected_package: row.package().clone(),
+        outcome: Call::TimedOutAfterAdmission,
+    }]);
+    let mut projection = known_projection(before);
+    let RowFenceSettlement::ReloadRequired(ambiguity) =
+        settled(projection.settle_live_grant_rebind(
+            &rebind,
+            &row,
+            next_revision,
+            next_digest,
+            manifest_for(row.package().clone()),
+            0,
+            Instant::now(),
+        ))
+    else {
+        panic!("timeout after admission did not retain grant-rebind evidence");
+    };
+    assert!(projection.known().is_none());
+    rebind.assert_drained();
+
+    let reload = Backend::new([loaded(after.clone())], []);
+    assert_eq!(projection.reload(&reload, Instant::now()), Ok(&after));
+    let RowFenceReconciliation::Applied(applied) = ambiguity.reconcile(&projection) else {
+        panic!("exact grant-rebind after frontier did not reconcile");
+    };
+    assert_eq!(applied.entry(), after.entries().first());
+    reload.assert_drained();
 }
 
 #[test]
