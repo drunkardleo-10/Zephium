@@ -1,15 +1,15 @@
-//! Live-runtime optional grants with retire-write-reactivate ordering.
+//! Live-runtime optional grants with durable and in-memory authority rebind.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionGrantInitializationState, ExtensionGrantMutation, ExtensionGrantPatch,
-    ExtensionNativeOwnershipKey, ExtensionRuntimeGeneration,
+    ExtensionNativeOwnershipKey, ExtensionRuntimeEligibility, ExtensionRuntimeGeneration,
 };
 use zephium_core::ports::extensions::{
-    ExtensionActivationPendingReason, ExtensionInstallSelector, ExtensionManagementSettlement,
-    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState,
+    ExtensionInstallSelector, ExtensionManagementSettlement, ExtensionRuntimeGrantOutcome,
+    ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState,
 };
 use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionGrantMutationOutcome,
@@ -19,7 +19,9 @@ use zephium_extension_repository::BundledManifestBindingsError;
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
 use super::WorkerStartupState;
-use crate::runtime_coordinator::RuntimeCoordinator;
+use crate::runtime_coordinator::{
+    RuntimeCoordinator, RuntimeGrantRebindOutcome, RuntimeGrantRebindUnavailableReason,
+};
 
 pub(super) fn request_until(
     startup: &mut WorkerStartupState,
@@ -34,6 +36,26 @@ pub(super) fn request_until(
     }
     if runtime.live_generation(key) != Some(generation) {
         return settle(runtime, ExtensionRuntimeGrantOutcome::Conflict);
+    }
+    match runtime.reconcile_pending_grant_rebind_until(
+        super::management::resources(startup),
+        key,
+        generation,
+        deadline,
+    ) {
+        RuntimeGrantRebindOutcome::NoPending | RuntimeGrantRebindOutcome::Rebound(_) => {}
+        // The exact live generation was established immediately above on the
+        // same serialized worker. Losing it while settling retained state is
+        // an internal authority divergence, not a stale caller conflict.
+        RuntimeGrantRebindOutcome::Conflict => {
+            return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed)
+        }
+        RuntimeGrantRebindOutcome::Unavailable(reason) => {
+            return settle(runtime, map_rebind_unavailable(reason))
+        }
+        RuntimeGrantRebindOutcome::FailedClosed(_) => {
+            return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed)
+        }
     }
 
     let catalog = match startup
@@ -114,6 +136,12 @@ pub(super) fn request_until(
     else {
         return settle(runtime, ExtensionRuntimeGrantOutcome::Rejected);
     };
+    let owner = match reconcile_loaded_grant_frontier(
+        startup, runtime, key, generation, &cohort, authority, deadline,
+    ) {
+        Ok(owner) => owner,
+        Err(outcome) => return settle(runtime, outcome),
+    };
     let declarations = manifest.declarations();
     if request
         .api()
@@ -165,21 +193,15 @@ pub(super) fn request_until(
     let expected_grant = authority.revision();
     drop(cohort);
 
-    let retired = match super::management::retire_all_contexts(startup, runtime, selector, deadline)
-    {
-        Ok(retired) => retired,
-        Err(outcome) => {
-            return settle(runtime, map_retirement_failure(outcome));
-        }
-    };
-    let mutation = startup.store.apply_grant_patch_until(
+    let mutation = startup.store.apply_live_grant_patch_until(
         key.profile(),
         selector.catalog_revision(),
         selector.install_revision(),
         key.install_id(),
-        manifest,
+        Arc::clone(&manifest),
         expected_grant,
         patch,
+        owner,
         deadline,
     );
     let applied = match mutation {
@@ -193,14 +215,7 @@ pub(super) fn request_until(
             applied
         }
         ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantMutationOutcome::Conflict(_)) => {
-            return restore_and_settle(
-                startup,
-                runtime,
-                selector,
-                retired,
-                deadline,
-                ExtensionRuntimeGrantOutcome::Conflict,
-            )
+            return settle(runtime, ExtensionRuntimeGrantOutcome::Conflict)
         }
         ExtensionServiceStoreCallOutcome::Completed(
             ExtensionGrantMutationOutcome::NotRegistered
@@ -208,25 +223,9 @@ pub(super) fn request_until(
             | ExtensionGrantMutationOutcome::Uninitialized
             | ExtensionGrantMutationOutcome::Invalid
             | ExtensionGrantMutationOutcome::RevisionExhausted,
-        ) => {
-            return restore_and_settle(
-                startup,
-                runtime,
-                selector,
-                retired,
-                deadline,
-                ExtensionRuntimeGrantOutcome::Rejected,
-            )
-        }
+        ) => return settle(runtime, ExtensionRuntimeGrantOutcome::Rejected),
         ExtensionServiceStoreCallOutcome::NotAdmitted => {
-            return restore_and_settle(
-                startup,
-                runtime,
-                selector,
-                retired,
-                deadline,
-                ExtensionRuntimeGrantOutcome::Unavailable,
-            )
+            return settle(runtime, ExtensionRuntimeGrantOutcome::Unavailable)
         }
         ExtensionServiceStoreCallOutcome::Completed(
             ExtensionGrantMutationOutcome::OutcomeUnknown,
@@ -247,63 +246,48 @@ pub(super) fn request_until(
     };
 
     let revision = applied.authority.revision();
-    let restored =
-        super::management::restore_contexts(startup, runtime, selector, retired, deadline);
-    let runtime_state = if restored {
-        match runtime.live_generation(key) {
-            Some(generation) => ExtensionRuntimeGrantRuntimeState::Active(generation),
-            None => {
-                return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed);
-            }
+    let eligibility = match ExtensionRuntimeEligibility::from_committed_grant_authority(
+        key.profile(),
+        applied.catalog_revision,
+        *applied.install,
+        manifest,
+        *applied.authority,
+        key.browsing_context(),
+    ) {
+        Ok(eligibility) if eligibility.grant_revision() == revision => eligibility,
+        Ok(_) | Err(_) => {
+            return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed);
         }
-    } else {
-        ExtensionRuntimeGrantRuntimeState::PendingActivation(if runtime.is_fail_stopped() {
-            ExtensionActivationPendingReason::FailedClosed
-        } else {
-            ExtensionActivationPendingReason::Unavailable
-        })
     };
+    match runtime.rebind_live_grants_until(
+        super::management::resources(startup),
+        key,
+        generation,
+        eligibility,
+        deadline,
+    ) {
+        RuntimeGrantRebindOutcome::Rebound(rebound) if rebound == revision => {}
+        RuntimeGrantRebindOutcome::Unavailable(reason) => {
+            return settle(runtime, map_rebind_unavailable(reason))
+        }
+        // Store has definitely committed. The serialized runtime cannot
+        // legitimately change owners between the CAS patch and this call.
+        RuntimeGrantRebindOutcome::Conflict => {
+            return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed)
+        }
+        RuntimeGrantRebindOutcome::FailedClosed(_)
+        | RuntimeGrantRebindOutcome::NoPending
+        | RuntimeGrantRebindOutcome::Rebound(_) => {
+            return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed)
+        }
+    }
     settle(
         runtime,
         ExtensionRuntimeGrantOutcome::Granted {
             revision,
-            runtime: runtime_state,
+            runtime: ExtensionRuntimeGrantRuntimeState::Active(generation),
         },
     )
-}
-
-fn restore_and_settle(
-    startup: &mut WorkerStartupState,
-    runtime: &mut RuntimeCoordinator,
-    selector: ExtensionInstallSelector,
-    retired: super::management::RetiredContexts,
-    deadline: Instant,
-    outcome: ExtensionRuntimeGrantOutcome,
-) -> ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome> {
-    if super::management::restore_contexts(startup, runtime, selector, retired, deadline) {
-        settle(runtime, outcome)
-    } else {
-        settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed)
-    }
-}
-
-const fn map_retirement_failure(
-    outcome: zephium_core::ports::extensions::ExtensionSetEnabledOutcome,
-) -> ExtensionRuntimeGrantOutcome {
-    use zephium_core::ports::extensions::ExtensionSetEnabledOutcome;
-
-    match outcome {
-        ExtensionSetEnabledOutcome::Unavailable => ExtensionRuntimeGrantOutcome::Unavailable,
-        ExtensionSetEnabledOutcome::Conflict => ExtensionRuntimeGrantOutcome::Conflict,
-        ExtensionSetEnabledOutcome::Rejected => ExtensionRuntimeGrantOutcome::Rejected,
-        ExtensionSetEnabledOutcome::OutcomeUnknown => ExtensionRuntimeGrantOutcome::OutcomeUnknown,
-        ExtensionSetEnabledOutcome::FailedClosed
-        | ExtensionSetEnabledOutcome::Enabled { .. }
-        | ExtensionSetEnabledOutcome::Disabled { .. }
-        | ExtensionSetEnabledOutcome::PendingActivation(_) => {
-            ExtensionRuntimeGrantOutcome::FailedClosed
-        }
-    }
 }
 
 fn classify_repository_error(error: BundledManifestBindingsError) -> ExtensionRuntimeGrantOutcome {
@@ -317,6 +301,61 @@ fn classify_repository_error(error: BundledManifestBindingsError) -> ExtensionRu
         }
         _ => ExtensionRuntimeGrantOutcome::FailedClosed,
     }
+}
+
+fn reconcile_loaded_grant_frontier(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    key: ExtensionNativeOwnershipKey,
+    generation: ExtensionRuntimeGeneration,
+    cohort: &zephium_core::extensions::ExtensionGrantCohort,
+    authority: &zephium_core::extensions::ExtensionGrantAuthority,
+    deadline: Instant,
+) -> Result<zephium_core::extensions::ExtensionNativeOwnershipEntryCas, ExtensionRuntimeGrantOutcome>
+{
+    let Some(owner) = runtime.published_owner_cas(key, generation) else {
+        return Err(ExtensionRuntimeGrantOutcome::Conflict);
+    };
+    if owner.store_grant_revision() == authority.revision()
+        && owner.grant_digest() == authority.digest()
+    {
+        return Ok(owner);
+    }
+    if authority.revision() <= owner.store_grant_revision() {
+        return Err(ExtensionRuntimeGrantOutcome::FailedClosed);
+    }
+    let eligibility = cohort
+        .runtime_eligibility(key.install_id(), key.browsing_context())
+        .map_err(|_| ExtensionRuntimeGrantOutcome::FailedClosed)?;
+    let expected_revision = eligibility.grant_revision();
+    match runtime.rebind_live_grants_until(
+        super::management::resources(startup),
+        key,
+        generation,
+        eligibility,
+        deadline,
+    ) {
+        RuntimeGrantRebindOutcome::Rebound(revision) if revision == expected_revision => runtime
+            .published_owner_cas(key, generation)
+            .ok_or(ExtensionRuntimeGrantOutcome::FailedClosed),
+        RuntimeGrantRebindOutcome::Unavailable(reason) => Err(map_rebind_unavailable(reason)),
+        // The caller already proved this exact generation live on the same
+        // worker turn; a conflict here means the authority graph diverged.
+        RuntimeGrantRebindOutcome::Conflict => Err(ExtensionRuntimeGrantOutcome::FailedClosed),
+        RuntimeGrantRebindOutcome::FailedClosed(_)
+        | RuntimeGrantRebindOutcome::NoPending
+        | RuntimeGrantRebindOutcome::Rebound(_) => Err(ExtensionRuntimeGrantOutcome::FailedClosed),
+    }
+}
+
+const fn map_rebind_unavailable(
+    _reason: RuntimeGrantRebindUnavailableReason,
+) -> ExtensionRuntimeGrantOutcome {
+    // Rebind is attempted only after Store grants may already be newer than
+    // the live native/journal authority. Never report an ordinary retry that
+    // could be mistaken for definite non-application; exact reconciliation is
+    // required before the callback may grant.
+    ExtensionRuntimeGrantOutcome::OutcomeUnknown
 }
 
 fn settle(

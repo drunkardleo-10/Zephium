@@ -436,7 +436,7 @@ pub(super) fn restore_contexts(
     restored
 }
 
-fn resources(startup: &mut WorkerStartupState) -> RuntimeCoordinatorResources<'_> {
+pub(super) fn resources(startup: &mut WorkerStartupState) -> RuntimeCoordinatorResources<'_> {
     RuntimeCoordinatorResources::new(
         &startup.store,
         &mut startup.projection,

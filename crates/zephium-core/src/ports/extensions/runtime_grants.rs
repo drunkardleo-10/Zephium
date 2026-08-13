@@ -11,8 +11,6 @@ use crate::extensions::{
 };
 use crate::injection::{MatchPattern, MAX_MATCH_PATTERN_RETAINED_BUDGET_BYTES};
 
-use super::ExtensionActivationPendingReason;
-
 /// Maximum retained bytes for one runtime-originated optional grant request.
 pub const MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES: usize =
     size_of::<ExtensionRuntimeGrantRequest>()
@@ -141,23 +139,23 @@ impl Error for ExtensionRuntimeGrantRequestError {}
 /// Runtime state after a durable optional-grant change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionRuntimeGrantRuntimeState {
-    /// The requesting context was reactivated at a new exact generation.
+    /// The requesting context retained its exact generation while its
+    /// published operation authority was rebound in place.
     Active(ExtensionRuntimeGeneration),
-    /// Durable grants changed, but runtime reactivation did not settle active.
-    PendingActivation(ExtensionActivationPendingReason),
 }
 
 /// Exact result of one serialized live-runtime optional-grant transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionRuntimeGrantOutcome {
-    /// One atomic grant revision committed after native retirement.
+    /// One atomic grant revision committed and the exact live runtime was
+    /// rebound without replacing its native owner or generation.
     Granted {
         /// The new durable grant revision.
         revision: ExtensionGrantRevision,
         /// Truthful post-commit state of the requesting context.
         runtime: ExtensionRuntimeGrantRuntimeState,
     },
-    /// Every requested target was already granted; no runtime was retired.
+    /// Every requested target was already granted; no authority changed.
     AlreadyGranted {
         /// The unchanged durable grant revision.
         revision: ExtensionGrantRevision,
@@ -168,9 +166,11 @@ pub enum ExtensionRuntimeGrantOutcome {
     Conflict,
     /// A target was not an optional declaration in the authenticated manifest.
     Rejected,
-    /// A retryable dependency or deadline prevented a definite change.
+    /// A retryable dependency or deadline prevented admission before any
+    /// durable grant change could have committed.
     Unavailable,
-    /// Store admitted the write but its commit outcome is unknown.
+    /// The durable write or its exact journal/host publication settlement
+    /// cannot yet be observed; a later serialized request must reconcile it.
     OutcomeUnknown,
     /// Runtime, Store, repository, or protocol integrity failed closed.
     FailedClosed,

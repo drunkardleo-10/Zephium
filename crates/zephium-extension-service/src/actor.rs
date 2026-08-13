@@ -17,8 +17,8 @@ use zephium_core::ports::extensions::{
     ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
     ExtensionManagementCatalogCallback, ExtensionManagementCatalogOutcome,
     ExtensionManagementSettlement, ExtensionRuntimeGrantCallback, ExtensionRuntimeGrantOutcome,
-    ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState, ExtensionSetEnabledCallback,
-    ExtensionSetEnabledOutcome, ExtensionUninstallCallback, ExtensionUninstallOutcome,
+    ExtensionRuntimeGrantRequest, ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome,
+    ExtensionUninstallCallback, ExtensionUninstallOutcome,
     MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
 };
 
@@ -2381,14 +2381,7 @@ impl WorkerState {
             ExtensionRuntimeGrantOutcome::OutcomeUnknown => {
                 self.management_write_state = ManagementWriteState::OutcomeUnknown;
             }
-            ExtensionRuntimeGrantOutcome::FailedClosed
-            | ExtensionRuntimeGrantOutcome::Granted {
-                runtime:
-                    ExtensionRuntimeGrantRuntimeState::PendingActivation(
-                        zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
-                    ),
-                ..
-            } => {
+            ExtensionRuntimeGrantOutcome::FailedClosed => {
                 self.management_write_state = ManagementWriteState::FailedClosed;
                 status.publish(ExtensionServicePhase::Failed);
             }

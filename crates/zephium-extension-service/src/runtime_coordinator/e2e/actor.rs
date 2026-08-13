@@ -295,7 +295,7 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
 }
 
 #[test]
-fn actor_runtime_optional_grants_retire_commit_and_reactivate_one_exact_generation() {
+fn actor_runtime_optional_grants_rebind_one_exact_live_generation() {
     let (harness, mut owner) = ActorAuthorityHarness::launch(1);
     let profile = harness.profiles[0];
     let key = harness.keys[0];
@@ -322,7 +322,7 @@ fn actor_runtime_optional_grants_retire_commit_and_reactivate_one_exact_generati
         panic!("optional runtime grants did not settle active: {granted:?}");
     };
     assert_eq!(revision.get(), 2);
-    assert!(*generation > ExtensionRuntimeGeneration::INITIAL);
+    assert_eq!(*generation, ExtensionRuntimeGeneration::INITIAL);
     assert_eq!(
         granted
             .active_profiles()
@@ -331,9 +331,12 @@ fn actor_runtime_optional_grants_retire_commit_and_reactivate_one_exact_generati
             .collect::<Vec<_>>(),
         [profile]
     );
-    assert_eq!(harness.probe.retirement_calls(), 1);
-    assert_eq!(harness.probe.reclaim_calls(), 1);
-    assert_eq!(harness.probe.activation_calls(), 2);
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 1);
+    assert_eq!(harness.probe.grant_rebind_calls(), 1);
+    assert_eq!(harness.probe.retirement_calls(), 0);
+    assert_eq!(harness.probe.reclaim_calls(), 0);
 
     let already = ExtensionServiceLifecycle::request_runtime_grants_until(
         &mut owner,
@@ -349,13 +352,16 @@ fn actor_runtime_optional_grants_retire_commit_and_reactivate_one_exact_generati
             generation: *generation,
         }
     );
-    assert_eq!(harness.probe.retirement_calls(), 1);
-    assert_eq!(harness.probe.activation_calls(), 2);
+    assert_eq!(harness.probe.grant_rebind_calls(), 1);
+    assert_eq!(harness.probe.retirement_calls(), 0);
+    assert_eq!(harness.probe.activation_calls(), 1);
 
     let stale = ExtensionServiceLifecycle::request_runtime_grants_until(
         &mut owner,
         key,
-        ExtensionRuntimeGeneration::INITIAL,
+        ExtensionRuntimeGeneration::INITIAL
+            .next()
+            .expect("one stale caller generation"),
         request(),
         deadline(),
     );
@@ -372,7 +378,8 @@ fn actor_runtime_optional_grants_retire_commit_and_reactivate_one_exact_generati
         deadline(),
     );
     assert_eq!(required.outcome(), &ExtensionRuntimeGrantOutcome::Rejected);
-    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.grant_rebind_calls(), 1);
+    assert_eq!(harness.probe.retirement_calls(), 0);
 
     let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
     assert_eq!(
@@ -542,7 +549,7 @@ fn actor_install_reauthenticates_selection_and_refuses_unrequested_file_scope() 
     assert_eq!(harness.probe.activation_calls(), 0);
 
     let out_of_range =
-        ExtensionInitialGrantSelection::new(vec![0], 1, Vec::new(), 0, false, false).unwrap();
+        ExtensionInitialGrantSelection::new(vec![1], 2, Vec::new(), 0, false, false).unwrap();
     let out_of_range =
         ExtensionServiceLifecycle::install_until(&mut owner, candidate(), out_of_range, deadline());
     assert_eq!(out_of_range.outcome(), &ExtensionInstallOutcome::Conflict);
