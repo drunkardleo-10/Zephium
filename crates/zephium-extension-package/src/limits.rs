@@ -51,6 +51,12 @@ pub const MAX_EXTENSION_RELATIVE_PATH_DEPTH: usize = 32;
 pub const MAX_CHROMIUM_MANIFEST_KEY_BYTES: usize = 16 * 1024;
 /// Maximum canonical Base64 bytes for a Chromium manifest public key.
 pub const MAX_CHROMIUM_MANIFEST_KEY_BASE64_BYTES: usize = 24 * 1024;
+/// Maximum CRX3 protocol-buffer header size accepted by Chromium and Zephium.
+pub const MAX_CRX3_HEADER_BYTES: usize = 1 << 18;
+/// Maximum signature proofs retained while authenticating one CRX3 package.
+pub const MAX_CRX3_SIGNATURE_PROOFS: usize = 16;
+/// Maximum one CRX3 public-key or signature field size.
+pub const MAX_CRX3_PROOF_COMPONENT_BYTES: usize = 1 << 16;
 /// Maximum nesting depth admitted by the shared JSON boundary.
 pub const MAX_EXTENSION_JSON_DEPTH: usize = 32;
 /// Maximum JSON values admitted in one parsed document.
@@ -72,6 +78,7 @@ const _: () = assert!(MAX_EXTENSION_TREE_FILES <= MAX_EXTENSION_TREE_ENTRIES);
 const _: () = assert!(MAX_EXTENSION_PACKAGE_LINES <= MAX_EXTENSION_TREE_FILES);
 const _: () = assert!(MAX_EXTENSION_PATH_COMPONENT_BYTES <= MAX_EXTENSION_RELATIVE_PATH_BYTES);
 const _: () = assert!(MAX_CHROMIUM_MANIFEST_KEY_BASE64_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
+const _: () = assert!(MAX_CRX3_HEADER_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
 const _: () = assert!(MAX_EXTENSION_LOCALE_MESSAGES_BYTES <= MAX_EXTENSION_TREE_FILE_BYTES);
 const _: () =
     assert!(MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES <= MAX_EXTENSION_METADATA_STRING_BYTES);

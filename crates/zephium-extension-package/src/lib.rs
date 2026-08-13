@@ -2,8 +2,8 @@
 //!
 //! This crate owns bounded upstream byte formats which do not belong in
 //! `zephium-core`: portable package-relative paths, duplicate-key-safe JSON,
-//! canonical resource-tree indexes, release catalog metadata, and Chromium's
-//! manifest-key-derived extension identity. It deliberately performs no
+//! canonical resource-tree indexes, release catalog metadata, Chromium CRX3
+//! signature verification, and manifest-key-derived extension identity. It deliberately performs no
 //! filesystem I/O, archive extraction, network access, native mutation, or
 //! profile persistence.
 //!
@@ -26,6 +26,7 @@
 #![deny(missing_docs)]
 
 mod chromium;
+mod crx3;
 mod digest;
 mod json;
 mod limits;
@@ -37,6 +38,7 @@ mod tree;
 pub use chromium::{
     ChromiumExtensionId, ChromiumManifestKey, ChromiumManifestKeyDigest, ChromiumManifestKeyError,
 };
+pub use crx3::{Crx3PackageError, VerifiedCrx3Package};
 pub use json::{parse_bounded_json, BoundedJsonError, BoundedJsonLimits, BoundedJsonValue};
 pub use limits::*;
 pub use manifest::{
