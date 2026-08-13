@@ -78,12 +78,29 @@ pub(super) fn begin_native_activation(
     };
 
     let prepared = {
-        let grants = match &reservation.binding {
-            ReservationBinding::Activation { grants, .. } => grants.native_snapshot(),
+        let bootstrap_grants = match &reservation.binding {
+            ReservationBinding::Activation {
+                bootstrap_grants, ..
+            } => match bootstrap_grants.lock() {
+                Ok(grants) => grants,
+                Err(_) => {
+                    reservation
+                        .gate
+                        .inner
+                        .invariant_failed
+                        .store(true, Ordering::Release);
+                    host.extension_runtime_registry.fail_invariant();
+                    return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+                }
+            },
             ReservationBinding::Recovery { .. } => {
                 host.extension_runtime_registry.fail_invariant();
                 return Err(ExtensionRuntimeHostBindError::InternalInvariant);
             }
+        };
+        let Some(grants) = bootstrap_grants.as_deref() else {
+            host.extension_runtime_registry.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         };
         let mut root_slot = match reservation.staged_native_root.lock() {
             Ok(root) => root,
@@ -101,7 +118,12 @@ pub(super) fn begin_native_activation(
             host.extension_runtime_registry.fail_invariant();
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         };
-        match prepare_native_runtime_activation(native_root, grants, expected_owner, controller) {
+        match prepare_native_runtime_activation(
+            native_root,
+            grants.native_snapshot(),
+            expected_owner,
+            controller,
+        ) {
             Ok(prepared) => prepared,
             Err(failure) => {
                 report_product_probe_failure("native package preparation", failure);

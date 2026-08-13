@@ -899,6 +899,46 @@ impl ExtensionNativeOwnershipEntry {
             grant_digest: self.grant_digest,
         }
     }
+
+    /// Rebuilds this process-local structural row with a later durable grant
+    /// identity while preserving every package/native ownership field.
+    ///
+    /// This is restricted to sibling Core authority code. It does not prove a
+    /// journal mutation by itself; callers must already possess the linearly
+    /// rebound operation authority or have validated the exact journal
+    /// transition. Equal, older, or digest-identical inputs fail. A later
+    /// revision may skip because the compact package pin is intentionally not
+    /// rewritten for each independently journaled live grant.
+    pub(super) fn with_later_store_grants(
+        &self,
+        grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+    ) -> Option<Self> {
+        if grant_revision.get() <= self.store_grant_revision.get()
+            || self.grant_digest == grant_digest
+        {
+            return None;
+        }
+        Self::from_persisted_with_native_identities(
+            self.key,
+            self.operation,
+            self.revision,
+            self.package.clone(),
+            self.catalog_set_digest,
+            self.catalog_role,
+            self.store_catalog_revision,
+            self.store_install_revision,
+            grant_revision,
+            grant_digest,
+            self.runtime_backend,
+            self.expected_native_identity,
+            self.native_identity,
+            self.native_incarnation,
+            self.intent,
+            self.phase,
+        )
+        .ok()
+    }
 }
 
 /// Exact expected row identity for transition or clear.

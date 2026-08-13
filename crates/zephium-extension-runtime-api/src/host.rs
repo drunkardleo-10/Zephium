@@ -23,8 +23,8 @@ use zephium_core::extensions::{
     ExtensionNativeGrantSnapshot, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
     ExtensionNativeOwnershipIdentityError, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipPhase, ExtensionOperationAuthorityDenial,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint, ExtensionRuntimeOperationAuthority,
-    ExtensionUserInvocationKind,
+    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint,
+    ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
 };
 use zephium_core::ids::ProfileId;
 
@@ -61,6 +61,16 @@ fn authority_exclusive_retained_bytes(authority: &ExtensionRuntimeOperationAutho
     authority
         .retained_bytes()
         .saturating_sub(size_of::<ExtensionRuntimeOperationAuthority>())
+}
+
+fn eligibility_operation_authority_retained_bytes(
+    eligibility: &ExtensionRuntimeEligibility,
+) -> usize {
+    size_of::<ExtensionRuntimeOperationAuthority>().saturating_add(
+        eligibility
+            .retained_bytes()
+            .saturating_sub(size_of::<ExtensionRuntimeEligibility>()),
+    )
 }
 
 /// Expected native identity selected from authenticated package metadata.
@@ -1190,6 +1200,21 @@ pub trait ExtensionRuntimeHostPublicationPort: Send {
         authority: ExtensionRuntimeOperationAuthority,
     ) -> Result<(), ExtensionRuntimeHostPublicationPortRefusal>;
 
+    /// Replaces the exact published operation authority at one grant-only
+    /// durable ownership frontier.
+    ///
+    /// `Err` must leave the current authority unchanged and return the exact
+    /// proposed eligibility. `Ok` must consume that eligibility into the same
+    /// registry generation without replacing or recreating the native owner.
+    fn rebind_operation_authority(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), ExtensionRuntimeHostGrantRebindPortRefusal>;
+
     /// Reclaims the exact operation authority after proven native absence.
     ///
     /// `Err` must retain the exact authority inside this port without changing
@@ -1220,6 +1245,47 @@ pub trait ExtensionRuntimeHostPublicationPort: Send {
         runtime: &ExtensionRuntimeFingerprint,
         purpose: ExtensionDocumentPurpose,
     ) -> Result<ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial>;
+}
+
+/// Lossless low-level refusal to replace a published grant authority.
+#[must_use = "grant-rebind refusal retains the exact proposed eligibility"]
+pub struct ExtensionRuntimeHostGrantRebindPortRefusal {
+    reason: ExtensionRuntimeHostBindError,
+    eligibility: Box<ExtensionRuntimeEligibility>,
+}
+
+impl ExtensionRuntimeHostGrantRebindPortRefusal {
+    /// Constructs a lossless refusal for a trusted engine adapter.
+    pub fn new(
+        reason: ExtensionRuntimeHostBindError,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Self {
+        Self {
+            reason,
+            eligibility: Box::new(eligibility),
+        }
+    }
+
+    /// Stable refusal reason.
+    #[must_use]
+    pub const fn reason(&self) -> ExtensionRuntimeHostBindError {
+        self.reason
+    }
+
+    /// Recovers the exact unconsumed eligibility.
+    pub fn into_eligibility(self) -> ExtensionRuntimeEligibility {
+        *self.eligibility
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeHostGrantRebindPortRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeHostGrantRebindPortRefusal")
+            .field("reason", &self.reason)
+            .field("eligibility", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Lossless low-level refusal to publish operation authority.
@@ -2750,6 +2816,72 @@ impl ExtensionRuntimePublicationReceipt {
         self.evidence
     }
 
+    /// Replaces the published operation authority at one exact additive grant
+    /// frontier while preserving the native owner and registry generation.
+    ///
+    /// The durable grant row and ownership journal must already have reached
+    /// `rebound_entry`. The host performs Core's exact old/new-row validation
+    /// under the same lock that owns operation authority. Ordinary refusal
+    /// returns this receipt and the proposed Store eligibility whole; a
+    /// substituted eligibility is quarantined and requires fail-stop.
+    pub fn rebind_grants(
+        mut self,
+        rebound_entry: ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<Self, ExtensionRuntimePublicationGrantRebindRefusal> {
+        let generation = self.fingerprint.instance().generation();
+        let expected_fingerprint = eligibility.fingerprint(generation);
+        let next_authority_retained_bytes =
+            eligibility_operation_authority_retained_bytes(&eligibility);
+        let projected_retained = size_of::<Self>()
+            .checked_add(next_authority_retained_bytes)
+            .and_then(|value| value.checked_add(self.publication.retained_bytes()));
+        let Some(projected_retained) = projected_retained else {
+            return Err(ExtensionRuntimePublicationGrantRebindRefusal::recoverable(
+                ExtensionRuntimeHostBindError::RetainedBytesOverflow,
+                self,
+                eligibility,
+            ));
+        };
+        if projected_retained > MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES {
+            return Err(ExtensionRuntimePublicationGrantRebindRefusal::recoverable(
+                ExtensionRuntimeHostBindError::RetainedBytesExceeded,
+                self,
+                eligibility,
+            ));
+        }
+
+        let owner = ExtensionRuntimeOwnerAddress::from_entry(&self.initial_entry);
+        match self.publication.rebind_operation_authority(
+            owner,
+            self.generation,
+            &self.owned_entry,
+            &rebound_entry,
+            eligibility,
+        ) {
+            Ok(()) => {
+                self.owned_entry = rebound_entry;
+                self.fingerprint = expected_fingerprint;
+                self.authority_retained_bytes = next_authority_retained_bytes;
+                debug_assert_eq!(self.retained_bytes(), projected_retained);
+                Ok(self)
+            }
+            Err(refusal) => {
+                let reason = refusal.reason();
+                let returned = refusal.into_eligibility();
+                if returned.fingerprint(generation) == expected_fingerprint {
+                    Err(ExtensionRuntimePublicationGrantRebindRefusal::recoverable(
+                        reason, self, returned,
+                    ))
+                } else {
+                    Err(ExtensionRuntimePublicationGrantRebindRefusal::quarantined(
+                        self, returned,
+                    ))
+                }
+            }
+        }
+    }
+
     /// Mints one active-tab witness inside the published registry.
     pub fn mint_active_tab_grant_witness(
         &mut self,
@@ -2814,7 +2946,7 @@ impl ExtensionRuntimePublicationReceipt {
         ) {
             Ok(authority)
                 if authority.fingerprint() == &self.fingerprint
-                    && authority.matches_native_ownership_lineage(&self.initial_entry) =>
+                    && authority.matches_native_ownership_lineage(&self.owned_entry) =>
             {
                 Ok(authority)
             }
@@ -2844,6 +2976,91 @@ impl ExtensionRuntimePublicationReceipt {
             self.authority_retained_bytes,
             self.publication.retained_bytes(),
         ])
+    }
+}
+
+/// Lossless refusal to replace one published runtime's grant authority.
+#[must_use = "grant-rebind refusal retains published and proposed authority"]
+pub struct ExtensionRuntimePublicationGrantRebindRefusal {
+    reason: ExtensionRuntimeHostBindError,
+    receipt: Box<ExtensionRuntimePublicationReceipt>,
+    eligibility: Box<ExtensionRuntimeEligibility>,
+    quarantined: bool,
+}
+
+impl ExtensionRuntimePublicationGrantRebindRefusal {
+    fn recoverable(
+        reason: ExtensionRuntimeHostBindError,
+        receipt: ExtensionRuntimePublicationReceipt,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Self {
+        Self {
+            reason,
+            receipt: Box::new(receipt),
+            eligibility: Box::new(eligibility),
+            quarantined: false,
+        }
+    }
+
+    fn quarantined(
+        receipt: ExtensionRuntimePublicationReceipt,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Self {
+        Self {
+            reason: ExtensionRuntimeHostBindError::InternalInvariant,
+            receipt: Box::new(receipt),
+            eligibility: Box::new(eligibility),
+            quarantined: true,
+        }
+    }
+
+    /// Stable refusal reason.
+    #[must_use]
+    pub const fn reason(&self) -> ExtensionRuntimeHostBindError {
+        self.reason
+    }
+
+    /// Whether the trusted port substituted the proposed eligibility.
+    #[must_use]
+    pub const fn requires_fail_stop(&self) -> bool {
+        self.quarantined
+    }
+
+    /// Recovers both exact inputs after an ordinary refusal.
+    pub fn try_into_parts(
+        self,
+    ) -> Result<
+        (
+            ExtensionRuntimePublicationReceipt,
+            ExtensionRuntimeEligibility,
+        ),
+        Self,
+    > {
+        if self.quarantined {
+            Err(self)
+        } else {
+            Ok((*self.receipt, *self.eligibility))
+        }
+    }
+
+    /// Conservative retained-memory charge for retry or fail-stop custody.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        checked_retained_sum([
+            size_of::<Self>(),
+            self.receipt.retained_bytes(),
+            self.eligibility.retained_bytes(),
+        ])
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimePublicationGrantRebindRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimePublicationGrantRebindRefusal")
+            .field("reason", &self.reason)
+            .field("state", &"[redacted]")
+            .finish()
     }
 }
 

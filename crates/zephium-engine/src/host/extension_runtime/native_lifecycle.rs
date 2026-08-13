@@ -123,6 +123,13 @@ pub(super) enum NativeCallWaitError {
     InvariantFailed,
 }
 
+// The terminal payload is deliberately inline and Copy: this channel is the
+// no-allocation handoff between a native callback and its deadline-bounded
+// waiter. Boxing would save a few hundred idle bytes per live runtime but add
+// fallible allocator work to every ownership-changing callback. The hard
+// runtime ceiling keeps the fixed cost bounded, and retained-byte accounting
+// charges the complete channel through ReservationControl.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NativeCallNotification {
     Pending,
@@ -132,6 +139,7 @@ pub(super) enum NativeCallNotification {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy)]
 enum NativeCallChannelState {
     Idle,

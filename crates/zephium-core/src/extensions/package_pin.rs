@@ -443,9 +443,20 @@ impl ExtensionPackagePinHeldBinding {
     /// both capabilities captive so neither can be reused or silently dropped
     /// as if a valid acquisition had been recovered.
     pub fn try_recombine(
-        self,
+        mut self,
         operation_authority: ExtensionRuntimeOperationAuthority,
     ) -> Result<ExtensionPackagePinAcquisitionBinding, ExtensionPackagePinRecombineRefusal> {
+        if !operation_authority.matches_native_ownership_lineage(&self.entry)
+            && operation_authority.matches_native_ownership_stable_lineage(&self.entry)
+        {
+            let runtime = operation_authority.fingerprint();
+            if let Some(rebound) = self
+                .entry
+                .with_later_store_grants(runtime.grant_revision(), runtime.grant_digest())
+            {
+                self.entry = rebound;
+            }
+        }
         if !operation_authority.matches_native_ownership_lineage(&self.entry) {
             return Err(ExtensionPackagePinRecombineRefusal {
                 reason: ExtensionPackagePinAcquisitionDenial::OperationAuthorityLineageMismatch,
@@ -674,7 +685,7 @@ mod tests {
     fn manifest(package: ExtensionPackageIdentity) -> Arc<ExtensionManifestDescriptor> {
         let declarations = ExtensionManifestDeclarations::new(
             api(&[]),
-            api(&["activeTab", "scripting"]),
+            api(&["activeTab", "scripting", "tabs"]),
             None,
             Some(
                 ExtensionHostPermissionSet::new(
@@ -728,6 +739,20 @@ mod tests {
         profile: ProfileId,
         install_id: ExtensionInstallId,
     ) -> ExtensionRuntimeEligibility {
+        runtime_eligibility_at_revision(
+            profile,
+            install_id,
+            ExtensionGrantRevision::INITIAL,
+            &["activeTab", "scripting"],
+        )
+    }
+
+    fn runtime_eligibility_at_revision(
+        profile: ProfileId,
+        install_id: ExtensionInstallId,
+        grant_revision: ExtensionGrantRevision,
+        granted_api: &[&str],
+    ) -> ExtensionRuntimeEligibility {
         let manifest = manifest(package(17));
         let install = ExtensionInstall::from_persisted(
             install_id,
@@ -747,10 +772,13 @@ mod tests {
                 Arc::clone(&manifest),
             )])
             .unwrap();
-        let authority = ExtensionGrantAuthority::initialize(
+        let authority = ExtensionGrantAuthority::from_persisted(
             &install,
-            ["activeTab", "scripting"]
-                .into_iter()
+            grant_revision,
+            manifest.package().clone(),
+            granted_api
+                .iter()
+                .copied()
                 .map(|name| ApiPermissionName::parse_exact(name).unwrap())
                 .collect(),
             vec![MatchPattern::parse(ALL_URLS).unwrap()],
@@ -843,6 +871,20 @@ mod tests {
             )
         }
 
+        fn with_grants_from(&self, eligibility: &ExtensionRuntimeEligibility) -> Self {
+            Self {
+                key: self.key,
+                package: self.package.clone(),
+                catalog_set_digest: self.catalog_set_digest,
+                catalog_role: self.catalog_role,
+                catalog_revision: self.catalog_revision,
+                install_revision: self.install_revision,
+                grant_revision: eligibility.grant_revision(),
+                grant_digest: eligibility.grant_digest(),
+                backend: self.backend,
+            }
+        }
+
         fn release_pending(&self) -> ExtensionNativeOwnershipEntry {
             self.entry(
                 4,
@@ -927,6 +969,58 @@ mod tests {
         assert_eq!(recombined.package(), entry.package());
         assert_eq!(recombined.eligibility().profile(), entry.key().profile());
         assert_eq!(recombined.eligibility().package(), entry.package());
+    }
+
+    #[test]
+    fn package_pin_recombines_with_linearly_rebound_live_grants() {
+        let profile = ProfileId::from(11);
+        let install_id = ExtensionInstallId::from(13);
+        let eligibility = runtime_eligibility_for(profile, install_id);
+        let fixture = EntryFixture::from_eligibility(&eligibility);
+        let entry = fixture.acquisition();
+        let generation = ExtensionRuntimeGeneration::new(33).unwrap();
+        let (held, mut authority) =
+            ExtensionPackagePinAcquisitionBinding::mint(&entry, eligibility)
+                .unwrap()
+                .into_runtime_parts(generation)
+                .into_held_binding_and_operation_authority();
+        let current_owned = fixture.entry(
+            3,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeOwned,
+        );
+        let next_eligibility = runtime_eligibility_at_revision(
+            profile,
+            install_id,
+            ExtensionGrantRevision::INITIAL.next().unwrap(),
+            &["activeTab", "scripting", "tabs"],
+        );
+        let rebound_fixture = fixture.with_grants_from(&next_eligibility);
+        let rebound_owned = rebound_fixture.entry(
+            3,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeOwned,
+        );
+        let next_runtime = authority
+            .try_rebind_grants(&current_owned, &rebound_owned, next_eligibility)
+            .expect("exact additive authority rebind");
+
+        let recombined = held
+            .try_recombine(authority)
+            .expect("stable package pin accepts linearly rebound grant authority");
+        assert_eq!(
+            recombined.store_grant_revision(),
+            next_runtime.grant_revision()
+        );
+        assert_eq!(recombined.grant_digest(), next_runtime.grant_digest());
+        assert_eq!(
+            recombined.journal_entry_revision(),
+            ExtensionNativeOwnershipEntryRevision::INITIAL
+        );
+        assert_eq!(
+            recombined.eligibility().fingerprint(generation),
+            next_runtime
+        );
     }
 
     #[test]

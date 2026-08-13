@@ -70,7 +70,7 @@ fn package(seed: u8) -> ExtensionPackageIdentity {
 fn manifest(seed: u8) -> Arc<ExtensionManifestDescriptor> {
     let declarations = ExtensionManifestDeclarations::new(
         api(&[]),
-        api(&["activeTab", "scripting"]),
+        api(&["activeTab", "scripting", "tabs"]),
         None,
         Some(
             ExtensionHostPermissionSet::new(
@@ -126,6 +126,22 @@ fn eligibility(
     profile: ProfileId,
     install_id: ExtensionInstallId,
 ) -> zephium_core::extensions::ExtensionRuntimeEligibility {
+    eligibility_at_revision(
+        seed,
+        profile,
+        install_id,
+        ExtensionGrantRevision::INITIAL,
+        &["activeTab", "scripting"],
+    )
+}
+
+fn eligibility_at_revision(
+    seed: u8,
+    profile: ProfileId,
+    install_id: ExtensionInstallId,
+    grant_revision: ExtensionGrantRevision,
+    granted_api: &[&str],
+) -> zephium_core::extensions::ExtensionRuntimeEligibility {
     let manifest = manifest(seed);
     let install = ExtensionInstall::from_persisted(
         install_id,
@@ -144,10 +160,13 @@ fn eligibility(
         Arc::clone(&manifest),
     )])
     .expect("valid manifest bindings");
-    let authority = ExtensionGrantAuthority::initialize(
+    let authority = ExtensionGrantAuthority::from_persisted(
         &install,
-        ["activeTab", "scripting"]
-            .into_iter()
+        grant_revision,
+        manifest.package().clone(),
+        granted_api
+            .iter()
+            .copied()
             .map(|name| ApiPermissionName::parse_exact(name).expect("valid API permission"))
             .collect(),
         vec![MatchPattern::parse(ALL_URLS).expect("all URLs pattern")],
@@ -206,6 +225,16 @@ impl EntryTemplate {
         native_identity: Option<ExtensionNativeOwnershipIdentity>,
     ) -> ExtensionNativeOwnershipEntry {
         self.entry_with_identities(revision, intent, phase, None, native_identity)
+    }
+
+    fn with_grants_from(
+        &self,
+        eligibility: &zephium_core::extensions::ExtensionRuntimeEligibility,
+    ) -> Self {
+        let mut rebound = self.clone();
+        rebound.grant_revision = eligibility.grant_revision();
+        rebound.grant_digest = eligibility.grant_digest();
+        rebound
     }
 
     fn entry_with_identities(
@@ -736,6 +765,8 @@ enum PublicationBehavior {
     Normal,
     RefuseExact,
     RefuseSwapped,
+    RefuseGrantExact,
+    RefuseGrantSwapped,
     SwapReclaim,
     BadActiveWitness,
     BadDocumentWitness,
@@ -748,6 +779,8 @@ struct FakePublication {
     behavior: PublicationBehavior,
     authority: Option<ExtensionRuntimeOperationAuthority>,
     substitute: Option<ExtensionRuntimeOperationAuthority>,
+    substitute_eligibility: Option<ExtensionRuntimeEligibility>,
+    retained_eligibility: Option<ExtensionRuntimeEligibility>,
     reclaim_failures: usize,
 }
 
@@ -792,6 +825,8 @@ impl ExtensionRuntimeHostPublicationPort for FakePublication {
                 ))
             }
             PublicationBehavior::Normal
+            | PublicationBehavior::RefuseGrantExact
+            | PublicationBehavior::RefuseGrantSwapped
             | PublicationBehavior::SwapReclaim
             | PublicationBehavior::BadActiveWitness
             | PublicationBehavior::BadDocumentWitness => {
@@ -800,6 +835,46 @@ impl ExtensionRuntimeHostPublicationPort for FakePublication {
                 Ok(())
             }
         }
+    }
+
+    fn rebind_operation_authority(
+        &mut self,
+        _owner: ExtensionRuntimeOwnerAddress,
+        _generation: ExtensionRuntimeHostRegistryGeneration,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), ExtensionRuntimeHostGrantRebindPortRefusal> {
+        if matches!(self.behavior, PublicationBehavior::RefuseGrantExact) {
+            return Err(ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                ExtensionRuntimeHostBindError::Unavailable,
+                eligibility,
+            ));
+        }
+        if matches!(self.behavior, PublicationBehavior::RefuseGrantSwapped) {
+            self.retained_eligibility = Some(eligibility);
+            return Err(ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                ExtensionRuntimeHostBindError::Unavailable,
+                self.substitute_eligibility
+                    .take()
+                    .expect("substitute eligibility"),
+            ));
+        }
+        let Some(authority) = self.authority.as_mut() else {
+            return Err(ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                eligibility,
+            ));
+        };
+        authority
+            .try_rebind_grants(current_entry, rebound_entry, eligibility)
+            .map(|_| ())
+            .map_err(|refusal| {
+                ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                    ExtensionRuntimeHostBindError::InternalInvariant,
+                    refusal.into_eligibility(),
+                )
+            })
     }
 
     fn reclaim_operation_authority(
@@ -883,6 +958,7 @@ struct FakeFactoryPort {
     recovery_retained_bytes: usize,
     publication_behavior: PublicationBehavior,
     substitute: Option<ExtensionRuntimeOperationAuthority>,
+    substitute_eligibility: Option<ExtensionRuntimeEligibility>,
     reclaim_failures: usize,
 }
 
@@ -898,6 +974,7 @@ impl FakeFactoryPort {
             recovery_retained_bytes: 0,
             publication_behavior: PublicationBehavior::Normal,
             substitute: None,
+            substitute_eligibility: None,
             reclaim_failures: 0,
         }
     }
@@ -982,6 +1059,8 @@ impl ExtensionRuntimeHostFactoryPort for FakeFactoryPort {
                 behavior: self.publication_behavior,
                 authority: None,
                 substitute: self.substitute.take(),
+                substitute_eligibility: self.substitute_eligibility.take(),
+                retained_eligibility: None,
                 reclaim_failures: self.reclaim_failures,
             }),
         ))
@@ -2192,6 +2271,11 @@ fn activation_context_transports_exact_grants_without_native_or_lifecycle_work()
                 ExtensionNativeGrantRequirement::Optional,
                 ExtensionNativeGrantDecision::Granted,
             ),
+            (
+                "tabs".to_owned(),
+                ExtensionNativeGrantRequirement::Optional,
+                ExtensionNativeGrantDecision::Denied,
+            ),
         ]
     );
     assert_eq!(
@@ -2811,6 +2895,131 @@ fn publication_refusal_returns_exact_authority_but_substitution_is_quarantined()
     assert!(refusal.requires_fail_stop());
     assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_HOST_QUARANTINE_RETAINED_BYTES);
     assert!(refusal.try_into_request().is_err());
+}
+
+#[test]
+fn published_grant_rebind_preserves_owner_and_advances_exact_operation_authority() {
+    let seed = 34;
+    let fixture = ActivationFixture::compatibility(seed);
+    let template = fixture.template.clone();
+    let profile = template.key.profile();
+    let install_id = template.key.install_id();
+    let probe = Arc::new(HostProbe::default());
+    let port = FakeFactoryPort::normal(Arc::clone(&probe));
+    let (mut receipt, _, current_runtime, _) = published_receipt_with(fixture, port);
+    let stale_witness = receipt
+        .mint_active_tab_grant_witness(&current_runtime, ExtensionUserInvocationKind::ToolbarAction)
+        .expect("current witness");
+
+    let next_eligibility = eligibility_at_revision(
+        seed,
+        profile,
+        install_id,
+        current_runtime.grant_revision().next().unwrap(),
+        &["activeTab", "scripting", "tabs"],
+    );
+    let next_runtime = next_eligibility.fingerprint(current_runtime.instance().generation());
+    let rebound = template.with_grants_from(&next_eligibility);
+    let receipt = receipt
+        .rebind_grants(rebound.owned(None), next_eligibility)
+        .expect("exact additive grant rebind");
+
+    assert_eq!(receipt.registry_generation().get(), 17);
+    assert!(receipt.retained_bytes() <= MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES);
+    assert!(!stale_witness.matches(&next_runtime, ExtensionUserInvocationKind::ToolbarAction));
+    let mut receipt = receipt;
+    assert!(matches!(
+        receipt.mint_active_tab_grant_witness(
+            &current_runtime,
+            ExtensionUserInvocationKind::ToolbarAction,
+        ),
+        Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+    ));
+    assert!(receipt
+        .mint_active_tab_grant_witness(&next_runtime, ExtensionUserInvocationKind::ToolbarAction,)
+        .is_ok());
+
+    let authority = receipt
+        .reclaim_after_absence(&rebound.release_absent(4, None))
+        .expect("rebound authority remains exactly reclaimable");
+    assert_eq!(authority.fingerprint(), &next_runtime);
+}
+
+#[test]
+fn published_grant_rebind_refusal_is_lossless_and_substitution_is_quarantined() {
+    let seed = 35;
+    let fixture = ActivationFixture::compatibility(seed);
+    let template = fixture.template.clone();
+    let profile = template.key.profile();
+    let install_id = template.key.install_id();
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(Arc::clone(&probe));
+    port.publication_behavior = PublicationBehavior::RefuseGrantExact;
+    let (receipt, _, current_runtime, _) = published_receipt_with(fixture, port);
+    let next_eligibility = eligibility_at_revision(
+        seed,
+        profile,
+        install_id,
+        current_runtime.grant_revision().next().unwrap(),
+        &["activeTab", "scripting", "tabs"],
+    );
+    let next_runtime = next_eligibility.fingerprint(current_runtime.instance().generation());
+    let rebound = template.with_grants_from(&next_eligibility);
+    let refusal = receipt
+        .rebind_grants(rebound.owned(None), next_eligibility)
+        .expect_err("ordinary host refusal");
+    assert_eq!(refusal.reason(), ExtensionRuntimeHostBindError::Unavailable);
+    assert!(!refusal.requires_fail_stop());
+    let (mut receipt, eligibility) = refusal
+        .try_into_parts()
+        .expect("ordinary refusal returns both exact inputs");
+    assert_eq!(
+        eligibility.fingerprint(current_runtime.instance().generation()),
+        next_runtime
+    );
+    assert!(
+        receipt
+            .mint_active_tab_grant_witness(
+                &current_runtime,
+                ExtensionUserInvocationKind::ToolbarAction,
+            )
+            .is_ok()
+    );
+
+    let seed = 36;
+    let fixture = ActivationFixture::compatibility(seed);
+    let template = fixture.template.clone();
+    let profile = template.key.profile();
+    let install_id = template.key.install_id();
+    let probe = Arc::new(HostProbe::default());
+    let mut port = FakeFactoryPort::normal(probe);
+    port.publication_behavior = PublicationBehavior::RefuseGrantSwapped;
+    port.substitute_eligibility = Some(eligibility_at_revision(
+        seed.wrapping_add(1),
+        ProfileId::from(900),
+        ExtensionInstallId::from(901),
+        ExtensionGrantRevision::INITIAL.next().unwrap(),
+        &["activeTab", "scripting", "tabs"],
+    ));
+    let (receipt, _, current_runtime, _) = published_receipt_with(fixture, port);
+    let next_eligibility = eligibility_at_revision(
+        seed,
+        profile,
+        install_id,
+        current_runtime.grant_revision().next().unwrap(),
+        &["activeTab", "scripting", "tabs"],
+    );
+    let rebound = template.with_grants_from(&next_eligibility);
+    let refusal = receipt
+        .rebind_grants(rebound.owned(None), next_eligibility)
+        .expect_err("substituted eligibility must be quarantined");
+    assert_eq!(
+        refusal.reason(),
+        ExtensionRuntimeHostBindError::InternalInvariant
+    );
+    assert!(refusal.requires_fail_stop());
+    assert!(refusal.retained_bytes() <= MAX_EXTENSION_RUNTIME_HOST_QUARANTINE_RETAINED_BYTES);
+    assert!(refusal.try_into_parts().is_err());
 }
 
 #[test]

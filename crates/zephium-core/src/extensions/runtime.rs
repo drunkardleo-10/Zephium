@@ -646,6 +646,15 @@ impl ExtensionRuntimeOperationAuthority {
     /// same user-facing runtime fingerprint.
     #[must_use]
     pub fn matches_native_ownership_lineage(&self, entry: &ExtensionNativeOwnershipEntry) -> bool {
+        self.matches_native_ownership_stable_lineage(entry)
+            && entry.store_grant_revision() == self.fingerprint.grant_revision()
+            && entry.grant_digest() == self.fingerprint.grant_digest()
+    }
+
+    pub(super) fn matches_native_ownership_stable_lineage(
+        &self,
+        entry: &ExtensionNativeOwnershipEntry,
+    ) -> bool {
         let instance = self.fingerprint.instance();
         entry.key().profile() == instance.profile()
             && entry.key().install_id() == instance.install_id()
@@ -653,8 +662,6 @@ impl ExtensionRuntimeOperationAuthority {
             && entry.package() == self.fingerprint.package()
             && entry.store_catalog_revision() == self.fingerprint.catalog_revision()
             && entry.store_install_revision() == self.fingerprint.install_revision()
-            && entry.store_grant_revision() == self.fingerprint.grant_revision()
-            && entry.grant_digest() == self.fingerprint.grant_digest()
             && self.lineage.matches_entry(entry)
     }
 

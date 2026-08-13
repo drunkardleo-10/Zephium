@@ -27,7 +27,8 @@ use zephium_core::extensions::{
     ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
-    ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeFingerprint,
+    ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
+    ExtensionRuntimeFingerprint, ExtensionRuntimeGrantRebindDenial,
     ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
 };
 use zephium_core::ids::ProfileId;
@@ -39,13 +40,14 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeBoundAbsenceEvidenceIssuer, ExtensionRuntimeFailure,
     ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
     ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
-    ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
-    ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostPublicationPort,
-    ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
-    ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeNativeIdentityExpectation,
-    ExtensionRuntimeNativeRootLease, ExtensionRuntimeOwnershipDisposition,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeRecoveryExpectation,
-    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
+    ExtensionRuntimeHostGrantRebindPortRefusal, ExtensionRuntimeHostLifecyclePort,
+    ExtensionRuntimeHostOwnershipPort, ExtensionRuntimeHostProfileAbsenceDisposition,
+    ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
+    ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
+    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeNativeRootLease,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRetirementDisposition,
+    ExtensionRuntimeTarget,
 };
 
 use super::resources::NativeResourceClass;
@@ -584,7 +586,14 @@ impl ExtensionRuntimeFactoryGate {
 enum ReservationBinding {
     Activation {
         owner: OwnerKey,
-        grants: Box<EngineNativeGrantSnapshot>,
+        // Native grant material is needed only until operation authority is
+        // published. Keeping it in a take-once slot lets publication drop the
+        // duplicate manifest/grant Arcs before any later live grant rebind.
+        bootstrap_grants: Mutex<Option<Box<EngineNativeGrantSnapshot>>>,
+        bootstrap_grants_companion_retained_bytes: usize,
+        // Box the comparatively large immutable fingerprint so recovery-only
+        // reservations do not pay the Activation variant's inline size.
+        initial_runtime: Box<ExtensionRuntimeFingerprint>,
         expectation: ExtensionRuntimeNativeIdentityExpectation,
         absence_issuer: ExtensionRuntimeAbsenceEvidenceIssuer,
     },
@@ -611,9 +620,15 @@ impl ReservationBinding {
 
     fn operation_authority_companion_retained_bytes(&self) -> usize {
         match self {
-            Self::Activation { grants, .. } => grants
-                .operation_authority_companion_retained_bytes()
-                .saturating_add(2 * size_of::<usize>()),
+            // Retained-byte reports are a stable lifetime maximum. The actual
+            // bootstrap snapshot is dropped at publication, but continuing to
+            // charge its small inline/allocator companion (plus the compact
+            // lineage box retained afterward) makes every proxy report
+            // conservative without locking mutable state.
+            Self::Activation {
+                bootstrap_grants_companion_retained_bytes,
+                ..
+            } => *bootstrap_grants_companion_retained_bytes,
             Self::Recovery { .. } => 0,
         }
     }
@@ -867,12 +882,36 @@ impl ReservationControl {
             && owned_entry.phase() == ExtensionNativeOwnershipPhase::NativeOwned
             && owner.continues_in(owned_entry)
             && authority.matches_native_ownership_lineage(owned_entry);
-        let exact_runtime = matches!(
-            &self.binding,
-            ReservationBinding::Activation { grants, expectation, .. }
-                if grants.runtime() == authority.fingerprint()
-                    && activation_expectation_accepts(*expectation, evidence)
-        );
+        let ReservationBinding::Activation {
+            bootstrap_grants,
+            initial_runtime,
+            expectation,
+            ..
+        } = &self.binding
+        else {
+            return Err(Box::new((
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                authority,
+            )));
+        };
+        let mut bootstrap_grants = match bootstrap_grants.lock() {
+            Ok(grants) => grants,
+            Err(_) => {
+                self.gate
+                    .inner
+                    .invariant_failed
+                    .store(true, Ordering::Release);
+                return Err(Box::new((
+                    ExtensionRuntimeHostBindError::InternalInvariant,
+                    authority,
+                )));
+            }
+        };
+        let exact_runtime = bootstrap_grants.as_deref().is_some_and(|grants| {
+            grants.runtime() == initial_runtime.as_ref()
+                && initial_runtime.as_ref() == authority.fingerprint()
+                && activation_expectation_accepts(*expectation, evidence)
+        });
         if !exact_owned_row || !exact_runtime {
             return Err(Box::new((
                 ExtensionRuntimeHostBindError::InternalInvariant,
@@ -924,6 +963,11 @@ impl ReservationControl {
                     evidence,
                     authority: Some(authority),
                 };
+                // The published authority now owns and charges the exact
+                // immutable grant cohort. Drop the construction-only duplicate
+                // before returning so a later rebind cannot retain old grants.
+                let dropped = bootstrap_grants.take();
+                debug_assert!(dropped.is_some());
                 Ok(())
             }
             ReservationAuthorityState::AbsenceProven { .. }
@@ -978,8 +1022,9 @@ impl ReservationControl {
         };
         let exact_runtime = matches!(
             &self.binding,
-            ReservationBinding::Activation { grants, .. }
-                if grants.runtime() == authority.fingerprint()
+            ReservationBinding::Activation {
+                initial_runtime, ..
+            } if runtime_continues_activation(initial_runtime.as_ref(), authority.fingerprint())
         ) && authority.matches_native_ownership_lineage(release_entry);
         if !exact_runtime {
             *authority_slot = Some(authority);
@@ -995,6 +1040,87 @@ impl ReservationControl {
         Ok(authority)
     }
 
+    fn rebind_authority(
+        &self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), Box<(ExtensionRuntimeHostBindError, ExtensionRuntimeEligibility)>> {
+        if owner != self.owner() || generation != self.generation {
+            return Err(Box::new((
+                ExtensionRuntimeHostBindError::OwnerConflict,
+                eligibility,
+            )));
+        }
+        if self.gate.inner.invariant_failed.load(Ordering::Acquire) {
+            return Err(Box::new((
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                eligibility,
+            )));
+        }
+        if self.phase() != RESERVATION_ATTACHED
+            || !owner.continues_in(current_entry)
+            || !owner.continues_in(rebound_entry)
+        {
+            return Err(Box::new((
+                ExtensionRuntimeHostBindError::OwnerConflict,
+                eligibility,
+            )));
+        }
+        let mut state = match self.authority_state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.gate
+                    .inner
+                    .invariant_failed
+                    .store(true, Ordering::Release);
+                return Err(Box::new((
+                    ExtensionRuntimeHostBindError::InternalInvariant,
+                    eligibility,
+                )));
+            }
+        };
+        let ReservationAuthorityState::Published {
+            evidence,
+            authority: Some(authority),
+        } = &mut *state
+        else {
+            return Err(Box::new((
+                ExtensionRuntimeHostBindError::OwnerConflict,
+                eligibility,
+            )));
+        };
+        if !self.accepts_publication_evidence(*evidence) {
+            return Err(Box::new((
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                eligibility,
+            )));
+        }
+        authority
+            .try_rebind_grants(current_entry, rebound_entry, eligibility)
+            .map(|_| ())
+            .map_err(|refusal| {
+                let reason = match refusal.reason() {
+                    ExtensionRuntimeGrantRebindDenial::InvalidOwnershipTransition => {
+                        ExtensionRuntimeHostBindError::OwnerConflict
+                    }
+                    ExtensionRuntimeGrantRebindDenial::CurrentAuthorityMismatch
+                    | ExtensionRuntimeGrantRebindDenial::ReplacementAuthorityMismatch
+                    | ExtensionRuntimeGrantRebindDenial::NonMonotonicGrantChange => {
+                        self.gate
+                            .inner
+                            .invariant_failed
+                            .store(true, Ordering::Release);
+                        ExtensionRuntimeHostBindError::InternalInvariant
+                    }
+                    _ => ExtensionRuntimeHostBindError::InternalInvariant,
+                };
+                Box::new((reason, refusal.into_eligibility()))
+            })
+    }
+
     fn mint_active_tab_grant_witness(
         &self,
         owner: OwnerKey,
@@ -1002,7 +1128,7 @@ impl ReservationControl {
         runtime: &ExtensionRuntimeFingerprint,
         invocation: ExtensionUserInvocationKind,
     ) -> Result<ExtensionActiveTabGrantWitness, ExtensionOperationAuthorityDenial> {
-        if !self.matches_runtime(owner, generation, runtime) {
+        if owner != self.owner() || generation != self.generation {
             return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
         }
         let state = self.lock_authority_for_witness()?;
@@ -1013,6 +1139,9 @@ impl ReservationControl {
         else {
             return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
         };
+        if authority.fingerprint() != runtime {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
         if !self.accepts_publication_evidence(*evidence) {
             return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
         }
@@ -1026,7 +1155,7 @@ impl ReservationControl {
         runtime: &ExtensionRuntimeFingerprint,
         purpose: ExtensionDocumentPurpose,
     ) -> Result<ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial> {
-        if !self.matches_runtime(owner, generation, runtime) {
+        if owner != self.owner() || generation != self.generation {
             return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
         }
         let state = self.lock_authority_for_witness()?;
@@ -1037,24 +1166,13 @@ impl ReservationControl {
         else {
             return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
         };
+        if authority.fingerprint() != runtime {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
         if !self.accepts_publication_evidence(*evidence) {
             return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
         }
         authority.mint_document_authority_witness(runtime, purpose)
-    }
-
-    fn matches_runtime(
-        &self,
-        owner: OwnerKey,
-        generation: ExtensionRuntimeHostRegistryGeneration,
-        runtime: &ExtensionRuntimeFingerprint,
-    ) -> bool {
-        owner == self.owner()
-            && generation == self.generation
-            && matches!(
-                &self.binding,
-                ReservationBinding::Activation { grants, .. } if grants.runtime() == runtime
-            )
     }
 
     fn accepts_publication_evidence(&self, evidence: ExtensionRuntimeOwnershipEvidence) -> bool {
@@ -1143,7 +1261,7 @@ impl ReservationControl {
             ) => activation_expectation_accepts(*expectation, *evidence),
             (
                 ReservationBinding::Activation {
-                    grants,
+                    initial_runtime,
                     expectation,
                     ..
                 },
@@ -1153,7 +1271,10 @@ impl ReservationControl {
                 },
             ) => {
                 activation_expectation_accepts(*expectation, *evidence)
-                    && grants.runtime() == authority.fingerprint()
+                    && runtime_continues_activation(
+                        initial_runtime.as_ref(),
+                        authority.fingerprint(),
+                    )
             }
             (
                 ReservationBinding::Recovery { expectation, .. },
@@ -1990,10 +2111,10 @@ impl ExtensionRuntimeRegistry {
         );
         let mut invariant_failed = false;
         for entry in &self.entries {
-            let ReservationBinding::Activation { grants, .. } = &entry.reservation.binding else {
-                continue;
-            };
-            if grants.runtime().instance().profile() != profile {
+            if !matches!(
+                entry.reservation.binding,
+                ReservationBinding::Activation { .. }
+            ) {
                 continue;
             }
             let state = match entry.reservation.authority_state.try_lock() {
@@ -2012,16 +2133,14 @@ impl ExtensionRuntimeRegistry {
                     break;
                 }
             };
-            let published = matches!(
-                &*state,
-                ReservationAuthorityState::Published {
-                    authority: Some(authority),
-                    ..
-                } if authority.fingerprint() == grants.runtime()
-            );
-            drop(state);
-            if published {
-                runtimes.push(grants.runtime().clone());
+            if let ReservationAuthorityState::Published {
+                authority: Some(authority),
+                ..
+            } = &*state
+            {
+                if authority.fingerprint().instance().profile() == profile {
+                    runtimes.push(authority.fingerprint().clone());
+                }
             }
         }
         let runtimes_are_unique = runtimes.iter().enumerate().all(|(index, runtime)| {
@@ -2098,32 +2217,21 @@ impl ExtensionRuntimeRegistry {
         if self.invariant_failed {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
-        let mut matching = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                matches!(
-                    &entry.reservation.binding,
-                    ReservationBinding::Activation { grants, .. } if grants.runtime() == runtime
-                )
-                .then_some(index)
-            });
-        let Some(index) = matching.next() else {
-            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
-        };
-        if matching.next().is_some() {
-            self.fail_invariant();
-            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
-        }
-        {
-            let state = match self.entries[index].reservation.authority_state.try_lock() {
+        let mut index = None;
+        for (candidate, entry) in self.entries.iter().enumerate() {
+            if !matches!(
+                entry.reservation.binding,
+                ReservationBinding::Activation { .. }
+            ) {
+                continue;
+            }
+            let state = match entry.reservation.authority_state.try_lock() {
                 Ok(state) => state,
                 Err(std::sync::TryLockError::WouldBlock) => {
                     return Err(ExtensionRuntimeHostBindError::Unavailable);
                 }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
-                    self.entries[index]
+                    entry
                         .reservation
                         .gate
                         .inner
@@ -2133,16 +2241,22 @@ impl ExtensionRuntimeRegistry {
                     return Err(ExtensionRuntimeHostBindError::InternalInvariant);
                 }
             };
-            if !matches!(
+            let matches = matches!(
                 &*state,
                 ReservationAuthorityState::Published {
                     authority: Some(authority),
                     ..
                 } if authority.fingerprint() == runtime
-            ) {
-                return Err(ExtensionRuntimeHostBindError::Unavailable);
+            );
+            drop(state);
+            if matches && index.replace(candidate).is_some() {
+                self.fail_invariant();
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
             }
         }
+        let Some(index) = index else {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        };
         Ok(index)
     }
 
@@ -2895,10 +3009,18 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
         let expectation = context.identity_expectation();
         let absence_issuer = context.absence_evidence_issuer();
         let grants = Box::new(EngineNativeGrantSnapshot::try_from_context(context)?);
+        let initial_runtime = grants.runtime().clone();
+        let bootstrap_grants_companion_retained_bytes = grants
+            .operation_authority_companion_retained_bytes()
+            .saturating_add(2 * size_of::<usize>())
+            .saturating_add(size_of::<ExtensionRuntimeFingerprint>())
+            .saturating_add(2 * size_of::<usize>());
         let reservation = self.gate.reserve_with_adapter(
             ReservationBinding::Activation {
                 owner,
-                grants,
+                bootstrap_grants: Mutex::new(Some(grants)),
+                bootstrap_grants_companion_retained_bytes,
+                initial_runtime: Box::new(initial_runtime),
                 expectation,
                 absence_issuer,
             },
@@ -3667,6 +3789,17 @@ fn ownership_bind_failure(
     }
 }
 
+fn runtime_continues_activation(
+    initial: &ExtensionRuntimeFingerprint,
+    current: &ExtensionRuntimeFingerprint,
+) -> bool {
+    initial.instance() == current.instance()
+        && initial.catalog_revision() == current.catalog_revision()
+        && initial.install_revision() == current.install_revision()
+        && initial.package() == current.package()
+        && initial.browsing_context() == current.browsing_context()
+}
+
 struct EnginePublicationPort {
     reservation: Arc<ReservationControl>,
 }
@@ -3690,6 +3823,23 @@ impl ExtensionRuntimeHostPublicationPort for EnginePublicationPort {
             .map_err(|refusal| {
                 let (reason, authority) = *refusal;
                 ExtensionRuntimeHostPublicationPortRefusal::new(reason, authority)
+            })
+    }
+
+    fn rebind_operation_authority(
+        &mut self,
+        owner: zephium_extension_runtime_api::ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), ExtensionRuntimeHostGrantRebindPortRefusal> {
+        let owner = OwnerKey::from_address(owner);
+        self.reservation
+            .rebind_authority(owner, generation, current_entry, rebound_entry, eligibility)
+            .map_err(|refusal| {
+                let (reason, eligibility) = *refusal;
+                ExtensionRuntimeHostGrantRebindPortRefusal::new(reason, eligibility)
             })
     }
 
@@ -4115,6 +4265,9 @@ mod tests {
         release: ExtensionNativeOwnershipEntry,
         authority: ExtensionRuntimeOperationAuthority,
         fingerprint: ExtensionRuntimeFingerprint,
+        next_eligibility: ExtensionRuntimeEligibility,
+        rebound_owned: ExtensionNativeOwnershipEntry,
+        rebound_release: ExtensionNativeOwnershipEntry,
     }
 
     struct AbsenceIssuerCaptureFactory {
@@ -4219,7 +4372,7 @@ mod tests {
         .expect("bounded host permissions");
         let declarations = ExtensionManifestDeclarations::new(
             api(&[]),
-            api(&["activeTab", "scripting"]),
+            api(&["activeTab", "scripting", "tabs"]),
             None,
             Some(hosts),
             None,
@@ -4293,6 +4446,43 @@ mod tests {
                 .expect("valid grant cohort")
                 .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
                 .expect("runtime eligibility");
+        let next_catalog = ExtensionInstallCatalog::from_persisted(
+            ExtensionInstallCatalogRevision::new(53).expect("catalog revision"),
+            Some(install_id),
+            vec![install.clone()],
+        )
+        .expect("valid next catalog");
+        let next_bindings =
+            ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+                install_id,
+                Arc::clone(&manifest),
+            )])
+            .expect("valid next manifest binding");
+        let next_grant = ExtensionGrantAuthority::from_persisted(
+            &install,
+            ExtensionGrantRevision::INITIAL
+                .next()
+                .expect("next grant revision"),
+            manifest.package().clone(),
+            ["activeTab", "scripting", "tabs"]
+                .into_iter()
+                .map(|name| ApiPermissionName::parse_exact(name).expect("valid API name"))
+                .collect(),
+            vec![MatchPattern::parse("<all_urls>").expect("all-URL pattern")],
+            false,
+            false,
+            &manifest,
+        )
+        .expect("valid next grant authority");
+        let next_eligibility = ExtensionGrantCohort::from_persisted(
+            profile,
+            next_catalog,
+            next_bindings,
+            vec![next_grant],
+        )
+        .expect("valid next grant cohort")
+        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+        .expect("next runtime eligibility");
         let preparation = ExtensionNativeOwnershipPreparation::new(
             ExtensionNativeOwnershipKey::new(
                 profile,
@@ -4364,6 +4554,36 @@ mod tests {
             ExtensionNativeOwnershipIntent::Release,
             ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
         );
+        let rebound_entry = |revision, intent, phase| {
+            ExtensionNativeOwnershipEntry::from_persisted_with_native_identity(
+                preparing.key(),
+                preparing.operation(),
+                ExtensionNativeOwnershipEntryRevision::new(revision).expect("entry revision"),
+                preparing.package().clone(),
+                preparing.catalog_set_digest(),
+                preparing.catalog_role(),
+                preparing.store_catalog_revision(),
+                preparing.store_install_revision(),
+                next_eligibility.grant_revision(),
+                next_eligibility.grant_digest(),
+                preparing.runtime_backend(),
+                None,
+                preparing.native_incarnation(),
+                intent,
+                phase,
+            )
+            .expect("continued rebound ownership row")
+        };
+        let rebound_owned = rebound_entry(
+            3,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeOwned,
+        );
+        let rebound_release = rebound_entry(
+            4,
+            ExtensionNativeOwnershipIntent::Release,
+            ExtensionNativeOwnershipPhase::NativeAbsentReleasePending,
+        );
         let cas = may_own.cas();
         let owner = OwnerKey {
             key: cas.key(),
@@ -4374,13 +4594,20 @@ mod tests {
         };
         let (absence_issuer, authority) =
             capture_activation_absence_issuer(may_own.clone(), authority);
+        let bootstrap_grants =
+            Box::new(EngineNativeGrantSnapshot::from_valid_core_snapshot_for_test(grants));
+        let bootstrap_grants_companion_retained_bytes = bootstrap_grants
+            .operation_authority_companion_retained_bytes()
+            .saturating_add(2 * size_of::<usize>())
+            .saturating_add(size_of::<ExtensionRuntimeFingerprint>())
+            .saturating_add(2 * size_of::<usize>());
         ActivationRegistryFixture {
             _held_pin: held_pin,
             binding: ReservationBinding::Activation {
                 owner,
-                grants: Box::new(
-                    EngineNativeGrantSnapshot::from_valid_core_snapshot_for_test(grants),
-                ),
+                bootstrap_grants: Mutex::new(Some(bootstrap_grants)),
+                bootstrap_grants_companion_retained_bytes,
+                initial_runtime: Box::new(fingerprint.clone()),
                 expectation: ExtensionRuntimeNativeIdentityExpectation::Compatibility,
                 absence_issuer,
             },
@@ -4390,6 +4617,9 @@ mod tests {
             release,
             authority,
             fingerprint,
+            next_eligibility,
+            rebound_owned,
+            rebound_release,
         }
     }
 
@@ -4890,10 +5120,15 @@ mod tests {
         let recovery = gate
             .reserve(recovery_binding(owner(2, 71, 71)))
             .expect("recovery reservation");
-        let ReservationBinding::Activation { grants, .. } = &activation.binding else {
+        let ReservationBinding::Activation {
+            bootstrap_grants, ..
+        } = &activation.binding
+        else {
             panic!("activation reservation must retain native grants");
         };
-        assert_eq!(grants.native_snapshot().api_grant_count(), 2);
+        let grants = bootstrap_grants.lock().expect("bootstrap grant slot");
+        let grants = grants.as_deref().expect("pre-publication native grants");
+        assert_eq!(grants.native_snapshot().api_grant_count(), 3);
         assert_eq!(grants.native_snapshot().host_grant_count(), 1);
         let activation_companion = activation
             .binding
@@ -4945,7 +5180,9 @@ mod tests {
         let fixture = activation_registry_fixture();
         let ReservationBinding::Activation {
             owner,
-            grants,
+            bootstrap_grants,
+            bootstrap_grants_companion_retained_bytes,
+            initial_runtime,
             absence_issuer,
             ..
         } = fixture.binding
@@ -4958,7 +5195,9 @@ mod tests {
         let reservation = gate
             .reserve(ReservationBinding::Activation {
                 owner,
-                grants,
+                bootstrap_grants,
+                bootstrap_grants_companion_retained_bytes,
+                initial_runtime,
                 expectation: ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(
                     native_id,
                 ),
@@ -5686,19 +5925,27 @@ mod tests {
             release,
             authority,
             fingerprint,
+            ..
         } = fixture;
         let gate = ExtensionRuntimeFactoryGate::new();
         let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
         let reservation = gate.reserve(binding).expect("activation reservation");
         let generation = reservation.generation;
-        let ReservationBinding::Activation { grants, .. } = &reservation.binding else {
+        let ReservationBinding::Activation {
+            bootstrap_grants, ..
+        } = &reservation.binding
+        else {
             panic!("activation reservation must retain native grants");
         };
-        assert_eq!(grants.runtime(), &fingerprint);
-        assert_eq!(grants.native_snapshot().api_grant_count(), 2);
-        assert_eq!(grants.native_snapshot().host_grant_count(), 1);
-        assert!(!grants.native_snapshot().file_scheme_access_granted());
-        assert!(!grants.native_snapshot().private_context_access_granted());
+        {
+            let grants = bootstrap_grants.lock().expect("bootstrap grant slot");
+            let grants = grants.as_deref().expect("pre-publication native grants");
+            assert_eq!(grants.runtime(), &fingerprint);
+            assert_eq!(grants.native_snapshot().api_grant_count(), 3);
+            assert_eq!(grants.native_snapshot().host_grant_count(), 1);
+            assert!(!grants.native_snapshot().file_scheme_access_granted());
+            assert!(!grants.native_snapshot().private_context_access_granted());
+        }
         registry
             .attach(Arc::clone(&reservation))
             .expect("activation attachment");
@@ -5760,6 +6007,10 @@ mod tests {
                 authority,
             )
             .expect("exact definite activation publishes");
+        assert!(bootstrap_grants
+            .lock()
+            .expect("bootstrap grant slot")
+            .is_none());
         assert!(registry.entries[0].binding_is_consistent());
         assert!(reservation
             .mint_active_tab_grant_witness(
@@ -5784,7 +6035,6 @@ mod tests {
         assert!(registry
             .prove_absence(owner, generation)
             .expect("definite absence removes exact published generation"));
-        assert_eq!(grants.runtime(), &fingerprint);
         assert_eq!(release.intent(), ExtensionNativeOwnershipIntent::Release);
         assert_eq!(
             release.phase(),
@@ -6081,6 +6331,7 @@ mod tests {
             release,
             authority,
             fingerprint,
+            ..
         } = activation_registry_fixture();
         let gate = ExtensionRuntimeFactoryGate::new();
         let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
@@ -6146,6 +6397,107 @@ mod tests {
             .reclaim_operation_authority(owner_address, generation, &release)
             .expect("exact release row reclaims through the host port");
         assert_eq!(reclaimed.fingerprint(), &fingerprint);
+        drop(reclaimed);
+        drop(_held_pin);
+    }
+
+    #[test]
+    fn engine_publication_port_rebinds_grants_without_replacing_native_owner() {
+        let ActivationRegistryFixture {
+            _held_pin,
+            binding,
+            owner,
+            initial,
+            owned,
+            authority,
+            fingerprint,
+            next_eligibility,
+            rebound_owned,
+            rebound_release,
+            ..
+        } = activation_registry_fixture();
+        let next_fingerprint = next_eligibility.fingerprint(fingerprint.instance().generation());
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate);
+        let reservation = registry
+            .gate
+            .reserve(binding)
+            .expect("activation reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("activation attachment");
+        registry
+            .mark_activated(
+                owner,
+                generation,
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+            )
+            .expect("definite activation");
+        let mut port = EnginePublicationPort {
+            reservation: Arc::clone(&reservation),
+        };
+        let owner_address = ExtensionRuntimeHostRecoveryBinding::try_new(initial)
+            .expect("owner address")
+            .context()
+            .owner();
+        port.publish_operation_authority(
+            owner_address,
+            generation,
+            &owned,
+            ExtensionRuntimeOwnershipEvidence::Compatibility,
+            authority,
+        )
+        .expect("initial publication");
+        let ReservationBinding::Activation {
+            bootstrap_grants, ..
+        } = &reservation.binding
+        else {
+            panic!("activation binding");
+        };
+        assert!(
+            bootstrap_grants
+                .lock()
+                .expect("bootstrap grant slot")
+                .is_none(),
+            "publication must release construction-only manifest and grant Arcs"
+        );
+        assert!(registry.entries[0].binding_is_consistent());
+
+        port.rebind_operation_authority(
+            owner_address,
+            generation,
+            &owned,
+            &rebound_owned,
+            next_eligibility,
+        )
+        .expect("exact grant-only authority rebind");
+        assert!(registry.entries[0].binding_is_consistent());
+        assert!(matches!(
+            port.mint_active_tab_grant_witness(
+                owner_address,
+                generation,
+                &fingerprint,
+                ExtensionUserInvocationKind::ToolbarAction,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+        ));
+        assert!(port
+            .mint_active_tab_grant_witness(
+                owner_address,
+                generation,
+                &next_fingerprint,
+                ExtensionUserInvocationKind::ToolbarAction,
+            )
+            .is_ok());
+
+        assert!(registry
+            .prove_absence(owner, generation)
+            .expect("same native owner reaches absence"));
+        let reclaimed = port
+            .reclaim_operation_authority(owner_address, generation, &rebound_release)
+            .expect("rebound authority remains reclaimable");
+        assert_eq!(reclaimed.fingerprint(), &next_fingerprint);
         drop(reclaimed);
         drop(_held_pin);
     }
@@ -6476,6 +6828,56 @@ mod tests {
             } if authority.fingerprint() == &fixture.fingerprint
         ));
         drop(retained);
+        drop(fixture._held_pin);
+    }
+
+    #[test]
+    fn poisoned_bootstrap_grants_fail_publication_closed_without_losing_authority() {
+        let fixture = activation_registry_fixture();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate
+            .reserve(fixture.binding)
+            .expect("activation reservation");
+        let generation = reservation.generation;
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("activation attachment");
+        registry
+            .mark_activated(
+                fixture.owner,
+                generation,
+                ExtensionRuntimeOwnershipEvidence::Compatibility,
+            )
+            .expect("definite activation");
+
+        let poisoned = Arc::clone(&reservation);
+        let _ = std::thread::spawn(move || {
+            let ReservationBinding::Activation {
+                bootstrap_grants, ..
+            } = &poisoned.binding
+            else {
+                panic!("activation binding");
+            };
+            let _guard = bootstrap_grants.lock().expect("bootstrap grants");
+            panic!("poison bootstrap grant slot");
+        })
+        .join();
+
+        let (reason, returned) = match reservation.publish_authority(
+            fixture.owner,
+            generation,
+            &fixture.owned,
+            ExtensionRuntimeOwnershipEvidence::Compatibility,
+            fixture.authority,
+        ) {
+            Ok(()) => panic!("poisoned bootstrap grants must not publish"),
+            Err(refusal) => *refusal,
+        };
+        assert_eq!(reason, ExtensionRuntimeHostBindError::InternalInvariant);
+        assert_eq!(returned.fingerprint(), &fixture.fingerprint);
+        assert!(gate.inner.invariant_failed.load(Ordering::Acquire));
+        drop(returned);
         drop(fixture._held_pin);
     }
 
