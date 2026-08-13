@@ -123,7 +123,8 @@ pub use package_pin::{
 pub use runtime::{
     ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness,
     ExtensionOperationAuthorityDenial, ExtensionRuntimeEligibility,
-    ExtensionRuntimeEligibilityDenial, ExtensionRuntimeOperationAuthority,
+    ExtensionRuntimeEligibilityDenial, ExtensionRuntimeGrantRebindDenial,
+    ExtensionRuntimeGrantRebindRefusal, ExtensionRuntimeOperationAuthority,
 };
 pub use transient::{
     ExtensionDocumentPurpose, ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration,

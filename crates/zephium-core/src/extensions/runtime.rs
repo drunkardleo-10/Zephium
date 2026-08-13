@@ -24,7 +24,8 @@ use super::{
     ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
     ExtensionNativeGrantProjection, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
-    ExtensionNativeOwnershipOperation, ExtensionPackageIdentity, ExtensionRuntimeBackendTarget,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionRuntimeBackendTarget,
     ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
     ExtensionUrlScopeDecision, ExtensionUserInvocationKind,
 };
@@ -71,6 +72,55 @@ pub enum ExtensionOperationAuthorityDenial {
     RuntimeFingerprintMismatch,
     /// The exact closed operation's manifest API is not effectively granted.
     RequiredAuthorityMissing,
+}
+
+/// Stable, data-free reason a live runtime grant authority was not rebound.
+///
+/// A refusal never consumes or weakens the currently published operation
+/// authority. The caller receives the proposed Store eligibility back through
+/// [`ExtensionRuntimeGrantRebindRefusal`] and may retire the runtime or retry
+/// from a fresh durable cohort.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum ExtensionRuntimeGrantRebindDenial {
+    /// The supplied current row is not the authority's exact owned frontier.
+    CurrentAuthorityMismatch,
+    /// The two rows do not describe one grant-only journal transition.
+    InvalidOwnershipTransition,
+    /// The proposed eligibility is not the exact next durable grant cohort.
+    ReplacementAuthorityMismatch,
+    /// Live replacement attempted to remove authority or change file/private
+    /// access; those changes require full native retirement.
+    NonMonotonicGrantChange,
+}
+
+/// Lossless refusal to replace one live runtime's grant authority.
+#[must_use = "grant-rebind refusal retains the proposed Store eligibility"]
+pub struct ExtensionRuntimeGrantRebindRefusal {
+    reason: ExtensionRuntimeGrantRebindDenial,
+    eligibility: Box<ExtensionRuntimeEligibility>,
+}
+
+impl ExtensionRuntimeGrantRebindRefusal {
+    /// Stable refusal reason without package, permission, or profile data.
+    pub const fn reason(&self) -> ExtensionRuntimeGrantRebindDenial {
+        self.reason
+    }
+
+    /// Returns the exact unconsumed replacement eligibility.
+    pub fn into_eligibility(self) -> ExtensionRuntimeEligibility {
+        *self.eligibility
+    }
+}
+
+impl fmt::Debug for ExtensionRuntimeGrantRebindRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionRuntimeGrantRebindRefusal")
+            .field("reason", &self.reason)
+            .field("eligibility", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Move-only capability for one trusted browser invocation to establish
@@ -608,6 +658,73 @@ impl ExtensionRuntimeOperationAuthority {
             && self.lineage.matches_entry(entry)
     }
 
+    /// Replaces this live runtime's grant authority without changing its
+    /// process-local generation or native/package lineage.
+    ///
+    /// This is intentionally narrower than general permission mutation. It
+    /// accepts only the exact next grant revision, an unchanged manifest and
+    /// install cohort, an additive API/host grant set, unchanged file/private
+    /// access, and a journal row whose only changed fields are grant revision
+    /// and digest. Revocation and browsing-partition changes must retire the
+    /// native owner instead.
+    ///
+    /// Validation completes before either field is replaced. On refusal this
+    /// authority remains byte-for-byte authoritative for the old fingerprint,
+    /// while the proposed eligibility is returned losslessly.
+    pub fn try_rebind_grants(
+        &mut self,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<ExtensionRuntimeFingerprint, ExtensionRuntimeGrantRebindRefusal> {
+        let deny = |reason, eligibility| ExtensionRuntimeGrantRebindRefusal {
+            reason,
+            eligibility: Box::new(eligibility),
+        };
+        if !self.matches_native_ownership_lineage(current_entry)
+            || current_entry.intent() != ExtensionNativeOwnershipIntent::Acquire
+            || current_entry.phase() != ExtensionNativeOwnershipPhase::NativeOwned
+        {
+            return Err(deny(
+                ExtensionRuntimeGrantRebindDenial::CurrentAuthorityMismatch,
+                eligibility,
+            ));
+        }
+        if !is_grant_only_owned_transition(current_entry, rebound_entry) {
+            return Err(deny(
+                ExtensionRuntimeGrantRebindDenial::InvalidOwnershipTransition,
+                eligibility,
+            ));
+        }
+
+        let generation = self.fingerprint.instance().generation();
+        let replacement_fingerprint = eligibility.fingerprint(generation);
+        if replacement_fingerprint.instance() != self.fingerprint.instance()
+            || replacement_fingerprint.package() != self.fingerprint.package()
+            || replacement_fingerprint.catalog_revision() != self.fingerprint.catalog_revision()
+            || replacement_fingerprint.install_revision() != self.fingerprint.install_revision()
+            || replacement_fingerprint.browsing_context() != self.fingerprint.browsing_context()
+            || replacement_fingerprint.grant_revision() != rebound_entry.store_grant_revision()
+            || replacement_fingerprint.grant_digest() != rebound_entry.grant_digest()
+        {
+            return Err(deny(
+                ExtensionRuntimeGrantRebindDenial::ReplacementAuthorityMismatch,
+                eligibility,
+            ));
+        }
+        if !eligibility_is_monotonic_grant_extension(&self.eligibility, &eligibility) {
+            return Err(deny(
+                ExtensionRuntimeGrantRebindDenial::NonMonotonicGrantChange,
+                eligibility,
+            ));
+        }
+
+        self.eligibility = eligibility;
+        self.fingerprint = replacement_fingerprint.clone();
+        debug_assert!(self.matches_native_ownership_lineage(rebound_entry));
+        Ok(replacement_fingerprint)
+    }
+
     pub(super) fn retained_heap_bytes(&self) -> usize {
         self.eligibility.retained_heap_bytes()
     }
@@ -677,6 +794,52 @@ impl ExtensionRuntimeOperationAuthority {
     }
 }
 
+fn is_grant_only_owned_transition(
+    current: &ExtensionNativeOwnershipEntry,
+    rebound: &ExtensionNativeOwnershipEntry,
+) -> bool {
+    current.key() == rebound.key()
+        && current.operation() == rebound.operation()
+        && current.revision() == rebound.revision()
+        && current.package() == rebound.package()
+        && current.catalog_set_digest() == rebound.catalog_set_digest()
+        && current.catalog_role() == rebound.catalog_role()
+        && current.store_catalog_revision() == rebound.store_catalog_revision()
+        && current.store_install_revision() == rebound.store_install_revision()
+        && current.store_grant_revision().next() == Some(rebound.store_grant_revision())
+        && current.grant_digest() != rebound.grant_digest()
+        && current.runtime_backend() == rebound.runtime_backend()
+        && current.expected_native_identity() == rebound.expected_native_identity()
+        && current.native_identity() == rebound.native_identity()
+        && current.native_incarnation() == rebound.native_incarnation()
+        && rebound.intent() == ExtensionNativeOwnershipIntent::Acquire
+        && rebound.phase() == ExtensionNativeOwnershipPhase::NativeOwned
+}
+
+fn eligibility_is_monotonic_grant_extension(
+    current: &ExtensionRuntimeEligibility,
+    replacement: &ExtensionRuntimeEligibility,
+) -> bool {
+    if current.manifest != replacement.manifest {
+        return false;
+    }
+    let current = current.grants.persistence_projection();
+    let replacement = replacement.grants.persistence_projection();
+    let strictly_adds_api_or_host = replacement.api_grant_count() > current.api_grant_count()
+        || replacement.host_grant_count() > current.host_grant_count();
+    strictly_adds_api_or_host
+        && current.persisted_file_access() == replacement.persisted_file_access()
+        && current.persisted_private_access() == replacement.persisted_private_access()
+        && current
+            .api_grants()
+            .all(|old| replacement.api_grants().any(|new| new == old))
+        && current.host_grants().all(|old| {
+            replacement
+                .host_grants()
+                .any(|new| new.as_str() == old.as_str())
+        })
+}
+
 impl fmt::Debug for ExtensionRuntimeOperationAuthority {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -701,7 +864,8 @@ mod tests {
         ExtensionInstall, ExtensionInstallCatalog, ExtensionManifestDeclarations,
         ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
         ExtensionManifestResourceDigest, ExtensionNativeGrantDecision,
-        ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot, ExtensionPackageKey,
+        ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot,
+        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipKey, ExtensionPackageKey,
         ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
         MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
     };
@@ -846,6 +1010,29 @@ mod tests {
         file_access: bool,
         private_access: bool,
     ) -> ExtensionGrantCohort {
+        cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            manifest,
+            ExtensionGrantRevision::INITIAL,
+            granted_api,
+            granted_hosts,
+            file_access,
+            private_access,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cohort_with_manifest_at_revision(
+        profile: ProfileId,
+        install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        grant_revision: ExtensionGrantRevision,
+        granted_api: &[&str],
+        granted_hosts: &[&str],
+        file_access: bool,
+        private_access: bool,
+    ) -> ExtensionGrantCohort {
         let install = ExtensionInstall::from_persisted(
             install_id,
             ExtensionInstallRevision::new(7).unwrap(),
@@ -864,8 +1051,10 @@ mod tests {
                 Arc::clone(&manifest),
             )])
             .unwrap();
-        let authority = ExtensionGrantAuthority::initialize(
+        let authority = ExtensionGrantAuthority::from_persisted(
             &install,
+            grant_revision,
+            manifest.package().clone(),
             granted_api
                 .iter()
                 .map(|name| ApiPermissionName::parse_exact(name).unwrap())
@@ -880,6 +1069,33 @@ mod tests {
         )
         .unwrap();
         ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority]).unwrap()
+    }
+
+    fn owned_entry(
+        runtime: &ExtensionRuntimeFingerprint,
+        lineage: ExtensionRuntimeOperationAuthorityLineage,
+    ) -> ExtensionNativeOwnershipEntry {
+        ExtensionNativeOwnershipEntry::from_persisted(
+            ExtensionNativeOwnershipKey::new(
+                runtime.instance().profile(),
+                runtime.instance().install_id(),
+                runtime.browsing_context(),
+            ),
+            lineage.operation,
+            ExtensionNativeOwnershipEntryRevision::new(3).unwrap(),
+            runtime.package().clone(),
+            lineage.catalog_set_digest,
+            lineage.catalog_role,
+            runtime.catalog_revision(),
+            runtime.install_revision(),
+            runtime.grant_revision(),
+            runtime.grant_digest(),
+            lineage.runtime_backend,
+            lineage.native_incarnation,
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeOwned,
+        )
+        .unwrap()
     }
 
     fn cohort(
@@ -1055,6 +1271,243 @@ mod tests {
             format!("{authority:?}"),
             "ExtensionRuntimeOperationAuthority { runtime: \"<redacted>\", authority: \"<redacted>\" }"
         );
+    }
+
+    #[test]
+    fn live_grant_rebind_is_exact_additive_and_preserves_native_lineage() {
+        let profile = ProfileId::from(211);
+        let install_id = ExtensionInstallId::from(223);
+        let generation = ExtensionRuntimeGeneration::new(227).unwrap();
+        let manifest = manifest();
+        let current_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            Arc::clone(&manifest),
+            ExtensionGrantRevision::INITIAL,
+            &["activeTab"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let current_eligibility = current_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let current_runtime = current_eligibility.fingerprint(generation);
+        let lineage = operation_lineage(229);
+        let mut authority = current_eligibility.into_operation_authority(generation, lineage);
+        let current_entry = owned_entry(&current_runtime, lineage);
+        let stale_witness = authority
+            .mint_active_tab_grant_witness(
+                &current_runtime,
+                ExtensionUserInvocationKind::ToolbarAction,
+            )
+            .unwrap();
+
+        let next_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            manifest,
+            current_runtime.grant_revision().next().unwrap(),
+            &["activeTab", "scripting"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let next_eligibility = next_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let next_runtime = next_eligibility.fingerprint(generation);
+        let rebound_entry = owned_entry(&next_runtime, lineage);
+
+        assert_eq!(
+            authority
+                .try_rebind_grants(&current_entry, &rebound_entry, next_eligibility)
+                .unwrap(),
+            next_runtime
+        );
+        assert_eq!(authority.fingerprint(), &next_runtime);
+        assert!(authority.matches_native_ownership_lineage(&rebound_entry));
+        assert!(!authority.matches_native_ownership_lineage(&current_entry));
+        assert!(!stale_witness.matches(&next_runtime, ExtensionUserInvocationKind::ToolbarAction));
+        assert!(matches!(
+            authority.mint_document_authority_witness(
+                &current_runtime,
+                ExtensionDocumentPurpose::ExecuteScript,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+        ));
+        assert!(
+            authority
+                .mint_document_authority_witness(
+                    &next_runtime,
+                    ExtensionDocumentPurpose::ExecuteScript,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn live_grant_rebind_refuses_removal_and_preserves_current_authority() {
+        let profile = ProfileId::from(233);
+        let install_id = ExtensionInstallId::from(239);
+        let generation = ExtensionRuntimeGeneration::new(241).unwrap();
+        let manifest = manifest();
+        let current_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            Arc::clone(&manifest),
+            ExtensionGrantRevision::INITIAL,
+            &["activeTab", "scripting"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let current_eligibility = current_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let current_runtime = current_eligibility.fingerprint(generation);
+        let lineage = operation_lineage(251);
+        let mut authority = current_eligibility.into_operation_authority(generation, lineage);
+        let current_entry = owned_entry(&current_runtime, lineage);
+
+        let reduced_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            manifest,
+            current_runtime.grant_revision().next().unwrap(),
+            &["activeTab"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let reduced_eligibility = reduced_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let reduced_runtime = reduced_eligibility.fingerprint(generation);
+        let rebound_entry = owned_entry(&reduced_runtime, lineage);
+        let refusal = authority
+            .try_rebind_grants(&current_entry, &rebound_entry, reduced_eligibility)
+            .unwrap_err();
+
+        assert_eq!(
+            refusal.reason(),
+            ExtensionRuntimeGrantRebindDenial::NonMonotonicGrantChange
+        );
+        assert_eq!(
+            refusal.into_eligibility().fingerprint(generation),
+            reduced_runtime
+        );
+        assert_eq!(authority.fingerprint(), &current_runtime);
+        assert!(authority.matches_native_ownership_lineage(&current_entry));
+        assert!(authority
+            .mint_document_authority_witness(
+                &current_runtime,
+                ExtensionDocumentPurpose::ExecuteScript,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn live_grant_rebind_refuses_skipped_rows_and_mismatched_eligibility_losslessly() {
+        let profile = ProfileId::from(257);
+        let install_id = ExtensionInstallId::from(263);
+        let generation = ExtensionRuntimeGeneration::new(269).unwrap();
+        let manifest = manifest();
+        let current_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            Arc::clone(&manifest),
+            ExtensionGrantRevision::INITIAL,
+            &["activeTab"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let current_eligibility = current_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let current_runtime = current_eligibility.fingerprint(generation);
+        let lineage = operation_lineage(271);
+        let mut authority = current_eligibility.into_operation_authority(generation, lineage);
+        let current_entry = owned_entry(&current_runtime, lineage);
+
+        let next_revision = current_runtime.grant_revision().next().unwrap();
+        let next_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            Arc::clone(&manifest),
+            next_revision,
+            &["activeTab", "scripting"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let next_eligibility = next_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let next_runtime = next_eligibility.fingerprint(generation);
+        let skipped_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            Arc::clone(&manifest),
+            next_revision.next().unwrap(),
+            &["activeTab", "scripting"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let skipped_runtime = skipped_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap()
+            .fingerprint(generation);
+        let refusal = authority
+            .try_rebind_grants(
+                &current_entry,
+                &owned_entry(&skipped_runtime, lineage),
+                next_eligibility,
+            )
+            .unwrap_err();
+        assert_eq!(
+            refusal.reason(),
+            ExtensionRuntimeGrantRebindDenial::InvalidOwnershipTransition
+        );
+        assert_eq!(
+            refusal.into_eligibility().fingerprint(generation),
+            next_runtime
+        );
+        assert_eq!(authority.fingerprint(), &current_runtime);
+
+        let mismatched_cohort = cohort_with_manifest_at_revision(
+            profile,
+            install_id,
+            manifest,
+            next_revision,
+            &["activeTab"],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let mismatched_eligibility = mismatched_cohort
+            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+            .unwrap();
+        let mismatched_runtime = mismatched_eligibility.fingerprint(generation);
+        let refusal = authority
+            .try_rebind_grants(
+                &current_entry,
+                &owned_entry(&next_runtime, lineage),
+                mismatched_eligibility,
+            )
+            .unwrap_err();
+        assert_eq!(
+            refusal.reason(),
+            ExtensionRuntimeGrantRebindDenial::ReplacementAuthorityMismatch
+        );
+        assert_eq!(
+            refusal.into_eligibility().fingerprint(generation),
+            mismatched_runtime
+        );
+        assert_eq!(authority.fingerprint(), &current_runtime);
+        assert!(authority.matches_native_ownership_lineage(&current_entry));
     }
 
     #[test]
