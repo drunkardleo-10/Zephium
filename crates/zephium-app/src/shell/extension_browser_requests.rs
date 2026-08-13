@@ -29,6 +29,15 @@ impl Shell {
                 ExtensionBrowserRequestAction::LoadTabUrl { tab, url } => {
                     self.extension_load_tab_url(profile, *tab, url)
                 }
+                ExtensionBrowserRequestAction::ReloadTab { tab } => {
+                    self.extension_reload_tab(profile, *tab)
+                }
+                ExtensionBrowserRequestAction::GoBack { tab } => {
+                    self.extension_traverse_history(profile, *tab, false)
+                }
+                ExtensionBrowserRequestAction::GoForward { tab } => {
+                    self.extension_traverse_history(profile, *tab, true)
+                }
             }
         };
 
@@ -128,6 +137,83 @@ impl Shell {
         } else {
             applied()
         }
+    }
+
+    fn extension_reload_tab(
+        &mut self,
+        profile: ProfileId,
+        tab: ItemId,
+    ) -> ExtensionBrowserRequestSettlement {
+        let Some(state) = self.extension_resident_tab(profile, tab) else {
+            return self.extension_tab_mutation_refusal(profile, tab);
+        };
+        debug_assert!(state.has_view());
+        settle_native_dispatch(self.engine.reload(tab))
+    }
+
+    fn extension_traverse_history(
+        &mut self,
+        profile: ProfileId,
+        tab: ItemId,
+        forward: bool,
+    ) -> ExtensionBrowserRequestSettlement {
+        let Some(state) = self.extension_resident_tab(profile, tab) else {
+            return self.extension_tab_mutation_refusal(profile, tab);
+        };
+        let available = if forward {
+            state.can_go_forward
+        } else {
+            state.can_go_back
+        };
+        if !available {
+            return rejected(ExtensionBrowserRequestRejection::InvalidRequest);
+        }
+        settle_native_dispatch(if forward {
+            self.engine.go_forward(tab)
+        } else {
+            self.engine.go_back(tab)
+        })
+    }
+
+    fn extension_resident_tab(&self, profile: ProfileId, tab: ItemId) -> Option<&TabState> {
+        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+            return None;
+        }
+        let state = self.items.tab(tab)?;
+        if !state.has_view()
+            || matches!(
+                self.residency.discard_probes.get(&tab),
+                Some(PendingDiscardProbe::Closing { .. })
+            )
+        {
+            return None;
+        }
+        Some(state)
+    }
+
+    fn extension_tab_mutation_refusal(
+        &self,
+        profile: ProfileId,
+        tab: ItemId,
+    ) -> ExtensionBrowserRequestSettlement {
+        if self.profile_of_item(tab) == Some(profile)
+            && self.item_in_focused_scope(tab)
+            && self.items.tab(tab).is_some()
+        {
+            rejected(ExtensionBrowserRequestRejection::TabDiscarded)
+        } else {
+            rejected(ExtensionBrowserRequestRejection::InvalidScope)
+        }
+    }
+}
+
+const fn settle_native_dispatch(dispatch: NativeDispatch) -> ExtensionBrowserRequestSettlement {
+    match dispatch {
+        NativeDispatch::Scheduled => applied(),
+        NativeDispatch::Rejected => {
+            rejected(ExtensionBrowserRequestRejection::NativeAdmissionFailed)
+        }
+        NativeDispatch::Unsupported => rejected(ExtensionBrowserRequestRejection::Unsupported),
     }
 }
 

@@ -710,10 +710,12 @@ impl Engine for FakeEngine {
     fn stop(&self, _id: ItemId) -> NativeDispatch {
         self.native_admission()
     }
-    fn go_back(&self, _id: ItemId) -> NativeDispatch {
+    fn go_back(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("back {id}"));
         self.native_admission()
     }
-    fn go_forward(&self, _id: ItemId) -> NativeDispatch {
+    fn go_forward(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("forward {id}"));
         self.native_admission()
     }
     fn close(&self, id: ItemId) -> NativeDispatch {

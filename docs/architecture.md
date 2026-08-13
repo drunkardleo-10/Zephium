@@ -597,6 +597,16 @@ called for the discarded tab and that the diagnostic advances. Extension
 enumeration therefore cannot resurrect a renderer or defeat §7's memory
 policy.
 
+Extension-driven tab reload and back/forward traversal use the same bounded
+native-completion broker as create, activate, navigate, and close. Shell owns
+the mutation decision and dispatches only to an already-resident tab in the
+focused profile scope; a discarded or in-flight-discard tab receives a typed
+`TabDiscarded` refusal and is never recreated. History traversal also requires
+the latest Shell-owned native history flag. Cache-bypassing reload remains an
+explicit refusal because the cross-platform Engine contract currently exposes
+ordinary reload only; approximating it would report semantics the browser did
+not apply.
+
 Native grant replacement is an exact, bounded main-thread operation. The pure
 grant compiler supplies the complete allowed API/host set; the adapter clears
 all four WebKit permission dictionaries, revokes every bounded prior key

@@ -126,3 +126,79 @@ fn prebootstrap_browser_request_is_explicitly_rejected() {
         )]
     );
 }
+
+#[test]
+fn extension_navigation_controls_require_a_resident_tab_and_never_wake_a_discard() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "extension-controls.example");
+    let profile = shell.windows.focused().unwrap().profile;
+    activate_extensions(&mut shell, profile);
+    shell.handle(Command::Engine(EngineEvent::NavState {
+        id: tab,
+        can_go_back: true,
+        can_go_forward: true,
+    }));
+
+    for (id, action) in [
+        (1, ExtensionBrowserRequestAction::ReloadTab { tab }),
+        (2, ExtensionBrowserRequestAction::GoBack { tab }),
+        (3, ExtensionBrowserRequestAction::GoForward { tab }),
+    ] {
+        shell.handle(Command::Engine(request(profile, id, action)));
+    }
+
+    let calls = engine.calls();
+    assert!(calls.iter().any(|call| call == &format!("reload {tab}")));
+    assert!(calls.iter().any(|call| call == &format!("back {tab}")));
+    assert!(calls.iter().any(|call| call == &format!("forward {tab}")));
+    assert!(engine.extension_browser_settlements()[..3]
+        .iter()
+        .all(|(_, _, settlement)| matches!(
+            settlement,
+            ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
+        )));
+
+    assert!(shell.items.mark_view_discarded(tab));
+    let native_calls_before = engine.calls().len();
+    shell.handle(Command::Engine(request(
+        profile,
+        4,
+        ExtensionBrowserRequestAction::ReloadTab { tab },
+    )));
+
+    assert_eq!(engine.calls().len(), native_calls_before);
+    assert_eq!(
+        engine.extension_browser_settlements()[3].2,
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::TabDiscarded)
+    );
+    assert!(!shell.items.tab(tab).unwrap().has_view());
+}
+
+#[test]
+fn extension_history_unavailable_is_not_reported_as_applied() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "extension-history.example");
+    let profile = shell.windows.focused().unwrap().profile;
+    activate_extensions(&mut shell, profile);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        1,
+        ExtensionBrowserRequestAction::GoBack { tab },
+    )));
+
+    assert_eq!(
+        engine.extension_browser_settlements()[0].2,
+        ExtensionBrowserRequestSettlement::Rejected(
+            ExtensionBrowserRequestRejection::InvalidRequest
+        )
+    );
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("back {tab}")));
+}

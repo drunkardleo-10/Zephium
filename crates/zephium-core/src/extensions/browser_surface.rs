@@ -104,6 +104,15 @@ pub enum ExtensionBrowserRequestAction {
         tab: ItemId,
         url: Arc<str>,
     },
+    ReloadTab {
+        tab: ItemId,
+    },
+    GoBack {
+        tab: ItemId,
+    },
+    GoForward {
+        tab: ItemId,
+    },
 }
 
 impl ExtensionBrowserRequestAction {
@@ -111,7 +120,11 @@ impl ExtensionBrowserRequestAction {
         match self {
             Self::CreateTab { url, .. } => url.as_deref(),
             Self::LoadTabUrl { url, .. } => Some(url),
-            Self::ActivateTab { .. } | Self::CloseTab { .. } => None,
+            Self::ActivateTab { .. }
+            | Self::CloseTab { .. }
+            | Self::ReloadTab { .. }
+            | Self::GoBack { .. }
+            | Self::GoForward { .. } => None,
         }
     }
 }
@@ -136,6 +149,9 @@ pub enum ExtensionBrowserRequestRejection {
     CapacityExceeded,
     NativeAdmissionFailed,
     ShuttingDown,
+    /// The logical tab exists, but its native renderer was discarded. An
+    /// extension request must never resurrect it behind the residency policy.
+    TabDiscarded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

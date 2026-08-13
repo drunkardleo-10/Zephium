@@ -401,6 +401,7 @@ fn browser_request_error(reason: ExtensionBrowserRequestRejection) -> Retained<N
         ExtensionBrowserRequestRejection::CapacityExceeded => 5,
         ExtensionBrowserRequestRejection::NativeAdmissionFailed => 6,
         ExtensionBrowserRequestRejection::ShuttingDown => 7,
+        ExtensionBrowserRequestRejection::TabDiscarded => 8,
     };
     let domain = NSString::from_str(BROWSER_REQUEST_ERROR_DOMAIN);
     // SAFETY: domain and numeric code are bounded constants and no user data
@@ -434,6 +435,12 @@ mod tests {
         broker.discarded_tab_webview_refusals.set(u64::MAX);
         broker.record_discarded_tab_webview_refusal();
         assert_eq!(broker.discarded_tab_webview_refusals(), u64::MAX);
+    }
+
+    #[test]
+    fn discarded_tab_rejection_has_a_stable_native_error_code() {
+        let error = browser_request_error(ExtensionBrowserRequestRejection::TabDiscarded);
+        assert_eq!(error.code(), 8);
     }
 
     #[test]

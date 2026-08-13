@@ -259,6 +259,13 @@ impl ProductBrowserModel {
                 }
                 ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
             }
+            ExtensionBrowserRequestAction::ReloadTab { .. }
+            | ExtensionBrowserRequestAction::GoBack { .. }
+            | ExtensionBrowserRequestAction::GoForward { .. } => {
+                ExtensionBrowserRequestSettlement::Rejected(
+                    ExtensionBrowserRequestRejection::Unsupported,
+                )
+            }
         };
         if engine.settle_extension_browser_request(self.profile, request_id, settlement)
             != NativeDispatch::Scheduled

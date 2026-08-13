@@ -243,11 +243,21 @@ define_class!(
         #[unsafe(method(reloadFromOrigin:forWebExtensionContext:completionHandler:))]
         fn reload(
             &self,
-            _from_origin: bool,
+            from_origin: bool,
             context: &WKWebExtensionContext,
             completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            self.reject_unsupported(context, completion);
+            if from_origin {
+                // `Engine::reload` does not represent cache bypass. Calling it
+                // here would claim stronger semantics than Zephium applied.
+                self.reject_unsupported(context, completion);
+                return;
+            }
+            self.begin_unit_action(
+                context,
+                completion,
+                ExtensionBrowserRequestAction::ReloadTab { tab: self.id() },
+            );
         }
 
         #[unsafe(method(goBackForWebExtensionContext:completionHandler:))]
@@ -256,7 +266,11 @@ define_class!(
             context: &WKWebExtensionContext,
             completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            self.reject_unsupported(context, completion);
+            self.begin_unit_action(
+                context,
+                completion,
+                ExtensionBrowserRequestAction::GoBack { tab: self.id() },
+            );
         }
 
         #[unsafe(method(goForwardForWebExtensionContext:completionHandler:))]
@@ -265,7 +279,11 @@ define_class!(
             context: &WKWebExtensionContext,
             completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            self.reject_unsupported(context, completion);
+            self.begin_unit_action(
+                context,
+                completion,
+                ExtensionBrowserRequestAction::GoForward { tab: self.id() },
+            );
         }
 
         #[unsafe(method(setParentTab:forWebExtensionContext:completionHandler:))]
@@ -331,6 +349,21 @@ define_class!(
 );
 
 impl BrowserTab {
+    fn begin_unit_action(
+        &self,
+        context: &WKWebExtensionContext,
+        completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        action: ExtensionBrowserRequestAction,
+    ) {
+        if !self.ivars().broker.accepts(None, context) {
+            self.ivars()
+                .broker
+                .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
+            return;
+        }
+        self.ivars().broker.begin_unit(action, completion);
+    }
+
     fn new(
         mtm: MainThreadMarker,
         projected: &zephium_core::extensions::ExtensionBrowserTab,
