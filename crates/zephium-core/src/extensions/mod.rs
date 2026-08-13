@@ -121,10 +121,11 @@ pub use package_pin::{
     ExtensionPackagePinRuntimeParts,
 };
 pub use runtime::{
-    ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness,
-    ExtensionOperationAuthorityDenial, ExtensionRuntimeEligibility,
-    ExtensionRuntimeEligibilityDenial, ExtensionRuntimeGrantRebindDenial,
-    ExtensionRuntimeGrantRebindRefusal, ExtensionRuntimeOperationAuthority,
+    ExtensionActiveTabGrantWitness, ExtensionCommittedRuntimeEligibilityError,
+    ExtensionDocumentAuthorityWitness, ExtensionOperationAuthorityDenial,
+    ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial,
+    ExtensionRuntimeGrantRebindDenial, ExtensionRuntimeGrantRebindRefusal,
+    ExtensionRuntimeOperationAuthority,
 };
 pub use transient::{
     ExtensionDocumentPurpose, ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration,

@@ -21,7 +21,7 @@ use super::transient::ExtensionRuntimeFingerprintInput;
 use super::{
     ApiPermissionName, ExtensionApiGrantDecision, ExtensionCatalogGenerationRole,
     ExtensionCatalogSetDigest, ExtensionDocumentPurpose, ExtensionGrantAuthority,
-    ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
+    ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision, ExtensionInstall,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
     ExtensionNativeGrantProjection, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipOperation,
@@ -357,6 +357,21 @@ pub enum ExtensionRuntimeEligibilityDenial {
     PrivateBrowsingUnsupported,
 }
 
+/// Structural refusal to project an exact successful grant mutation directly
+/// into runtime eligibility.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum ExtensionCommittedRuntimeEligibilityError {
+    /// Install, manifest, and grant authority do not name one package/install.
+    CohortMismatch,
+    /// Durable user intent no longer requests an enabled runtime.
+    Disabled,
+    /// A required manifest declaration is unexpectedly absent.
+    RequiredAuthorityMissing,
+    /// Private execution has not passed its independent isolation gates.
+    PrivateBrowsingUnsupported,
+}
+
 /// Owned, bounded eligibility projected from one complete atomic store cohort.
 ///
 /// This value pins the exact manifest and grant owners without deep-cloning
@@ -409,6 +424,51 @@ impl ExtensionRuntimeEligibility {
         })
     }
 
+    /// Projects the exact result of one already-committed grant transaction.
+    ///
+    /// This avoids a second Store round trip in the narrow interval where the
+    /// profile grant database has advanced but the native-ownership journal
+    /// and in-memory operation authority have not. All inputs are the owned,
+    /// validated values returned by that transaction plus the same admitted
+    /// manifest. The result remains structural and non-authorizing.
+    pub fn from_committed_grant_authority(
+        profile: ProfileId,
+        catalog_revision: ExtensionInstallCatalogRevision,
+        install: ExtensionInstall,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        grants: ExtensionGrantAuthority,
+        browsing_context: ExtensionGrantBrowsingContext,
+    ) -> Result<Self, ExtensionCommittedRuntimeEligibilityError> {
+        if install.id() != grants.install_id()
+            || install.package() != manifest.package()
+            || grants.package() != manifest.package()
+        {
+            return Err(ExtensionCommittedRuntimeEligibilityError::CohortMismatch);
+        }
+        if !install.desired_enabled() {
+            return Err(ExtensionCommittedRuntimeEligibilityError::Disabled);
+        }
+        if !grants.has_required_api_and_host_grants_for(&manifest) {
+            return Err(ExtensionCommittedRuntimeEligibilityError::RequiredAuthorityMissing);
+        }
+        if browsing_context == ExtensionGrantBrowsingContext::Private {
+            return Err(ExtensionCommittedRuntimeEligibilityError::PrivateBrowsingUnsupported);
+        }
+        let grant_revision = grants.revision();
+        let grant_digest = grants.digest();
+        Ok(Self {
+            profile,
+            catalog_revision,
+            install_id: install.id(),
+            install_revision: install.revision(),
+            grant_revision,
+            grant_digest,
+            browsing_context,
+            manifest,
+            grants: Arc::new(grants),
+        })
+    }
+
     /// Exact durable profile that owns this install and grant snapshot.
     pub const fn profile(&self) -> ProfileId {
         self.profile
@@ -451,6 +511,16 @@ impl ExtensionRuntimeEligibility {
 
     /// Exact admitted structural manifest pinned by the store snapshot.
     pub fn manifest(&self) -> &ExtensionManifestDescriptor {
+        &self.manifest
+    }
+
+    /// Shared exact manifest owner for trusted cross-database validation.
+    ///
+    /// The manifest is immutable and non-authorizing. Returning the retained
+    /// owner avoids reparsing or deep-copying declarations when a serialized
+    /// coordinator must submit the same Store-admitted manifest to another
+    /// durable authority fence.
+    pub fn manifest_arc(&self) -> &Arc<ExtensionManifestDescriptor> {
         &self.manifest
     }
 
@@ -1643,6 +1713,45 @@ mod tests {
             cohort.runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Private),
             Err(ExtensionRuntimeEligibilityDenial::PrivateBrowsingUnsupported)
         ));
+    }
+
+    #[test]
+    fn committed_grant_authority_projects_without_a_second_store_cohort_load() {
+        let profile = ProfileId::from(13);
+        let install_id = ExtensionInstallId::from(17);
+        let manifest = manifest();
+        let install = ExtensionInstall::from_persisted(
+            install_id,
+            ExtensionInstallRevision::new(5).unwrap(),
+            manifest.package().clone(),
+            true,
+        );
+        let grants = ExtensionGrantAuthority::from_persisted(
+            &install,
+            ExtensionGrantRevision::new(7).unwrap(),
+            manifest.package().clone(),
+            vec![ApiPermissionName::parse_exact("activeTab").unwrap()],
+            vec![MatchPattern::parse(ALL_URLS).unwrap()],
+            false,
+            false,
+            &manifest,
+        )
+        .unwrap();
+        let eligibility = ExtensionRuntimeEligibility::from_committed_grant_authority(
+            profile,
+            ExtensionInstallCatalogRevision::new(11).unwrap(),
+            install,
+            Arc::clone(&manifest),
+            grants,
+            ExtensionGrantBrowsingContext::Regular,
+        )
+        .expect("exact committed mutation projects");
+
+        assert_eq!(eligibility.profile(), profile);
+        assert_eq!(eligibility.install_id(), install_id);
+        assert_eq!(eligibility.grant_revision().get(), 7);
+        assert_eq!(eligibility.package(), manifest.package());
+        assert!(Arc::ptr_eq(eligibility.manifest_arc(), &manifest));
     }
 
     #[test]
