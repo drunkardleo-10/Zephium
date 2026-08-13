@@ -11,15 +11,16 @@ use zephium_core::extensions::{
     ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionNativeIncarnation,
     ExtensionNativeNamespaceScope, ExtensionNativeOwnershipApplyError,
     ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
-    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIdentity,
-    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipJournal,
-    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, ExtensionNativeOwnershipMutationKind,
-    ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
-    ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackageRevision, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibilityDenial,
-    ExtensionTreeDigest, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, EXTENSION_SHA256_BYTES,
-    MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
+    ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipGrantRebindCount,
+    ExtensionNativeOwnershipIdentity, ExtensionNativeOwnershipIntent,
+    ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
+    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
+    ExtensionNativeOwnershipMutationKind, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
+    ExtensionPackageKey, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES,
+    EXTENSION_SHA256_BYTES, MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
 };
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
@@ -262,6 +263,7 @@ impl Hub {
         let preparation = match &mutation {
             ExtensionNativeOwnershipJournalMutation::Begin(preparation) => preparation.as_ref(),
             ExtensionNativeOwnershipJournalMutation::Transition { .. }
+            | ExtensionNativeOwnershipJournalMutation::RebindGrants { .. }
             | ExtensionNativeOwnershipJournalMutation::Clear { .. } => {
                 return Ok(ExtensionNativeOwnershipActivationOutcome::Invalid)
             }
@@ -370,6 +372,82 @@ impl Hub {
             .map(map_activation_persistence_outcome)
     }
 
+    pub(crate) fn rebind_extension_native_ownership_grants(
+        &mut self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        owned: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+    ) -> rusqlite::Result<ExtensionNativeOwnershipJournalMutationOutcome> {
+        if self.recovery_required.is_some() {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::SessionRecoveryRequired);
+        }
+        let journal = load_journal(&self.meta)?;
+        if journal.revision() != expected {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        }
+        let Some(entry) = journal.get(owned.key()) else {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        };
+        if entry.cas() != owned {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Conflict {
+                current: journal.revision(),
+            });
+        }
+        if entry.intent() != ExtensionNativeOwnershipIntent::Acquire
+            || entry.phase() != ExtensionNativeOwnershipPhase::NativeOwned
+            || entry.store_grant_revision().next() != Some(store_grant_revision)
+            || entry.grant_digest() == grant_digest
+        {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Invalid);
+        }
+        let profile = entry.key().profile();
+        if !self.registry.contains(&profile) {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::DegradedProfile);
+        }
+        let validation = {
+            let tx = self.profile_conn(profile)?.transaction()?;
+            let validation = validate_activation_cohort(
+                &tx,
+                ActivationCohortFacts {
+                    key: entry.key(),
+                    package: entry.package(),
+                    catalog_revision: entry.store_catalog_revision(),
+                    install_revision: entry.store_install_revision(),
+                    grant_revision: store_grant_revision,
+                    grant_digest,
+                },
+                &manifest,
+            )?;
+            tx.commit()?;
+            validation
+        };
+        if validation.is_err() {
+            // The public journal result has no authority-drift taxonomy.
+            // `Invalid` is definite and forces the caller to reload the exact
+            // catalog/grant cohort before deciding whether to retry.
+            return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Invalid);
+        }
+
+        self.persist_extension_native_ownership_journal(
+            expected,
+            ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                owned,
+                store_grant_revision,
+                grant_digest,
+            ),
+            true,
+        )
+    }
+
     fn validate_extension_native_activation_profile(
         &mut self,
         facts: ActivationCohortFacts<'_>,
@@ -390,7 +468,11 @@ impl Hub {
         fresh_activation_validated: bool,
     ) -> rusqlite::Result<ExtensionNativeOwnershipJournalMutationOutcome> {
         if !fresh_activation_validated
-            && matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_))
+            && matches!(
+                &mutation,
+                ExtensionNativeOwnershipJournalMutation::Begin(_)
+                    | ExtensionNativeOwnershipJournalMutation::RebindGrants { .. }
+            )
         {
             return Ok(ExtensionNativeOwnershipJournalMutationOutcome::Invalid);
         }
@@ -424,6 +506,7 @@ impl Hub {
         let current_revision = current.revision();
         let current_operation_high_water = current.operation_high_water();
         let current_incarnation_high_water = current.native_incarnation_high_water();
+        let current_grant_rebind_count = current.grant_rebind_count();
         if !fresh_activation_validated
             && current.revision() == expected
             && raw_mutation_crosses_fresh_may_own_fence(&current, &mutation)
@@ -467,6 +550,16 @@ impl Hub {
                     .ok_or_else(|| invalid_data("journal transition has no resulting row"))?,
             )?,
             (
+                ExtensionNativeOwnershipMutationKind::RebindGrants,
+                ExtensionNativeOwnershipJournalMutation::RebindGrants { expected, .. },
+            ) => update_entry(
+                &tx,
+                *expected,
+                application
+                    .entry()
+                    .ok_or_else(|| invalid_data("journal grant rebind has no resulting row"))?,
+            )?,
+            (
                 ExtensionNativeOwnershipMutationKind::Clear,
                 ExtensionNativeOwnershipJournalMutation::Clear { expected },
             ) => delete_entry(&tx, *expected)?,
@@ -492,11 +585,13 @@ impl Hub {
             "UPDATE extension_native_ownership_journal_state
              SET revision = ?2,
                  operation_high_water = ?3,
-                 native_incarnation_high_water = ?4
+                 native_incarnation_high_water = ?4,
+                 grant_rebind_count = ?5
              WHERE id = 1
                AND revision = ?1
-               AND operation_high_water = ?5
-               AND native_incarnation_high_water = ?6",
+               AND operation_high_water = ?6
+               AND native_incarnation_high_water = ?7
+               AND grant_rebind_count = ?8",
             params![
                 revision_i64(current_revision.get())?,
                 revision_i64(next.revision().get())?,
@@ -505,8 +600,10 @@ impl Hub {
                     next.native_incarnation_high_water()
                         .map(|value| value.get())
                 )?,
+                revision_i64(next.grant_rebind_count().get())?,
                 high_water_i64(current_operation_high_water.map(|value| value.get()))?,
                 high_water_i64(current_incarnation_high_water.map(|value| value.get()))?,
+                revision_i64(current_grant_rebind_count.get())?,
             ],
         )?;
         if state_updated != 1 {
@@ -519,6 +616,7 @@ impl Hub {
             journal_revision: next.revision(),
             operation_high_water: next.operation_high_water(),
             native_incarnation_high_water: next.native_incarnation_high_water(),
+            grant_rebind_count: next.grant_rebind_count(),
             entry: application.entry().cloned().map(Box::new),
         };
         let committed = tx.commit();
@@ -689,9 +787,43 @@ pub(super) fn has_unresolved_native_ownership_for_install(
     }))
 }
 
+/// Verifies the narrow authority exception used by a runtime-originated
+/// optional-grant patch.
+///
+/// The requester must be the install's only unresolved owner and must already
+/// be positively owned. This forces the service to retire a peer regular or
+/// private context before changing shared grants, while preserving the exact
+/// requester whose JavaScript promise WebKit must settle.
+pub(super) fn has_exact_sole_live_owner(
+    meta: &Connection,
+    profile: ProfileId,
+    install_id: ExtensionInstallId,
+    expected: ExtensionNativeOwnershipEntryCas,
+) -> rusqlite::Result<bool> {
+    let journal = load_journal(meta)?;
+    let mut owners = journal.entries().iter().filter(|entry| {
+        let key = entry.key();
+        key.profile() == profile && key.install_id() == install_id
+    });
+    let Some(owner) = owners.next() else {
+        return Ok(false);
+    };
+    Ok(owners.next().is_none()
+        && owner.cas() == expected
+        && owner.intent() == ExtensionNativeOwnershipIntent::Acquire
+        && owner.phase() == ExtensionNativeOwnershipPhase::NativeOwned)
+}
+
 fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJournal> {
-    let (state_count, revision, operation_high_water, incarnation_high_water): (
+    let (
+        state_count,
+        revision,
+        operation_high_water,
+        incarnation_high_water,
+        grant_rebind_count,
+    ): (
         i64,
+        Option<i64>,
         Option<i64>,
         Option<i64>,
         Option<i64>,
@@ -700,10 +832,19 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
              count(*),
              CASE WHEN count(*) = 1 THEN max(revision) END,
              CASE WHEN count(*) = 1 THEN max(operation_high_water) END,
-             CASE WHEN count(*) = 1 THEN max(native_incarnation_high_water) END
+             CASE WHEN count(*) = 1 THEN max(native_incarnation_high_water) END,
+             CASE WHEN count(*) = 1 THEN max(grant_rebind_count) END
          FROM extension_native_ownership_journal_state",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
     )?;
     if state_count != 1 {
         return Err(invalid_data(
@@ -716,6 +857,10 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
         .ok_or_else(|| invalid_data("native-ownership journal revision is invalid"))?;
     let operation_high_water = decode_operation_high_water(operation_high_water)?;
     let incarnation_high_water = decode_incarnation_high_water(incarnation_high_water)?;
+    let grant_rebind_count = grant_rebind_count
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(ExtensionNativeOwnershipGrantRebindCount::new)
+        .ok_or_else(|| invalid_data("native-ownership grant rebind count is invalid"))?;
 
     let count = conn.query_row(
         "SELECT count(*) FROM extension_native_ownership_journal",
@@ -916,10 +1061,11 @@ fn load_journal(conn: &Connection) -> rusqlite::Result<ExtensionNativeOwnershipJ
             "native-ownership journal changed while loading",
         ));
     }
-    let journal = ExtensionNativeOwnershipJournal::from_persisted(
+    let journal = ExtensionNativeOwnershipJournal::from_persisted_with_grant_rebinds(
         revision,
         operation_high_water,
         incarnation_high_water,
+        grant_rebind_count,
         entries,
     )
     .map_err(|_| invalid_data("native-ownership journal cohort is invalid"))?;
@@ -1187,6 +1333,8 @@ fn update_entry(
         .expected_native_identity()
         .map(|identity| identity.bytes());
     let native_identity = entry.native_identity().map(|identity| identity.bytes());
+    let next_grant_digest = entry.grant_digest().bytes();
+    let expected_grant_digest = expected.grant_digest().bytes();
     let updated = conn.execute(
         "UPDATE extension_native_ownership_journal
          SET revision = ?6,
@@ -1195,13 +1343,17 @@ fn update_entry(
              expected_native_identity_kind = ?10,
              expected_native_identity = ?11,
              native_identity_kind = ?12,
-             native_identity = ?13
+             native_identity = ?13,
+             store_grant_revision = ?14,
+             grant_sha256 = ?15
          WHERE profile_id = ?1
            AND install_id = ?2
            AND browsing_context = ?3
            AND operation = ?4
            AND revision = ?5
-           AND native_incarnation = ?9",
+           AND native_incarnation = ?9
+           AND store_grant_revision = ?16
+           AND grant_sha256 = ?17",
         params![
             key.profile().to_string(),
             &install_id[..],
@@ -1222,6 +1374,10 @@ fn update_entry(
                 .native_identity()
                 .map(|identity| i64::from(identity.persisted_kind())),
             native_identity.as_ref().map(|identity| &identity[..]),
+            revision_i64(entry.store_grant_revision().get())?,
+            &next_grant_digest[..],
+            revision_i64(expected.store_grant_revision().get())?,
+            &expected_grant_digest[..],
         ],
     )?;
     if updated != 1 {
@@ -1238,6 +1394,7 @@ fn delete_entry(
 ) -> rusqlite::Result<()> {
     let key = expected.key();
     let install_id = key.install_id().bytes();
+    let grant_digest = expected.grant_digest().bytes();
     let deleted = conn.execute(
         "DELETE FROM extension_native_ownership_journal
          WHERE profile_id = ?1
@@ -1246,6 +1403,8 @@ fn delete_entry(
            AND operation = ?4
            AND revision = ?5
            AND native_incarnation = ?6
+           AND store_grant_revision = ?7
+           AND grant_sha256 = ?8
            AND intent = 'release'
            AND phase = 'native_absent_release_pending'",
         params![
@@ -1255,6 +1414,8 @@ fn delete_entry(
             revision_i64(expected.operation().get())?,
             revision_i64(expected.revision().get())?,
             revision_i64(expected.native_incarnation().get())?,
+            revision_i64(expected.store_grant_revision().get())?,
+            &grant_digest[..],
         ],
     )?;
     if deleted != 1 {

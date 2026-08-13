@@ -179,6 +179,7 @@ fn apply(
         journal_revision: application.journal().revision(),
         operation_high_water: application.journal().operation_high_water(),
         native_incarnation_high_water: application.journal().native_incarnation_high_water(),
+        grant_rebind_count: application.journal().grant_rebind_count(),
         entry: application.entry().cloned().map(Box::new),
     };
     (application.into_journal(), applied)

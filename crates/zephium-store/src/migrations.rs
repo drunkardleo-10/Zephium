@@ -1156,6 +1156,71 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 15,
+        up: |tx| {
+            tx.execute_batch(
+                // A live native owner can adopt a newly committed optional
+                // grant without changing its lifecycle phase or incarnation.
+                // Record those global-CAS advances independently so the
+                // original lifecycle-history proof remains exact rather than
+                // treating a grant change as a fictional native transition.
+                "ALTER TABLE extension_native_ownership_journal_state
+                 ADD COLUMN grant_rebind_count INTEGER NOT NULL DEFAULT 0
+                     CHECK (grant_rebind_count BETWEEN 0 AND 9223372036854775807);
+
+                 DROP TRIGGER extension_native_ownership_journal_state_reachable;
+                 CREATE TRIGGER extension_native_ownership_journal_state_reachable
+                 BEFORE UPDATE OF revision, operation_high_water,
+                                  native_incarnation_high_water, grant_rebind_count
+                 ON extension_native_ownership_journal_state
+                 BEGIN
+                     SELECT CASE
+                         WHEN NEW.grant_rebind_count > NEW.revision - 1
+                         THEN RAISE(ABORT,
+                             'native-ownership grant rebind history is impossible')
+                         WHEN live_count > NEW.operation_high_water
+                           OR EXISTS (
+                               SELECT 1
+                               FROM extension_native_ownership_journal
+                               WHERE operation > NEW.operation_high_water
+                                  OR native_incarnation > NEW.native_incarnation_high_water
+                                  OR operation >
+                                     (NEW.revision - NEW.grant_rebind_count) - revision
+                           )
+                         THEN RAISE(ABORT,
+                             'native-ownership row exceeds journal authority')
+                         WHEN (NEW.revision - NEW.grant_rebind_count)
+                              - (1 + live_revision_sum) < 0
+                         THEN RAISE(ABORT,
+                             'native-ownership journal history is impossible')
+                         WHEN NEW.operation_high_water - live_count
+                              > ((NEW.revision - NEW.grant_rebind_count)
+                                 - (1 + live_revision_sum)) / 3
+                         THEN RAISE(ABORT,
+                             'native-ownership journal history is too short')
+                         WHEN NEW.operation_high_water - live_count
+                              < ((NEW.revision - NEW.grant_rebind_count)
+                                 - (1 + live_revision_sum)) / 7
+                           OR (
+                               NEW.operation_high_water - live_count
+                               = ((NEW.revision - NEW.grant_rebind_count)
+                                  - (1 + live_revision_sum)) / 7
+                               AND ((NEW.revision - NEW.grant_rebind_count)
+                                    - (1 + live_revision_sum)) % 7 != 0
+                           )
+                         THEN RAISE(ABORT,
+                             'native-ownership journal history is too long')
+                     END
+                     FROM (
+                         SELECT count(*) AS live_count,
+                                coalesce(sum(revision), 0) AS live_revision_sum
+                         FROM extension_native_ownership_journal
+                     );
+                 END;",
+            )
+        },
+    },
 ];
 
 pub static PROFILE: &[Migration] = &[
@@ -2684,7 +2749,7 @@ mod tests {
         )
         .unwrap();
 
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..14]).unwrap();
 
         let seeded: Vec<String> = {
             let mut statement = conn
@@ -2707,6 +2772,67 @@ mod tests {
             14
         );
         assert_eq!(PROFILE.last().map(|migration| migration.version), Some(12));
+    }
+
+    #[test]
+    fn meta_v15_separates_live_grant_rebinds_from_native_lifecycle_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..14]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 3,
+                 operation_high_water = 1,
+                 native_incarnation_high_water = 1",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, &META[..15]).unwrap();
+
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET grant_rebind_count = 1",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE extension_native_ownership_journal
+             SET store_grant_revision = 2,
+                 grant_sha256 = ?1",
+            [vec![8_u8; 32]],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal_state
+             SET revision = 4,
+                 grant_rebind_count = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT revision, grant_rebind_count
+                 FROM extension_native_ownership_journal_state",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (4, 1)
+        );
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state
+                 SET revision = 5",
+                [],
+            )
+            .is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            15
+        );
     }
 
     #[test]

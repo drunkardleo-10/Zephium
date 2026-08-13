@@ -726,6 +726,9 @@ mod tests {
         Clear {
             operation: u64,
         },
+        RebindGrants {
+            operation: u64,
+        },
     }
 
     enum LoadAction {
@@ -811,6 +814,11 @@ mod tests {
                     intent: *intent,
                     phase: *phase,
                 },
+                ExtensionNativeOwnershipJournalMutation::RebindGrants { expected, .. } => {
+                    MutationTrace::RebindGrants {
+                        operation: expected.operation().get(),
+                    }
+                }
                 ExtensionNativeOwnershipJournalMutation::Clear { expected } => {
                     MutationTrace::Clear {
                         operation: expected.operation().get(),
@@ -836,6 +844,7 @@ mod tests {
                 native_incarnation_high_water: application
                     .journal()
                     .native_incarnation_high_water(),
+                grant_rebind_count: application.journal().grant_rebind_count(),
                 entry: application.entry().cloned().map(Box::new),
             };
             *self.durable.borrow_mut() = application.into_journal();

@@ -562,6 +562,7 @@ pub(super) fn requires_fenced_activation(
                 && current.phase() == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
         }),
         ExtensionNativeOwnershipJournalMutation::Transition { .. }
+        | ExtensionNativeOwnershipJournalMutation::RebindGrants { .. }
         | ExtensionNativeOwnershipJournalMutation::Clear { .. } => false,
     }
 }

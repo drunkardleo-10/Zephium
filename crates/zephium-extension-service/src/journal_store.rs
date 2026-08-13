@@ -176,6 +176,7 @@ fn applied_matches(
     applied.journal_revision == predicted.revision()
         && applied.operation_high_water == predicted.operation_high_water()
         && applied.native_incarnation_high_water == predicted.native_incarnation_high_water()
+        && applied.grant_rebind_count == predicted.grant_rebind_count()
         && applied.entry.as_deref() == application.entry()
 }
 
@@ -324,6 +325,7 @@ mod tests {
             journal_revision: application.journal().revision(),
             operation_high_water: application.journal().operation_high_water(),
             native_incarnation_high_water: application.journal().native_incarnation_high_water(),
+            grant_rebind_count: application.journal().grant_rebind_count(),
             entry: application.entry().cloned().map(Box::new),
         };
         (application.into_journal(), applied)

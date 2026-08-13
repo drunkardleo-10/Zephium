@@ -1034,6 +1034,7 @@ mod tests {
                 native_incarnation_high_water: application
                     .journal()
                     .native_incarnation_high_water(),
+                grant_rebind_count: application.journal().grant_rebind_count(),
                 entry: application.entry().cloned().map(Box::new),
             };
             if let Some(entry) = application.entry() {

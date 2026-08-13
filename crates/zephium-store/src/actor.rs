@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
-    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority,
+    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority, ExtensionGrantDigest,
     ExtensionGrantManifestBindings, ExtensionGrantPatch, ExtensionGrantRevision,
     ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
@@ -664,6 +664,16 @@ enum Cmd {
         ExtensionNativeOwnershipMutationPermit,
         ExtensionNativeOwnershipActivationDone,
     ),
+    RebindExtensionNativeOwnershipGrants(
+        ExtensionNativeOwnershipJournalRevision,
+        ExtensionNativeOwnershipEntryCas,
+        ExtensionGrantRevision,
+        ExtensionGrantDigest,
+        Arc<ExtensionManifestDescriptor>,
+        ExtensionGrantRequestPermit,
+        ExtensionNativeOwnershipMutationPermit,
+        ExtensionNativeOwnershipJournalMutationDone,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -919,6 +929,14 @@ impl ExtensionServiceStoreAuthority {
         mutation: ExtensionNativeOwnershipJournalMutation,
         deadline: Instant,
     ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
+        if matches!(
+            &mutation,
+            ExtensionNativeOwnershipJournalMutation::RebindGrants { .. }
+        ) {
+            return ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionNativeOwnershipJournalMutationOutcome::Invalid,
+            );
+        }
         if Instant::now() >= deadline {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1002,6 +1020,38 @@ impl ExtensionServiceStoreAuthority {
                 done,
             )
         {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Rebinds a positively owned runtime row only after Store independently
+    /// verifies the exact newly committed install/grant cohort.
+    pub fn rebind_native_ownership_grants_until(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        owned: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self.store.try_rebind_extension_native_ownership_grants(
+            expected,
+            owned,
+            store_grant_revision,
+            grant_digest,
+            manifest,
+            deadline,
+            done,
+        ) {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
         observe_extension_service_store_call(result, deadline)
@@ -1202,6 +1252,56 @@ impl ExtensionServiceStoreAuthority {
             ExtensionGrantWrite::ApplyPatch {
                 expected: expected_grant,
                 patch,
+            },
+            deadline,
+            done,
+        ) {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Applies one grant-only runtime permission patch while preserving one
+    /// exact native requester.
+    ///
+    /// Store verifies the requester as the install's sole positively-owned
+    /// journal row and binds it to the exact pre-mutation grant authority.
+    /// A changed result deliberately leaves the journal on the old authority:
+    /// the serialized extension service must next commit `RebindGrants`
+    /// before allowing the native permission callback to settle. A crash or
+    /// ambiguous outcome in that interval is safe because the surviving
+    /// native owner is no more privileged than durable profile authority and
+    /// startup reconciliation retires the mismatched row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_live_grant_patch_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+        install: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        expected_grant: ExtensionGrantRevision,
+        patch: ExtensionGrantPatch,
+        owner: ExtensionNativeOwnershipEntryCas,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionGrantMutationOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self.store.try_mutate_extension_grants(
+            profile,
+            expected_catalog,
+            expected_install,
+            install,
+            manifest,
+            ExtensionGrantWrite::ApplyLivePatch {
+                expected: expected_grant,
+                patch,
+                owner,
             },
             deadline,
             done,
@@ -1764,6 +1864,55 @@ impl SqliteStore {
                 expected,
                 preparing,
                 expected_native_identity,
+                manifest,
+                grant_permit,
+                ownership_permit,
+                done,
+            ))
+            .is_ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_rebind_extension_native_ownership_grants(
+        &self,
+        expected: ExtensionNativeOwnershipJournalRevision,
+        owned: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+        done: ExtensionNativeOwnershipJournalMutationDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let mutation = ExtensionNativeOwnershipJournalMutation::rebind_grants(
+            owned,
+            store_grant_revision,
+            grant_digest,
+        );
+        let Some((grant_permit, ownership_permit)) =
+            self.try_acquire_extension_activation_permits(&manifest, mutation.retained_bytes())
+        else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::RebindExtensionNativeOwnershipGrants(
+                expected,
+                owned,
+                store_grant_revision,
+                grant_digest,
                 manifest,
                 grant_permit,
                 ownership_permit,
@@ -2839,6 +2988,31 @@ fn actor(
                             "store: extension native-ownership fenced MayOwn transition failed: {error}"
                         );
                         ExtensionNativeOwnershipActivationOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::RebindExtensionNativeOwnershipGrants(
+                expected,
+                owned,
+                store_grant_revision,
+                grant_digest,
+                manifest,
+                _grant_permit,
+                _ownership_permit,
+                done,
+            )) => {
+                let outcome = match hub.rebind_extension_native_ownership_grants(
+                    expected,
+                    owned,
+                    store_grant_revision,
+                    grant_digest,
+                    manifest,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("store: extension native-ownership grant rebind failed: {error}");
+                        ExtensionNativeOwnershipJournalMutationOutcome::Failed
                     }
                 };
                 done(outcome);

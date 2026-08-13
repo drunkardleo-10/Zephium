@@ -322,6 +322,19 @@ pub enum ExtensionGrantWrite {
         expected: ExtensionGrantRevision,
         patch: ExtensionGrantPatch,
     },
+    /// Applies a grant-only optional-permission patch while one exact native
+    /// owner remains live.
+    ///
+    /// This is a distinct authority path, not an exception to `ApplyPatch`:
+    /// Store implementations must verify that `owner` is the sole unresolved
+    /// row for the install, is positively `NativeOwned`, and is bound to the
+    /// exact pre-mutation grant revision and digest. The resulting owner
+    /// journal rebind is a subsequent fail-closed settlement step.
+    ApplyLivePatch {
+        expected: ExtensionGrantRevision,
+        patch: ExtensionGrantPatch,
+        owner: crate::extensions::ExtensionNativeOwnershipEntryCas,
+    },
 }
 
 /// Conservative maximum logical retained bytes of one grant-write payload.
@@ -348,7 +361,9 @@ impl ExtensionGrantWrite {
                     std::mem::size_of::<ExtensionGrantMutation>()
                 }
             },
-            Self::ApplyPatch { patch, .. } => patch.retained_bytes(),
+            Self::ApplyPatch { patch, .. } | Self::ApplyLivePatch { patch, .. } => {
+                patch.retained_bytes()
+            }
         };
         let retained = std::mem::size_of::<Self>().saturating_add(payload);
         debug_assert!(retained <= MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES);
@@ -488,6 +503,7 @@ pub struct ExtensionNativeOwnershipJournalMutationApplied {
     pub journal_revision: ExtensionNativeOwnershipJournalRevision,
     pub operation_high_water: Option<ExtensionNativeOwnershipOperation>,
     pub native_incarnation_high_water: Option<ExtensionNativeIncarnation>,
+    pub grant_rebind_count: crate::extensions::ExtensionNativeOwnershipGrantRebindCount,
     /// The exact affected row after begin/transition. Clear returns `None`.
     pub entry: Option<Box<ExtensionNativeOwnershipEntry>>,
 }

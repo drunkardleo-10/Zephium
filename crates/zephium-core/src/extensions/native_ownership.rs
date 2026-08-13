@@ -102,6 +102,40 @@ durable_counter!(
     "First persistent native owner incarnation."
 );
 
+/// Number of durable grant-authority rebinds performed without replacing the
+/// corresponding native owner.
+///
+/// Unlike the other journal clocks, zero is meaningful: every journal that
+/// predates live-owner grant upgrades has performed no rebinds. Keeping this
+/// count separate preserves the journal's exact lifecycle-history checks;
+/// grant rebinds advance the global CAS revision but do not invent native
+/// owner transitions or incarnations.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExtensionNativeOwnershipGrantRebindCount(u64);
+
+impl ExtensionNativeOwnershipGrantRebindCount {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(value: u64) -> Option<Self> {
+        if value > MAX_DURABLE_COUNTER {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Self::new(value),
+            None => None,
+        }
+    }
+}
+
 /// Path-free content identity of one exact active or rollback catalog set.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ExtensionCatalogSetDigest([u8; 32]);
@@ -861,6 +895,8 @@ impl ExtensionNativeOwnershipEntry {
             operation: self.operation,
             revision: self.revision,
             native_incarnation: self.native_incarnation,
+            store_grant_revision: self.store_grant_revision,
+            grant_digest: self.grant_digest,
         }
     }
 }
@@ -872,6 +908,8 @@ pub struct ExtensionNativeOwnershipEntryCas {
     operation: ExtensionNativeOwnershipOperation,
     revision: ExtensionNativeOwnershipEntryRevision,
     native_incarnation: ExtensionNativeIncarnation,
+    store_grant_revision: ExtensionGrantRevision,
+    grant_digest: ExtensionGrantDigest,
 }
 
 impl ExtensionNativeOwnershipEntryCas {
@@ -890,6 +928,14 @@ impl ExtensionNativeOwnershipEntryCas {
     pub const fn native_incarnation(self) -> ExtensionNativeIncarnation {
         self.native_incarnation
     }
+
+    pub const fn store_grant_revision(self) -> ExtensionGrantRevision {
+        self.store_grant_revision
+    }
+
+    pub const fn grant_digest(self) -> ExtensionGrantDigest {
+        self.grant_digest
+    }
 }
 
 /// Complete bounded global reconciliation cohort.
@@ -898,6 +944,7 @@ pub struct ExtensionNativeOwnershipJournal {
     revision: ExtensionNativeOwnershipJournalRevision,
     operation_high_water: Option<ExtensionNativeOwnershipOperation>,
     native_incarnation_high_water: Option<ExtensionNativeIncarnation>,
+    grant_rebind_count: ExtensionNativeOwnershipGrantRebindCount,
     entries: Vec<ExtensionNativeOwnershipEntry>,
     retained_bytes: usize,
 }
@@ -909,6 +956,7 @@ impl ExtensionNativeOwnershipJournal {
             revision: ExtensionNativeOwnershipJournalRevision::INITIAL,
             operation_high_water: None,
             native_incarnation_high_water: None,
+            grant_rebind_count: ExtensionNativeOwnershipGrantRebindCount::ZERO,
             entries: Vec::new(),
             retained_bytes: 0,
         }
@@ -926,8 +974,34 @@ impl ExtensionNativeOwnershipJournal {
         native_incarnation_high_water: Option<ExtensionNativeIncarnation>,
         entries: Vec<ExtensionNativeOwnershipEntry>,
     ) -> Result<Self, ExtensionNativeOwnershipJournalError> {
-        if !valid_revision_authority(
+        Self::from_persisted_with_grant_rebinds(
             revision,
+            operation_high_water,
+            native_incarnation_high_water,
+            ExtensionNativeOwnershipGrantRebindCount::ZERO,
+            entries,
+        )
+    }
+
+    /// Reconstructs a journal that may contain live-owner grant rebinds.
+    ///
+    /// The rebind count is a durable history witness. Subtracting it from the
+    /// global revision recovers the lifecycle-only clock validated by the
+    /// original begin/transition/clear state machine.
+    pub fn from_persisted_with_grant_rebinds(
+        revision: ExtensionNativeOwnershipJournalRevision,
+        operation_high_water: Option<ExtensionNativeOwnershipOperation>,
+        native_incarnation_high_water: Option<ExtensionNativeIncarnation>,
+        grant_rebind_count: ExtensionNativeOwnershipGrantRebindCount,
+        entries: Vec<ExtensionNativeOwnershipEntry>,
+    ) -> Result<Self, ExtensionNativeOwnershipJournalError> {
+        let lifecycle_revision = revision
+            .get()
+            .checked_sub(grant_rebind_count.get())
+            .and_then(ExtensionNativeOwnershipJournalRevision::new)
+            .ok_or(ExtensionNativeOwnershipJournalError::InconsistentRevisionAuthority)?;
+        if !valid_revision_authority(
+            lifecycle_revision,
             operation_high_water,
             native_incarnation_high_water,
         ) {
@@ -1018,7 +1092,7 @@ impl ExtensionNativeOwnershipJournal {
                 });
             }
             if u128::from(entry.operation.get()) + u128::from(entry.revision.get())
-                > u128::from(revision.get())
+                > u128::from(lifecycle_revision.get())
             {
                 return Err(ExtensionNativeOwnershipJournalError::EntryAboveJournalRevision);
             }
@@ -1039,7 +1113,7 @@ impl ExtensionNativeOwnershipJournal {
             .checked_add(live_entry_revision_sum)
             .and_then(|value| value.checked_add(cleared_count.checked_mul(7)?))
             .ok_or(ExtensionNativeOwnershipJournalError::RevisionHistoryInconsistent)?;
-        let durable_revision = u128::from(revision.get());
+        let durable_revision = u128::from(lifecycle_revision.get());
         if !(minimum_revision..=maximum_revision).contains(&durable_revision) {
             return Err(ExtensionNativeOwnershipJournalError::RevisionHistoryInconsistent);
         }
@@ -1054,6 +1128,7 @@ impl ExtensionNativeOwnershipJournal {
             revision,
             operation_high_water,
             native_incarnation_high_water,
+            grant_rebind_count,
             entries,
             retained_bytes,
         })
@@ -1069,6 +1144,10 @@ impl ExtensionNativeOwnershipJournal {
 
     pub const fn native_incarnation_high_water(&self) -> Option<ExtensionNativeIncarnation> {
         self.native_incarnation_high_water
+    }
+
+    pub const fn grant_rebind_count(&self) -> ExtensionNativeOwnershipGrantRebindCount {
+        self.grant_rebind_count
     }
 
     pub fn entries(&self) -> &[ExtensionNativeOwnershipEntry] {
@@ -1090,6 +1169,7 @@ impl ExtensionNativeOwnershipJournal {
         self.revision == other.revision
             && self.operation_high_water == other.operation_high_water
             && self.native_incarnation_high_water == other.native_incarnation_high_water
+            && self.grant_rebind_count == other.grant_rebind_count
             && self.entries == other.entries
     }
 
@@ -1246,6 +1326,41 @@ impl ExtensionNativeOwnershipJournal {
                     Some(self.entries[index].clone()),
                 )
             }
+            ExtensionNativeOwnershipJournalMutation::RebindGrants {
+                expected,
+                store_grant_revision,
+                grant_digest,
+            } => {
+                let index = self
+                    .entries
+                    .binary_search_by_key(&expected.key, ExtensionNativeOwnershipEntry::key)
+                    .map_err(|_| ExtensionNativeOwnershipApplyError::Conflict {
+                        current: self.revision,
+                    })?;
+                let current = &self.entries[index];
+                if current.cas() != expected {
+                    return Err(ExtensionNativeOwnershipApplyError::Conflict {
+                        current: self.revision,
+                    });
+                }
+                if current.intent != ExtensionNativeOwnershipIntent::Acquire
+                    || current.phase != ExtensionNativeOwnershipPhase::NativeOwned
+                    || current.store_grant_revision.next() != Some(store_grant_revision)
+                    || current.grant_digest == grant_digest
+                {
+                    return Err(ExtensionNativeOwnershipApplyError::Invalid);
+                }
+                self.grant_rebind_count = self
+                    .grant_rebind_count
+                    .next()
+                    .ok_or(ExtensionNativeOwnershipApplyError::RevisionExhausted)?;
+                self.entries[index].store_grant_revision = store_grant_revision;
+                self.entries[index].grant_digest = grant_digest;
+                (
+                    ExtensionNativeOwnershipMutationKind::RebindGrants,
+                    Some(self.entries[index].clone()),
+                )
+            }
             ExtensionNativeOwnershipJournalMutation::Clear { expected } => {
                 let index = self
                     .entries
@@ -1307,6 +1422,17 @@ pub enum ExtensionNativeOwnershipJournalMutation {
         attach_expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
         /// Attach once; `None` preserves the currently persisted identity.
         attach_native_identity: Option<ExtensionNativeOwnershipIdentity>,
+    },
+    /// Rebinds one live native owner to the next exact durable grant
+    /// authority without changing its lifecycle phase or incarnation.
+    ///
+    /// This mutation is valid only for a positively observed `NativeOwned`
+    /// acquisition. The old grant revision and digest are part of `expected`,
+    /// so a replay or stale runtime request conflicts before authority moves.
+    RebindGrants {
+        expected: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
     },
     /// Clear only a definite-native-absence, release-pending row.
     Clear {
@@ -1375,12 +1501,24 @@ impl ExtensionNativeOwnershipJournalMutation {
         Self::Clear { expected }
     }
 
+    pub const fn rebind_grants(
+        expected: ExtensionNativeOwnershipEntryCas,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+    ) -> Self {
+        Self::RebindGrants {
+            expected,
+            store_grant_revision,
+            grant_digest,
+        }
+    }
+
     /// Conservative heap-plus-inline actor admission charge.
     pub const fn retained_bytes(&self) -> usize {
         let bytes = size_of::<Self>()
             + match self {
                 Self::Begin(_) => size_of::<ExtensionNativeOwnershipPreparation>(),
-                Self::Transition { .. } | Self::Clear { .. } => 0,
+                Self::Transition { .. } | Self::RebindGrants { .. } | Self::Clear { .. } => 0,
             };
         debug_assert!(bytes <= MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES);
         bytes
@@ -1389,7 +1527,9 @@ impl ExtensionNativeOwnershipJournalMutation {
     pub const fn profile(&self) -> ProfileId {
         match self {
             Self::Begin(preparation) => preparation.key.profile(),
-            Self::Transition { expected, .. } | Self::Clear { expected } => expected.key.profile(),
+            Self::Transition { expected, .. }
+            | Self::RebindGrants { expected, .. }
+            | Self::Clear { expected } => expected.key.profile(),
         }
     }
 }
@@ -1399,6 +1539,7 @@ impl ExtensionNativeOwnershipJournalMutation {
 pub enum ExtensionNativeOwnershipMutationKind {
     Begin,
     Transition,
+    RebindGrants,
     Clear,
 }
 
@@ -1717,6 +1858,36 @@ mod tests {
             .unwrap()
     }
 
+    fn native_owned(value: u128) -> ExtensionNativeOwnershipJournalApplication {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), value);
+        let preparing = begun.entry().unwrap().clone();
+        let begun_revision = begun.journal.revision();
+        let may_own = begun
+            .journal
+            .apply(
+                begun_revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
+                    preparing.cas(),
+                    expected_native_identity(ExtensionRuntimeBackendTarget::MacosNative),
+                ),
+            )
+            .unwrap();
+        let pending = may_own.entry().unwrap().clone();
+        let may_own_revision = may_own.journal.revision();
+        may_own
+            .journal
+            .apply(
+                may_own_revision,
+                ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                    pending.cas(),
+                    ExtensionNativeOwnershipIntent::Acquire,
+                    ExtensionNativeOwnershipPhase::NativeOwned,
+                    native_identity(ExtensionRuntimeBackendTarget::MacosNative),
+                ),
+            )
+            .unwrap()
+    }
+
     fn persisted_entry(
         operation: u64,
         incarnation: u64,
@@ -1919,9 +2090,125 @@ mod tests {
         different_incarnation_high_water.native_incarnation_high_water = None;
         assert!(!journal.exactly_matches_durable_state(&different_incarnation_high_water));
 
+        let mut different_rebind_count = accounting_variant.clone();
+        different_rebind_count.grant_rebind_count =
+            ExtensionNativeOwnershipGrantRebindCount::new(1).unwrap();
+        assert!(!journal.exactly_matches_durable_state(&different_rebind_count));
+
         let mut different_entries = accounting_variant;
         different_entries.entries.clear();
         assert!(!journal.exactly_matches_durable_state(&different_entries));
+    }
+
+    #[test]
+    fn native_owned_grant_rebind_advances_only_exact_grant_authority() {
+        let owned = native_owned(1);
+        let before = owned.entry().unwrap().clone();
+        let stale = before.cas();
+        let next_grant = before.store_grant_revision().next().unwrap();
+        let next_digest = ExtensionGrantDigest::from_bytes([7; 32]);
+        let owned_revision = owned.journal.revision();
+        let rebound = owned
+            .journal
+            .apply(
+                owned_revision,
+                ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                    stale,
+                    next_grant,
+                    next_digest,
+                ),
+            )
+            .unwrap();
+        let after = rebound.entry().unwrap();
+
+        assert_eq!(rebound.journal.revision().get(), 5);
+        assert_eq!(
+            rebound.journal.grant_rebind_count(),
+            ExtensionNativeOwnershipGrantRebindCount::new(1).unwrap()
+        );
+        assert_eq!(after.operation(), before.operation());
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.native_incarnation(), before.native_incarnation());
+        assert_eq!(after.native_identity(), before.native_identity());
+        assert_eq!(after.store_grant_revision(), next_grant);
+        assert_eq!(after.grant_digest(), next_digest);
+        assert_ne!(after.cas(), stale);
+
+        assert_eq!(
+            rebound.journal.clone().apply(
+                rebound.journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                    stale,
+                    next_grant.next().unwrap(),
+                    ExtensionGrantDigest::from_bytes([8; 32]),
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Conflict {
+                current: rebound.journal.revision(),
+            })
+        );
+
+        assert!(
+            ExtensionNativeOwnershipJournal::from_persisted_with_grant_rebinds(
+                rebound.journal.revision(),
+                rebound.journal.operation_high_water(),
+                rebound.journal.native_incarnation_high_water(),
+                rebound.journal.grant_rebind_count(),
+                rebound.journal.entries().to_vec(),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            ExtensionNativeOwnershipJournal::from_persisted(
+                rebound.journal.revision(),
+                rebound.journal.operation_high_water(),
+                rebound.journal.native_incarnation_high_water(),
+                rebound.journal.entries().to_vec(),
+            ),
+            Err(ExtensionNativeOwnershipJournalError::RevisionHistoryInconsistent)
+        );
+    }
+
+    #[test]
+    fn grant_rebind_refuses_unowned_skipped_or_unchanged_authority() {
+        let begun = begin(ExtensionNativeOwnershipJournal::empty(), 1);
+        let preparing = begun.entry().unwrap();
+        assert_eq!(
+            begun.journal.clone().apply(
+                begun.journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                    preparing.cas(),
+                    preparing.store_grant_revision().next().unwrap(),
+                    ExtensionGrantDigest::from_bytes([7; 32]),
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Invalid)
+        );
+
+        let owned = native_owned(2);
+        let current = owned.entry().unwrap();
+        assert_eq!(
+            owned.journal.clone().apply(
+                owned.journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                    current.cas(),
+                    ExtensionGrantRevision::new(current.store_grant_revision().get() + 2).unwrap(),
+                    ExtensionGrantDigest::from_bytes([7; 32]),
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Invalid)
+        );
+        assert_eq!(
+            owned.journal.clone().apply(
+                owned.journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                    current.cas(),
+                    current.store_grant_revision().next().unwrap(),
+                    current.grant_digest(),
+                ),
+            ),
+            Err(ExtensionNativeOwnershipApplyError::Invalid)
+        );
     }
 
     #[test]

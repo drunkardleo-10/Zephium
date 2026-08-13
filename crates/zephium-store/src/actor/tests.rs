@@ -29,7 +29,10 @@ use zephium_core::permissions::{
     PageOrigin, PagePermissionCatalogRevision, PagePermissionChange, PagePermissionGrantRevision,
     PagePermissionKind, PagePermissionPatch, RememberedPagePermission,
 };
-use zephium_core::ports::store::{ExtensionGrantConflict, ExtensionNativeOwnershipActivationStale};
+use zephium_core::ports::store::{
+    ExtensionGrantConflict, ExtensionNativeOwnershipActivationStale,
+    ExtensionNativeOwnershipJournalMutationApplied,
+};
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
 use zephium_core::split::{Axis, Pane};
@@ -650,6 +653,50 @@ fn transition_native_ownership_to_may_own(
         ExtensionServiceStoreCallOutcome::Completed(outcome) => outcome,
         other => panic!("native-ownership fenced MayOwn transition did not settle: {other:?}"),
     }
+}
+
+fn acquire_native_owned(
+    authority: &ExtensionServiceStoreAuthority,
+    initial: ExtensionNativeOwnershipJournalRevision,
+    fixture: &NativeOwnershipActivationFixture,
+) -> ExtensionNativeOwnershipJournalMutationApplied {
+    let ExtensionNativeOwnershipActivationOutcome::Applied(begun) =
+        begin_native_ownership(authority, initial, fixture)
+    else {
+        panic!("native owner begin was not applied");
+    };
+    let preparing = begun.entry.as_deref().unwrap();
+    let ExtensionNativeOwnershipActivationOutcome::Applied(may_own) =
+        transition_native_ownership_to_may_own(
+            authority,
+            begun.journal_revision,
+            preparing.cas(),
+            Some(expected_native_ownership_identity()),
+            fixture,
+        )
+    else {
+        panic!("native owner may-own transition was not applied");
+    };
+    let pending = may_own.entry.as_deref().unwrap();
+    let ExtensionNativeOwnershipJournalMutationOutcome::Applied(owned) =
+        mutate_native_ownership_journal(
+            authority,
+            may_own.journal_revision,
+            ExtensionNativeOwnershipJournalMutation::transition_with_native_identity(
+                pending.cas(),
+                ExtensionNativeOwnershipIntent::Acquire,
+                ExtensionNativeOwnershipPhase::NativeOwned,
+                ExtensionNativeOwnershipIdentity::parse(
+                    ExtensionRuntimeBackendTarget::MacosNative,
+                    "abcdefghijklmnopabcdefghijklmnop",
+                )
+                .unwrap(),
+            ),
+        )
+    else {
+        panic!("native owner owned transition was not applied");
+    };
+    owned
 }
 
 fn expected_native_ownership_identity() -> ExtensionExpectedNativeOwnershipIdentity {
@@ -2885,6 +2932,185 @@ fn unresolved_native_ownership_interlocks_changed_install_and_grant_writes_until
 }
 
 #[test]
+fn live_grant_patch_requires_and_rebinds_one_exact_owned_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(910);
+
+    {
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        store.save_session(sample());
+        assert!(store.flush());
+        let authority = store.claim_extension_service_store_authority().unwrap();
+        let fixture = prepare_native_ownership_activation(
+            store.as_ref(),
+            profile,
+            install_id,
+            83,
+            ExtensionRuntimeBackendTarget::MacosNative,
+        );
+        let owned = acquire_native_owned(
+            &authority,
+            ExtensionNativeOwnershipJournalRevision::INITIAL,
+            &fixture,
+        );
+        let owner_before = owned.entry.as_deref().unwrap().clone();
+
+        assert_eq!(
+            mutate_extension_grants(
+                store.as_ref(),
+                profile,
+                fixture.preparation.store_catalog_revision(),
+                fixture.preparation.store_install_revision(),
+                install_id,
+                fixture.manifest.clone(),
+                ExtensionGrantWrite::ApplyLivePatch {
+                    expected: fixture.preparation.store_grant_revision(),
+                    patch: ExtensionGrantPatch::new(vec![
+                        ExtensionGrantMutation::SetPrivateAccess { granted: true },
+                    ])
+                    .unwrap(),
+                    owner: owner_before.cas(),
+                },
+            ),
+            ExtensionGrantMutationOutcome::Invalid,
+            "live authority path accepted a non-permission grant target"
+        );
+
+        let ExtensionGrantMutationOutcome::Applied(granted) = mutate_extension_grants(
+            store.as_ref(),
+            profile,
+            fixture.preparation.store_catalog_revision(),
+            fixture.preparation.store_install_revision(),
+            install_id,
+            fixture.manifest.clone(),
+            ExtensionGrantWrite::ApplyLivePatch {
+                expected: fixture.preparation.store_grant_revision(),
+                patch: ExtensionGrantPatch::new(vec![ExtensionGrantMutation::SetApi {
+                    name: ApiPermissionName::parse_exact("tabs").unwrap(),
+                    granted: true,
+                }])
+                .unwrap(),
+                owner: owner_before.cas(),
+            },
+        ) else {
+            panic!("exact live optional grant was not committed");
+        };
+        assert_eq!(
+            granted.authority.revision(),
+            fixture.preparation.store_grant_revision().next().unwrap()
+        );
+        assert!(granted
+            .authority
+            .persistence_projection()
+            .api_grants()
+            .any(|name| name.as_str() == "tabs"));
+
+        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(before_rebind) =
+            load_native_ownership_journal(&authority)
+        else {
+            panic!("journal did not load after live grant commit");
+        };
+        assert_eq!(before_rebind.grant_rebind_count().get(), 0);
+        assert_eq!(before_rebind.entries()[0], owner_before);
+        assert_eq!(
+            mutate_extension_grants(
+                store.as_ref(),
+                profile,
+                fixture.preparation.store_catalog_revision(),
+                fixture.preparation.store_install_revision(),
+                install_id,
+                fixture.manifest.clone(),
+                ExtensionGrantWrite::ApplyLivePatch {
+                    expected: granted.authority.revision(),
+                    patch: ExtensionGrantPatch::new(vec![ExtensionGrantMutation::SetHost {
+                        pattern: MatchPattern::parse("https://optional.example/*").unwrap(),
+                        granted: true,
+                    }])
+                    .unwrap(),
+                    owner: owner_before.cas(),
+                },
+            ),
+            ExtensionGrantMutationOutcome::RuntimeOwnershipConflict,
+            "stale journal authority admitted a second live grant"
+        );
+
+        assert_eq!(
+            mutate_native_ownership_journal(
+                &authority,
+                before_rebind.revision(),
+                ExtensionNativeOwnershipJournalMutation::rebind_grants(
+                    owner_before.cas(),
+                    granted.authority.revision(),
+                    granted.authority.digest(),
+                ),
+            ),
+            ExtensionNativeOwnershipJournalMutationOutcome::Invalid,
+            "generic journal mutation bypassed the Store grant-cohort fence"
+        );
+        assert_eq!(
+            authority.rebind_native_ownership_grants_until(
+                before_rebind.revision(),
+                owner_before.cas(),
+                granted.authority.revision(),
+                zephium_core::extensions::ExtensionGrantDigest::from_bytes([99; 32]),
+                fixture.manifest.clone(),
+                Instant::now() + STORE_RPC_TIMEOUT,
+            ),
+            ExtensionServiceStoreCallOutcome::Completed(
+                ExtensionNativeOwnershipJournalMutationOutcome::Invalid
+            ),
+            "fenced rebind accepted authority not present in the profile Store"
+        );
+        let ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionNativeOwnershipJournalMutationOutcome::Applied(rebound),
+        ) = authority.rebind_native_ownership_grants_until(
+            before_rebind.revision(),
+            owner_before.cas(),
+            granted.authority.revision(),
+            granted.authority.digest(),
+            fixture.manifest.clone(),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        )
+        else {
+            panic!("live native owner grant rebind was not committed");
+        };
+        let owner_after = rebound.entry.as_deref().unwrap();
+        assert_eq!(rebound.grant_rebind_count.get(), 1);
+        assert_eq!(owner_after.operation(), owner_before.operation());
+        assert_eq!(owner_after.revision(), owner_before.revision());
+        assert_eq!(
+            owner_after.native_incarnation(),
+            owner_before.native_incarnation()
+        );
+        assert_eq!(
+            owner_after.store_grant_revision(),
+            granted.authority.revision()
+        );
+        assert_eq!(owner_after.grant_digest(), granted.authority.digest());
+
+        assert_eq!(
+            store.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    let reopened = Arc::new(SqliteStore::open(dir.path()).unwrap());
+    let authority = reopened.claim_extension_service_store_authority().unwrap();
+    let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(reloaded) =
+        load_native_ownership_journal(&authority)
+    else {
+        panic!("rebound journal did not survive restart");
+    };
+    assert_eq!(reloaded.grant_rebind_count().get(), 1);
+    assert_eq!(reloaded.entries()[0].store_grant_revision().get(), 2);
+    assert_eq!(
+        reopened.shutdown_until(Instant::now() + DEFAULT_FLUSH_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+}
+
+#[test]
 fn native_ownership_may_own_fence_revalidates_after_catalog_drift() {
     let profile = ProfileId::from(1);
     let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -3194,12 +3420,14 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn mutate_native_ownership_until(",
         "pub fn begin_native_ownership_until(",
         "pub fn transition_native_ownership_to_may_own_until(",
+        "pub fn rebind_native_ownership_grants_until(",
         "pub fn load_install_catalog_until(",
         "pub fn provision_install_until(",
         "pub fn set_install_enabled_until(",
         "pub fn delete_install_until(",
         "pub fn load_grant_cohort_until(",
         "pub fn apply_grant_patch_until(",
+        "pub fn apply_live_grant_patch_until(",
     ] {
         assert_eq!(
             surface.matches(required).count(),
@@ -3215,12 +3443,12 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 12,
+        public_items, 14,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
     assert!(!surface.contains("pub fn mutate_extension_grant"));
-    assert_eq!(surface.matches(".try_mutate_extension_grants(").count(), 1);
+    assert_eq!(surface.matches(".try_mutate_extension_grants(").count(), 2);
 }
 
 #[test]

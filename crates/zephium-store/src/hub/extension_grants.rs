@@ -192,7 +192,7 @@ impl Hub {
             return Ok(ExtensionGrantMutationOutcome::Invalid);
         }
 
-        let (authority, persistence) = match write {
+        let (authority, persistence, live_owner_validated) = match write {
             ExtensionGrantWrite::Initialize { authority } => {
                 if current_grant_revision.is_some() {
                     return Ok(ExtensionGrantMutationOutcome::Conflict(
@@ -211,7 +211,7 @@ impl Hub {
                 else {
                     return Ok(ExtensionGrantMutationOutcome::Invalid);
                 };
-                (verified, GrantPersistence::Initialize)
+                (verified, GrantPersistence::Initialize, false)
             }
             ExtensionGrantWrite::Apply { expected, mutation } => {
                 let Some(current) = load_authority(&tx, install, &manifest)? else {
@@ -243,7 +243,7 @@ impl Hub {
                     GrantPersistence::None
                 };
                 let authority = application.into_authority();
-                (authority, persistence)
+                (authority, persistence, false)
             }
             ExtensionGrantWrite::ApplyPatch { expected, patch } => {
                 let Some(current) = load_authority(&tx, install, &manifest)? else {
@@ -271,7 +271,58 @@ impl Hub {
                     GrantPersistence::None
                 };
                 let authority = application.into_authority();
-                (authority, persistence)
+                (authority, persistence, false)
+            }
+            ExtensionGrantWrite::ApplyLivePatch {
+                expected,
+                patch,
+                owner,
+            } => {
+                if owner.key().profile() != profile
+                    || owner.key().install_id() != install_id
+                    || !patch.changes().iter().all(|mutation| {
+                        matches!(
+                            mutation,
+                            ExtensionGrantMutation::SetApi { granted: true, .. }
+                                | ExtensionGrantMutation::SetHost { granted: true, .. }
+                        )
+                    })
+                {
+                    return Ok(ExtensionGrantMutationOutcome::Invalid);
+                }
+                let Some(current) = load_authority(&tx, install, &manifest)? else {
+                    return Ok(ExtensionGrantMutationOutcome::Uninitialized);
+                };
+                if owner.store_grant_revision() != current.revision()
+                    || owner.grant_digest() != current.digest()
+                    || !super::native_ownership::has_exact_sole_live_owner(
+                        meta, profile, install_id, owner,
+                    )?
+                {
+                    return Ok(ExtensionGrantMutationOutcome::RuntimeOwnershipConflict);
+                }
+                let application = match current.apply_patch(expected, &manifest, patch) {
+                    Ok(application) => application,
+                    Err(ExtensionGrantApplyError::RevisionConflict { current, .. }) => {
+                        return Ok(ExtensionGrantMutationOutcome::Conflict(
+                            ExtensionGrantConflict::new(
+                                catalog.revision(),
+                                Some(install.revision()),
+                                Some(current),
+                            ),
+                        ));
+                    }
+                    Err(ExtensionGrantApplyError::RevisionExhausted) => {
+                        return Ok(ExtensionGrantMutationOutcome::RevisionExhausted)
+                    }
+                    Err(_) => return Ok(ExtensionGrantMutationOutcome::Invalid),
+                };
+                let persistence = if application.changed() {
+                    GrantPersistence::Patch { expected }
+                } else {
+                    GrantPersistence::None
+                };
+                (application.into_authority(), persistence, true)
             }
         };
 
@@ -285,9 +336,11 @@ impl Hub {
             ));
         }
 
-        if super::native_ownership::has_unresolved_native_ownership_for_install(
-            meta, profile, install_id,
-        )? {
+        if !live_owner_validated
+            && super::native_ownership::has_unresolved_native_ownership_for_install(
+                meta, profile, install_id,
+            )?
+        {
             return Ok(ExtensionGrantMutationOutcome::RuntimeOwnershipConflict);
         }
 
