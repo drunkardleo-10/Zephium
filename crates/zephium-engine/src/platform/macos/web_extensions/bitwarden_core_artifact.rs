@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,7 +21,6 @@ use objc2_web_kit::{
     WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use wry::WebViewBuilderExtMacos as _;
 use zephium_extension_package::{
     parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex,
@@ -181,7 +180,7 @@ fn admit_artifact(root: &Path) -> Result<AdmittedArtifact, String> {
     let index = CanonicalExtensionTreeIndex::parse_canonical(&index_bytes)
         .map_err(|error| format!("Bitwarden probe artifact tree index is invalid: {error}"))?;
     let extension_root = root.join(EXTENSION_DIRECTORY);
-    verify_closed_tree(&extension_root, &index)?;
+    super::artifact_tree::verify_closed_tree(&extension_root, &index, "Bitwarden Core")?;
 
     let tree_sha256 = lower_hex(index.tree_sha256().as_bytes());
     let index_sha256 = lower_hex(index.index_sha256().as_bytes());
@@ -241,86 +240,6 @@ fn validate_artifact_root_inventory(root: &Path) -> Result<(), String> {
         return Err("Bitwarden probe artifact root inventory is not closed".into());
     }
     Ok(())
-}
-
-fn verify_closed_tree(root: &Path, index: &CanonicalExtensionTreeIndex) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(root)
-        .map_err(|error| format!("cannot inspect Bitwarden extension root: {error}"))?;
-    if !metadata.is_dir() {
-        return Err("Bitwarden extension root is not a directory".into());
-    }
-    let mut actual = BTreeSet::new();
-    collect_tree_paths(root, Path::new(""), 0, &mut actual)?;
-    let expected = index
-        .files()
-        .iter()
-        .map(|file| file.path().as_str().to_owned())
-        .collect::<BTreeSet<_>>();
-    if actual != expected {
-        return Err("Bitwarden extension tree differs from its closed index".into());
-    }
-    for expected in index.files() {
-        let path = root.join(expected.path().as_str());
-        let bytes = read_bounded_file(&path, expected.length(), expected.path().as_str())?;
-        if bytes.len() as u64 != expected.length()
-            || Sha256::digest(&bytes).as_slice() != expected.sha256()
-        {
-            return Err(format!(
-                "Bitwarden extension file differs from its closed index: {}",
-                expected.path().as_str()
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn collect_tree_paths(
-    root: &Path,
-    relative: &Path,
-    depth: usize,
-    files: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    if depth > 32 {
-        return Err("Bitwarden extension tree exceeds the path-depth ceiling".into());
-    }
-    for entry in fs::read_dir(root.join(relative))
-        .map_err(|error| format!("cannot enumerate Bitwarden extension tree: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("cannot read extension-tree entry: {error}"))?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| "Bitwarden extension tree contains a non-UTF-8 path".to_owned())?;
-        let child = relative.join(name);
-        let encoded = encode_relative_path(&child)?;
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| format!("cannot inspect extension-tree entry {encoded}: {error}"))?;
-        if metadata.is_dir() {
-            collect_tree_paths(root, &child, depth + 1, files)?;
-        } else if metadata.is_file() {
-            files.insert(encoded);
-        } else {
-            return Err("Bitwarden extension tree contains a special entry".into());
-        }
-    }
-    Ok(())
-}
-
-fn encode_relative_path(path: &Path) -> Result<String, String> {
-    let mut encoded = String::new();
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            return Err("Bitwarden extension tree contains a non-relative path".into());
-        };
-        let component = component
-            .to_str()
-            .ok_or_else(|| "Bitwarden extension tree contains a non-UTF-8 path".to_owned())?;
-        if !encoded.is_empty() {
-            encoded.push('/');
-        }
-        encoded.push_str(component);
-    }
-    Ok(encoded)
 }
 
 fn read_bounded_file(path: &Path, max_bytes: u64, description: &str) -> Result<Vec<u8>, String> {

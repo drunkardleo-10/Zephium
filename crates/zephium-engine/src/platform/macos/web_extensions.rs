@@ -5,11 +5,13 @@
 //! point. Passing it proves the native backend behavior, but does not provision
 //! a product extension catalog or complete the user-facing extension feature.
 
+mod artifact_tree;
 mod bitwarden_contract;
 mod bitwarden_core_artifact;
 mod persistent_runtime;
 mod profile_isolation;
 mod resource_transport;
+mod stock_password_manager;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -519,6 +521,13 @@ pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
 
 pub(crate) fn run_bitwarden_core_probe(artifact: &Path) -> Result<bool, String> {
     bitwarden_core_artifact::run(artifact)
+}
+
+pub(crate) fn run_stock_password_manager_probe(
+    extension: &Path,
+    tree_index: &Path,
+) -> Result<bool, String> {
+    stock_password_manager::run(extension, tree_index)
 }
 
 pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
@@ -2118,6 +2127,7 @@ fn respond_to_fixture_request(
                 cross_origin.ok_or_else(|| "main fixture server has no cross origin".to_owned())?;
             main_page(run, cross_origin)
         }
+        "/login" => password_manager_login_page(run),
         "/frame/same" => child_page("same", run),
         "/frame/cross" => child_page("cross", run),
         "/excluded/frame" => child_page("excluded", run),
@@ -2127,6 +2137,7 @@ fn respond_to_fixture_request(
         return Err("fixture response exceeded bound".into());
     }
     let status = if path == "/main"
+        || path == "/login"
         || path == "/frame/same"
         || path == "/frame/cross"
         || path == "/excluded/frame"
@@ -2142,6 +2153,18 @@ fn respond_to_fixture_request(
     stream
         .write_all(response.as_bytes())
         .map_err(|error| format!("cannot write fixture response: {error}"))
+}
+
+fn password_manager_login_page(run: &str) -> String {
+    let run = serde_json::to_string(run).expect("bounded run identifier is serializable");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>login fixture</title></head>
+        <body><main><form id="login-form" action="/accepted" method="post">
+        <label for="username">Email</label><input id="username" name="username" type="email" autocomplete="username">
+        <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+        <button type="submit">Sign in</button></form></main>
+        <script>globalThis.__zephiumPasswordManagerRun = {run};</script></body></html>"#
+    )
 }
 
 fn child_page(role: &str, run: &str) -> String {

@@ -6255,6 +6255,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-web-kit",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

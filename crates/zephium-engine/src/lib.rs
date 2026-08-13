@@ -56,6 +56,21 @@ pub fn run_macos_bitwarden_core_probe(artifact: &std::path::Path) -> Result<bool
     platform::macos::run_bitwarden_core_probe(artifact)
 }
 
+/// Executes an exact, stock password-manager compatibility artifact through
+/// the public macOS extension runtime without modifying its resources.
+///
+/// This probe-only API accepts only the pinned tree encoded by its diagnostic
+/// contract. It grants no package, catalog, or product authority and is absent
+/// from ordinary builds.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_stock_password_manager_probe(
+    extension: &std::path::Path,
+    tree_index: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_stock_password_manager_probe(extension, tree_index)
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

@@ -14,6 +14,7 @@ native-isolation-probes = []
 native-web-extension-probes = [
     "dep:tempfile",
     "dep:sha2",
+    "dep:serde",
     "dep:zephium-extension-package",
     "objc2-web-kit/WKWebExtension",
     "objc2-web-kit/WKWebExtensionAction",
@@ -52,6 +53,11 @@ path = "src/bin/macos_bitwarden_core_probe.rs"
 required-features = ["native-web-extension-probes"]
 
 [[bin]]
+name = "macos-stock-password-manager-probe"
+path = "src/bin/macos_stock_password_manager_probe.rs"
+required-features = ["native-web-extension-probes"]
+
+[[bin]]
 name = "macos-web-extension-resource-probe"
 path = "src/bin/macos_web_extension_resource_probe.rs"
 required-features = ["native-web-extension-probes"]
@@ -61,6 +67,7 @@ zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true
 wry.workspace = true
 serde_json.workspace = true
+serde = { workspace = true, optional = true }
 sha2 = { version = "=0.10.9", optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
