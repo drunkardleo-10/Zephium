@@ -483,6 +483,20 @@ file reads are bounded, and canonical file paths must remain beneath the
 admitted root. This protects release operators from building a drifted or
 partially inspected tree; it is not confinement against a malicious process
 running as the release user.
+Chrome-package acquisition is likewise separate from archive materialization.
+The pure CRX3 boundary bounds the signed header, protobuf fields, proof count,
+proof components, and total payload before cryptography; verifies every
+recognized RSA/ECDSA proof; and requires one unambiguous developer proof whose
+key digest derives both the signed CRX identifier and the catalog-expected
+identifier. A valid unrelated publisher proof cannot substitute for that
+developer identity. The offline probe materializer consumes only the verified
+ZIP payload and preflights the complete central-directory inventory before
+writing: encryption, links, special entries, nonportable names, duplicate or
+case-colliding paths, file/directory shape conflicts, and file/tree expansion
+budget violations fail closed. Its private output retains an incomplete marker
+until every bounded ordinary file is durably written. These commands remain
+diagnostic and cannot mint a catalog release, materialization receipt, lease,
+grant, or runtime authority.
 The first macOS vertical-slice overlay is deliberately non-product. It fixes
 the absent `ExecutionWorld` enum and offscreen fallback, but removes public
 inline-menu pages and forces that UI path closed because WebKit does not enforce

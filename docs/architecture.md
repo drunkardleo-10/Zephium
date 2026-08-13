@@ -551,9 +551,12 @@ gates are documented in
 The WebExtensions API is a browser-layer compatibility product, not a feature
 the native engines provide uniformly. Zephium does not claim extension
 installation, API mediation, userscripts, or Chrome/Firefox compatibility in
-the current tree. The exact initial compatibility target is one pinned
-**Bitwarden Core** build with a written supported/degraded/unsupported matrix,
-not an open-store or general-parity promise.
+the current tree. The product target is a curated, package-neutral MV3
+compatibility surface. Pinned **Bitwarden Core** and stock third-party
+artifacts are adversarial acceptance contracts used to expose platform gaps;
+they are not product dependencies and no target-specific branch belongs in
+ordinary browser code. An open store or general-parity promise remains outside
+the initial release.
 
 Delivery is layered and measured:
 
@@ -1011,9 +1014,14 @@ static/dynamic script loaded, but fails the 12-second executable-popup deadline
 while importing the 7.04 MiB SDK WebAssembly module. WebKit serves the private
 extension resource with a MIME type that rejects streaming compilation; the
 vendor webpack fallback is allowed to run, but does not settle within the UX
-deadline on the reviewed machine. This is a release blocker and resource-budget
-input, not authority to increase the timeout, preload a hidden view, install a
-global fetch shim, or claim Bitwarden compatibility.
+deadline on the reviewed machine. Three uncontended release-build repetitions
+on August 13, 2026 reproduced the same `sdk-import` / `streaming-rejected`
+terminal state in 12.92–13.32 seconds, at 115–119 MB maximum resident set and
+approximately 110.5–111.0 MB peak footprint for the probe process. The blocker
+is therefore stable on the exercised machine rather than a contention
+artifact. It is a release blocker and resource-budget input, not authority to
+increase the timeout, preload a hidden view, install a global fetch shim, or
+claim Bitwarden compatibility.
 
 The separate feature-gated `macos-web-extension-resource-probe` closes the
 public `baseURL` plus `WKURLSchemeHandler` hypothesis with a Zephium-owned MV3
@@ -1032,6 +1040,45 @@ it does not claim that future WebKit releases cannot add a supported transport.
 The stock Bitwarden deadline therefore remains blocked unless upstream output
 changes, WebKit changes its private loader, or a separately approved sealed
 adaptation removes the dependency on that resource behavior.
+
+The package-neutral Chrome acquisition boundary now authenticates CRX3 before
+materialization. It bounds the package and protobuf header, verifies every
+recognized RSA/ECDSA proof, requires the signed developer proof to derive the
+declared and expected Chrome identifier, and exposes only the authenticated ZIP
+payload. The offline probe materializer then preflights every archive entry,
+rejects encryption, links, special files, nonportable paths, cross-platform
+collisions, file/directory conflicts, duplicate entries, and decompression
+budget violations before writing into a private, incomplete-marked,
+no-replace tree. A canonical closed-tree index is still diagnostic evidence;
+catalog release authority, a materialization receipt, and a live lease remain
+separate requirements.
+
+The second stock-manager gate uses the unmodified Chrome Web Store CRX for
+[Proton Pass 1.38.2](https://chromewebstore.google.com/detail/proton-pass-free-password/ghmbeldphafepmbegfdlkpapadhbakde)
+(`ghmbeldphafepmbegfdlkpapadhbakde`). Its authenticated CRX
+SHA-256 is
+`2cc54d72218fe09081e8e38261ae0f16aca51c62722828f46a33109f88c7c679`;
+the exact 275-file, 20,124,326-byte tree is fixed by the probe contract. WebKit
+parses and loads the manifest, creates the context and action popover, and
+executes enough stock popup JavaScript to populate the application root.
+However, it reports `WKWebExtensionContextErrorDomain` code 6 (background
+content failed to load), the stock content scripts produce no login-field or
+inline-root effect, and the popup does not establish a usable runtime contract
+under the probe. Controller, context, page, popup, and routing objects release
+after unload, but the nonpersistent website data store remains retained beyond
+the five-second error-path teardown budget; repeated failing activation must
+therefore stay disabled until that lifecycle is bounded. This proves that this
+raw stock Chrome package is not usable on the exercised WKWebExtension runtime.
+It does **not** prove that Safari-authored packages or a reviewed
+package-neutral compatibility transform are impossible.
+
+Both third-party contracts stay feature-gated and confer
+`product_authority=false`. Zephium must not hardcode either manager into the
+production runtime or redistribute modified third-party bytes by accident. The
+next macOS runtime gate is a generic, deterministic compatibility transform and
+capability-classification boundary; only after that boundary proves a viable
+stock-package path should permission and management UX present such a package
+as installable.
 
 ---
 
