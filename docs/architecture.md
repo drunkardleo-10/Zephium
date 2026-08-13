@@ -620,6 +620,20 @@ final absence. The production macOS adapter reaches this boundary only through
 authenticated package, grant, ownership-journal, and operation authority
 reconstructed inside the serialized extension service.
 
+The same identity rule applies to runtime `permissions.request()`. Grant
+revision and digest are inputs to the runtime fingerprint, durable native
+ownership row, native grant snapshot, and operation authority. A delegate may
+therefore never persist a grant and patch only `WKWebExtensionContext`, nor may
+it return an allowed set before those authorities agree. Runtime optional
+permission requests remain denied until the serialized coordinator implements
+a crash-consistent upgrade protocol and a live gate proves its WebKit promise
+semantics. That protocol must either atomically supersede every fingerprint-
+bound authority around a verified complete live native replacement, or retire
+the old owner before persistence and prove that WebKit can truthfully settle
+the originating request across replacement. Live context grant replacement
+remains useful for native behavioral verification, but is not durable product
+authority by itself.
+
 The controller registry now separates persistent namespace identity from
 quiescence. View construction and exact controller borrowing revalidate the
 profile identifier, persistent controller configuration, and the exact
