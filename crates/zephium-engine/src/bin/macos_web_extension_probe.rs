@@ -10,11 +10,20 @@ fn main() {
     let callback_cohort = arguments
         .iter()
         .any(|argument| argument == "--permission-callback-cohort-gate");
-    if interactive_permissions && callback_cohort {
+    let replacement_settlement = arguments
+        .iter()
+        .any(|argument| argument == "--permission-replacement-settlement-gate");
+    if usize::from(interactive_permissions)
+        + usize::from(callback_cohort)
+        + usize::from(replacement_settlement)
+        > 1
+    {
         eprintln!("choose only one interactive permission gate");
         std::process::exit(2);
     }
-    let result = if callback_cohort {
+    let result = if replacement_settlement {
+        zephium_engine::run_macos_web_extension_permission_replacement_settlement_probe()
+    } else if callback_cohort {
         zephium_engine::run_macos_web_extension_permission_callback_cohort_probe()
     } else if interactive_permissions {
         zephium_engine::run_macos_web_extension_permission_probe()

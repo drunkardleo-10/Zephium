@@ -54,6 +54,8 @@ pub(crate) use web_extensions::run_web_extension_permission_callback_cohort_prob
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_web_extension_permission_probe;
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_permission_replacement_settlement_probe;
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_web_extension_probe;
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 

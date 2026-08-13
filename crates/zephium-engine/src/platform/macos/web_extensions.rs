@@ -545,6 +545,7 @@ struct ProbeTeardown {
     runtime_permission_status: &'static str,
     runtime_permission_readback: String,
     runtime_permission_callbacks_coalesced_before_settlement: bool,
+    runtime_permission_replacement_settlement_stranded: bool,
     operating_system: String,
 }
 
@@ -560,11 +561,16 @@ pub(crate) fn run_web_extension_permission_callback_cohort_probe() -> Result<boo
     run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::CallbackCohort)
 }
 
+pub(crate) fn run_web_extension_permission_replacement_settlement_probe() -> Result<bool, String> {
+    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::ReplacementSettlement)
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RuntimePermissionProbeMode {
     None,
     Full,
     CallbackCohort,
+    ReplacementSettlement,
 }
 
 impl RuntimePermissionProbeMode {
@@ -592,11 +598,12 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
             teardown.runtime_permission_callbacks_coalesced_before_settlement,
+            teardown.runtime_permission_replacement_settlement_stranded,
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
             teardown.bitwarden_dynamic_resource_url,
@@ -966,7 +973,18 @@ fn run_supported_probe(
             tab_protocol,
             &run_loop,
             &permission_request_state,
-            permission_mode == RuntimePermissionProbeMode::CallbackCohort,
+            match permission_mode {
+                RuntimePermissionProbeMode::Full => {
+                    permission_requests::PermissionRequestRunMode::Full
+                }
+                RuntimePermissionProbeMode::CallbackCohort => {
+                    permission_requests::PermissionRequestRunMode::CallbackCohort
+                }
+                RuntimePermissionProbeMode::ReplacementSettlement => {
+                    permission_requests::PermissionRequestRunMode::ReplacementSettlement
+                }
+                RuntimePermissionProbeMode::None => unreachable!("interactive mode checked above"),
+            },
         )?
     } else {
         permission_requests::PermissionRequestEvidence {
@@ -974,6 +992,7 @@ fn run_supported_probe(
             extension_views: Vec::new(),
             readback: "interactive-not-run".to_owned(),
             callbacks_coalesced_before_settlement: false,
+            replacement_settlement_stranded: false,
         }
     };
     let runtime_permission_contexts = permission_request_evidence.contexts.len();
@@ -1403,10 +1422,13 @@ fn run_supported_probe(
             RuntimePermissionProbeMode::None => "interactive-not-run",
             RuntimePermissionProbeMode::Full => "passed",
             RuntimePermissionProbeMode::CallbackCohort => "callback-cohort-passed",
+            RuntimePermissionProbeMode::ReplacementSettlement => "replacement-settlement-stranded",
         },
         runtime_permission_readback: permission_request_evidence.readback,
         runtime_permission_callbacks_coalesced_before_settlement: permission_request_evidence
             .callbacks_coalesced_before_settlement,
+        runtime_permission_replacement_settlement_stranded: permission_request_evidence
+            .replacement_settlement_stranded,
         operating_system,
     })
 }

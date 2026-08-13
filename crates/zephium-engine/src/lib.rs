@@ -55,6 +55,14 @@ pub fn run_macos_web_extension_permission_callback_cohort_probe() -> Result<bool
     platform::macos::run_web_extension_permission_callback_cohort_probe()
 }
 
+/// Tests whether an outstanding WebKit permission promise survives replacing
+/// its exact native context before delegate settlement.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_permission_replacement_settlement_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_permission_replacement_settlement_probe()
+}
+
 /// Executes the non-product macOS extension-resource transport capability gate.
 ///
 /// A successful result means the current behavior was classified exactly: the

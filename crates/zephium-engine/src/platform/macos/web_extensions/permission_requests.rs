@@ -29,6 +29,14 @@ const OPTIONAL_HOST_PATTERN: &str = "https://optional.zephium.invalid/*";
 const MAX_REQUEST_ENTRIES: usize = 8;
 const INTERACTIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 const CALLBACK_COHORT_OBSERVATION_WINDOW: Duration = Duration::from_secs(1);
+const REPLACEMENT_SETTLEMENT_OBSERVATION_WINDOW: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum PermissionRequestRunMode {
+    Full,
+    CallbackCohort,
+    ReplacementSettlement,
+}
 
 type PermissionCompletion = RcBlock<dyn Fn(NonNull<NSSet<WKWebExtensionPermission>>, *mut NSDate)>;
 type PatternCompletion = RcBlock<dyn Fn(NonNull<NSSet<WKWebExtensionMatchPattern>>, *mut NSDate)>;
@@ -81,6 +89,7 @@ pub(super) struct PermissionRequestProbe {
     deferred_pattern: RefCell<Option<DeferredPatternCompletion>>,
     deferred_since: Cell<Option<Instant>>,
     callbacks_coalesced_before_settlement: Cell<bool>,
+    defer_for_replacement: Cell<bool>,
     failure: RefCell<Option<String>>,
 }
 
@@ -239,10 +248,15 @@ impl PermissionRequestProbe {
             return;
         }
         self.callbacks_coalesced_before_settlement.set(true);
-        self.complete_deferred();
+        if !self.defer_for_replacement.get() {
+            self.complete_deferred();
+        }
     }
 
     fn release_deferred_if_observation_elapsed(&self) {
+        if self.defer_for_replacement.get() {
+            return;
+        }
         if self
             .deferred_since
             .get()
@@ -266,6 +280,12 @@ impl PermissionRequestProbe {
                 .completion
                 .call((NonNull::from(&*pending.requested), std::ptr::null_mut()));
         }
+    }
+
+    fn cohort_is_ready(&self) -> bool {
+        self.callbacks_coalesced_before_settlement.get()
+            && self.deferred_permission.borrow().is_some()
+            && self.deferred_pattern.borrow().is_some()
     }
 
     fn validate_callbacks(&self, policy: ResponsePolicy) -> Result<(), String> {
@@ -304,6 +324,7 @@ pub(super) struct PermissionRequestEvidence {
     pub(super) extension_views: Vec<Weak<objc2_web_kit::WKWebView>>,
     pub(super) readback: String,
     pub(super) callbacks_coalesced_before_settlement: bool,
+    pub(super) replacement_settlement_stranded: bool,
 }
 
 pub(super) fn write_fixture(path: &std::path::Path) -> Result<(), String> {
@@ -394,7 +415,7 @@ pub(super) fn run(
     tab: &ProtocolObject<dyn WKWebExtensionTab>,
     run_loop: &NSRunLoop,
     state: &Rc<PermissionRequestProbe>,
-    callback_cohort_only: bool,
+    mode: PermissionRequestRunMode,
 ) -> Result<PermissionRequestEvidence, String> {
     validate_declaration(extension)?;
     let mtm = MainThreadMarker::new()
@@ -402,15 +423,19 @@ pub(super) fn run(
     let mut contexts = Vec::with_capacity(3);
     let mut extension_views = Vec::with_capacity(3);
     let mut readbacks = Vec::with_capacity(3);
-    let policies: &[ResponsePolicy] = if callback_cohort_only {
-        &[ResponsePolicy::AllowAll]
-    } else {
+    let mut replacement_settlement_stranded = false;
+    let policies: &[ResponsePolicy] = if mode == PermissionRequestRunMode::Full {
         &[
             ResponsePolicy::Deny,
             ResponsePolicy::ApiOnly,
             ResponsePolicy::AllowAll,
         ]
+    } else {
+        &[ResponsePolicy::AllowAll]
     };
+    state
+        .defer_for_replacement
+        .set(mode == PermissionRequestRunMode::ReplacementSettlement);
 
     for &policy in policies {
         let identifier = format!(
@@ -485,24 +510,66 @@ pub(super) fn run(
             "native-probe-runtime-permission: click Request for policy={}",
             policy.identifier_suffix()
         );
-        wait_for_badge(
-            &context,
-            &action,
-            &native_page,
-            policy.expected_badge(),
-            run_loop,
-            state,
-            INTERACTIVE_TIMEOUT,
-        )?;
+        let mut replacement = None;
+        if mode == PermissionRequestRunMode::ReplacementSettlement {
+            wait_for_deferred_cohort(&context, state, run_loop, INTERACTIVE_TIMEOUT)?;
+            super::unload_context(controller, &context, &identifier)?;
+            let replacement_identifier = format!("{identifier}-replacement");
+            let replacement_context = super::new_context(extension, &replacement_identifier)?;
+            let _replacement_grants = crate::platform::macos::extensions::apply_probe_grants(
+                &replacement_context,
+                &[crate::platform::macos::extensions::MacosNativeApiPermission::ClipboardWrite],
+                &[OPTIONAL_HOST_PATTERN],
+                false,
+            )
+            .map_err(|error| format!("replacement permission grants failed: {error}"))?;
+            super::load_context(controller, &replacement_context, &replacement_identifier)?;
+            state.complete_deferred();
+            match observe_extension_page_settlement(
+                &context,
+                &native_page,
+                policy.expected_badge(),
+                run_loop,
+                REPLACEMENT_SETTLEMENT_OBSERVATION_WINDOW,
+            )? {
+                ReplacementSettlementObservation::Stranded => {
+                    replacement_settlement_stranded = true;
+                }
+                ReplacementSettlementObservation::Settled => {
+                    return Err(
+                        "runtime permission promise unexpectedly survived native owner replacement; re-evaluate the live-upgrade protocol"
+                            .into(),
+                    );
+                }
+            }
+            replacement = Some((replacement_context, replacement_identifier));
+        } else {
+            wait_for_badge(
+                &context,
+                &action,
+                &native_page,
+                policy.expected_badge(),
+                run_loop,
+                state,
+                INTERACTIVE_TIMEOUT,
+            )?;
+        }
         state.validate_callbacks(policy)?;
-        readbacks.push(validate_readback(&context, policy)?);
+        readbacks.push(validate_readback(
+            replacement
+                .as_ref()
+                .map_or(&*context, |(replacement, _)| &**replacement),
+            policy,
+        )?);
         super::validate_context_errors(&context, "runtime permission probe")?;
 
         drop(native_page);
         drop(page);
         window.close();
         drop(window);
-        super::unload_context(controller, &context, &identifier)?;
+        if mode != PermissionRequestRunMode::ReplacementSettlement {
+            super::unload_context(controller, &context, &identifier)?;
+        }
         crate::platform::macos::extensions::clear_all_probe_grants(&context).map_err(|error| {
             format!(
                 "runtime permission {} cleanup failed: {error}",
@@ -510,6 +577,13 @@ pub(super) fn run(
             )
         })?;
         contexts.push(Weak::from_retained(&context));
+        if let Some((replacement, replacement_identifier)) = replacement {
+            super::unload_context(controller, &replacement, &replacement_identifier)?;
+            crate::platform::macos::extensions::clear_all_probe_grants(&replacement).map_err(
+                |error| format!("replacement runtime permission cleanup failed: {error}"),
+            )?;
+            contexts.push(Weak::from_retained(&replacement));
+        }
         drop(action);
         drop(context);
         super::drain_run_loop_once(run_loop);
@@ -520,7 +594,62 @@ pub(super) fn run(
         extension_views,
         readback: readbacks.join(","),
         callbacks_coalesced_before_settlement: state.callbacks_coalesced_before_settlement.get(),
+        replacement_settlement_stranded,
     })
+}
+
+fn wait_for_deferred_cohort(
+    context: &WKWebExtensionContext,
+    state: &PermissionRequestProbe,
+    run_loop: &NSRunLoop,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if state.cohort_is_ready() {
+            return Ok(());
+        }
+        super::validate_context_errors(context, "runtime permission callback cohort")?;
+        if Instant::now() >= deadline {
+            return Err("runtime permission callbacks did not form a deferred cohort".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplacementSettlementObservation {
+    Settled,
+    Stranded,
+}
+
+fn observe_extension_page_settlement(
+    context: &WKWebExtensionContext,
+    extension_page: &objc2_web_kit::WKWebView,
+    expected: &str,
+    run_loop: &NSRunLoop,
+    timeout: Duration,
+) -> Result<ReplacementSettlementObservation, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let title = unsafe { extension_page.title() }.map(|title| title.to_string());
+        if title.as_deref() == Some(expected) {
+            return Ok(ReplacementSettlementObservation::Settled);
+        }
+        if title
+            .as_deref()
+            .is_some_and(|title| title == "MISM" || title.starts_with("ERR:"))
+        {
+            return Err(format!(
+                "runtime permission promise failed after native owner replacement: title={title:?}"
+            ));
+        }
+        super::validate_context_errors(context, "runtime permission replacement settlement")?;
+        if Instant::now() >= deadline {
+            return Ok(ReplacementSettlementObservation::Stranded);
+        }
+        super::drain_run_loop_once(run_loop);
+    }
 }
 
 fn interactive_window(mtm: MainThreadMarker) -> Result<objc2::rc::Retained<NSWindow>, String> {
