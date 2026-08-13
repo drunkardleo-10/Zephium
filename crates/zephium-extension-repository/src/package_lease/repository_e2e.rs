@@ -46,12 +46,13 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeHostActivationBindingError, ExtensionRuntimeHostActivationContext,
     ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError,
     ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
-    ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
-    ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
-    ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
-    ExtensionRuntimeLifecyclePort, ExtensionRuntimeNativeIdentityExpectation,
-    ExtensionRuntimeOwnerAddress, ExtensionRuntimeOwnershipDisposition,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeOwnershipPort, ExtensionRuntimeResourcePlan,
+    ExtensionRuntimeHostGrantRebindPortRefusal, ExtensionRuntimeHostLifecyclePort,
+    ExtensionRuntimeHostOwnershipPort, ExtensionRuntimeHostPublicationPort,
+    ExtensionRuntimeHostPublicationPortRefusal, ExtensionRuntimeHostRecoveryContext,
+    ExtensionRuntimeHostRegistryGeneration, ExtensionRuntimeLifecyclePort,
+    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeOwnerAddress,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeOwnershipPort, ExtensionRuntimeResourcePlan,
     ExtensionRuntimeRetirementDisposition, ExtensionRuntimeRetirementSettlement,
     ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
@@ -1004,6 +1005,37 @@ impl ExtensionRuntimeHostPublicationPort for SuccessfulCompatibilityPublication 
         }
         self.authority = Some(authority);
         Ok(())
+    }
+
+    fn rebind_operation_authority(
+        &mut self,
+        owner: ExtensionRuntimeOwnerAddress,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        current_entry: &ExtensionNativeOwnershipEntry,
+        rebound_entry: &ExtensionNativeOwnershipEntry,
+        eligibility: ExtensionRuntimeEligibility,
+    ) -> Result<(), ExtensionRuntimeHostGrantRebindPortRefusal> {
+        if owner != self.owner || generation != self.generation {
+            return Err(ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                eligibility,
+            ));
+        }
+        let Some(authority) = self.authority.as_mut() else {
+            return Err(ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                ExtensionRuntimeHostBindError::InternalInvariant,
+                eligibility,
+            ));
+        };
+        authority
+            .try_rebind_grants(current_entry, rebound_entry, eligibility)
+            .map(|_| ())
+            .map_err(|refusal| {
+                ExtensionRuntimeHostGrantRebindPortRefusal::new(
+                    ExtensionRuntimeHostBindError::InternalInvariant,
+                    refusal.into_eligibility(),
+                )
+            })
     }
 
     fn reclaim_operation_authority(
@@ -4244,18 +4276,25 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
                 ),
                 (
                     "tabs".to_owned(),
-                    ExtensionNativeGrantRequirement::Required,
-                    ExtensionNativeGrantDecision::Granted,
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
                 ),
             ]
         );
         assert_eq!(
             observation.hosts,
-            vec![(
-                "http://127.0.0.1/*".to_owned(),
-                ExtensionNativeGrantRequirement::Required,
-                ExtensionNativeGrantDecision::Granted,
-            )]
+            vec![
+                (
+                    "http://127.0.0.1/*".to_owned(),
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "https://optional.example/*".to_owned(),
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+            ]
         );
         assert!(!observation.file_scheme_access);
         assert!(!observation.private_context_access);
@@ -4385,18 +4424,25 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
                 ),
                 (
                     "tabs".to_owned(),
-                    ExtensionNativeGrantRequirement::Required,
-                    ExtensionNativeGrantDecision::Granted,
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
                 ),
             ]
         );
         assert_eq!(
             observation.hosts,
-            vec![(
-                "http://127.0.0.1/*".to_owned(),
-                ExtensionNativeGrantRequirement::Required,
-                ExtensionNativeGrantDecision::Granted,
-            )]
+            vec![
+                (
+                    "http://127.0.0.1/*".to_owned(),
+                    ExtensionNativeGrantRequirement::Required,
+                    ExtensionNativeGrantDecision::Granted,
+                ),
+                (
+                    "https://optional.example/*".to_owned(),
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+            ]
         );
         assert!(!observation.file_scheme_access);
         assert!(!observation.private_context_access);
