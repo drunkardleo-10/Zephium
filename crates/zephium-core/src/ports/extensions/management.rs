@@ -549,7 +549,7 @@ impl fmt::Display for ExtensionManagementProjectionError {
 
 impl Error for ExtensionManagementProjectionError {}
 
-fn validate_display_text(
+pub(super) fn validate_display_text(
     value: &str,
     max_characters: usize,
     require_identity: bool,

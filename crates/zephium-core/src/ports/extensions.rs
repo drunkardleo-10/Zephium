@@ -19,7 +19,9 @@ pub use management::{
     MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
 };
 pub use runtime_grants::{
-    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRequestError,
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptError,
+    ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRequest,
+    ExtensionRuntimeGrantRequestError, ExtensionRuntimeGrantRequestId,
     ExtensionRuntimeGrantRuntimeState, MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
 };
 
@@ -27,6 +29,11 @@ pub use runtime_grants::{
 /// expose at most three distinct profiles with executable runtime authority.
 /// Keep this projection fixed-size and allocation-free.
 pub const MAX_EXTENSION_ACTIVE_PROFILES: usize = 3;
+
+/// At most one user-visible optional-grant prompt may be outstanding for each
+/// admitted background runtime. This fixed ceiling bounds native completion
+/// ownership independently from ordinary tab/browser request traffic.
+pub const MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS: usize = MAX_EXTENSION_ACTIVE_PROFILES;
 
 /// Exact profiles whose extension runtimes were active when startup settled.
 ///

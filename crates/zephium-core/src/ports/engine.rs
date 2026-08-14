@@ -4,12 +4,16 @@ use std::sync::Arc;
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
-    ExtensionBrowserSurface, ExtensionNativeNamespaceScope,
+    ExtensionBrowserSurface, ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
 pub use crate::permissions::PagePermissionKind as PermissionKind;
+use crate::ports::extensions::{
+    ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptSettlement,
+    ExtensionRuntimeGrantRequestId,
+};
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
@@ -621,6 +625,20 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Settles one exact native optional-grant callback cohort after Shell has
+    /// obtained a user decision and, for `Granted`, the serialized extension
+    /// service has durably committed and rebound that complete cohort.
+    ///
+    /// The native adapter matches both the process-local runtime generation
+    /// and request id before invoking retained WebKit completion handlers.
+    fn settle_extension_runtime_grant_prompt(
+        &self,
+        _runtime: ExtensionRuntimeInstance,
+        _request: ExtensionRuntimeGrantRequestId,
+        _settlement: ExtensionRuntimeGrantPromptSettlement,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Installs one exact, immutable profile-scoped content policy.
     ///
     /// Queue admission is not native application. The terminal result arrives
@@ -775,6 +793,20 @@ pub enum EngineEvent {
     /// [`Engine::settle_extension_browser_request`].
     ExtensionBrowserRequested {
         request: ExtensionBrowserRequest,
+    },
+    /// A native WebExtension context requested one complete optional API/host
+    /// cohort. The engine retains and times out every platform completion;
+    /// Shell owns user consent and must answer through
+    /// [`Engine::settle_extension_runtime_grant_prompt`].
+    ExtensionRuntimeGrantRequested {
+        prompt: Box<ExtensionRuntimeGrantPrompt>,
+    },
+    /// The native completion cohort timed out or its exact runtime retired
+    /// before Shell settled it. Browser-owned consent UI must remove the
+    /// matching prompt and must not begin a durable grant transaction.
+    ExtensionRuntimeGrantCancelled {
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionRuntimeGrantRequestId,
     },
     /// Terminal response to one exact effective action-cohort query.
     ExtensionActionsSnapshotSettled {
