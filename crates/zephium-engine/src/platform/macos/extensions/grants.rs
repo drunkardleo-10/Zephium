@@ -474,6 +474,75 @@ impl MacosNativeGrantSchema {
     }
 }
 
+/// Validates one dynamic API-permission cohort against the same product and
+/// native representability vocabulary used by complete grant compilation.
+/// This runs before user consent so a prohibited optional declaration can
+/// never commit durably and fail only during the post-commit native rebind.
+pub(super) fn validate_runtime_api_permission_request(
+    permissions: &[zephium_core::extensions::ApiPermissionName],
+) -> Result<(), MacosNativeGrantPlanError> {
+    for permission in permissions {
+        match MacosNativeGrantSchema::WkWebExtensionV1
+            .permission_disposition(permission.as_str())?
+        {
+            MacosNativeApiPermissionDisposition::Native(_)
+            | MacosNativeApiPermissionDisposition::NotInNativePermissionSet => {}
+            MacosNativeApiPermissionDisposition::ProductProhibited => {
+                return Err(MacosNativeGrantPlanError::ProhibitedApiPermission);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compiles the response set for a dynamic host-permission callback using the
+/// exact web-only translation used by complete native grant plans.
+///
+/// A file-only request is rejected instead of being persisted as an
+/// ineffective host row and then accidentally made effective by returning the
+/// raw WebKit request set. `<all_urls>` remains representable as its ordinary
+/// HTTP/HTTPS subset; local-file authority stays behind the independent file
+/// grant, which this request type intentionally cannot mutate.
+pub(super) fn compile_runtime_host_permission_response(
+    patterns: &[MatchPattern],
+) -> Result<Box<[String]>, MacosNativeGrantPlanError> {
+    let capacity = patterns
+        .len()
+        .checked_mul(2)
+        .ok_or(MacosNativeGrantPlanError::HostEntryLimitExceeded)?;
+    if capacity > MAX_MACOS_NATIVE_HOST_PATTERNS {
+        return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
+    }
+    let mut translated = Vec::with_capacity(capacity);
+    for pattern in patterns {
+        if matches!(
+            pattern.components(),
+            MatchPatternComponents::Standard {
+                scheme: MatchPatternScheme::File,
+                ..
+            }
+        ) {
+            return Err(MacosNativeGrantPlanError::FileAccessUnproven);
+        }
+        translate_host_pattern(pattern, true, &mut translated)?;
+    }
+    translated.sort_unstable();
+    translated.dedup();
+    if translated.is_empty() && !patterns.is_empty() {
+        return Err(MacosNativeGrantPlanError::FileAccessUnproven);
+    }
+
+    translated
+        .into_iter()
+        .map(|pattern| {
+            let mut rendered = String::with_capacity(pattern.rendered_len()?);
+            pattern.append_to(&mut rendered);
+            Ok(rendered)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
+}
+
 impl MacosNativeApiPermission {
     pub(super) const fn as_str(self) -> &'static str {
         match self {

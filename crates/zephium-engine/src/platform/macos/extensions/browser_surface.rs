@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::Rc;
 #[cfg(feature = "native-web-extension-probes")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,13 +18,13 @@ use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::NSView;
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSError, NSNotFound, NSObjectProtocol, NSString,
+    MainThreadMarker, NSArray, NSDate, NSError, NSNotFound, NSObjectProtocol, NSSet, NSString,
     NSUTF8StringEncoding, NSURL,
 };
 use objc2_web_kit::{
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
-    WKWebExtensionControllerDelegate, WKWebExtensionTab, WKWebExtensionTabConfiguration,
-    WKWebExtensionWindow, WKWebView,
+    WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern, WKWebExtensionPermission,
+    WKWebExtensionTab, WKWebExtensionTabConfiguration, WKWebExtensionWindow, WKWebView,
 };
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
@@ -37,6 +38,9 @@ pub(super) type NativeExtensionTab = Retained<ProtocolObject<dyn WKWebExtensionT
 use super::action_popup::ActionPopupBroker;
 use super::browser_request_broker::{
     BrowserRequestBroker, BrowserRequestPool, BrowserRequestSettlementOutcome,
+};
+use super::runtime_grant_broker::{
+    RuntimeGrantRequestBroker, RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome,
 };
 
 #[cfg(feature = "native-web-extension-probes")]
@@ -651,6 +655,7 @@ struct BrowserControllerDelegateIvars {
     focused: RefCell<Option<Retained<BrowserWindow>>>,
     broker: Rc<BrowserRequestBroker>,
     action_popup: Rc<ActionPopupBroker>,
+    runtime_grants: Rc<RuntimeGrantRequestBroker>,
     #[cfg(feature = "native-web-extension-probes")]
     lifecycle_drops: Arc<AtomicUsize>,
 }
@@ -824,6 +829,57 @@ define_class!(
                 .action_popup
                 .present(controller, action, context, completion);
         }
+
+        #[unsafe(method(webExtensionController:promptForPermissions:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_for_permissions(
+            &self,
+            controller: &WKWebExtensionController,
+            permissions: &NSSet<WKWebExtensionPermission>,
+            _tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<
+                dyn Fn(NonNull<NSSet<WKWebExtensionPermission>>, *mut NSDate),
+            >,
+        ) {
+            self.ivars().runtime_grants.begin_permissions(
+                controller,
+                context,
+                permissions,
+                completion,
+            );
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissionMatchPatterns:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_for_patterns(
+            &self,
+            controller: &WKWebExtensionController,
+            patterns: &NSSet<WKWebExtensionMatchPattern>,
+            _tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<
+                dyn Fn(NonNull<NSSet<WKWebExtensionMatchPattern>>, *mut NSDate),
+            >,
+        ) {
+            self.ivars()
+                .runtime_grants
+                .begin_patterns(controller, context, patterns, completion);
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissionToAccessURLs:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_for_urls(
+            &self,
+            _controller: &WKWebExtensionController,
+            _urls: &NSSet<NSURL>,
+            _tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            _context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(NonNull<NSSet<NSURL>>, *mut NSDate)>,
+        ) {
+            // URL-set prompts are tab/document-scoped authority, not durable
+            // manifest optional-host grants. Keep that separate capability
+            // unavailable until its activeTab/document broker exists.
+            let empty = NSSet::<NSURL>::new();
+            completion.call((NonNull::from(&*empty), std::ptr::null_mut()));
+        }
     }
 );
 
@@ -832,6 +888,7 @@ impl BrowserControllerDelegate {
         mtm: MainThreadMarker,
         broker: Rc<BrowserRequestBroker>,
         action_popup: Rc<ActionPopupBroker>,
+        runtime_grants: Rc<RuntimeGrantRequestBroker>,
         #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
         let object = Self::alloc(mtm).set_ivars(BrowserControllerDelegateIvars {
@@ -839,6 +896,7 @@ impl BrowserControllerDelegate {
             focused: RefCell::new(None),
             broker,
             action_popup,
+            runtime_grants,
             #[cfg(feature = "native-web-extension-probes")]
             lifecycle_drops,
         });
@@ -879,6 +937,7 @@ pub(super) struct MacosExtensionBrowserSurfaceHost {
     delegate: Retained<BrowserControllerDelegate>,
     broker: Rc<BrowserRequestBroker>,
     action_popup: Rc<ActionPopupBroker>,
+    runtime_grants: Rc<RuntimeGrantRequestBroker>,
     windows: HashMap<WindowId, Retained<BrowserWindow>>,
     tabs: HashMap<ItemId, Retained<BrowserTab>>,
     #[cfg(feature = "native-web-extension-probes")]
@@ -890,9 +949,12 @@ impl MacosExtensionBrowserSurfaceHost {
         profile: ProfileId,
         sink: Option<crate::EngineEventIngressSink>,
         request_pool: Rc<BrowserRequestPool>,
+        runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
     ) -> Result<Self, BrowserSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
         let action_popup = ActionPopupBroker::new(profile, sink.clone());
+        let runtime_grants =
+            RuntimeGrantRequestBroker::new(profile, sink.clone(), runtime_grant_pool);
         let broker = BrowserRequestBroker::new(profile, sink, request_pool);
         #[cfg(feature = "native-web-extension-probes")]
         let lifecycle_drops = Arc::new(AtomicUsize::new(0));
@@ -903,11 +965,13 @@ impl MacosExtensionBrowserSurfaceHost {
                 mtm,
                 broker.clone(),
                 action_popup.clone(),
+                runtime_grants.clone(),
                 #[cfg(feature = "native-web-extension-probes")]
                 lifecycle_drops.clone(),
             ),
             broker,
             action_popup,
+            runtime_grants,
             windows: HashMap::new(),
             tabs: HashMap::new(),
             #[cfg(feature = "native-web-extension-probes")]
@@ -917,6 +981,7 @@ impl MacosExtensionBrowserSurfaceHost {
 
     pub(super) fn attach(&self, controller: &Retained<WKWebExtensionController>) {
         self.broker.bind_controller(controller);
+        self.runtime_grants.bind_controller(controller);
         let delegate = ProtocolObject::from_ref(&*self.delegate);
         // SAFETY: the host retains the main-thread delegate for at least as
         // long as the owning controller entry remains live.
@@ -1166,6 +1231,45 @@ impl MacosExtensionBrowserSurfaceHost {
         self.broker.timeout(request)
     }
 
+    pub(super) fn runtime_grant_context_identity(
+        &self,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+    ) -> Option<*const WKWebExtensionContext> {
+        self.runtime_grants.pending_context_identity(request)
+    }
+
+    pub(super) fn finalize_runtime_grant_request(
+        &self,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+        subject: Option<(
+            zephium_core::extensions::ExtensionRuntimeInstance,
+            zephium_core::extensions::ExtensionNativeOwnershipKey,
+            String,
+        )>,
+    ) -> bool {
+        self.runtime_grants.finalize(request, subject)
+    }
+
+    pub(super) fn settle_runtime_grant_request(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+        settlement: zephium_core::ports::extensions::ExtensionRuntimeGrantPromptSettlement,
+    ) -> RuntimeGrantSettlementOutcome {
+        self.runtime_grants.settle(runtime, request, settlement)
+    }
+
+    pub(super) fn timeout_runtime_grant_request(
+        &self,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+    ) -> bool {
+        self.runtime_grants.timeout(request)
+    }
+
+    pub(super) fn cancel_runtime_grant_context(&self, context: *const WKWebExtensionContext) {
+        self.runtime_grants.cancel_context(context);
+    }
+
     pub(super) fn begin_action_popup(
         &self,
         request: ExtensionActionRequest,
@@ -1230,6 +1334,7 @@ impl MacosExtensionBrowserSurfaceHost {
     pub(super) fn clear(&mut self, controller: &WKWebExtensionController) {
         self.action_popup.seal_and_close();
         self.broker.seal_and_reject();
+        self.runtime_grants.seal_and_reject();
         let old_windows = std::mem::take(&mut self.windows);
         let old_tabs = std::mem::take(&mut self.tabs);
         let had_focus = self.delegate.ivars().focused.borrow().is_some();

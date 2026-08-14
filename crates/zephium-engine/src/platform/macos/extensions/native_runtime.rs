@@ -333,6 +333,24 @@ impl MacosNativeRuntimeOwner {
         Retained::as_ptr(&self.context)
     }
 
+    /// Comparison-only identity used to join a spontaneous delegate callback
+    /// to the exact published runtime that already owns this context.
+    pub(crate) fn runtime_grant_context_identity(&self) -> *const WKWebExtensionContext {
+        Retained::as_ptr(&self.context)
+    }
+
+    /// Bounded authenticated display label for browser-owned consent UI.
+    /// The package was parsed from the held content-addressed root before this
+    /// owner existed; this value remains display-only and grants no authority.
+    pub(crate) fn runtime_grant_display_name(&self) -> Option<String> {
+        let name = unsafe { self.extension.displayName() }?.to_string();
+        (!name.is_empty()
+            && name.len()
+                <= zephium_core::ports::extensions::MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
+            && !name.chars().any(char::is_control))
+        .then_some(name)
+    }
+
     pub(crate) fn retire(mut self) -> MacosNativeRuntimeRetirement {
         match self.prove_absence() {
             Ok(audit) => MacosNativeRuntimeRetirement::Absent(audit),

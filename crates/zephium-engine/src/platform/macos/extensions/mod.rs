@@ -13,11 +13,12 @@ mod erasure;
 mod grant_application;
 mod grants;
 mod native_runtime;
+mod runtime_grant_broker;
 
 pub(crate) use controller_registry::{
     ControllerBrowserRequestSettlement, ControllerErasureSettlement,
     ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
-    PersistentControllerRegistry,
+    ControllerRuntimeGrantSettlement, PersistentControllerRegistry,
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use controller_registry::{

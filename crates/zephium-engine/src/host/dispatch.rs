@@ -32,6 +32,13 @@ thread_local! {
     #[cfg(target_os = "macos")]
     static EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
+    static PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS: Cell<ExtensionRuntimeGrantTerminalSlots> =
+        const { Cell::new(ExtensionRuntimeGrantTerminalSlots::EMPTY) };
+    #[cfg(target_os = "macos")]
+    static EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
     static PENDING_EXTENSION_ACTION_POPUP_TERMINALS: Cell<ExtensionActionPopupTerminalSlots> =
         const { Cell::new(ExtensionActionPopupTerminalSlots::EMPTY) };
     #[cfg(target_os = "macos")]
@@ -62,6 +69,12 @@ type ExtensionRuntimeTerminalSlots = ExactTerminalSlots<EXTENSION_RUNTIME_TERMIN
 #[cfg(target_os = "macos")]
 type ExtensionBrowserRequestTerminalSlots =
     ExactTerminalSlots<EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY>;
+#[cfg(target_os = "macos")]
+const EXTENSION_RUNTIME_GRANT_TERMINAL_CAPACITY: usize =
+    3 * zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS;
+#[cfg(target_os = "macos")]
+type ExtensionRuntimeGrantTerminalSlots =
+    ExactTerminalSlots<EXTENSION_RUNTIME_GRANT_TERMINAL_CAPACITY>;
 #[cfg(target_os = "macos")]
 type ExtensionActionPopupTerminalSlots = ExactTerminalSlots<1>;
 
@@ -359,6 +372,14 @@ pub(crate) fn install(
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(target_os = "macos")]
+    PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionRuntimeGrantTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
     PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
         drop(pending.replace(ExtensionActionPopupTerminalSlots::EMPTY));
     });
@@ -516,6 +537,14 @@ pub(crate) fn make_unavailable_for_test() {
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
+        drop(pending.replace(ExtensionRuntimeGrantTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(target_os = "macos")]
     PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
         drop(pending.replace(ExtensionActionPopupTerminalSlots::EMPTY));
@@ -786,6 +815,94 @@ fn drain_extension_browser_request_terminals_with_host(host: &mut EngineHost) ->
     if report {
         (host.native_terminal_failure)(
             "extension browser request terminals exceeded their proven exact capacity",
+        );
+    }
+    false
+}
+
+/// Admits collection, timeout, and Shell-settlement tasks for the fixed
+/// optional-grant cohort. This ring is independent from tab mutations and
+/// popup loading, so saturation in one native delegate surface cannot strand
+/// another surface's retained Objective-C completion blocks.
+#[cfg(target_os = "macos")]
+pub(crate) fn with_extension_runtime_grant_terminal<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let task: HostTask = Box::new(f);
+    enum Admission {
+        Accepted,
+        Quarantined,
+        Exhausted,
+    }
+    let admission = PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
+        let mut slots = pending.take();
+        let admission = match slots.push_back(task) {
+            Ok(()) => Admission::Accepted,
+            Err(task) => match slots.quarantine_overflow(task) {
+                Ok(()) => Admission::Quarantined,
+                Err(_task) => Admission::Exhausted,
+            },
+        };
+        pending.set(slots);
+        admission
+    });
+    match admission {
+        Admission::Accepted => drain_extension_runtime_grant_terminals(),
+        Admission::Quarantined | Admission::Exhausted => {
+            EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            let _ = drain_extension_runtime_grant_terminals();
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_extension_runtime_grant_terminals() -> bool {
+    enum Drain {
+        Complete(bool),
+        Deferred,
+        Unavailable,
+    }
+    let drain = HOST.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return Drain::Deferred;
+        };
+        let Some(host) = slot.as_mut() else {
+            return Drain::Unavailable;
+        };
+        Drain::Complete(drain_extension_runtime_grant_terminals_with_host(host))
+    });
+    match drain {
+        Drain::Complete(clean) => clean,
+        Drain::Deferred => true,
+        Drain::Unavailable => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_extension_runtime_grant_terminals_with_host(host: &mut EngineHost) -> bool {
+    loop {
+        let task = PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            let task = slots.pop_front();
+            pending.set(slots);
+            task
+        });
+        let Some(task) = task else {
+            break;
+        };
+        task(host);
+    }
+    if !EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        return true;
+    }
+    let report =
+        EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
+    if report {
+        (host.native_terminal_failure)(
+            "extension runtime grant terminals exceeded their proven exact capacity",
         );
     }
     false
@@ -1105,6 +1222,10 @@ where
                     return Access::TerminalFailed;
                 }
                 #[cfg(target_os = "macos")]
+                if !drain_extension_runtime_grant_terminals_with_host(host) {
+                    return Access::TerminalFailed;
+                }
+                #[cfg(target_os = "macos")]
                 if !drain_extension_action_popup_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
@@ -1180,6 +1301,12 @@ where
     }
 
     #[cfg(target_os = "macos")]
+    if !drain_extension_runtime_grant_terminals() {
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
     if !drain_extension_action_popup_terminals() {
         HOST_SEALED.with(|sealed| sealed.set(true));
         return false;
@@ -1248,6 +1375,11 @@ where
         }
         #[cfg(target_os = "macos")]
         if !drain_extension_browser_request_terminals() {
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if !drain_extension_runtime_grant_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }

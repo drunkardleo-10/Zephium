@@ -22,6 +22,8 @@ pub(crate) use dispatch::make_unavailable_for_test;
 pub(crate) use dispatch::with_extension_action_popup_terminal;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::with_extension_runtime_grant_terminal;
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };

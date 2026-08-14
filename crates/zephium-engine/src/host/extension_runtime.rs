@@ -2180,6 +2180,50 @@ impl ExtensionRuntimeRegistry {
             })
     }
 
+    /// Resolves a comparison-only native context identity to exactly one
+    /// published runtime. The bounded scan is paid only for an explicit user
+    /// permission request and adds no startup or idle resident state.
+    #[cfg(target_os = "macos")]
+    pub(super) fn published_runtime_for_macos_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const objc2_web_kit::WKWebExtensionContext,
+    ) -> Result<Option<ExtensionRuntimeFingerprint>, ExtensionRuntimeHostBindError> {
+        let runtimes = self.published_runtimes(profile)?;
+        let mut matched = None;
+        for runtime in runtimes {
+            let is_match = self
+                .with_owned_macos_runtime(&runtime, |owner| {
+                    owner.runtime_grant_context_identity() == context
+                })?
+                .unwrap_or(false);
+            if !is_match {
+                continue;
+            }
+            if matched.is_some() {
+                self.fail_invariant();
+                return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+            }
+            matched = Some(runtime);
+        }
+        Ok(matched)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn published_runtime_grant_subject_for_macos_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const objc2_web_kit::WKWebExtensionContext,
+    ) -> Result<Option<(ExtensionRuntimeFingerprint, String)>, ExtensionRuntimeHostBindError> {
+        let Some(runtime) = self.published_runtime_for_macos_context(profile, context)? else {
+            return Ok(None);
+        };
+        let name = self
+            .with_owned_macos_runtime(&runtime, |owner| owner.runtime_grant_display_name())?
+            .flatten();
+        Ok(name.map(|name| (runtime, name)))
+    }
+
     /// Mints `activeTab` only when the exact published authority declares it.
     /// Missing permission is a normal `None`: toolbar dispatch does not depend
     /// on `activeTab`. A fingerprint contradiction is a registry invariant.

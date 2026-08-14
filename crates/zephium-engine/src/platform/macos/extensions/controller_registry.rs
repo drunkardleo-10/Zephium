@@ -42,6 +42,7 @@ use super::erasure::{
     ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
     ProfileControllerErasure,
 };
+use super::runtime_grant_broker::{RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome};
 
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
 const _: () = assert!(MAX_PERSISTENT_CONTROLLERS == 64);
@@ -324,6 +325,7 @@ pub(crate) struct PersistentControllerRegistry {
     next_erasure_generation: u64,
     browser_request_sink: Option<crate::EngineEventIngressSink>,
     browser_request_pool: Rc<BrowserRequestPool>,
+    runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -346,6 +348,13 @@ pub(crate) enum ControllerBrowserRequestSettlement {
     Stale,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerRuntimeGrantSettlement {
+    ControllerUnprepared,
+    Settled,
+    Stale,
+}
+
 impl PersistentControllerRegistry {
     pub(crate) fn new() -> Self {
         Self {
@@ -354,6 +363,7 @@ impl PersistentControllerRegistry {
             next_erasure_generation: 0,
             browser_request_sink: None,
             browser_request_pool: Rc::new(BrowserRequestPool::new()),
+            runtime_grant_pool: Rc::new(RuntimeGrantRequestPool::new()),
         }
     }
 
@@ -647,6 +657,91 @@ impl PersistentControllerRegistry {
         entry.browser_surface.timeout_request(request)
     }
 
+    pub(crate) fn runtime_grant_context_identity(
+        &mut self,
+        profile: ProfileId,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+    ) -> Result<Option<*const WKWebExtensionContext>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .runtime_grant_context_identity(request))
+    }
+
+    pub(crate) fn finalize_runtime_grant_request(
+        &mut self,
+        profile: ProfileId,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+        subject: Option<(
+            zephium_core::extensions::ExtensionRuntimeInstance,
+            zephium_core::extensions::ExtensionNativeOwnershipKey,
+            String,
+        )>,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .finalize_runtime_grant_request(request, subject))
+    }
+
+    pub(crate) fn settle_runtime_grant_request(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+        settlement: zephium_core::ports::extensions::ExtensionRuntimeGrantPromptSettlement,
+    ) -> Result<ControllerRuntimeGrantSettlement, ControllerRegistryError> {
+        let profile = runtime.profile();
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(ControllerRuntimeGrantSettlement::ControllerUnprepared);
+        };
+        validate_entry_identity(entry)?;
+        match entry
+            .browser_surface
+            .settle_runtime_grant_request(runtime, request, settlement)
+        {
+            RuntimeGrantSettlementOutcome::Settled => Ok(ControllerRuntimeGrantSettlement::Settled),
+            RuntimeGrantSettlementOutcome::Stale => Ok(ControllerRuntimeGrantSettlement::Stale),
+            RuntimeGrantSettlementOutcome::IntegrityFailed => {
+                self.slots.poison();
+                Err(ControllerRegistryError::BrowserSurfaceIntegrity)
+            }
+        }
+    }
+
+    pub(crate) fn timeout_runtime_grant_request(
+        &mut self,
+        profile: ProfileId,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+    ) -> bool {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return false;
+        };
+        entry.browser_surface.timeout_runtime_grant_request(request)
+    }
+
+    pub(crate) fn cancel_runtime_grant_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const WKWebExtensionContext,
+    ) {
+        if let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile) {
+            entry.browser_surface.cancel_runtime_grant_context(context);
+        }
+    }
+
     /// Clears an authorized profile's delegate graph after all of its views
     /// and runtime contexts have retired. An absent controller is inert; no
     /// native namespace is created by cleanup.
@@ -931,13 +1026,15 @@ impl PersistentControllerRegistry {
 
         let sink = self.browser_request_sink.clone();
         let request_pool = self.browser_request_pool.clone();
-        let candidate = match catch_native(|| create_entry(profile, sink, request_pool)) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                self.slots.poison();
-                return Err(error);
-            }
-        };
+        let runtime_grant_pool = self.runtime_grant_pool.clone();
+        let candidate =
+            match catch_native(|| create_entry(profile, sink, request_pool, runtime_grant_pool)) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.slots.poison();
+                    return Err(error);
+                }
+            };
         let aliased = self.slots.entries.values().any(|other| match other {
             PersistentControllerSlot::Prepared(other) => {
                 Retained::as_ptr(&other.controller) == Retained::as_ptr(&candidate.controller)
@@ -1183,6 +1280,7 @@ fn create_entry(
     profile: ProfileId,
     browser_request_sink: Option<crate::EngineEventIngressSink>,
     browser_request_pool: Rc<BrowserRequestPool>,
+    runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
 ) -> Result<PersistentControllerEntry, ControllerRegistryError> {
     let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
     let identifier = NSUUID::from_bytes(profile.bytes());
@@ -1204,9 +1302,13 @@ fn create_entry(
             &controller_configuration,
         )
     };
-    let browser_surface =
-        MacosExtensionBrowserSurfaceHost::new(profile, browser_request_sink, browser_request_pool)
-            .map_err(map_browser_surface_error)?;
+    let browser_surface = MacosExtensionBrowserSurfaceHost::new(
+        profile,
+        browser_request_sink,
+        browser_request_pool,
+        runtime_grant_pool,
+    )
+    .map_err(map_browser_surface_error)?;
     browser_surface.attach(&controller);
     let entry = PersistentControllerEntry {
         profile,

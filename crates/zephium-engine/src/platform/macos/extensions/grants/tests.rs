@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use zephium_core::extensions::{
-    ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
+    ApiPermissionName, ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
     ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement, ExtensionRuntimeGeneration,
     ExtensionRuntimeInstance, MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_HOST_GRANTS,
 };
@@ -358,6 +358,31 @@ fn all_urls_never_smuggles_file_access_into_the_native_plan() {
     let plan = regular(&[], &[host(&all_urls, REQUIRED, GRANTED)])
         .expect("web subset of all URLs is representable");
     assert_eq!(compiled_host_patterns(&plan), ["http://*/*", "https://*/*"]);
+}
+
+#[test]
+fn dynamic_all_urls_response_is_web_only_and_file_only_requests_are_refused() {
+    let all_urls = parse("<all_urls>");
+    let response = super::compile_runtime_host_permission_response(&[all_urls]).unwrap();
+    assert_eq!(&*response, ["http://*/*", "https://*/*"]);
+
+    let file = parse("file:///tmp/*");
+    assert_eq!(
+        super::compile_runtime_host_permission_response(&[file]),
+        Err(MacosNativeGrantPlanError::FileAccessUnproven)
+    );
+}
+
+#[test]
+fn dynamic_api_request_reuses_the_native_product_prohibition_boundary() {
+    let permitted = ApiPermissionName::parse_exact("clipboardRead").unwrap();
+    assert!(super::validate_runtime_api_permission_request(&[permitted]).is_ok());
+
+    let prohibited = ApiPermissionName::parse_exact("nativeMessaging").unwrap();
+    assert_eq!(
+        super::validate_runtime_api_permission_request(&[prohibited]),
+        Err(MacosNativeGrantPlanError::ProhibitedApiPermission)
+    );
 }
 
 #[test]

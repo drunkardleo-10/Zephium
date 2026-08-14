@@ -5,6 +5,9 @@ use zephium_core::extensions::{
     MAX_EXTENSION_BROWSER_WINDOWS,
 };
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ports::extensions::{
+    ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRequestId,
+};
 
 use super::EngineHost;
 
@@ -42,6 +45,89 @@ impl EngineHost {
         let _ = self
             .macos_extension_controllers
             .timeout_browser_request(profile, request);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finalize_extension_runtime_grant_prompt(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionRuntimeGrantRequestId,
+    ) {
+        let context = match self
+            .macos_extension_controllers
+            .runtime_grant_context_identity(profile, request)
+        {
+            Ok(Some(context)) => context,
+            Ok(None) | Err(_) => {
+                let _ = self
+                    .macos_extension_controllers
+                    .finalize_runtime_grant_request(profile, request, None);
+                return;
+            }
+        };
+        let subject = self
+            .extension_runtime_registry
+            .published_runtime_grant_subject_for_macos_context(profile, context)
+            .ok()
+            .flatten()
+            .map(|(runtime, name)| {
+                let instance = runtime.instance();
+                let key = zephium_core::extensions::ExtensionNativeOwnershipKey::new(
+                    instance.profile(),
+                    instance.install_id(),
+                    runtime.browsing_context(),
+                );
+                (instance, key, name)
+            });
+        let _ = self
+            .macos_extension_controllers
+            .finalize_runtime_grant_request(profile, request, subject);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn settle_extension_runtime_grant_prompt(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        request: ExtensionRuntimeGrantRequestId,
+        mut settlement: ExtensionRuntimeGrantPromptSettlement,
+    ) -> bool {
+        let profile = runtime.profile();
+        if settlement == ExtensionRuntimeGrantPromptSettlement::Granted {
+            let current = self
+                .macos_extension_controllers
+                .runtime_grant_context_identity(profile, request)
+                .ok()
+                .flatten()
+                .and_then(|context| {
+                    self.extension_runtime_registry
+                        .published_runtime_for_macos_context(profile, context)
+                        .ok()
+                        .flatten()
+                })
+                .map(|fingerprint| fingerprint.instance());
+            if current != Some(runtime) {
+                settlement = ExtensionRuntimeGrantPromptSettlement::Unavailable;
+            }
+        }
+        matches!(
+            self.macos_extension_controllers
+                .settle_runtime_grant_request(runtime, request, settlement),
+            Ok(
+                crate::platform::imp::ControllerRuntimeGrantSettlement::Settled
+                    | crate::platform::imp::ControllerRuntimeGrantSettlement::Stale
+            )
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn timeout_extension_runtime_grant_prompt(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionRuntimeGrantRequestId,
+    ) {
+        let _ = self
+            .macos_extension_controllers
+            .timeout_runtime_grant_request(profile, request);
     }
 
     pub(crate) fn set_extension_browser_surface(

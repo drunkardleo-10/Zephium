@@ -115,7 +115,7 @@ use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
     ExtensionActionSnapshotSettlement, ExtensionBrowserRequestId,
     ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
-    ExtensionNativeNamespaceScope,
+    ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
@@ -123,6 +123,9 @@ use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
     NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
     UserContentGeneration, ZoomRequestId,
+};
+use zephium_core::ports::extensions::{
+    ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRequestId,
 };
 use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_core::split::Pane;
@@ -594,7 +597,9 @@ impl RetirementGate {
             // This is an untrusted request, not a native-state fact. Deliver
             // it after profile retirement so Shell can explicitly reject the
             // retained native completion instead of waiting for its timeout.
-            event @ EngineEvent::ExtensionBrowserRequested { .. } => Some(event),
+            event @ EngineEvent::ExtensionBrowserRequested { .. }
+            | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
+            | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. } => Some(event),
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
             | event @ EngineEvent::PresentationPending { id, .. }
@@ -1396,6 +1401,30 @@ impl Engine for WebviewEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (profile, request, settlement);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn settle_extension_runtime_grant_prompt(
+        &self,
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionRuntimeGrantRequestId,
+        settlement: ExtensionRuntimeGrantPromptSettlement,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            // This is terminal cleanup for native callbacks already retained
+            // by the delegate, so retirement cannot revoke its dispatch path.
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::with_extension_runtime_grant_terminal(move |host| {
+                    let _ =
+                        host.settle_extension_runtime_grant_prompt(runtime, request, settlement);
+                });
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (runtime, request, settlement);
             NativeDispatch::Unsupported
         }
     }
