@@ -1152,11 +1152,39 @@ receiver semantics, rather than requiring a Proton-specific product runtime.
 
 Both third-party contracts stay feature-gated and confer
 `product_authority=false`. Zephium must not hardcode either manager into the
-production runtime or redistribute modified third-party bytes by accident. The
-next macOS runtime gate is a generic, deterministic compatibility transform and
-capability-classification boundary; only after that boundary proves a viable
-stock-package path should permission and management UX present such a package
-as installable.
+production runtime or redistribute modified third-party bytes by accident.
+
+The first package-neutral macOS transform now exists as an offline,
+non-authorizing boundary. `cargo xtask
+materialize-macos-extension-compatibility --extension PATH --tree-index PATH
+--output PATH` reopens an exact closed MV3 tree, rejects source drift and
+reserved-namespace collisions, and emits a separately indexed artifact. Its
+versioned WebKit adapter preserves native method receivers, supplies only the
+inert catalog-update event owned by Zephium, wraps classic or module background
+workers, prepends isolated content scripts, leaves `MAIN` scripts unchanged,
+and inserts the local prelude only into an explicit leading action-popup
+`<head>`. Ambiguous HTML, nonportable or absent resources, links, special
+files, unsupported worlds, and every file/tree budget violation fail closed.
+The emitted metadata binds source and output manifest/tree/index identities and
+states `product_authority=false`; it is not a release sealer, catalog entry, or
+redistribution decision. A Node contract gate exercises receiver preservation,
+nested namespaces, facade identity, idempotence, absent-native fail-closure,
+and the deliberate absence of page/network bridges.
+
+The exact Proton source transformed through that generic boundary produces a
+277-file, 20,127,230-byte tree with tree SHA-256
+`4d209e696e999f91b136fa2093c5385c60bd941071f7c2e5f0b5457b6108bb04`.
+The feature-gated native probe independently pins the source and output
+identities before WebKit: the original background loads without context errors,
+the real popup observes the package-neutral compatibility world and renders,
+and every native object releases. The synthetic login page still shows no
+Proton inline-autofill effect, and WebKit exposes no controller-visible content
+script in that run. Content-script behavior, login, vault, save, autofill, and
+user workflows therefore remain unassessed; this result proves a reusable
+background/popup adaptation seam, not Proton compatibility. The next gate is a
+Zephium-owned transformed fixture that proves isolated content execution and
+background messaging in CI, followed by real stock workflow tests before any
+package can be presented as installable.
 
 ---
 
