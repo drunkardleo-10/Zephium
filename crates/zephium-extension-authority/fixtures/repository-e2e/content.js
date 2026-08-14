@@ -1,35 +1,22 @@
+const api = globalThis.browser ?? globalThis.chrome;
 const marker = "data-zephium-extension-product-probe";
-const message = {
-  kind: "zephium-product-probe",
-  pageTitle: document.title,
-  pageUrl: globalThis.location.href,
-};
 
-function settle(response) {
+function settle(message) {
   const value =
-    response?.state === "ready" && response?.count === 1
+    message?.state === "ready" && message?.count === 1
       ? "ready:1"
-      : `invalid-response:${response?.state ?? "missing"}`;
+      : `invalid-response:${message?.state ?? "missing"}`;
   document.documentElement.setAttribute(marker, value);
 }
 
-function fail(channel, error) {
-  const detail = String(error?.message ?? error ?? "unknown")
-    .replace(/[^A-Za-z0-9 .:_/-]/g, "?")
-    .slice(0, 96);
-  document.documentElement.setAttribute(marker, `${channel}:${detail}`);
-}
+api.runtime.onMessage.addListener((message) => {
+  if (message?.kind !== "zephium-product-probe-result") {
+    return undefined;
+  }
+  settle(message);
+  return undefined;
+});
 
-if (globalThis.browser?.runtime) {
-  globalThis.browser.runtime.sendMessage(message).then(settle, (error) => {
-    fail("promise-message-failed", error);
-  });
-} else {
-  globalThis.chrome.runtime.sendMessage(message, (response) => {
-    if (globalThis.chrome.runtime.lastError) {
-      fail("callback-message-failed", globalThis.chrome.runtime.lastError);
-      return;
-    }
-    settle(response);
-  });
-}
+// The product probe invokes the native action only after this listener is
+// installed, so a fast service-worker response cannot race page readiness.
+document.documentElement.setAttribute(marker, "armed");

@@ -20,11 +20,15 @@ use objc2_foundation::{
 };
 use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
 use zephium_core::blocker::ContentPolicyGeneration;
-use zephium_core::extensions::ExtensionBrowserRequest;
+use zephium_core::extensions::{
+    ExtensionActionRequest, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
+    ExtensionActionState, ExtensionBrowserRequest,
+};
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::{
     ContentRuleSettlement, Engine, EngineEvent, UserContent, UserContentGeneration,
 };
+use zephium_core::ports::extensions::ExtensionRuntimeGrantPrompt;
 use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_engine::{InitialUserContent, WebviewEngine};
 use zephium_extension_runtime_api::ExtensionRuntimeHostFactory;
@@ -230,6 +234,199 @@ impl MacosEngineHarness {
         })
     }
 
+    pub(crate) fn wait_for_extension_armed(
+        &mut self,
+        item: ItemId,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let expected = format!(r#"{EXTENSION_MARKER}="armed""#);
+        let marker_prefix = format!(r#"{EXTENSION_MARKER}=""#);
+        let mut next_observation = Instant::now();
+        self.pump_until("extension action listener readiness", deadline, |harness| {
+            loop {
+                match harness.events.try_recv() {
+                    Ok(EngineEvent::HtmlExtracted {
+                        id,
+                        html,
+                        truncated,
+                    }) if id == item => {
+                        if truncated {
+                            return Err(
+                                "extension readiness observation returned truncated HTML".into()
+                            );
+                        }
+                        if html.contains(&expected) {
+                            return Ok(true);
+                        }
+                        if let Some(marker_start) = html.find(&marker_prefix) {
+                            let value_start = marker_start + marker_prefix.len();
+                            let value = html[value_start..]
+                                .split('"')
+                                .next()
+                                .unwrap_or_default()
+                                .chars()
+                                .take(160)
+                                .collect::<String>();
+                            return Err(format!(
+                                "extension reached unexpected pre-action marker {value:?}"
+                            ));
+                        }
+                    }
+                    Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {
+                        return Err("profile view failed before extension action readiness".into())
+                    }
+                    Ok(EngineEvent::Crashed { id }) if id == item => {
+                        return Err("profile view crashed before extension action readiness".into())
+                    }
+                    Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                        return Err(format!(
+                            "extension requested browser mutation before optional grants: {:?}",
+                            request.action()
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("engine event ingress disconnected".to_owned())
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            if now >= next_observation {
+                if harness.engine.extract_html(item)
+                    != zephium_core::ports::engine::NativeDispatch::Scheduled
+                {
+                    return Err("extension readiness observation was not admitted".into());
+                }
+                next_observation = now
+                    .checked_add(HTML_OBSERVATION_INTERVAL)
+                    .ok_or_else(|| "readiness-observation deadline overflowed".to_owned())?;
+            }
+            Ok(false)
+        })
+    }
+
+    pub(crate) fn request_extension_action(
+        &mut self,
+        profile: ProfileId,
+        item: ItemId,
+        surface_generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration,
+        deadline: Instant,
+    ) -> Result<ExtensionActionState, String> {
+        if self
+            .engine
+            .request_extension_actions(profile, item, surface_generation)
+            != zephium_core::ports::engine::NativeDispatch::Scheduled
+        {
+            return Err("extension action snapshot was not scheduled".into());
+        }
+        let mut action = None;
+        self.pump_until("extension action snapshot", deadline, |harness| loop {
+            match harness.events.try_recv() {
+                Ok(EngineEvent::ExtensionActionsSnapshotSettled {
+                    profile: event_profile,
+                    tab,
+                    surface_generation: event_generation,
+                    settlement,
+                }) if event_profile == profile
+                    && tab == item
+                    && event_generation == surface_generation =>
+                {
+                    let ExtensionActionSnapshotSettlement::Applied(snapshot) = settlement else {
+                        return Err("extension action snapshot was rejected".into());
+                    };
+                    if snapshot.actions().len() != 1 {
+                        return Err(format!(
+                            "expected one authenticated extension action, observed {}",
+                            snapshot.actions().len()
+                        ));
+                    }
+                    action = snapshot.actions().first().cloned();
+                    return Ok(true);
+                }
+                Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {
+                    return Err("profile view failed during extension action projection".into())
+                }
+                Ok(EngineEvent::Crashed { id }) if id == item => {
+                    return Err("profile view crashed during extension action projection".into())
+                }
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("engine event ingress disconnected".to_owned())
+                }
+            }
+        })?;
+        action.ok_or_else(|| "extension action snapshot completed without an action".to_owned())
+    }
+
+    pub(crate) fn invoke_action_for_runtime_grant(
+        &mut self,
+        request: ExtensionActionRequest,
+        deadline: Instant,
+    ) -> Result<ExtensionRuntimeGrantPrompt, String> {
+        if self.engine.invoke_extension_action(request)
+            != zephium_core::ports::engine::NativeDispatch::Scheduled
+        {
+            return Err("extension action invocation was not scheduled".into());
+        }
+        let mut dispatched = false;
+        let mut prompt = None;
+        self.pump_until("native optional permission request", deadline, |harness| loop {
+            match harness.events.try_recv() {
+                Ok(EngineEvent::ExtensionActionSettled {
+                    profile,
+                    request: event_request,
+                    settlement,
+                }) if profile == request.runtime().profile()
+                    && event_request == request.id() =>
+                {
+                    if settlement != ExtensionActionSettlement::Dispatched {
+                        return Err(format!(
+                            "extension action did not dispatch its user gesture: {settlement:?}"
+                        ));
+                    }
+                    dispatched = true;
+                }
+                Ok(EngineEvent::ExtensionRuntimeGrantRequested {
+                    prompt: candidate,
+                }) => {
+                    if prompt.is_some() {
+                        return Err("extension action produced duplicate grant prompts".into());
+                    }
+                    prompt = Some(*candidate);
+                }
+                Ok(EngineEvent::ExtensionRuntimeGrantCancelled { runtime, request }) => {
+                    return Err(format!(
+                        "native optional permission prompt was cancelled: runtime={runtime:?}, request={}",
+                        request.get()
+                    ));
+                }
+                Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                    return Err(format!(
+                        "extension requested browser mutation before grant settlement: {:?}",
+                        request.action()
+                    ));
+                }
+                Ok(EngineEvent::ViewCreationFailed { .. }) => {
+                    return Err("profile view failed during optional permission request".into())
+                }
+                Ok(EngineEvent::Crashed { .. }) => {
+                    return Err("profile view crashed during optional permission request".into())
+                }
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => {
+                    return Ok(dispatched && prompt.is_some())
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("engine event ingress disconnected".to_owned())
+                }
+            }
+        })?;
+        prompt.ok_or_else(|| "extension action completed without a grant prompt".to_owned())
+    }
+
     pub(crate) fn wait_for_executable_extension(
         &mut self,
         item: ItemId,
@@ -267,9 +464,11 @@ impl MacosEngineHarness {
                                 .chars()
                                 .take(160)
                                 .collect::<String>();
-                            return Err(format!(
-                                "authenticated extension reported marker {value:?}; expected {EXTENSION_MARKER_VALUE:?}"
-                            ));
+                            if value != "armed" {
+                                return Err(format!(
+                                    "authenticated extension reported marker {value:?}; expected {EXTENSION_MARKER_VALUE:?}"
+                                ));
+                            }
                         }
                     }
                     Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {

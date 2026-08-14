@@ -25,13 +25,19 @@ use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules};
 use zephium_core::extensions::{
-    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
-    ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
-    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
+    ExtensionActionRequest, ExtensionActionRequestId, ExtensionBrowserRequest,
+    ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection, ExtensionBrowserRequestResult,
+    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
+    ExtensionBrowserTab, ExtensionBrowserWindow, ExtensionGrantBrowsingContext,
+    ExtensionPopupAnchor,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::{Engine, NativeDispatch, Partition};
+use zephium_core::ports::extensions::{
+    ExtensionManagementAdmission, ExtensionRuntimeGrantOutcome,
+    ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRuntimeState,
+};
 use zephium_extension_service::{
     ExtensionServiceOwner, ExtensionServicePhase, ExtensionServiceShutdownOutcome,
     ExtensionServiceStartupOutcome, ExtensionServiceStartupWait,
@@ -58,8 +64,9 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; authenticated_startup_ms={}; profile_view_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; tabs_create_activate_update_remove=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 measurements.authenticated_startup.as_millis(),
+                measurements.durable_grant_rebind.as_millis(),
                 measurements.profile_view.as_millis(),
                 measurements.service_shutdown.as_millis(),
                 measurements.engine_shutdown.as_millis(),
@@ -84,6 +91,7 @@ enum ProbeDisposition {
 
 struct ProbeMeasurements {
     authenticated_startup: Duration,
+    durable_grant_rebind: Duration,
     profile_view: Duration,
     service_shutdown: Duration,
     engine_shutdown: Duration,
@@ -400,7 +408,7 @@ fn run() -> Result<ProbeDisposition, String> {
 
     set_phase("authenticated-runtime-hydration");
     let startup_started = Instant::now();
-    let service =
+    let mut service =
         ExtensionServiceOwner::launch(worker_launch.bind_host_factory(host_factory), deadline())
             .map_err(|error| format!("cannot spawn extension-service worker: {error}"))?;
     let service_status = service.handle();
@@ -495,6 +503,105 @@ fn run() -> Result<ProbeDisposition, String> {
         return Err("profile view request was not admitted".to_owned());
     }
     engine.wait_for_view_commit(item, page.url(), deadline())?;
+    engine.wait_for_extension_armed(item, deadline())?;
+
+    set_phase("native-optional-permission");
+    let durable_grant_rebind_started = Instant::now();
+    let action = engine.request_extension_action(
+        profile,
+        item,
+        ExtensionBrowserSurfaceGeneration::INITIAL,
+        deadline(),
+    )?;
+    if !action.is_enabled()
+        || action.presents_popup()
+        || action.label() != "Run authenticated product probe"
+    {
+        return Err(format!(
+            "authenticated action projection was unexpected: enabled={}, popup={}, label={:?}",
+            action.is_enabled(),
+            action.presents_popup(),
+            action.label()
+        ));
+    }
+    let action_request = ExtensionActionRequest::new(
+        ExtensionActionRequestId::new(1)
+            .ok_or_else(|| "extension action request id was invalid".to_owned())?,
+        action.runtime(),
+        item,
+        ExtensionBrowserSurfaceGeneration::INITIAL,
+        action.revision(),
+        ExtensionPopupAnchor::new(Rect::new(12.0, 12.0, 28.0, 28.0))
+            .map_err(|error| format!("extension action anchor was invalid: {error:?}"))?,
+    );
+    let prompt = engine.invoke_action_for_runtime_grant(action_request, deadline())?;
+    if prompt.runtime() != action.runtime()
+        || prompt.key().profile() != profile
+        || prompt.key().install_id() != action.runtime().install_id()
+        || prompt.key().browsing_context() != ExtensionGrantBrowsingContext::Regular
+        || prompt.extension_name() != "Fixture"
+        || prompt.request().api().len() != 1
+        || prompt.request().api()[0].as_str() != "tabs"
+        || prompt.request().hosts().len() != 1
+        || prompt.request().hosts()[0].as_str() != "https://optional.example/*"
+    {
+        return Err(format!(
+            "native optional-grant prompt did not preserve the authenticated cohort: {prompt:?}"
+        ));
+    }
+
+    let (grant_tx, grant_rx) = mpsc::sync_channel(1);
+    if service.begin_request_runtime_grants(
+        prompt.key(),
+        prompt.runtime().generation(),
+        prompt.request().clone(),
+        deadline(),
+        Box::new(move |settlement| {
+            let _ = grant_tx.send(settlement);
+        }),
+    ) != ExtensionManagementAdmission::Accepted
+    {
+        return Err("extension service did not admit the optional-grant transaction".into());
+    }
+    let mut grant_settlement = None;
+    engine.pump_until(
+        "durable optional-grant rebind",
+        deadline(),
+        |_| match grant_rx.try_recv() {
+            Ok(settlement) => {
+                grant_settlement = Some(settlement);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("optional-grant settlement channel disconnected".to_owned())
+            }
+        },
+    )?;
+    match grant_settlement
+        .ok_or_else(|| "optional-grant transaction returned no settlement".to_owned())?
+        .into_outcome()
+    {
+        ExtensionRuntimeGrantOutcome::Granted {
+            revision,
+            runtime: ExtensionRuntimeGrantRuntimeState::Active(generation),
+        } if revision.get() == 2 && generation == prompt.runtime().generation() => {}
+        outcome => {
+            return Err(format!(
+                "optional-grant transaction did not commit and rebind exactly: {outcome:?}"
+            ))
+        }
+    }
+    if engine.engine().settle_extension_runtime_grant_prompt(
+        prompt.runtime(),
+        prompt.id(),
+        ExtensionRuntimeGrantPromptSettlement::Granted,
+    ) != NativeDispatch::Scheduled
+    {
+        return Err("native optional-grant completion was not scheduled".into());
+    }
+    let durable_grant_rebind = durable_grant_rebind_started.elapsed();
+
     let mut browser_model = ProductBrowserModel::new(profile, page_url, item);
     set_phase("executable-mv3");
     if let Err(error) = engine.wait_for_executable_extension(item, deadline(), |native, request| {
@@ -563,6 +670,7 @@ fn run() -> Result<ProbeDisposition, String> {
 
     Ok(ProbeDisposition::Passed(ProbeMeasurements {
         authenticated_startup,
+        durable_grant_rebind,
         profile_view,
         service_shutdown,
         engine_shutdown,
