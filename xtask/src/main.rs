@@ -6,6 +6,7 @@ mod blocker_seed;
 mod crx3;
 mod extension_runtime_acquisition_boundary;
 mod extension_tree;
+mod macos_extension_compatibility;
 mod webview2_extension_boundary;
 
 use std::process::{exit, Command};
@@ -50,6 +51,9 @@ fn main() {
             check_extension_runtime_acquisition_boundary()
         }
         Some("check-webview2-extension-boundary") => check_webview2_extension_boundary(),
+        Some("check-macos-extension-compatibility-asset") => {
+            check_macos_extension_compatibility_asset()
+        }
         Some("check-blocker-seed") if arguments.len() == 1 => {
             let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
             if let Err(error) = blocker_seed::check(&repository) {
@@ -92,6 +96,21 @@ fn main() {
                 std::path::Path::new(&arguments[4]),
             ) {
                 eprintln!("extension probe tree indexing failed: {error}");
+                exit(1);
+            }
+        }
+        Some("materialize-macos-extension-compatibility")
+            if arguments.len() == 7
+                && arguments[1] == "--extension"
+                && arguments[3] == "--tree-index"
+                && arguments[5] == "--output" =>
+        {
+            if let Err(error) = macos_extension_compatibility::materialize(
+                std::path::Path::new(&arguments[2]),
+                std::path::Path::new(&arguments[4]),
+                std::path::Path::new(&arguments[6]),
+            ) {
+                eprintln!("macOS extension compatibility materialization failed: {error}");
                 exit(1);
             }
         }
@@ -165,7 +184,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|index-extension-probe-tree --extension PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -622,6 +641,7 @@ fn ci() {
     check_extension_runtime_host_assembler_call_sites();
     check_extension_runtime_acquisition_boundary();
     check_webview2_extension_boundary();
+    check_macos_extension_compatibility_asset();
     check_engine_floors();
     check_advisory_exceptions();
     check_blocker_security_fork();
@@ -677,6 +697,13 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_extension_product_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+fn check_macos_extension_compatibility_asset() {
+    run(
+        "node",
+        &["xtask/scripts/check-macos-extension-compatibility.mjs"],
+    );
 }
 
 fn check_webview2_extension_boundary() {

@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use zephium_extension_package::{
     CanonicalExtensionTreeIndex, PortableRelativePath, MAX_EXTENSION_TREE_BYTES,
-    MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILE_BYTES,
+    MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILE_BYTES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
 #[derive(Serialize)]
@@ -31,6 +31,11 @@ struct Inventory {
     bytes: u64,
 }
 
+pub(crate) struct GeneratedTreeIndex {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) parsed: CanonicalExtensionTreeIndex,
+}
+
 /// Emits a canonical closed-tree index for a diagnostic extension directory.
 ///
 /// This is deliberately not release authentication. It gives native probes a
@@ -38,14 +43,7 @@ struct Inventory {
 /// has been extracted. Product ingestion must bind extraction to its package
 /// authority rather than treating this caller-selected index as trust.
 pub(crate) fn index_probe_tree(extension: &Path, output: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(extension)
-        .map_err(|error| format!("cannot inspect extension root: {error}"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("extension root must be one ordinary directory".into());
-    }
-    let extension = extension
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize extension root: {error}"))?;
+    let extension = canonical_extension_root(extension)?;
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -64,8 +62,63 @@ pub(crate) fn index_probe_tree(extension: &Path, output: &Path) -> Result<(), St
         return Err("tree-index output may not be inside the indexed extension".into());
     }
 
+    let generated = build_tree_index(&extension)?;
+
+    let mut staged = tempfile::NamedTempFile::new_in(&parent)
+        .map_err(|error| format!("cannot create tree-index stage: {error}"))?;
+    staged
+        .write_all(&generated.bytes)
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|error| format!("cannot durably stage tree index: {error}"))?;
+    staged
+        .persist_noclobber(&output)
+        .map_err(|error| format!("cannot atomically publish tree index: {}", error.error))?;
+
+    println!(
+        "extension probe tree indexed: files={}; bytes={}; manifest_sha256={}; tree_sha256={}; index_sha256={}; product_authority=false",
+        generated.parsed.files().len(),
+        generated.parsed.total_bytes(),
+        lower_hex(generated.parsed.manifest_sha256().as_bytes()),
+        lower_hex(generated.parsed.tree_sha256().as_bytes()),
+        lower_hex(generated.parsed.index_sha256().as_bytes()),
+    );
+    Ok(())
+}
+
+pub(crate) fn verify_closed_tree(
+    extension: &Path,
+    index: &Path,
+) -> Result<(PathBuf, CanonicalExtensionTreeIndex), String> {
+    let extension = canonical_extension_root(extension)?;
+    let index_metadata = fs::symlink_metadata(index)
+        .map_err(|error| format!("cannot inspect extension tree index: {error}"))?;
+    if !index_metadata.is_file() || index_metadata.file_type().is_symlink() {
+        return Err("extension tree index must be one ordinary file".into());
+    }
+    let index = index
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize extension tree index: {error}"))?;
+    if index.starts_with(&extension) {
+        return Err("extension tree index must be outside the indexed tree".into());
+    }
+    let metadata = fs::metadata(&index)
+        .map_err(|error| format!("cannot inspect extension tree index: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_EXTENSION_TREE_INDEX_BYTES as u64 {
+        return Err("extension tree index is not a bounded regular file".into());
+    }
+    let expected_bytes = read_exact_file(&index, metadata.len(), "tree index")?;
+    let expected = CanonicalExtensionTreeIndex::parse_canonical(&expected_bytes)
+        .map_err(|error| format!("extension tree index is invalid: {error}"))?;
+    let observed = build_tree_index(&extension)?;
+    if observed.bytes != expected_bytes {
+        return Err("extension tree does not match its exact canonical index".into());
+    }
+    Ok((extension, expected))
+}
+
+pub(crate) fn build_tree_index(extension: &Path) -> Result<GeneratedTreeIndex, String> {
     let mut inventory = Inventory::default();
-    collect(&extension, Path::new(""), 0, &mut inventory)?;
+    collect(extension, Path::new(""), 0, &mut inventory)?;
     inventory
         .files
         .sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -76,26 +129,18 @@ pub(crate) fn index_probe_tree(extension: &Path, output: &Path) -> Result<(), St
     .map_err(|error| format!("cannot serialize canonical tree index: {error}"))?;
     let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes)
         .map_err(|error| format!("generated tree index is invalid: {error}"))?;
+    Ok(GeneratedTreeIndex { bytes, parsed })
+}
 
-    let mut staged = tempfile::NamedTempFile::new_in(&parent)
-        .map_err(|error| format!("cannot create tree-index stage: {error}"))?;
-    staged
-        .write_all(&bytes)
-        .and_then(|()| staged.as_file().sync_all())
-        .map_err(|error| format!("cannot durably stage tree index: {error}"))?;
-    staged
-        .persist_noclobber(&output)
-        .map_err(|error| format!("cannot atomically publish tree index: {}", error.error))?;
-
-    println!(
-        "extension probe tree indexed: files={}; bytes={}; manifest_sha256={}; tree_sha256={}; index_sha256={}; product_authority=false",
-        parsed.files().len(),
-        parsed.total_bytes(),
-        lower_hex(parsed.manifest_sha256().as_bytes()),
-        lower_hex(parsed.tree_sha256().as_bytes()),
-        lower_hex(parsed.index_sha256().as_bytes()),
-    );
-    Ok(())
+fn canonical_extension_root(extension: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(extension)
+        .map_err(|error| format!("cannot inspect extension root: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("extension root must be one ordinary directory".into());
+    }
+    extension
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize extension root: {error}"))
 }
 
 fn collect(
