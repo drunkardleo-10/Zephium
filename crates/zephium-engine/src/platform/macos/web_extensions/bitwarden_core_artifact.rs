@@ -62,6 +62,7 @@ struct AdmittedArtifact {
     tree_sha256: String,
     file_count: usize,
     total_bytes: u64,
+    wasm_response_mime_adapter: bool,
 }
 
 struct NativeTeardown {
@@ -78,6 +79,7 @@ struct NativeTeardown {
     webview_requests: usize,
     operating_system: String,
     popup_startup_millis: u128,
+    wasm_response_mime_adapter: bool,
     compatibility_failure: Option<String>,
 }
 
@@ -100,21 +102,23 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
         match (&teardown.compatibility_failure, teardown_result) {
             (Some(failure), Ok(())) => {
                 return Err(format!(
-                    "{failure}; popup_startup_ms={}; native_objects_released=passed; product_authority=false",
+                    "{failure}; popup_startup_ms={}; wasm_response_mime_adapter={}; native_objects_released=passed; product_authority=false",
                     teardown.popup_startup_millis,
+                    teardown.wasm_response_mime_adapter,
                 ));
             }
             (Some(failure), Err(teardown_failure)) => {
                 return Err(format!(
-                    "{failure}; popup_startup_ms={}; teardown_failure={teardown_failure}; product_authority=false",
+                    "{failure}; popup_startup_ms={}; wasm_response_mime_adapter={}; teardown_failure={teardown_failure}; product_authority=false",
                     teardown.popup_startup_millis,
+                    teardown.wasm_response_mime_adapter,
                 ));
             }
             (None, Err(teardown_failure)) => return Err(teardown_failure),
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS Bitwarden Core passed; os={}; source={}; tree_sha256={}; files={}; bytes={}; manifest_parse=passed; exact_native_grants=passed; content_registration=passed; extension_scripts={}; popup_background_startup=passed; popup_startup_ms={}; offscreen_fallback=passed; inline_menu=disabled; background_diagnostics=probe-only; product_authority=false; native_objects_released=passed; webview_callbacks={}; lifecycle_objects_released={}",
+            "native-probe: macOS Bitwarden Core passed; os={}; source={}; tree_sha256={}; files={}; bytes={}; manifest_parse=passed; exact_native_grants=passed; content_registration=passed; extension_scripts={}; popup_background_startup=passed; popup_startup_ms={}; wasm_response_mime_adapter={}; offscreen_fallback=passed; inline_menu=disabled; background_diagnostics=probe-only; product_authority=false; native_objects_released=passed; webview_callbacks={}; lifecycle_objects_released={}",
             teardown.operating_system,
             EXPECTED_SOURCE_TAG,
             teardown.tree_sha256,
@@ -122,6 +126,7 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             teardown.total_bytes,
             teardown.extension_script_count,
             teardown.popup_startup_millis,
+            teardown.wasm_response_mime_adapter,
             teardown.webview_requests,
             teardown.lifecycle_drops.load(Ordering::Acquire),
         );
@@ -174,21 +179,49 @@ fn admit_artifact(root: &Path) -> Result<AdmittedArtifact, String> {
         return Err("Bitwarden probe artifact omitted probe-only popup diagnostics".into());
     }
     if metadata.pointer("/probe_diagnostics")
-        != Some(&serde_json::json!(["popup-init-stage", "popup-wasm-state"]))
+        != Some(&serde_json::json!([
+            "popup-init-stage",
+            "popup-wasm-state",
+            "popup-wasm-timeline-v1"
+        ]))
     {
         return Err("Bitwarden probe artifact diagnostic contract drifted".into());
     }
     if metadata.pointer("/extension_page_canary") != Some(&Value::Bool(true)) {
         return Err("Bitwarden probe artifact omitted its extension-page canary".into());
     }
-    let expected_adaptations = serde_json::json!([
+    let wasm_response_mime_adapter = metadata
+        .pointer("/wasm_response_mime_adapter")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "Bitwarden probe artifact omitted its typed WASM response MIME mode".to_owned()
+        })?;
+    let mut expected_adaptations = vec![
         "webkit-extension-device-classification",
         "unsupported-notification-subscription-guard",
         "unsupported-offscreen-storage-fallback",
-        "typed-main-world-enum"
-    ]);
-    if metadata.pointer("/compatibility_adaptations") != Some(&expected_adaptations) {
+        "typed-main-world-enum",
+    ];
+    if wasm_response_mime_adapter {
+        expected_adaptations.push("strict-wasm-response-mime");
+    }
+    if metadata.pointer("/compatibility_adaptations")
+        != Some(&serde_json::json!(expected_adaptations))
+    {
         return Err("Bitwarden probe artifact compatibility adaptations drifted".into());
+    }
+    let mut expected_limitations = vec![
+        "inline-menu-disabled",
+        "build-toolchain-unattested",
+        "probe-background-instrumented",
+        "probe-popup-instrumented",
+        "not-a-product-package",
+    ];
+    if wasm_response_mime_adapter {
+        expected_limitations.push("probe-wasm-response-mime-adapter");
+    }
+    if metadata.pointer("/limitations") != Some(&serde_json::json!(expected_limitations)) {
+        return Err("Bitwarden probe artifact limitation contract drifted".into());
     }
 
     let index_bytes = read_bounded_file(
@@ -223,6 +256,7 @@ fn admit_artifact(root: &Path) -> Result<AdmittedArtifact, String> {
         tree_sha256,
         file_count: index.files().len(),
         total_bytes: index.total_bytes(),
+        wasm_response_mime_adapter,
     })
 }
 
@@ -468,6 +502,7 @@ fn run_native(
         webview_requests: webview_requests.load(Ordering::Acquire),
         operating_system,
         popup_startup_millis,
+        wasm_response_mime_adapter: admitted.wasm_response_mime_adapter,
         compatibility_failure,
     };
     drop(delegate);

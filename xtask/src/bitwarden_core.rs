@@ -34,9 +34,64 @@ const PROBE_PAGE_DIAGNOSTICS: &str = "zephium-probe-page-diagnostics.js";
 const PROBE_PAGE_CANARY: &str = "zephium-probe-canary.html";
 const PROBE_PAGE_CANARY_SCRIPT: &str = "zephium-probe-canary.js";
 const SOURCE_POPUP_ENTRYPOINT: &str = "popup/index.html";
+const PROBE_WASM_RESPONSE_MIME_HELPER_MARKER: &str = "/* ZEPHIUM_WASM_RESPONSE_MIME_HELPER */";
+const PROBE_WASM_RESPONSE_MIME_HELPER_SOURCE: &str = r#"const installWasmResponseMimeAdapter = (enabled, mark) => {
+  if (typeof WebAssembly?.instantiateStreaming !== 'function') return;
+  const instantiateStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
+  WebAssembly.instantiateStreaming = (...args) => {
+    mark('streaming-start');
+    const source = Promise.resolve(args[0]);
+    return instantiateStreaming(...args).then(
+      value => { mark('streaming-ready'); return value; },
+      async error => {
+        const message = `${error?.name ?? 'Error'}:${error?.message ?? error}`;
+        mark('streaming-rejected', message);
+        if (!enabled || !/mime/i.test(message) || !/application\/wasm/i.test(message)) {
+          throw error;
+        }
+        let response;
+        try {
+          response = await source;
+        } catch (_) {
+          throw error;
+        }
+        const mime = response instanceof Response
+          ? (response.headers.get('Content-Type') ?? '').trim().toLowerCase()
+          : '';
+        const eligible = response instanceof Response
+          && response.status === 200
+          && mime === 'application/octet-stream'
+          && /\.wasm(?:$|[?#])/.test(response.url)
+          && response.body !== null
+          && !response.bodyUsed;
+        if (!eligible) {
+          mark('streaming-mime-retry-refused', `${response?.status ?? 'not-response'};${mime};${response?.bodyUsed ?? 'unknown'}`);
+          throw error;
+        }
+        const headers = new Headers(response.headers);
+        headers.set('Content-Type', 'application/wasm');
+        const rewritten = new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+        mark('streaming-mime-retry', response.url.split('/').pop());
+        return instantiateStreaming(Promise.resolve(rewritten), args[1]).then(
+          value => { mark('streaming-mime-retry-ready'); return value; },
+          retryError => {
+            mark('streaming-mime-retry-rejected', `${retryError?.name ?? 'Error'}:${retryError?.message ?? retryError}`);
+            throw retryError;
+          },
+        );
+      },
+    );
+  };
+};"#;
 const PROBE_BACKGROUND_WRAPPER_SOURCE: &str = r#"(() => {
   'use strict';
   const prefix = 'ZEPHIUM_BACKGROUND_DIAGNOSTIC:';
+  const wasmResponseMimeAdapter = false;
+  let wasmState = 'idle';
   const render = value => {
     try {
       if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ''}`;
@@ -47,9 +102,11 @@ const PROBE_BACKGROUND_WRAPPER_SOURCE: &str = r#"(() => {
     }
   };
   const publish = (kind, values) => {
-    const message = `${prefix}${kind}: ${values.map(render).join(' | ')}`.slice(0, 2048);
+    const message = `${prefix}${kind}: wasm=${wasmState} | ${values.map(render).join(' | ')}`.slice(0, 2048);
     try { chrome.action.setTitle({ title: message }); } catch (_) {}
   };
+  /* ZEPHIUM_WASM_RESPONSE_MIME_HELPER */
+  installWasmResponseMimeAdapter(wasmResponseMimeAdapter, stage => { wasmState = stage; });
   const originalError = console.error.bind(console);
   console.error = (...values) => {
     publish('console.error', values);
@@ -67,6 +124,9 @@ const PROBE_BACKGROUND_WRAPPER_SOURCE: &str = r#"(() => {
 const PROBE_PAGE_DIAGNOSTICS_SOURCE: &str = r#"(() => {
   'use strict';
   const prefix = 'ZEPHIUM_POPUP_DIAGNOSTIC:';
+  const readyTitle = 'zephium-bitwarden-core-popup-ready';
+  const wasmResponseMimeAdapter = false;
+  const started = performance.now();
   const render = value => {
     try {
       if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ''}`;
@@ -80,17 +140,49 @@ const PROBE_PAGE_DIAGNOSTICS_SOURCE: &str = r#"(() => {
     document.title = `${prefix}${kind}: ${values.map(render).join(' | ')}`.slice(0, 2048);
   };
   const scriptStates = [];
+  const wasmTimeline = [];
   let wasmState = 'idle';
-  const publishState = () => {
+  let wasmMime = 'unknown';
+  let wasmBytes = -1;
+  let lastInitStage = 'not-started';
+  let publishState = () => {};
+  const appendTimeline = (stage, detail = '') => {
+    if (wasmTimeline.length >= 20) return;
+    wasmTimeline.push({
+      stage,
+      ms: Math.round(performance.now() - started),
+      detail: String(detail).slice(0, 160),
+    });
+  };
+  const mark = (stage, detail = '') => {
+    wasmState = stage;
+    appendTimeline(stage, detail);
+    publishState();
+  };
+  const observeInitStage = () => {
+    const stage = globalThis.__zephiumPopupInitStage ?? 'not-started';
+    if (stage !== lastInitStage) {
+      lastInitStage = stage;
+      appendTimeline(`init:${stage}`);
+    }
+    return stage;
+  };
+  publishState = () => {
+    if (document.title === readyTitle || document.title.startsWith(prefix)) return;
     document.title = `ZEPHIUM_POPUP_STATE:${JSON.stringify({
       ready: document.readyState,
       loading: !!document.querySelector('#loading'),
       rootChildren: document.querySelector('app-root')?.childElementCount ?? -1,
       chrome: typeof chrome,
       runtime: typeof chrome === 'object' ? typeof chrome.runtime : 'absent',
-      initStage: globalThis.__zephiumPopupInitStage ?? 'not-started',
-      scripts: scriptStates.map(({ src, loaded }) => ({ src, loaded })),
-      wasm: wasmState,
+      initStage: observeInitStage(),
+      elapsedMs: Math.round(performance.now() - started),
+      scripts: {
+        total: scriptStates.length,
+        loaded: scriptStates.filter(state => state.loaded).length,
+        pending: scriptStates.filter(state => !state.loaded).map(state => state.src.split('/').pop()),
+      },
+      wasm: { state: wasmState, mime: wasmMime, bytes: wasmBytes, timeline: wasmTimeline },
     })}`.slice(0, 2048);
   };
   const trackScript = script => {
@@ -108,25 +200,63 @@ const PROBE_PAGE_DIAGNOSTICS_SOURCE: &str = r#"(() => {
       if (node instanceof Element) for (const script of node.querySelectorAll('script')) trackScript(script);
     }
   }).observe(document.documentElement, { childList: true, subtree: true });
-  if (typeof WebAssembly?.instantiateStreaming === 'function') {
-    const instantiateStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
-    WebAssembly.instantiateStreaming = (...args) => {
-      wasmState = 'instantiate-streaming';
-      publishState();
-      return instantiateStreaming(...args).then(
-        value => { wasmState = 'ready'; publishState(); return value; },
-        error => { wasmState = 'streaming-rejected'; publishState(); throw error; },
+  const nativeFetch = globalThis.fetch?.bind(globalThis);
+  if (nativeFetch) {
+    globalThis.fetch = (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const wasm = /\.wasm(?:$|[?#])/.test(url);
+      if (wasm) mark('fetch-start', url.split('/').pop());
+      return nativeFetch(input, init).then(response => {
+        if (wasm) {
+          wasmMime = response.headers.get('Content-Type') ?? 'missing';
+          mark('fetch-response', `${response.status};${wasmMime}`);
+        }
+        return response;
+      });
+    };
+  }
+  const nativeArrayBuffer = Response.prototype.arrayBuffer;
+  Response.prototype.arrayBuffer = function() {
+    const wasm = /\.wasm(?:$|[?#])/.test(this.url) || /(?:application\/wasm|octet-stream)/i.test(this.headers.get('Content-Type') ?? '');
+    if (wasm) mark('array-buffer-start', this.url.split('/').pop());
+    const operation = nativeArrayBuffer.call(this);
+    if (wasm) mark('array-buffer-returned');
+    return operation.then(value => {
+      if (wasm) {
+        wasmBytes = value.byteLength;
+        mark('array-buffer-ready', wasmBytes);
+      }
+      return value;
+    });
+  };
+  /* ZEPHIUM_WASM_RESPONSE_MIME_HELPER */
+  installWasmResponseMimeAdapter(wasmResponseMimeAdapter, mark);
+  if (typeof WebAssembly?.instantiate === 'function') {
+    const instantiate = WebAssembly.instantiate.bind(WebAssembly);
+    WebAssembly.instantiate = (...args) => {
+      const input = args[0];
+      const bytes = input?.byteLength ?? input?.buffer?.byteLength ?? -1;
+      if (bytes > 0) {
+        wasmBytes = bytes;
+        mark('instantiate-start', bytes);
+      }
+      return Promise.resolve(instantiate(...args)).then(
+        value => { if (bytes > 0) mark('instantiate-ready', bytes); return value; },
+        error => { if (bytes > 0) mark('instantiate-rejected', `${error?.name ?? 'Error'}:${error?.message ?? error}`); throw error; },
       );
     };
   }
   const originalError = console.error.bind(console);
   console.error = (...values) => {
-    publish('console.error', values);
+    publish('console.error', [{
+      initStage: observeInitStage(),
+      elapsedMs: Math.round(performance.now() - started),
+      wasm: { state: wasmState, mime: wasmMime, bytes: wasmBytes, timeline: wasmTimeline },
+    }, ...values]);
     originalError(...values);
   };
   addEventListener('error', event => publish('error', [event.message, event.error]));
   addEventListener('unhandledrejection', event => publish('unhandledrejection', [event.reason]));
-  const readyTitle = 'zephium-bitwarden-core-popup-ready';
   const observeReadiness = () => {
     const root = document.querySelector('app-root');
     const update = () => {
@@ -143,15 +273,33 @@ const PROBE_PAGE_DIAGNOSTICS_SOURCE: &str = r#"(() => {
   addEventListener('DOMContentLoaded', publishState, { once: true });
   addEventListener('load', publishState, { once: true });
   publishState();
-  setTimeout(() => {
-    if (document.title !== readyTitle && !document.title.startsWith(prefix)) publishState();
-  }, 5000);
+  const interval = setInterval(publishState, 100);
+  setTimeout(() => { clearInterval(interval); publishState(); }, 15000);
 })();
 "#;
 const PROBE_PAGE_CANARY_SOURCE: &str =
     "<!doctype html><meta charset=\"utf-8\"><title>zephium-canary-pending</title><script src=\"zephium-probe-canary.js\"></script>";
 const PROBE_PAGE_CANARY_SCRIPT_SOURCE: &str =
     "document.title='zephium-bitwarden-extension-page-ready';";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MacosProbeArtifactMode {
+    Baseline,
+    WasmResponseMimeAdapter,
+}
+
+impl MacosProbeArtifactMode {
+    fn uses_wasm_response_mime_adapter(self) -> bool {
+        self == Self::WasmResponseMimeAdapter
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::WasmResponseMimeAdapter => "wasm-response-mime-adapter",
+        }
+    }
+}
 const EXPECTED_SOURCE_MAPS: &[&str] = &[
     "719.background.js.map",
     "assets/635.js.map",
@@ -524,7 +672,7 @@ pub(crate) fn materialize_macos_probe_overlay(root: &Path, output: &Path) -> Res
             "unsupported-offscreen-storage-fallback",
             "typed-main-world-enum"
         ],
-        "probe_diagnostics": ["popup-init-stage", "popup-wasm-state"],
+        "probe_diagnostics": ["popup-init-stage", "popup-wasm-state", "popup-wasm-timeline-v1"],
         "limitations": ["inline-menu-disabled", "not-a-product-package"],
         "files": PROBE_OVERLAY_FILES,
     }))
@@ -575,12 +723,85 @@ struct ProbeTreeFile {
     sha256: String,
 }
 
+fn probe_diagnostic_source(
+    template: &str,
+    description: &str,
+    mode: MacosProbeArtifactMode,
+) -> Result<Vec<u8>, String> {
+    const DISABLED: &str = "const wasmResponseMimeAdapter = false;";
+    const ENABLED: &str = "const wasmResponseMimeAdapter = true;";
+    if template.matches(DISABLED).count() != 1 {
+        return Err(format!(
+            "probe {description} WASM response MIME adapter marker drifted"
+        ));
+    }
+    if template
+        .matches(PROBE_WASM_RESPONSE_MIME_HELPER_MARKER)
+        .count()
+        != 1
+    {
+        return Err(format!(
+            "probe {description} WASM response MIME helper marker drifted"
+        ));
+    }
+    let expanded = template.replacen(
+        PROBE_WASM_RESPONSE_MIME_HELPER_MARKER,
+        PROBE_WASM_RESPONSE_MIME_HELPER_SOURCE,
+        1,
+    );
+    let source = if mode.uses_wasm_response_mime_adapter() {
+        expanded.replacen(DISABLED, ENABLED, 1)
+    } else {
+        expanded
+    };
+    Ok(source.into_bytes())
+}
+
+fn probe_background_wrapper_source(mode: MacosProbeArtifactMode) -> Result<Vec<u8>, String> {
+    probe_diagnostic_source(PROBE_BACKGROUND_WRAPPER_SOURCE, "background", mode)
+}
+
+fn probe_page_diagnostics_source(mode: MacosProbeArtifactMode) -> Result<Vec<u8>, String> {
+    probe_diagnostic_source(PROBE_PAGE_DIAGNOSTICS_SOURCE, "popup", mode)
+}
+
+fn probe_compatibility_adaptations(mode: MacosProbeArtifactMode) -> Vec<&'static str> {
+    let mut adaptations = vec![
+        "webkit-extension-device-classification",
+        "unsupported-notification-subscription-guard",
+        "unsupported-offscreen-storage-fallback",
+        "typed-main-world-enum",
+    ];
+    if mode.uses_wasm_response_mime_adapter() {
+        adaptations.push("strict-wasm-response-mime");
+    }
+    adaptations
+}
+
+fn probe_limitations(mode: MacosProbeArtifactMode) -> Vec<&'static str> {
+    let mut limitations = vec![
+        "inline-menu-disabled",
+        "build-toolchain-unattested",
+        "probe-background-instrumented",
+        "probe-popup-instrumented",
+        "not-a-product-package",
+    ];
+    if mode.uses_wasm_response_mime_adapter() {
+        limitations.push("probe-wasm-response-mime-adapter");
+    }
+    limitations
+}
+
 /// Produces the closed, non-product extension tree consumed by the live native
 /// Bitwarden probe. This step intentionally does not authenticate a release:
 /// it strips debug maps and the fail-closed privileged inline-menu pages,
 /// validates the exact reviewed manifest/adaptation invariants, and emits a
 /// canonical resource index beside (not inside) the extension root.
-pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Result<(), String> {
+pub(crate) fn finalize_macos_probe_artifact(
+    build: &Path,
+    output: &Path,
+    mode: MacosProbeArtifactMode,
+) -> Result<(), String> {
     let build = build
         .canonicalize()
         .map_err(|error| format!("cannot canonicalize probe build root: {error}"))?;
@@ -619,6 +840,8 @@ pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Resu
     let extension_root = staging.path().join(PROBE_ARTIFACT_EXTENSION_DIRECTORY);
     fs::create_dir(&extension_root)
         .map_err(|error| format!("cannot create staged extension root: {error}"))?;
+    let background_wrapper = probe_background_wrapper_source(mode)?;
+    let page_diagnostics = probe_page_diagnostics_source(mode)?;
 
     let mut index_files = Vec::with_capacity(EXPECTED_INSTRUMENTED_FILE_COUNT);
     for file in &inventory.files {
@@ -645,22 +868,18 @@ pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Resu
     write_overlay_file(
         &extension_root,
         PROBE_BACKGROUND_WRAPPER,
-        PROBE_BACKGROUND_WRAPPER_SOURCE.as_bytes(),
+        &background_wrapper,
     )?;
     index_files.push(ProbeTreeFile {
         path: PROBE_BACKGROUND_WRAPPER.to_owned(),
-        length: PROBE_BACKGROUND_WRAPPER_SOURCE.len() as u64,
-        sha256: sha256_hex(PROBE_BACKGROUND_WRAPPER_SOURCE.as_bytes()),
+        length: background_wrapper.len() as u64,
+        sha256: sha256_hex(&background_wrapper),
     });
-    write_overlay_file(
-        &extension_root,
-        PROBE_PAGE_DIAGNOSTICS,
-        PROBE_PAGE_DIAGNOSTICS_SOURCE.as_bytes(),
-    )?;
+    write_overlay_file(&extension_root, PROBE_PAGE_DIAGNOSTICS, &page_diagnostics)?;
     index_files.push(ProbeTreeFile {
         path: PROBE_PAGE_DIAGNOSTICS.to_owned(),
-        length: PROBE_PAGE_DIAGNOSTICS_SOURCE.len() as u64,
-        sha256: sha256_hex(PROBE_PAGE_DIAGNOSTICS_SOURCE.as_bytes()),
+        length: page_diagnostics.len() as u64,
+        sha256: sha256_hex(&page_diagnostics),
     });
     for (path, bytes) in [
         (PROBE_PAGE_CANARY, PROBE_PAGE_CANARY_SOURCE.as_bytes()),
@@ -701,14 +920,10 @@ pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Resu
         "build_toolchain_attested": false,
         "background_diagnostics": true,
         "popup_diagnostics": true,
-        "probe_diagnostics": ["popup-init-stage", "popup-wasm-state"],
+        "wasm_response_mime_adapter": mode.uses_wasm_response_mime_adapter(),
+        "probe_diagnostics": ["popup-init-stage", "popup-wasm-state", "popup-wasm-timeline-v1"],
         "extension_page_canary": true,
-        "compatibility_adaptations": [
-            "webkit-extension-device-classification",
-            "unsupported-notification-subscription-guard",
-            "unsupported-offscreen-storage-fallback",
-            "typed-main-world-enum"
-        ],
+        "compatibility_adaptations": probe_compatibility_adaptations(mode),
         "extension_root": PROBE_ARTIFACT_EXTENSION_DIRECTORY,
         "tree_index": PROBE_ARTIFACT_INDEX,
         "file_count": parsed_index.files().len(),
@@ -720,13 +935,7 @@ pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Resu
             "source_maps": EXPECTED_SOURCE_MAPS.len(),
             "unsafe_inline_menu_files": UNSAFE_INLINE_MENU_FILES.len(),
         },
-        "limitations": [
-            "inline-menu-disabled",
-            "build-toolchain-unattested",
-            "probe-background-instrumented",
-            "probe-popup-instrumented",
-            "not-a-product-package"
-        ],
+        "limitations": probe_limitations(mode),
     }))
     .map_err(|error| format!("cannot serialize probe artifact metadata: {error}"))?;
     write_overlay_file(staging.path(), PROBE_ARTIFACT_METADATA, &metadata)?;
@@ -739,7 +948,8 @@ pub(crate) fn finalize_macos_probe_artifact(build: &Path, output: &Path) -> Resu
         )
     })?;
     println!(
-        "Bitwarden Core macOS probe artifact finalized: files={}; bytes={}; product_authority=false",
+        "Bitwarden Core macOS probe artifact finalized: mode={}; files={}; bytes={}; product_authority=false",
+        mode.label(),
         parsed_index.files().len(),
         parsed_index.total_bytes(),
     );
@@ -1672,6 +1882,43 @@ after
     }
 
     #[test]
+    fn popup_probe_profiles_the_bounded_wasm_fallback_pipeline() {
+        let baseline = String::from_utf8(
+            probe_page_diagnostics_source(MacosProbeArtifactMode::Baseline).unwrap(),
+        )
+        .unwrap();
+        let adapted = String::from_utf8(
+            probe_page_diagnostics_source(MacosProbeArtifactMode::WasmResponseMimeAdapter).unwrap(),
+        )
+        .unwrap();
+        assert!(baseline.contains("const wasmResponseMimeAdapter = false;"));
+        assert!(adapted.contains("const wasmResponseMimeAdapter = true;"));
+        for contract in [
+            "fetch-start",
+            "array-buffer-ready",
+            "array-buffer-returned",
+            "streaming-rejected",
+            "instantiate-start",
+            "instantiate-ready",
+            "elapsedMs",
+            "pending: scriptStates.filter",
+            "wasmTimeline.length >= 20",
+            "String(detail).slice(0, 160)",
+            "response.status === 200",
+            "mime === 'application/octet-stream'",
+            "!response.bodyUsed",
+            "headers.set('Content-Type', 'application/wasm')",
+        ] {
+            assert!(
+                baseline.contains(contract),
+                "missing probe contract: {contract}"
+            );
+        }
+        assert!(!baseline.contains(PROBE_WASM_RESPONSE_MIME_HELPER_MARKER));
+        assert!(!baseline.contains("performance.measureUserAgentSpecificMemory"));
+    }
+
+    #[test]
     fn overlay_writer_never_replaces_an_existing_file() {
         let temp = tempfile::tempdir().unwrap();
         write_overlay_file(temp.path(), "nested/file", b"first").unwrap();
@@ -1687,7 +1934,7 @@ after
         write_probe_build_fixture(&build);
         let output = temp.path().join("artifact");
 
-        finalize_macos_probe_artifact(&build, &output).unwrap();
+        finalize_macos_probe_artifact(&build, &output, MacosProbeArtifactMode::Baseline).unwrap();
         assert!(!output
             .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
             .join("background.js.map")
@@ -1710,6 +1957,15 @@ after
         assert_eq!(metadata["file_count"], EXPECTED_INSTRUMENTED_FILE_COUNT);
         assert_eq!(metadata["background_diagnostics"], true);
         assert_eq!(metadata["popup_diagnostics"], true);
+        assert_eq!(metadata["wasm_response_mime_adapter"], false);
+        assert_eq!(
+            metadata["probe_diagnostics"],
+            serde_json::json!([
+                "popup-init-stage",
+                "popup-wasm-state",
+                "popup-wasm-timeline-v1"
+            ])
+        );
         assert_eq!(
             metadata["compatibility_adaptations"][0],
             "webkit-extension-device-classification"
@@ -1726,6 +1982,70 @@ after
             metadata["manifest_sha256"],
             lower_hex(index.manifest_sha256().as_bytes())
         );
-        assert!(finalize_macos_probe_artifact(&build, &output).is_err());
+        assert!(finalize_macos_probe_artifact(
+            &build,
+            &output,
+            MacosProbeArtifactMode::WasmResponseMimeAdapter,
+        )
+        .is_err());
+
+        let adapted_output = temp.path().join("artifact-mime-adapter");
+        finalize_macos_probe_artifact(
+            &build,
+            &adapted_output,
+            MacosProbeArtifactMode::WasmResponseMimeAdapter,
+        )
+        .unwrap();
+        let adapted_metadata: serde_json::Value = serde_json::from_slice(
+            &fs::read(adapted_output.join(PROBE_ARTIFACT_METADATA)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(adapted_metadata["wasm_response_mime_adapter"], true);
+        assert_eq!(
+            adapted_metadata["compatibility_adaptations"][4],
+            "strict-wasm-response-mime"
+        );
+        assert_eq!(
+            adapted_metadata["limitations"][5],
+            "probe-wasm-response-mime-adapter"
+        );
+        let baseline_diagnostics = fs::read(
+            output
+                .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+                .join(PROBE_PAGE_DIAGNOSTICS),
+        )
+        .unwrap();
+        let adapted_diagnostics = fs::read(
+            adapted_output
+                .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+                .join(PROBE_PAGE_DIAGNOSTICS),
+        )
+        .unwrap();
+        let baseline_background = fs::read(
+            output
+                .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+                .join(PROBE_BACKGROUND_WRAPPER),
+        )
+        .unwrap();
+        let adapted_background = fs::read(
+            adapted_output
+                .join(PROBE_ARTIFACT_EXTENSION_DIRECTORY)
+                .join(PROBE_BACKGROUND_WRAPPER),
+        )
+        .unwrap();
+        assert!(std::str::from_utf8(&baseline_diagnostics)
+            .unwrap()
+            .contains("const wasmResponseMimeAdapter = false;"));
+        assert!(std::str::from_utf8(&adapted_diagnostics)
+            .unwrap()
+            .contains("const wasmResponseMimeAdapter = true;"));
+        assert_ne!(baseline_diagnostics, adapted_diagnostics);
+        assert!(std::str::from_utf8(&baseline_background)
+            .unwrap()
+            .contains("const wasmResponseMimeAdapter = false;"));
+        assert!(std::str::from_utf8(&adapted_background)
+            .unwrap()
+            .contains("const wasmResponseMimeAdapter = true;"));
+        assert_ne!(baseline_background, adapted_background);
     }
 }
