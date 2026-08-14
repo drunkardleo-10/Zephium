@@ -1,5 +1,7 @@
 const api = globalThis.browser ?? globalThis.chrome;
 const marker = "data-zephium-extension-product-probe";
+const popupMarker = "data-zephium-extension-popup-probe";
+let popupExecutions = 0;
 
 function settle(message) {
   const value =
@@ -10,10 +12,12 @@ function settle(message) {
 }
 
 api.runtime.onMessage.addListener((message) => {
-  if (message?.kind !== "zephium-product-probe-result") {
-    return undefined;
+  if (message?.kind === "zephium-product-probe-result") {
+    settle(message);
+  } else if (message?.kind === "zephium-product-probe-popup-ready") {
+    popupExecutions += 1;
+    document.documentElement.setAttribute(popupMarker, `ready:${popupExecutions}`);
   }
-  settle(message);
   return undefined;
 });
 

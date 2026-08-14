@@ -25,11 +25,12 @@ use std::time::{Duration, Instant};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules};
 use zephium_core::extensions::{
-    ExtensionActionRequest, ExtensionActionRequestId, ExtensionBrowserRequest,
-    ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection, ExtensionBrowserRequestResult,
-    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
-    ExtensionBrowserTab, ExtensionBrowserWindow, ExtensionGrantBrowsingContext,
-    ExtensionPopupAnchor,
+    ExtensionActionRequest, ExtensionActionRequestId, ExtensionActionState,
+    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
+    ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
+    ExtensionGrantBrowsingContext, ExtensionPopupAnchor, MAX_EXTENSION_POPUP_HEIGHT,
+    MAX_EXTENSION_POPUP_WIDTH, MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
@@ -64,10 +65,11 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
                 measurements.profile_view.as_millis(),
+                measurements.popup_presentation.as_millis(),
                 measurements.service_shutdown.as_millis(),
                 measurements.engine_shutdown.as_millis(),
             );
@@ -93,6 +95,7 @@ struct ProbeMeasurements {
     authenticated_startup: Duration,
     durable_grant_rebind: Duration,
     profile_view: Duration,
+    popup_presentation: Duration,
     service_shutdown: Duration,
     engine_shutdown: Duration,
 }
@@ -284,6 +287,31 @@ impl ProductBrowserModel {
     }
 
     fn publish(&mut self, engine: &zephium_engine::WebviewEngine) -> Result<(), String> {
+        self.publish_with_original_residency(engine, true)
+    }
+
+    fn publish_original_residency(
+        &mut self,
+        engine: &zephium_engine::WebviewEngine,
+        resident: bool,
+    ) -> Result<ExtensionBrowserSurfaceGeneration, String> {
+        if self.created.is_some() || self.active != self.original {
+            return Err("popup residency proof requires only the original active tab".into());
+        }
+        self.publish_with_original_residency(engine, resident)?;
+        self.surface_generation()
+    }
+
+    fn surface_generation(&self) -> Result<ExtensionBrowserSurfaceGeneration, String> {
+        ExtensionBrowserSurfaceGeneration::new(self.generation)
+            .ok_or_else(|| "invalid product-probe surface generation".to_owned())
+    }
+
+    fn publish_with_original_residency(
+        &mut self,
+        engine: &zephium_engine::WebviewEngine,
+        original_resident: bool,
+    ) -> Result<(), String> {
         self.generation = self
             .generation
             .checked_add(1)
@@ -291,7 +319,7 @@ impl ProductBrowserModel {
         let mut tabs = vec![ExtensionBrowserTab::from_snapshot(
             None,
             self.original,
-            true,
+            original_resident,
             "Zephium extension product probe",
             Some(&self.page_url),
             false,
@@ -312,12 +340,12 @@ impl ProductBrowserModel {
                 .map_err(|error| format!("cannot project created probe tab: {error:?}"))?,
             );
         }
-        let window = ExtensionBrowserWindow::new(1, false, Some(self.active), tabs)
+        let active = original_resident.then_some(self.active);
+        let window = ExtensionBrowserWindow::new(1, false, active, tabs)
             .map_err(|error| format!("cannot project mutation probe window: {error:?}"))?;
         let surface = ExtensionBrowserSurface::new(
             self.profile,
-            ExtensionBrowserSurfaceGeneration::new(self.generation)
-                .ok_or_else(|| "invalid mutation probe generation".to_owned())?,
+            self.surface_generation()?,
             Some(1),
             vec![window],
         )
@@ -524,16 +552,8 @@ fn run() -> Result<ProbeDisposition, String> {
             action.label()
         ));
     }
-    let action_request = ExtensionActionRequest::new(
-        ExtensionActionRequestId::new(1)
-            .ok_or_else(|| "extension action request id was invalid".to_owned())?,
-        action.runtime(),
-        item,
-        ExtensionBrowserSurfaceGeneration::INITIAL,
-        action.revision(),
-        ExtensionPopupAnchor::new(Rect::new(12.0, 12.0, 28.0, 28.0))
-            .map_err(|error| format!("extension action anchor was invalid: {error:?}"))?,
-    );
+    let action_request =
+        extension_action_request(1, &action, item, ExtensionBrowserSurfaceGeneration::INITIAL)?;
     let prompt = engine.invoke_action_for_runtime_grant(action_request, deadline())?;
     if prompt.runtime() != action.runtime()
         || prompt.key().profile() != profile
@@ -612,6 +632,47 @@ fn run() -> Result<ProbeDisposition, String> {
     browser_model.verify_complete()?;
     let profile_view = view_started.elapsed();
 
+    set_phase("native-popup");
+    let popup_started = Instant::now();
+    let popup_generation = browser_model.surface_generation()?;
+    let popup_action =
+        engine.request_extension_action(profile, item, popup_generation, deadline())?;
+    if !popup_action.is_enabled()
+        || !popup_action.presents_popup()
+        || popup_action.label() != "Run authenticated product probe"
+    {
+        return Err(format!(
+            "authenticated popup action projection was unexpected: enabled={}, popup={}, label={:?}",
+            popup_action.is_enabled(),
+            popup_action.presents_popup(),
+            popup_action.label()
+        ));
+    }
+    let first_popup = extension_action_request(2, &popup_action, item, popup_generation)?;
+    let first_size = engine.invoke_popup_action(first_popup, deadline())?;
+    validate_popup_size("first", first_size)?;
+    engine.wait_for_popup_execution(item, 1, deadline())?;
+
+    let parallel_popup = extension_action_request(3, &popup_action, item, popup_generation)?;
+    engine.reject_parallel_popup(parallel_popup, deadline())?;
+
+    // A discarded logical tab closes the active transient surface without
+    // destroying or recreating its physical content view. Re-publishing that
+    // already-resident view must then be able to acquire the exact same bounded
+    // popup capacity again.
+    browser_model.publish_original_residency(engine.engine(), false)?;
+    let restored_generation = browser_model.publish_original_residency(engine.engine(), true)?;
+    let reopened_action =
+        engine.request_extension_action(profile, item, restored_generation, deadline())?;
+    if !reopened_action.is_enabled() || !reopened_action.presents_popup() {
+        return Err("extension popup action did not survive tab residency reconciliation".into());
+    }
+    let reopened_popup = extension_action_request(4, &reopened_action, item, restored_generation)?;
+    let reopened_size = engine.invoke_popup_action(reopened_popup, deadline())?;
+    validate_popup_size("reopened", reopened_size)?;
+    engine.wait_for_popup_execution(item, 2, deadline())?;
+    let popup_presentation = popup_started.elapsed();
+
     // Service shutdown must run off the native main thread. It blocks until
     // the engine retires the exact WKWebExtension owner, so this thread keeps
     // pumping both the host queue and WebKit run loop until evidence arrives.
@@ -672,9 +733,43 @@ fn run() -> Result<ProbeDisposition, String> {
         authenticated_startup,
         durable_grant_rebind,
         profile_view,
+        popup_presentation,
         service_shutdown,
         engine_shutdown,
     }))
+}
+
+fn extension_action_request(
+    id: u64,
+    action: &ExtensionActionState,
+    tab: ItemId,
+    surface_generation: ExtensionBrowserSurfaceGeneration,
+) -> Result<ExtensionActionRequest, String> {
+    let id = ExtensionActionRequestId::new(id)
+        .ok_or_else(|| "extension action request id was invalid".to_owned())?;
+    let anchor = ExtensionPopupAnchor::new(Rect::new(12.0, 12.0, 28.0, 28.0))
+        .map_err(|error| format!("extension action anchor was invalid: {error:?}"))?;
+    Ok(ExtensionActionRequest::new(
+        id,
+        action.runtime(),
+        tab,
+        surface_generation,
+        action.revision(),
+        anchor,
+    ))
+}
+
+fn validate_popup_size(label: &str, size: zephium_core::geometry::Size) -> Result<(), String> {
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || !(MIN_EXTENSION_POPUP_WIDTH..=MAX_EXTENSION_POPUP_WIDTH).contains(&size.width)
+        || !(MIN_EXTENSION_POPUP_HEIGHT..=MAX_EXTENSION_POPUP_HEIGHT).contains(&size.height)
+    {
+        return Err(format!(
+            "{label} extension popup escaped the bounded size policy: {size:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn set_phase(phase: &'static str) {

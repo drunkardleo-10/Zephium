@@ -533,12 +533,14 @@ fn preparation_requests() -> [ServedResource; 2] {
     ]
 }
 
-fn full_requests() -> [ServedResource; 5] {
+fn full_requests() -> [ServedResource; 7] {
     [
         ServedResource::TreeIndex,
         ServedResource::TreeFile("manifest.json".to_owned()),
         ServedResource::TreeFile("background.js".to_owned()),
         ServedResource::TreeFile("content.js".to_owned()),
+        ServedResource::TreeFile("popup.html".to_owned()),
+        ServedResource::TreeFile("popup.js".to_owned()),
         ServedResource::LegalNotice("licenses/fixture.txt".to_owned()),
     ]
 }

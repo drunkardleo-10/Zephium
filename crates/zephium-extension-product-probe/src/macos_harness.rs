@@ -21,9 +21,10 @@ use objc2_foundation::{
 use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
 use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::extensions::{
-    ExtensionActionRequest, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
-    ExtensionActionState, ExtensionBrowserRequest,
+    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
+    ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionBrowserRequest,
 };
+use zephium_core::geometry::Size;
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::{
     ContentRuleSettlement, Engine, EngineEvent, UserContent, UserContentGeneration,
@@ -42,6 +43,7 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const HTML_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 const EXTENSION_MARKER: &str = "data-zephium-extension-product-probe";
 const EXTENSION_MARKER_VALUE: &str = "ready:1";
+const EXTENSION_POPUP_MARKER: &str = "data-zephium-extension-popup-probe";
 
 type MainTask = Box<dyn FnOnce() + Send + 'static>;
 
@@ -425,6 +427,179 @@ impl MacosEngineHarness {
             }
         })?;
         prompt.ok_or_else(|| "extension action completed without a grant prompt".to_owned())
+    }
+
+    pub(crate) fn invoke_popup_action(
+        &mut self,
+        request: ExtensionActionRequest,
+        deadline: Instant,
+    ) -> Result<Size, String> {
+        if self.engine.invoke_extension_action(request)
+            != zephium_core::ports::engine::NativeDispatch::Scheduled
+        {
+            return Err("extension popup invocation was not scheduled".into());
+        }
+        let mut presented = None;
+        self.pump_until("native extension popup presentation", deadline, |harness| {
+            loop {
+                match harness.events.try_recv() {
+                    Ok(EngineEvent::ExtensionActionSettled {
+                        profile,
+                        request: event_request,
+                        settlement,
+                    }) if profile == request.runtime().profile()
+                        && event_request == request.id() =>
+                    {
+                        let ExtensionActionSettlement::PopupPresented(size) = settlement else {
+                            return Err(format!(
+                                "extension popup was not presented: {settlement:?}"
+                            ));
+                        };
+                        presented = Some(size);
+                        return Ok(true);
+                    }
+                    Ok(EngineEvent::ExtensionRuntimeGrantRequested { .. }) => {
+                        return Err("extension popup unexpectedly requested runtime grants".into())
+                    }
+                    Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                        return Err(format!(
+                            "extension popup unexpectedly requested a browser mutation: {:?}",
+                            request.action()
+                        ));
+                    }
+                    Ok(EngineEvent::ViewCreationFailed { .. }) => {
+                        return Err("profile view failed during extension popup presentation".into())
+                    }
+                    Ok(EngineEvent::Crashed { .. }) => {
+                        return Err(
+                            "profile view crashed during extension popup presentation".into()
+                        )
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("engine event ingress disconnected".to_owned())
+                    }
+                }
+            }
+        })?;
+        presented.ok_or_else(|| "extension popup completed without a size".to_owned())
+    }
+
+    pub(crate) fn reject_parallel_popup(
+        &mut self,
+        request: ExtensionActionRequest,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        if self.engine.invoke_extension_action(request)
+            != zephium_core::ports::engine::NativeDispatch::Scheduled
+        {
+            return Err("parallel extension popup invocation was not scheduled".into());
+        }
+        self.pump_until("extension popup capacity rejection", deadline, |harness| loop {
+            match harness.events.try_recv() {
+                Ok(EngineEvent::ExtensionActionSettled {
+                    profile,
+                    request: event_request,
+                    settlement,
+                }) if profile == request.runtime().profile()
+                    && event_request == request.id() =>
+                {
+                    return match settlement {
+                        ExtensionActionSettlement::Rejected(
+                            ExtensionActionRejection::PopupCapacityExceeded,
+                        ) => Ok(true),
+                        other => Err(format!(
+                            "parallel extension popup did not fail at the capacity boundary: {other:?}"
+                        )),
+                    };
+                }
+                Ok(EngineEvent::ViewCreationFailed { .. }) => {
+                    return Err("profile view failed during popup capacity proof".into())
+                }
+                Ok(EngineEvent::Crashed { .. }) => {
+                    return Err("profile view crashed during popup capacity proof".into())
+                }
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("engine event ingress disconnected".to_owned())
+                }
+            }
+        })
+    }
+
+    pub(crate) fn wait_for_popup_execution(
+        &mut self,
+        item: ItemId,
+        expected_count: usize,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let expected = format!(r#"{EXTENSION_POPUP_MARKER}="ready:{expected_count}""#);
+        let marker_prefix = format!(r#"{EXTENSION_POPUP_MARKER}=""#);
+        let mut next_observation = Instant::now();
+        self.pump_until("extension popup script execution", deadline, |harness| {
+            loop {
+                match harness.events.try_recv() {
+                    Ok(EngineEvent::HtmlExtracted {
+                        id,
+                        html,
+                        truncated,
+                    }) if id == item => {
+                        if truncated {
+                            return Err(
+                                "extension popup observation returned truncated HTML".into()
+                            );
+                        }
+                        if html.contains(&expected) {
+                            return Ok(true);
+                        }
+                        if let Some(marker_start) = html.find(&marker_prefix) {
+                            let value_start = marker_start + marker_prefix.len();
+                            let value = html[value_start..].split('"').next().unwrap_or_default();
+                            let observed = value
+                                .strip_prefix("ready:")
+                                .and_then(|count| count.parse::<usize>().ok());
+                            if observed.is_none_or(|count| count >= expected_count) {
+                                return Err(format!(
+                                    "extension popup reported unexpected marker {value:?}"
+                                ));
+                            }
+                        }
+                    }
+                    Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {
+                        return Err("profile view failed during popup execution".into())
+                    }
+                    Ok(EngineEvent::Crashed { id }) if id == item => {
+                        return Err("profile view crashed during popup execution".into())
+                    }
+                    Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                        return Err(format!(
+                            "popup execution requested an unexpected browser mutation: {:?}",
+                            request.action()
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("engine event ingress disconnected".to_owned())
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            if now >= next_observation {
+                if harness.engine.extract_html(item)
+                    != zephium_core::ports::engine::NativeDispatch::Scheduled
+                {
+                    return Err("extension popup HTML observation was not admitted".into());
+                }
+                next_observation = now
+                    .checked_add(HTML_OBSERVATION_INTERVAL)
+                    .ok_or_else(|| "popup-observation deadline overflowed".to_owned())?;
+            }
+            Ok(false)
+        })
     }
 
     pub(crate) fn wait_for_executable_extension(

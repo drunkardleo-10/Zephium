@@ -111,6 +111,9 @@ api.action.onClicked.addListener(async (tab) => {
       return;
     }
     const result = await runProductProbe(tab);
+    if (result.state === "ready") {
+      await api.action.setPopup({ popup: "popup.html" });
+    }
     await report(tab.id, result.state, result.count);
   } catch (error) {
     await report(tab.id, `runtime-error:${boundedDetail(error)}`);

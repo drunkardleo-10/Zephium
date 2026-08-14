@@ -485,9 +485,22 @@ fn install_maximum_cohort(repository: &mut ExtensionRepository) -> MaximumCohort
         template_set.packages[0].package_record_id,
         template_package_id
     );
-    assert_eq!(template_package.tree_index.file_count, 3);
+    let authenticated_tree =
+        CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
+    let authenticated_file_count = u32::try_from(authenticated_tree.files().len()).unwrap();
+    assert!(authenticated_tree
+        .files()
+        .iter()
+        .all(|file| !file.path().as_str().contains('/')));
+    assert_eq!(
+        template_package.tree_index.file_count,
+        authenticated_file_count
+    );
     assert_eq!(template_package.tree_index.directory_count, 0);
-    assert_eq!(template_package.tree_index.total_entry_count, 3);
+    assert_eq!(
+        template_package.tree_index.total_entry_count,
+        authenticated_file_count
+    );
 
     let mut trees = vec![MaximumCohortTree {
         tree_sha256: template_package.tree_index.tree_sha256,
