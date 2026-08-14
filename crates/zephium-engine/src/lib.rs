@@ -100,6 +100,9 @@ pub enum MacosStockPasswordManagerProbeMode {
     /// Materializes a private, ephemeral copy and applies only the reviewed
     /// WebKit API-surface adapters before extension-owned scripts.
     WebkitApiSurfaceDiagnostic,
+    /// Executes a separately materialized, package-neutral compatibility
+    /// artifact after revalidating its exact pinned source and output trees.
+    WebkitCompatibilityArtifact,
 }
 
 /// Executes an exact, stock password-manager compatibility artifact through
@@ -117,6 +120,19 @@ pub fn run_macos_stock_password_manager_probe(
     mode: MacosStockPasswordManagerProbeMode,
 ) -> Result<bool, String> {
     platform::macos::run_stock_password_manager_probe(extension, tree_index, mode)
+}
+
+/// Executes the package-neutral compatibility artifact derived from the exact
+/// pinned stock password-manager tree.
+///
+/// This remains a feature-gated diagnostic. Artifact metadata is explicitly
+/// non-authorizing and cannot provision a product catalog or runtime.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_stock_password_manager_compatibility_artifact_probe(
+    artifact: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_stock_password_manager_compatibility_artifact_probe(artifact)
 }
 
 use std::cell::Cell;

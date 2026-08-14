@@ -1,6 +1,21 @@
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.len() == 2 && arguments[0] == "--compatibility-artifact" {
+        match zephium_engine::run_macos_stock_password_manager_compatibility_artifact_probe(
+            std::path::Path::new(&arguments[1]),
+        ) {
+            Ok(true) => return,
+            Ok(false) => {
+                eprintln!("macOS stock password-manager compatibility artifact is unsupported");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("macOS stock password-manager compatibility artifact failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if !matches!(arguments.len(), 4 | 6)
         || arguments[0] != "--extension"
         || arguments[2] != "--tree-index"
@@ -8,7 +23,7 @@ fn main() {
             && (arguments[4] != "--diagnostic" || arguments[5] != "webkit-api-surface"))
     {
         eprintln!(
-            "usage: macos-stock-password-manager-probe --extension PATH --tree-index PATH [--diagnostic webkit-api-surface]"
+            "usage: macos-stock-password-manager-probe (--extension PATH --tree-index PATH [--diagnostic webkit-api-surface] | --compatibility-artifact PATH)"
         );
         std::process::exit(2);
     }

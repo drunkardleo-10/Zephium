@@ -650,6 +650,12 @@ pub(crate) fn run_stock_password_manager_probe(
     stock_password_manager::run(extension, tree_index, mode)
 }
 
+pub(crate) fn run_stock_password_manager_compatibility_artifact_probe(
+    artifact: &Path,
+) -> Result<bool, String> {
+    stock_password_manager::run_compatibility_artifact(artifact)
+}
+
 pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
     let Some(operating_system) = supported_runtime()? else {
         return Ok(false);

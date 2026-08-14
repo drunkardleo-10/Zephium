@@ -54,6 +54,22 @@ const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1024;
 const WEBKIT_API_PRELUDE: &str = "zephium-webkit-api-compatibility.js";
 const WEBKIT_BACKGROUND_WRAPPER: &str = "zephium-webkit-background-wrapper.js";
 const WEBKIT_API_COMPATIBILITY_ATTRIBUTE: &str = "data-zephium-webkit-api-compatibility";
+const COMPATIBILITY_ARTIFACT_METADATA: &str = "ZEPHIUM-COMPATIBILITY.json";
+const COMPATIBILITY_ARTIFACT_INDEX: &str = "authenticated-extension-tree.json";
+const COMPATIBILITY_ARTIFACT_EXTENSION: &str = "extension";
+const COMPATIBILITY_ARTIFACT_KIND: &str = "zephium-macos-web-extension-compatibility-artifact";
+const COMPATIBILITY_ARTIFACT_TARGET: &str = "webkit-macos-native-v1";
+const COMPATIBILITY_API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+const COMPATIBILITY_BACKGROUND_WRAPPER: &str = "__zephium__/background-v1.js";
+const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
+const EXPECTED_COMPATIBILITY_FILE_COUNT: usize = 277;
+const EXPECTED_COMPATIBILITY_TOTAL_BYTES: u64 = 20_127_230;
+const EXPECTED_COMPATIBILITY_INDEX_SHA256: &str =
+    "4809e3b0ff43361157747a3ec7fd47d22d7a0623e060ec1e557723e31eee9798";
+const EXPECTED_COMPATIBILITY_TREE_SHA256: &str =
+    "4d209e696e999f91b136fa2093c5385c60bd941071f7c2e5f0b5457b6108bb04";
+const EXPECTED_COMPATIBILITY_MANIFEST_SHA256: &str =
+    "03ea75c5ca5f54d6b085fdc5ac2708248cc985ad939795f6e26bc0d56577cb91";
 const WEBKIT_API_PRELUDE_SOURCE: &str = r#"(() => {
   'use strict';
   const nativeApi = globalThis.browser;
@@ -254,6 +270,15 @@ struct PopupState {
 
 pub(super) fn run(extension: &Path, tree_index: &Path, mode: ProbeMode) -> Result<bool, String> {
     let admitted = admit_exact_stock_artifact(extension, tree_index, mode)?;
+    run_admitted(admitted)
+}
+
+pub(super) fn run_compatibility_artifact(artifact: &Path) -> Result<bool, String> {
+    let admitted = admit_compatibility_artifact(artifact)?;
+    run_admitted(admitted)
+}
+
+fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
     let Some(operating_system) = super::supported_runtime()? else {
         return Ok(false);
     };
@@ -340,6 +365,141 @@ fn admit_exact_stock_artifact(
         extension_root: diagnostic_root,
         probe_mode: mode,
         _temporary_root: Some(temporary_root),
+    })
+}
+
+fn admit_compatibility_artifact(root: &Path) -> Result<AdmittedStockArtifact, String> {
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| format!("cannot inspect compatibility artifact root: {error}"))?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err("compatibility artifact root is not an ordinary directory".into());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize compatibility artifact root: {error}"))?;
+    let mut entries = fs::read_dir(&root)
+        .map_err(|error| format!("cannot enumerate compatibility artifact root: {error}"))?
+        .map(|entry| {
+            entry
+                .map_err(|error| format!("cannot enumerate compatibility artifact entry: {error}"))
+                .and_then(|entry| {
+                    entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| "compatibility artifact has a non-UTF-8 root entry".to_owned())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_unstable();
+    if entries
+        != [
+            COMPATIBILITY_ARTIFACT_METADATA.to_owned(),
+            COMPATIBILITY_ARTIFACT_INDEX.to_owned(),
+            COMPATIBILITY_ARTIFACT_EXTENSION.to_owned(),
+        ]
+    {
+        return Err("compatibility artifact root inventory drifted".into());
+    }
+
+    let metadata_bytes = read_bounded_file(
+        &root.join(COMPATIBILITY_ARTIFACT_METADATA),
+        BoundedJsonLimits::extension_manifest().max_bytes() as u64,
+        "compatibility artifact metadata",
+    )?;
+    let metadata = parse_bounded_json(&metadata_bytes, BoundedJsonLimits::extension_manifest())
+        .map_err(|error| format!("compatibility artifact metadata is invalid: {error}"))?
+        .into_value();
+    for (pointer, expected) in [
+        ("/schema", Value::from(1)),
+        ("/kind", Value::from(COMPATIBILITY_ARTIFACT_KIND)),
+        ("/target", Value::from(COMPATIBILITY_ARTIFACT_TARGET)),
+        ("/product_authority", Value::from(false)),
+        ("/source/files", Value::from(EXPECTED_FILE_COUNT)),
+        ("/source/bytes", Value::from(EXPECTED_TOTAL_BYTES)),
+        (
+            "/source/manifest_sha256",
+            Value::from(EXPECTED_MANIFEST_SHA256),
+        ),
+        ("/source/tree_sha256", Value::from(EXPECTED_TREE_SHA256)),
+        (
+            "/source/tree_index_sha256",
+            Value::from(EXPECTED_INDEX_SHA256),
+        ),
+        (
+            "/output/files",
+            Value::from(EXPECTED_COMPATIBILITY_FILE_COUNT),
+        ),
+        (
+            "/output/bytes",
+            Value::from(EXPECTED_COMPATIBILITY_TOTAL_BYTES),
+        ),
+        (
+            "/output/manifest_sha256",
+            Value::from(EXPECTED_COMPATIBILITY_MANIFEST_SHA256),
+        ),
+        (
+            "/output/tree_sha256",
+            Value::from(EXPECTED_COMPATIBILITY_TREE_SHA256),
+        ),
+        (
+            "/output/tree_index_sha256",
+            Value::from(EXPECTED_COMPATIBILITY_INDEX_SHA256),
+        ),
+        ("/surfaces/background", Value::from("classic-wrapper")),
+        ("/surfaces/isolated_content_scripts", Value::from(1)),
+        (
+            "/surfaces/action_popup",
+            Value::from("explicit-head-injected"),
+        ),
+        (
+            "/surfaces/main_world_content_scripts",
+            Value::from("unchanged"),
+        ),
+    ] {
+        if metadata.pointer(pointer) != Some(&expected) {
+            return Err(format!(
+                "compatibility artifact metadata drifted at {pointer}"
+            ));
+        }
+    }
+    if metadata.pointer("/adaptations")
+        != Some(&serde_json::json!([
+            "native-api-receiver-binding-v1",
+            "catalog-update-event-stub-v1"
+        ]))
+        || metadata.pointer("/limitations")
+            != Some(&serde_json::json!([
+                "not-a-product-package",
+                "catalog-update-events-owned-by-zephium",
+                "sandbox-pages-not-adapted",
+                "non-action-extension-pages-not-adapted"
+            ]))
+    {
+        return Err("compatibility artifact contract drifted".into());
+    }
+
+    let index_bytes = read_bounded_file(
+        &root.join(COMPATIBILITY_ARTIFACT_INDEX),
+        MAX_EXTENSION_TREE_INDEX_BYTES as u64,
+        "compatibility artifact tree index",
+    )?;
+    let index = CanonicalExtensionTreeIndex::parse_canonical(&index_bytes)
+        .map_err(|error| format!("compatibility artifact tree index is invalid: {error}"))?;
+    if index.files().len() != EXPECTED_COMPATIBILITY_FILE_COUNT
+        || index.total_bytes() != EXPECTED_COMPATIBILITY_TOTAL_BYTES
+        || lower_hex(index.index_sha256().as_bytes()) != EXPECTED_COMPATIBILITY_INDEX_SHA256
+        || lower_hex(index.tree_sha256().as_bytes()) != EXPECTED_COMPATIBILITY_TREE_SHA256
+        || lower_hex(index.manifest_sha256().as_bytes()) != EXPECTED_COMPATIBILITY_MANIFEST_SHA256
+    {
+        return Err("compatibility artifact output identity drifted".into());
+    }
+    let extension_root = root.join(COMPATIBILITY_ARTIFACT_EXTENSION);
+    super::artifact_tree::verify_closed_tree(&extension_root, &index, "compatibility artifact")?;
+    validate_compatibility_manifest(&extension_root.join("manifest.json"))?;
+    Ok(AdmittedStockArtifact {
+        extension_root,
+        probe_mode: ProbeMode::WebkitCompatibilityArtifact,
+        _temporary_root: None,
     })
 }
 
@@ -502,6 +662,7 @@ const fn probe_mode_name(mode: ProbeMode) -> &'static str {
     match mode {
         ProbeMode::Stock => "stock",
         ProbeMode::WebkitApiSurfaceDiagnostic => "webkit-api-surface",
+        ProbeMode::WebkitCompatibilityArtifact => "webkit-compatibility-artifact",
     }
 }
 
@@ -555,6 +716,68 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
         || scripts[1].get("world").and_then(Value::as_str) != Some("MAIN")
     {
         return Err("stock extension content-script contract drifted".into());
+    }
+    Ok(())
+}
+
+fn validate_compatibility_manifest(path: &Path) -> Result<(), String> {
+    let bytes = read_bounded_file(
+        path,
+        zephium_extension_package::MAX_EXTENSION_MANIFEST_BYTES as u64,
+        "compatibility artifact manifest",
+    )?;
+    let manifest = parse_bounded_json(&bytes, BoundedJsonLimits::extension_manifest())
+        .map_err(|error| format!("compatibility artifact manifest is invalid: {error}"))?
+        .into_value();
+    for (pointer, expected) in [
+        ("/name", Value::from(DISPLAY_NAME)),
+        ("/version", Value::from(VERSION)),
+        ("/manifest_version", Value::from(3)),
+        (
+            "/background/service_worker",
+            Value::from(COMPATIBILITY_BACKGROUND_WRAPPER),
+        ),
+        ("/action/default_popup", Value::from("popup.html")),
+    ] {
+        if manifest.pointer(pointer) != Some(&expected) {
+            return Err(format!(
+                "compatibility artifact manifest drifted at {pointer}"
+            ));
+        }
+    }
+    require_string_set(
+        &manifest,
+        "/permissions",
+        &[
+            "activeTab",
+            "alarms",
+            "offscreen",
+            "scripting",
+            "storage",
+            "unlimitedStorage",
+            "webNavigation",
+            "webRequest",
+        ],
+    )?;
+    require_string_set(
+        &manifest,
+        "/host_permissions",
+        &["http://*/*", "https://*/*"],
+    )?;
+    let scripts = manifest
+        .pointer("/content_scripts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "compatibility artifact manifest has no content-script array".to_owned())?;
+    if scripts.len() != 2
+        || scripts[0].pointer("/js/0").and_then(Value::as_str) != Some(COMPATIBILITY_API_PRELUDE)
+        || scripts[0].pointer("/js/1").and_then(Value::as_str) != Some("orchestrator.js")
+        || scripts[0].pointer("/js/2").is_some()
+        || scripts[0].get("all_frames").and_then(Value::as_bool) != Some(true)
+        || scripts[1].pointer("/js/0").and_then(Value::as_str) != Some("webauthn.js")
+        || scripts[1].pointer("/js/1").is_some()
+        || scripts[1].get("world").and_then(Value::as_str) != Some("MAIN")
+    {
+        return Err("compatibility artifact content-script contract drifted".into());
     }
     Ok(())
 }
@@ -816,6 +1039,12 @@ fn stock_runtime_is_compatible(observation: StockRuntimeObservation<'_>) -> bool
                 && observation.popup_rendered
                 && observation.context_error_count == 0
         }
+        ProbeMode::WebkitCompatibilityArtifact => {
+            observation.popup_rendered
+                && observation.popup_api_observed
+                && observation.popup_api_compatibility == "package-neutral-v1"
+                && observation.context_error_count == 0
+        }
     }
 }
 
@@ -868,7 +1097,9 @@ fn observe_inline_execution(
             fieldMarkers: document.querySelectorAll('[data-protonpass-role]').length,
             roots: document.querySelectorAll('[id^="protonpass-root-"], [class*="protonpass-control-"]').length,
             extensionFrames: [...document.querySelectorAll('iframe')].filter((frame) => String(frame.src).startsWith('chrome-extension:') || String(frame.src).startsWith('safari-web-extension:')).length,
-            compatibilityState: document.documentElement.getAttribute({WEBKIT_API_COMPATIBILITY_ATTRIBUTE:?}) || 'unmodified',
+            compatibilityState: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true
+              ? 'package-neutral-v1'
+              : document.documentElement.getAttribute({WEBKIT_API_COMPATIBILITY_ATTRIBUTE:?}) || 'unmodified',
           }};
           document.title = {PAGE_STATE_PREFIX:?} + JSON.stringify(state);
         }})()"#
@@ -944,7 +1175,9 @@ fn wait_for_executable_popup(
             browserRuntime: Boolean(globalThis.browser && browser.runtime),
             browserRuntimeId: Boolean(globalThis.browser && browser.runtime && browser.runtime.id),
             offscreen: globalThis.chrome ? typeof chrome.offscreen : 'absent',
-            compatibilityState: document.documentElement.getAttribute({WEBKIT_API_COMPATIBILITY_ATTRIBUTE:?}) || 'unmodified',
+            compatibilityState: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true
+              ? 'package-neutral-v1'
+              : document.documentElement.getAttribute({WEBKIT_API_COMPATIBILITY_ATTRIBUTE:?}) || 'unmodified',
             errors: globalThis[key].errors,
           }};
           document.title = {POPUP_STATE_PREFIX:?} + JSON.stringify(state);
@@ -1137,6 +1370,29 @@ mod tests {
                 context_error_count: errors,
             }));
         }
+    }
+
+    #[test]
+    fn package_neutral_artifact_requires_its_popup_world_marker() {
+        let observation = |state, errors| StockRuntimeObservation {
+            mode: ProbeMode::WebkitCompatibilityArtifact,
+            inline_executed: false,
+            popup_rendered: true,
+            popup_api_observed: true,
+            page_api_compatibility: "unmodified",
+            popup_api_compatibility: state,
+            background_action_label: "Proton Pass: Free Password Manager",
+            context_error_count: errors,
+        };
+        assert!(stock_runtime_is_compatible(observation(
+            "package-neutral-v1",
+            0
+        )));
+        assert!(!stock_runtime_is_compatible(observation("unmodified", 0)));
+        assert!(!stock_runtime_is_compatible(observation(
+            "package-neutral-v1",
+            1
+        )));
     }
 
     #[test]
