@@ -87,19 +87,36 @@ pub fn run_macos_bitwarden_core_probe(artifact: &std::path::Path) -> Result<bool
     platform::macos::run_bitwarden_core_probe(artifact)
 }
 
+/// Selects the exact stock-password-manager probe contract.
+///
+/// Both modes are feature-gated diagnostics. Neither mode authorizes a
+/// package for installation or exposes a production compatibility path.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MacosStockPasswordManagerProbeMode {
+    /// Executes the authenticated package without changing any resource.
+    Stock,
+    /// Materializes a private, ephemeral copy and applies only the reviewed
+    /// WebKit API-surface adapters before extension-owned scripts.
+    WebkitApiSurfaceDiagnostic,
+}
+
 /// Executes an exact, stock password-manager compatibility artifact through
-/// the public macOS extension runtime without modifying its resources.
+/// the public macOS extension runtime.
 ///
 /// This probe-only API accepts only the pinned tree encoded by its diagnostic
-/// contract. It grants no package, catalog, or product authority and is absent
-/// from ordinary builds.
+/// contract. The optional compatibility mode modifies only a private temporary
+/// copy after authenticating that exact source tree. It grants no package,
+/// catalog, or product authority and is absent from ordinary builds.
 #[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
 #[doc(hidden)]
 pub fn run_macos_stock_password_manager_probe(
     extension: &std::path::Path,
     tree_index: &std::path::Path,
+    mode: MacosStockPasswordManagerProbeMode,
 ) -> Result<bool, String> {
-    platform::macos::run_stock_password_manager_probe(extension, tree_index)
+    platform::macos::run_stock_password_manager_probe(extension, tree_index, mode)
 }
 
 use std::cell::Cell;

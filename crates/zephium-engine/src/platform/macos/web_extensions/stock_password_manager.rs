@@ -6,7 +6,9 @@
 //! selects, downloads, admits, or special-cases this extension.
 
 use std::fs;
-use std::io::Read as _;
+use std::fs::OpenOptions;
+use std::io::{Read as _, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -22,13 +24,16 @@ use objc2_web_kit::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
+use tempfile::TempDir;
 use wry::WebViewBuilderExtMacos as _;
 use zephium_extension_package::{
-    parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex,
-    MAX_EXTENSION_TREE_INDEX_BYTES,
+    parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, MAX_EXTENSION_TREE_BYTES,
+    MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
 use super::super::extensions::MacosNativeApiPermission as Permission;
+use crate::MacosStockPasswordManagerProbeMode as ProbeMode;
 
 const DISPLAY_NAME: &str = "Proton Pass: Free Password Manager";
 const VERSION: &str = "1.38.2";
@@ -46,6 +51,142 @@ const PAGE_READY_TITLE: &str = "zephium-stock-password-page-ready";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_STOCK_POPUP_STATE:";
 const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1024;
+const WEBKIT_API_PRELUDE: &str = "zephium-webkit-api-compatibility.js";
+const WEBKIT_BACKGROUND_WRAPPER: &str = "zephium-webkit-background-wrapper.js";
+const WEBKIT_API_COMPATIBILITY_ATTRIBUTE: &str = "data-zephium-webkit-api-compatibility";
+const WEBKIT_API_PRELUDE_SOURCE: &str = r#"(() => {
+  'use strict';
+  const nativeApi = globalThis.browser;
+  const trace = globalThis.__zephiumWebkitApiTrace = [];
+  const recordTrace = (kind, value) => {
+    if (trace.length < 8) trace.push(`${kind}:${String(value)}`.slice(0, 160));
+    const api = globalThis.chrome ?? globalThis.browser;
+    try {
+      api?.action?.setTitle({ title: `ZEPHIUM_PROTON_TRACE:${trace.join('|')}`.slice(0, 1024) });
+    } catch (_) {}
+  };
+  let state = 'browser-unavailable';
+  if (globalThis.chrome?.runtime?.id) {
+    state = 'native-chrome';
+  } else if (nativeApi?.runtime?.id && typeof globalThis.chrome === 'undefined') {
+    Object.defineProperty(globalThis, 'chrome', {
+      value: nativeApi,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+    state = globalThis.chrome?.runtime?.id === nativeApi.runtime.id ? 'aliased' : 'alias-failed';
+  } else if (typeof globalThis.chrome !== 'undefined') {
+    state = 'chrome-without-runtime';
+  }
+  const inertCatalogUpdateEvent = Object.freeze({
+    addListener() {},
+    removeListener() {},
+    hasListener() { return false; },
+    hasListeners() { return false; },
+  });
+  let catalogUpdateAdapted = false;
+  let catalogUpdateFailed = false;
+  for (const namespace of ['chrome', 'browser']) {
+    const nativeNamespace = globalThis[namespace];
+    const nativeRuntime = nativeNamespace?.runtime;
+    if (!nativeRuntime?.id || nativeRuntime.onUpdateAvailable) continue;
+    const nativeGetUrl = nativeRuntime.getURL?.bind(nativeRuntime);
+    const compatibleRuntime = new Proxy(nativeRuntime, {
+      get(target, property) {
+        if (property === 'onUpdateAvailable') return inertCatalogUpdateEvent;
+        if (property === 'getURL' && nativeGetUrl) {
+          return path => {
+            if (typeof path !== 'string') recordTrace(`${namespace}.runtime.getURL`, typeof path);
+            const result = nativeGetUrl(path);
+            if (String(result).includes('undefined')) recordTrace(`${namespace}.runtime.url`, result);
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const compatibleNamespace = new Proxy(nativeNamespace, {
+      get(target, property) {
+        if (property === 'runtime') return compatibleRuntime;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      globalThis[namespace] = compatibleNamespace;
+      if (globalThis[namespace]?.runtime?.onUpdateAvailable === inertCatalogUpdateEvent) {
+        catalogUpdateAdapted = true;
+      } else {
+        catalogUpdateFailed = true;
+      }
+    } catch (_) {
+      catalogUpdateFailed = true;
+    }
+  }
+  if (catalogUpdateFailed) state = 'catalog-update-adapter-failed';
+  else if (catalogUpdateAdapted) state = `${state}+catalog-update`;
+  if (typeof globalThis.importScripts === 'function') {
+    const nativeImportScripts = globalThis.importScripts.bind(globalThis);
+    try {
+      globalThis.importScripts = (...urls) => {
+        for (const url of urls) if (typeof url !== 'string' || url.includes('undefined')) {
+          recordTrace('importScripts', url);
+        }
+        return nativeImportScripts(...urls);
+      };
+    } catch (_) {}
+  }
+  if (typeof globalThis.Worker === 'function') {
+    const NativeWorker = globalThis.Worker;
+    try {
+      globalThis.Worker = new Proxy(NativeWorker, {
+        construct(target, argumentsList, newTarget) {
+          const [url, options] = argumentsList;
+          recordTrace('Worker', `${String(url)};type=${String(options?.type)}`);
+          return Reflect.construct(target, argumentsList, newTarget);
+        },
+      });
+    } catch (_) {}
+  }
+  if (typeof document === 'object' && document.documentElement) {
+    document.documentElement.setAttribute('data-zephium-webkit-api-compatibility', state);
+  }
+  globalThis.__zephiumWebkitApiCompatibility = state;
+})();
+"#;
+const WEBKIT_BACKGROUND_WRAPPER_SOURCE: &str = r#"(() => {
+  'use strict';
+  const api = globalThis.chrome ?? globalThis.browser;
+  const render = value => {
+    try {
+      if (value instanceof Error) return `${value.name}: ${value.message}`;
+      return String(value);
+    } catch (_) {
+      return '<unprintable>';
+    }
+  };
+  const report = (state, detail = '') => {
+    try { api?.action?.setBadgeText({ text: state === 'imported' ? 'Z2' : 'ZE' }); } catch (_) {}
+    try {
+      api?.action?.setTitle({
+        title: `ZEPHIUM_PROTON_BACKGROUND:${state}:${render(detail)}`.slice(0, 1024),
+      });
+    } catch (_) {}
+  };
+  addEventListener('error', event => report('error', event.error ?? event.message));
+  addEventListener('unhandledrejection', event => report('unhandledrejection', event.reason));
+  try {
+    importScripts('zephium-webkit-api-compatibility.js', 'background.js');
+    const trace = globalThis.__zephiumWebkitApiTrace ?? [];
+    const suffix = trace.length ? `|trace=${trace.join('|')}` : '';
+    report('imported', `${globalThis.__zephiumWebkitApiCompatibility}${suffix}`);
+  } catch (error) {
+    report('importScripts', error);
+  }
+})();
+"#;
 const NATIVE_PERMISSIONS: [Permission; 7] = [
     Permission::ActiveTab,
     Permission::Alarms,
@@ -58,6 +199,8 @@ const NATIVE_PERMISSIONS: [Permission; 7] = [
 
 struct AdmittedStockArtifact {
     extension_root: PathBuf,
+    probe_mode: ProbeMode,
+    _temporary_root: Option<TempDir>,
 }
 
 struct NativeTeardown {
@@ -75,6 +218,11 @@ struct NativeTeardown {
     inline_extension_frames: usize,
     popup_root_children: usize,
     popup_offscreen_namespace: String,
+    page_api_compatibility: String,
+    popup_api_compatibility: String,
+    background_diagnostic_badge: String,
+    background_action_label: String,
+    probe_mode: ProbeMode,
     compatibility_failure: Option<String>,
 }
 
@@ -85,6 +233,7 @@ struct PageState {
     field_markers: usize,
     roots: usize,
     extension_frames: usize,
+    compatibility_state: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,11 +248,12 @@ struct PopupState {
     browser_runtime: bool,
     browser_runtime_id: bool,
     offscreen: String,
+    compatibility_state: String,
     errors: Vec<String>,
 }
 
-pub(super) fn run(extension: &Path, tree_index: &Path) -> Result<bool, String> {
-    let admitted = admit_exact_stock_artifact(extension, tree_index)?;
+pub(super) fn run(extension: &Path, tree_index: &Path, mode: ProbeMode) -> Result<bool, String> {
+    let admitted = admit_exact_stock_artifact(extension, tree_index, mode)?;
     let Some(operating_system) = super::supported_runtime()? else {
         return Ok(false);
     };
@@ -134,13 +284,19 @@ pub(super) fn run(extension: &Path, tree_index: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS stock password manager passed; target=proton-pass; version={VERSION}; os={}; exact_tree=passed; source_modified=false; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_execution=passed; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; popup_execution=passed; popup_root_children={}; offscreen_namespace={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS stock password manager passed; target=proton-pass; version={VERSION}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
+            probe_mode_name(teardown.probe_mode),
+            teardown.probe_mode != ProbeMode::Stock,
             teardown.extension_script_count,
             teardown.inline_field_markers,
             teardown.inline_roots,
             teardown.inline_extension_frames,
+            teardown.page_api_compatibility,
             teardown.popup_root_children,
+            teardown.popup_api_compatibility,
+            teardown.background_diagnostic_badge,
+            teardown.background_action_label,
             teardown.popup_offscreen_namespace,
             teardown.webview_requests,
         );
@@ -153,6 +309,7 @@ pub(super) fn run(extension: &Path, tree_index: &Path) -> Result<bool, String> {
 fn admit_exact_stock_artifact(
     extension: &Path,
     tree_index: &Path,
+    mode: ProbeMode,
 ) -> Result<AdmittedStockArtifact, String> {
     let extension_root = extension
         .canonicalize()
@@ -170,7 +327,20 @@ fn admit_exact_stock_artifact(
     require_evidence(&index)?;
     super::artifact_tree::verify_closed_tree(&extension_root, &index, DISPLAY_NAME)?;
     validate_manifest(&extension_root.join("manifest.json"))?;
-    Ok(AdmittedStockArtifact { extension_root })
+    if mode == ProbeMode::Stock {
+        return Ok(AdmittedStockArtifact {
+            extension_root,
+            probe_mode: mode,
+            _temporary_root: None,
+        });
+    }
+    let temporary_root = materialize_webkit_api_diagnostic(&extension_root, &index)?;
+    let diagnostic_root = temporary_root.path().to_path_buf();
+    Ok(AdmittedStockArtifact {
+        extension_root: diagnostic_root,
+        probe_mode: mode,
+        _temporary_root: Some(temporary_root),
+    })
 }
 
 fn require_evidence(index: &CanonicalExtensionTreeIndex) -> Result<(), String> {
@@ -210,6 +380,129 @@ fn require_evidence(index: &CanonicalExtensionTreeIndex) -> Result<(), String> {
         return Err("stock extension WASM inventory is not the pinned contract".into());
     }
     Ok(())
+}
+
+fn materialize_webkit_api_diagnostic(
+    source_root: &Path,
+    index: &CanonicalExtensionTreeIndex,
+) -> Result<TempDir, String> {
+    const ADDED_FILES: usize = 2;
+    if index.files().len().saturating_add(ADDED_FILES) > MAX_EXTENSION_TREE_FILES
+        || index.total_entry_count().saturating_add(ADDED_FILES) > MAX_EXTENSION_TREE_ENTRIES
+    {
+        return Err("stock compatibility diagnostic exceeds the extension entry ceiling".into());
+    }
+    let conservative_bytes = index
+        .total_bytes()
+        .checked_add(WEBKIT_API_PRELUDE_SOURCE.len() as u64)
+        .and_then(|bytes| bytes.checked_add(WEBKIT_BACKGROUND_WRAPPER_SOURCE.len() as u64))
+        .ok_or_else(|| "stock compatibility diagnostic byte accounting overflowed".to_owned())?;
+    if conservative_bytes > MAX_EXTENSION_TREE_BYTES {
+        return Err("stock compatibility diagnostic exceeds the extension byte ceiling".into());
+    }
+
+    let temporary_root = tempfile::Builder::new()
+        .prefix("zephium-stock-extension-diagnostic-")
+        .tempdir()
+        .map_err(|error| format!("cannot create stock compatibility diagnostic root: {error}"))?;
+    for expected in index.files() {
+        let relative = expected.path().as_str();
+        let source = source_root.join(relative);
+        let bytes = read_bounded_file(
+            &source,
+            expected.length(),
+            "stock compatibility diagnostic source",
+        )?;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if bytes.len() as u64 != expected.length() || digest != expected.sha256() {
+            return Err(format!(
+                "stock compatibility diagnostic source changed during materialization: {relative}"
+            ));
+        }
+        let output = match relative {
+            "manifest.json" => adapt_webkit_api_manifest(&bytes)?,
+            "popup.html" => adapt_webkit_api_popup(&bytes)?,
+            _ => bytes,
+        };
+        write_diagnostic_file(temporary_root.path(), relative, &output)?;
+    }
+    for (relative, bytes) in [
+        (WEBKIT_API_PRELUDE, WEBKIT_API_PRELUDE_SOURCE.as_bytes()),
+        (
+            WEBKIT_BACKGROUND_WRAPPER,
+            WEBKIT_BACKGROUND_WRAPPER_SOURCE.as_bytes(),
+        ),
+    ] {
+        write_diagnostic_file(temporary_root.path(), relative, bytes)?;
+    }
+    Ok(temporary_root)
+}
+
+fn adapt_webkit_api_manifest(source: &[u8]) -> Result<Vec<u8>, String> {
+    let mut manifest = parse_bounded_json(source, BoundedJsonLimits::extension_manifest())
+        .map_err(|error| format!("cannot adapt invalid stock manifest: {error}"))?
+        .into_value();
+    let service_worker = manifest
+        .pointer_mut("/background/service_worker")
+        .ok_or_else(|| "stock manifest omitted its background worker".to_owned())?;
+    if service_worker.as_str() != Some("background.js") {
+        return Err("stock manifest background worker drifted before adaptation".into());
+    }
+    *service_worker = Value::from(WEBKIT_BACKGROUND_WRAPPER);
+
+    let content_scripts = manifest
+        .pointer_mut("/content_scripts")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "stock manifest omitted its content scripts".to_owned())?;
+    let isolated_scripts = content_scripts
+        .first_mut()
+        .and_then(|entry| entry.get_mut("js"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "stock manifest omitted its isolated content-script files".to_owned())?;
+    if isolated_scripts.as_slice() != [Value::from("orchestrator.js")] {
+        return Err("stock isolated content-script files drifted before adaptation".into());
+    }
+    isolated_scripts.insert(0, Value::from(WEBKIT_API_PRELUDE));
+    serde_json::to_vec(&manifest)
+        .map_err(|error| format!("cannot serialize adapted stock manifest: {error}"))
+}
+
+fn adapt_webkit_api_popup(source: &[u8]) -> Result<Vec<u8>, String> {
+    let source = std::str::from_utf8(source)
+        .map_err(|_| "stock popup entrypoint is not UTF-8".to_owned())?;
+    const MARKER: &str = "        <script src=\"polyfills.js\" charset=\"UTF-8\"></script>";
+    if source.matches(MARKER).count() != 1 {
+        return Err("stock popup entrypoint drifted before API adaptation".into());
+    }
+    let replacement = format!(
+        "        <script src=\"{WEBKIT_API_PRELUDE}\" charset=\"UTF-8\"></script>\n{MARKER}"
+    );
+    Ok(source.replacen(MARKER, &replacement, 1).into_bytes())
+}
+
+fn write_diagnostic_file(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
+    let output = root.join(relative);
+    let parent = output
+        .parent()
+        .ok_or_else(|| format!("diagnostic output has no parent: {relative}"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create diagnostic directory for {relative}: {error}"))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&output)
+        .map_err(|error| format!("cannot create diagnostic file {relative}: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write diagnostic file {relative}: {error}"))?;
+    Ok(())
+}
+
+const fn probe_mode_name(mode: ProbeMode) -> &'static str {
+    match mode {
+        ProbeMode::Stock => "stock",
+        ProbeMode::WebkitApiSurfaceDiagnostic => "webkit-api-surface",
+    }
 }
 
 fn validate_manifest(path: &Path) -> Result<(), String> {
@@ -405,6 +698,8 @@ fn run_native(
     super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
     let popup_state = wait_for_executable_popup(&popup, &run_loop)?;
     let popup_weak = Weak::from_retained(&popup);
+    let background_diagnostic_badge = unsafe { action.badgeText() }.to_string();
+    let background_action_label = unsafe { action.label() }.to_string();
 
     let context_errors = unsafe { context.errors() };
     let context_error_count = context_errors.count();
@@ -436,15 +731,20 @@ fn run_native(
         && popup_state.errors.is_empty();
     let popup_api_observed = (popup_state.chrome_runtime || popup_state.browser_runtime)
         && (popup_state.chrome_runtime_id || popup_state.browser_runtime_id);
-    let compatibility_failure = (!stock_runtime_is_compatible(
+    let compatibility_failure = (!stock_runtime_is_compatible(StockRuntimeObservation {
+        mode: admitted.probe_mode,
         inline_executed,
         popup_rendered,
         popup_api_observed,
+        page_api_compatibility: &page_state.compatibility_state,
+        popup_api_compatibility: &popup_state.compatibility_state,
+        background_action_label: &background_action_label,
         context_error_count,
-    ))
+    }))
     .then(|| {
             format!(
-                "stock extension compatibility failed: inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}"
+                "stock extension compatibility failed: mode={}, inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, background_diagnostic_badge={background_diagnostic_badge:?}, background_action_label={background_action_label:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}",
+                probe_mode_name(admitted.probe_mode),
             )
         });
 
@@ -463,6 +763,11 @@ fn run_native(
         inline_extension_frames: page_state.extension_frames,
         popup_root_children: popup_state.root_children,
         popup_offscreen_namespace: popup_state.offscreen,
+        page_api_compatibility: page_state.compatibility_state,
+        popup_api_compatibility: popup_state.compatibility_state,
+        background_diagnostic_badge,
+        background_action_label,
+        probe_mode: admitted.probe_mode,
         compatibility_failure,
     };
     drop(delegate);
@@ -480,13 +785,45 @@ fn run_native(
     Ok(teardown)
 }
 
-const fn stock_runtime_is_compatible(
+#[derive(Clone, Copy)]
+struct StockRuntimeObservation<'a> {
+    mode: ProbeMode,
     inline_executed: bool,
     popup_rendered: bool,
     popup_api_observed: bool,
+    page_api_compatibility: &'a str,
+    popup_api_compatibility: &'a str,
+    background_action_label: &'a str,
     context_error_count: usize,
-) -> bool {
-    inline_executed && popup_rendered && popup_api_observed && context_error_count == 0
+}
+
+fn stock_runtime_is_compatible(observation: StockRuntimeObservation<'_>) -> bool {
+    match observation.mode {
+        ProbeMode::Stock => {
+            observation.inline_executed
+                && observation.popup_rendered
+                && observation.popup_api_observed
+                && observation.context_error_count == 0
+        }
+        ProbeMode::WebkitApiSurfaceDiagnostic => {
+            api_compatibility_available(observation.page_api_compatibility)
+                && api_compatibility_available(observation.popup_api_compatibility)
+                && observation
+                    .background_action_label
+                    .strip_prefix("ZEPHIUM_PROTON_BACKGROUND:imported:")
+                    .and_then(|diagnostic| diagnostic.split('|').next())
+                    .is_some_and(api_compatibility_available)
+                && observation.popup_rendered
+                && observation.context_error_count == 0
+        }
+    }
+}
+
+fn api_compatibility_available(state: &str) -> bool {
+    matches!(
+        state,
+        "aliased" | "native-chrome" | "aliased+catalog-update" | "native-chrome+catalog-update"
+    )
 }
 
 fn wait_for_page(
@@ -531,6 +868,7 @@ fn observe_inline_execution(
             fieldMarkers: document.querySelectorAll('[data-protonpass-role]').length,
             roots: document.querySelectorAll('[id^="protonpass-root-"], [class*="protonpass-control-"]').length,
             extensionFrames: [...document.querySelectorAll('iframe')].filter((frame) => String(frame.src).startsWith('chrome-extension:') || String(frame.src).startsWith('safari-web-extension:')).length,
+            compatibilityState: document.documentElement.getAttribute({WEBKIT_API_COMPATIBILITY_ATTRIBUTE:?}) || 'unmodified',
           }};
           document.title = {PAGE_STATE_PREFIX:?} + JSON.stringify(state);
         }})()"#
@@ -606,6 +944,7 @@ fn wait_for_executable_popup(
             browserRuntime: Boolean(globalThis.browser && browser.runtime),
             browserRuntimeId: Boolean(globalThis.browser && browser.runtime && browser.runtime.id),
             offscreen: globalThis.chrome ? typeof chrome.offscreen : 'absent',
+            compatibilityState: document.documentElement.getAttribute({WEBKIT_API_COMPATIBILITY_ATTRIBUTE:?}) || 'unmodified',
             errors: globalThis[key].errors,
           }};
           document.title = {POPUP_STATE_PREFIX:?} + JSON.stringify(state);
@@ -706,11 +1045,126 @@ fn lower_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::stock_runtime_is_compatible;
+    use serde_json::Value;
+
+    use super::{
+        adapt_webkit_api_manifest, adapt_webkit_api_popup, stock_runtime_is_compatible, ProbeMode,
+        StockRuntimeObservation, WEBKIT_API_PRELUDE, WEBKIT_BACKGROUND_WRAPPER,
+    };
 
     #[test]
     fn rendered_popup_without_extension_authority_is_not_compatible() {
-        assert!(!stock_runtime_is_compatible(true, true, false, 0));
-        assert!(stock_runtime_is_compatible(true, true, true, 0));
+        assert!(!stock_runtime_is_compatible(StockRuntimeObservation {
+            mode: ProbeMode::Stock,
+            inline_executed: true,
+            popup_rendered: true,
+            popup_api_observed: false,
+            page_api_compatibility: "unmodified",
+            popup_api_compatibility: "unmodified",
+            background_action_label: "",
+            context_error_count: 0,
+        }));
+        assert!(stock_runtime_is_compatible(StockRuntimeObservation {
+            mode: ProbeMode::Stock,
+            inline_executed: true,
+            popup_rendered: true,
+            popup_api_observed: true,
+            page_api_compatibility: "unmodified",
+            popup_api_compatibility: "unmodified",
+            background_action_label: "",
+            context_error_count: 0,
+        }));
+    }
+
+    #[test]
+    fn api_surface_diagnostic_requires_all_three_extension_contexts() {
+        assert!(stock_runtime_is_compatible(StockRuntimeObservation {
+            mode: ProbeMode::WebkitApiSurfaceDiagnostic,
+            inline_executed: false,
+            popup_rendered: true,
+            popup_api_observed: false,
+            page_api_compatibility: "aliased",
+            popup_api_compatibility: "aliased",
+            background_action_label: "ZEPHIUM_PROTON_BACKGROUND:imported:aliased",
+            context_error_count: 0,
+        }));
+        assert!(stock_runtime_is_compatible(StockRuntimeObservation {
+            mode: ProbeMode::WebkitApiSurfaceDiagnostic,
+            inline_executed: false,
+            popup_rendered: true,
+            popup_api_observed: false,
+            page_api_compatibility: "native-chrome+catalog-update",
+            popup_api_compatibility: "native-chrome+catalog-update",
+            background_action_label:
+                "ZEPHIUM_PROTON_BACKGROUND:imported:native-chrome+catalog-update",
+            context_error_count: 0,
+        }));
+        for (page, popup, action_label, errors) in [
+            (
+                "browser-unavailable",
+                "aliased",
+                "ZEPHIUM_PROTON_BACKGROUND:imported:aliased",
+                0,
+            ),
+            (
+                "aliased",
+                "browser-unavailable",
+                "ZEPHIUM_PROTON_BACKGROUND:imported:aliased",
+                0,
+            ),
+            (
+                "aliased",
+                "aliased",
+                "ZEPHIUM_PROTON_BACKGROUND:importScripts:TypeError",
+                0,
+            ),
+            ("aliased", "aliased", "Proton Pass", 0),
+            (
+                "aliased",
+                "aliased",
+                "ZEPHIUM_PROTON_BACKGROUND:imported:aliased",
+                1,
+            ),
+        ] {
+            assert!(!stock_runtime_is_compatible(StockRuntimeObservation {
+                mode: ProbeMode::WebkitApiSurfaceDiagnostic,
+                inline_executed: false,
+                popup_rendered: true,
+                popup_api_observed: false,
+                page_api_compatibility: page,
+                popup_api_compatibility: popup,
+                background_action_label: action_label,
+                context_error_count: errors,
+            }));
+        }
+    }
+
+    #[test]
+    fn api_manifest_adaptation_is_narrow_and_keeps_main_world_unmodified() {
+        let source = br#"{"manifest_version":3,"background":{"service_worker":"background.js"},"content_scripts":[{"js":["orchestrator.js"]},{"js":["webauthn.js"],"world":"MAIN"}]}"#;
+        let adapted = adapt_webkit_api_manifest(source).unwrap();
+        let manifest: Value = serde_json::from_slice(&adapted).unwrap();
+        assert_eq!(
+            manifest.pointer("/background/service_worker"),
+            Some(&Value::from(WEBKIT_BACKGROUND_WRAPPER)),
+        );
+        assert_eq!(
+            manifest.pointer("/content_scripts/0/js"),
+            Some(&serde_json::json!([WEBKIT_API_PRELUDE, "orchestrator.js"])),
+        );
+        assert_eq!(
+            manifest.pointer("/content_scripts/1/js"),
+            Some(&serde_json::json!(["webauthn.js"])),
+        );
+    }
+
+    #[test]
+    fn api_popup_adaptation_requires_one_exact_insertion_seam() {
+        let source =
+            b"<body>\n        <script src=\"polyfills.js\" charset=\"UTF-8\"></script>\n</body>";
+        let adapted = String::from_utf8(adapt_webkit_api_popup(source).unwrap()).unwrap();
+        assert!(adapted.contains(&format!("src=\"{WEBKIT_API_PRELUDE}\"")));
+        assert!(adapted.find(WEBKIT_API_PRELUDE) < adapted.find("polyfills.js"));
+        assert!(adapt_webkit_api_popup(b"<body></body>").is_err());
     }
 }

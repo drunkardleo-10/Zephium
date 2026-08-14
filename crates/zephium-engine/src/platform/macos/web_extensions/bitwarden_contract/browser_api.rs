@@ -37,10 +37,19 @@ enum SandboxIsolation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimePortEarlyConnect {
+    DeliveredAfterRegistration,
+    RejectedNoListener,
+    DisconnectedNoListener,
+    DisconnectedWithoutDiagnostic,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Observation {
     dynamic_resource_url: DynamicResourceUrl,
     execution_world_namespace: ExecutionWorldNamespace,
     sandbox_isolation: SandboxIsolation,
+    runtime_port_early_connect: RuntimePortEarlyConnect,
 }
 
 #[derive(Clone, Copy)]
@@ -76,6 +85,17 @@ impl Observation {
     pub(super) const fn sandbox_isolation(self) -> &'static str {
         match self.sandbox_isolation {
             SandboxIsolation::SealedBlob => "sealed-blob",
+        }
+    }
+
+    pub(super) const fn runtime_port_early_connect(self) -> &'static str {
+        match self.runtime_port_early_connect {
+            RuntimePortEarlyConnect::DeliveredAfterRegistration => "delivered-after-registration",
+            RuntimePortEarlyConnect::RejectedNoListener => "rejected-no-listener",
+            RuntimePortEarlyConnect::DisconnectedNoListener => "disconnected-no-listener",
+            RuntimePortEarlyConnect::DisconnectedWithoutDiagnostic => {
+                "disconnected-without-diagnostic"
+            }
         }
     }
 }
@@ -243,6 +263,7 @@ pub(super) fn probe_script() -> String {
     const settle = (value) => { document.title = JSON.stringify(value); };
     const cleanup = new URLSearchParams(location.search).get("cleanup") === "context-menu";
     let cleanupRequested = false;
+    let runtimePortRequested = false;
     let polls = 0;
     const poll = () => {
         if (cleanup && !cleanupRequested) {
@@ -264,12 +285,26 @@ pub(super) fn probe_script() -> String {
         const contextMenuReady = cleanup
             ? background?.contextMenusLifecycle === "created-updated-native-read-removed"
             : background?.contextMenusLifecycle === "created-updated-held";
+        if (!cleanup && !runtimePortRequested && !!background) {
+            runtimePortRequested = true;
+            try {
+                const port = api.runtime.connect({ name: "zephium-bitwarden-registered-port" });
+                port.onMessage.addListener(() => {});
+                port.postMessage({ kind: "zephium-bitwarden-port-ping" });
+            } catch (error) {
+                settle({ error: `registered-port:${String(error?.message ?? error)}` });
+                return;
+            }
+        }
+        const earlyPortSettled = !["pending", "returned"].includes(background?.runtimePortEarly);
         const ready = !!background && !!content && content.settled === true
             && background.executeScript !== "pending"
             && background.webNavigationCommitted !== "pending"
             && background.alarmsLifecycle !== "pending"
             && background.commandsReadback !== "pending"
             && background.commandDispatch !== "pending"
+            && background.runtimePortRegistered === "round-trip"
+            && earlyPortSettled
             && contextMenuReady;
         if (ready || polls >= __ZEPHIUM_SETTLE_POLLS__) {
             settle({ background, content, settled: ready });
@@ -365,6 +400,22 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
             ))
         }
     };
+    let runtime_port_early_connect = match background
+        .and_then(|value| value.get("runtimePortEarly"))
+        .and_then(Value::as_str)
+    {
+        Some("delivered-after-registration") => RuntimePortEarlyConnect::DeliveredAfterRegistration,
+        Some("rejected-no-listener") => RuntimePortEarlyConnect::RejectedNoListener,
+        Some("disconnected-no-listener") => RuntimePortEarlyConnect::DisconnectedNoListener,
+        Some("disconnected-without-diagnostic") => {
+            RuntimePortEarlyConnect::DisconnectedWithoutDiagnostic
+        }
+        _ => {
+            return Err(format!(
+                "Bitwarden early runtime-port contract drifted: {evidence}"
+            ))
+        }
+    };
     let sandbox_location_origin = content
         .and_then(|value| value.get("sandboxLocationOrigin"))
         .and_then(Value::as_str)
@@ -393,6 +444,7 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
         || !matches(background, "commandsReadback", "fulfilled")
         || command_names.as_deref() != Some(EXPECTED_COMMAND_NAMES.as_slice())
         || !matches(background, "commandDispatch", "autofill_login")
+        || !matches(background, "runtimePortRegistered", "round-trip")
         || !matches(
             background,
             "contextMenusLifecycle",
@@ -414,6 +466,7 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
         dynamic_resource_url,
         execution_world_namespace,
         sandbox_isolation,
+        runtime_port_early_connect,
     })
 }
 
@@ -434,6 +487,7 @@ mod tests {
         let probe = probe_script();
         assert!(probe.contains("zephiumBitwardenBackgroundApiProbe"));
         assert!(probe.contains("zephiumBitwardenContentApiProbe"));
+        assert!(probe.contains("zephium-bitwarden-registered-port"));
         assert!(probe.contains(&format!("polls >= {SETTLE_POLLS}")));
     }
 
@@ -450,6 +504,8 @@ mod tests {
                 "commandNames": EXPECTED_COMMAND_NAMES,
                 "commandsReadback": "fulfilled",
                 "commandDispatch": "autofill_login",
+                "runtimePortEarly": "disconnected-without-diagnostic",
+                "runtimePortRegistered": "round-trip",
                 "contextMenusLifecycle": "created-updated-held"
             },
             "content": {
@@ -475,6 +531,7 @@ mod tests {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
                 execution_world_namespace: ExecutionWorldNamespace::LiteralMainOnly,
                 sandbox_isolation: SandboxIsolation::SealedBlob,
+                runtime_port_early_connect: RuntimePortEarlyConnect::DisconnectedWithoutDiagnostic,
             })
         );
 
@@ -492,6 +549,7 @@ mod tests {
                 dynamic_resource_url: DynamicResourceUrl::Opaque,
                 execution_world_namespace: ExecutionWorldNamespace::Native,
                 sandbox_isolation: SandboxIsolation::SealedBlob,
+                runtime_port_early_connect: RuntimePortEarlyConnect::DisconnectedWithoutDiagnostic,
             })
         );
 

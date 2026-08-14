@@ -81,6 +81,7 @@ pub(super) struct ContractNativeTeardown {
     pub(super) dynamic_resource_url: &'static str,
     pub(super) execution_world_namespace: &'static str,
     pub(super) sandbox_isolation: &'static str,
+    pub(super) runtime_port_early_connect: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -551,8 +552,9 @@ pub(super) fn validate_native_grant_round_trip(
             let browser_api = browser_api_observation
                 .expect("successful Bitwarden gate records browser API evidence");
             eprintln!(
-                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; alarms_lifecycle=passed; commands_readback=passed; commands_native_dispatch=passed; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; alarms_lifecycle=passed; commands_readback=passed; commands_native_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
                 browser_api.execution_world_namespace(),
+                browser_api.runtime_port_early_connect(),
                 browser_api.dynamic_resource_url(),
                 browser_api.sandbox_isolation(),
             );
@@ -567,6 +569,7 @@ pub(super) fn validate_native_grant_round_trip(
                 dynamic_resource_url: browser_api.dynamic_resource_url(),
                 execution_world_namespace: browser_api.execution_world_namespace(),
                 sandbox_isolation: browser_api.sandbox_isolation(),
+                runtime_port_early_connect: browser_api.runtime_port_early_connect(),
             })
         }
         (Err(gate), Ok(())) => Err(gate),
@@ -937,9 +940,58 @@ fn background_probe_script() -> &'static str {
         commandNames: [],
         commandsReadback: "pending",
         commandDispatch: "pending",
+        runtimePortEarly: "pending",
+        runtimePortRegistered: "pending",
         contextMenusLifecycle: "pending"
     };
     const publishSurface = () => api?.storage?.local?.set({ zephiumBitwardenBackgroundApiProbe: surface });
+    const noListenerError = (error) => /no runtime\.onconnect listeners found/i.test(
+        String(error?.message ?? error)
+    );
+    let earlyPort;
+    try {
+        earlyPort = api.runtime.connect({ name: "zephium-bitwarden-early-port" });
+        surface.runtimePortEarly = "returned";
+        earlyPort.onDisconnect.addListener(() => {
+            if (surface.runtimePortEarly === "delivered-after-registration") return;
+            const disconnectError = api.runtime.lastError;
+            surface.runtimePortEarly = disconnectError == null
+                ? "disconnected-without-diagnostic"
+                : noListenerError(disconnectError)
+                    ? "disconnected-no-listener"
+                    : "disconnected-other";
+            void publishSurface();
+        });
+        setTimeout(() => {
+            if (surface.runtimePortEarly !== "returned") return;
+            surface.runtimePortEarly = "returned-unrouted";
+            try { earlyPort.disconnect(); } catch (_) {}
+            void publishSurface();
+        }, 100);
+    } catch (error) {
+        surface.runtimePortEarly = noListenerError(error)
+            ? "rejected-no-listener"
+            : "rejected-other";
+    }
+    if (api?.runtime?.onConnect) {
+        api.runtime.onConnect.addListener((port) => {
+            if (port.name === "zephium-bitwarden-early-port") {
+                surface.runtimePortEarly = "delivered-after-registration";
+                try { port.disconnect(); } catch (_) {}
+                void publishSurface();
+                return;
+            }
+            if (port.name !== "zephium-bitwarden-registered-port") return;
+            port.onMessage.addListener((message) => {
+                if (message?.kind !== "zephium-bitwarden-port-ping") return;
+                surface.runtimePortRegistered = "round-trip";
+                port.postMessage({ kind: "zephium-bitwarden-port-pong" });
+                void publishSurface();
+            });
+        });
+    } else {
+        surface.runtimePortRegistered = "absent";
+    }
     if (globalThis.chrome?.webNavigation?.onCommitted) {
         globalThis.chrome.webNavigation.onCommitted.addListener((details) => {
             if (details.frameId === 0 && /^https?:/.test(details.url ?? "")) {
@@ -1193,6 +1245,9 @@ mod tests {
         assert!(script.contains("alarms.get"));
         assert!(script.contains("alarms.clear"));
         assert!(script.contains("commands.getAll"));
+        assert!(script.contains("runtime.connect({ name: \"zephium-bitwarden-early-port\" })"));
+        assert!(script.contains("runtime.onConnect.addListener"));
+        assert!(script.contains("zephium-bitwarden-port-ping"));
         assert!(script.contains("contextMenus.create"));
         assert!(script.contains("contextMenus.update"));
         assert!(script.contains("contextMenus.remove"));

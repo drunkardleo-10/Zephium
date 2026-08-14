@@ -542,6 +542,7 @@ struct ProbeTeardown {
     bitwarden_dynamic_resource_url: &'static str,
     bitwarden_execution_world_namespace: &'static str,
     bitwarden_sandbox_isolation: &'static str,
+    bitwarden_runtime_port_early_connect: &'static str,
     runtime_permission_status: &'static str,
     runtime_permission_readback: String,
     runtime_permission_callbacks_coalesced_before_settlement: bool,
@@ -598,7 +599,7 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -606,6 +607,7 @@ fn run_web_extension_probe_with_permissions(
             teardown.runtime_permission_replacement_settlement_stranded,
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
+            teardown.bitwarden_runtime_port_early_connect,
             teardown.bitwarden_dynamic_resource_url,
             teardown.bitwarden_sandbox_isolation,
             teardown.extension_product_views.len(),
@@ -643,8 +645,9 @@ pub(crate) fn run_bitwarden_core_probe(artifact: &Path) -> Result<bool, String> 
 pub(crate) fn run_stock_password_manager_probe(
     extension: &Path,
     tree_index: &Path,
+    mode: crate::MacosStockPasswordManagerProbeMode,
 ) -> Result<bool, String> {
-    stock_password_manager::run(extension, tree_index)
+    stock_password_manager::run(extension, tree_index, mode)
 }
 
 pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
@@ -1418,6 +1421,8 @@ fn run_supported_probe(
         bitwarden_dynamic_resource_url: bitwarden_contract_teardown.dynamic_resource_url,
         bitwarden_execution_world_namespace: bitwarden_contract_teardown.execution_world_namespace,
         bitwarden_sandbox_isolation: bitwarden_contract_teardown.sandbox_isolation,
+        bitwarden_runtime_port_early_connect: bitwarden_contract_teardown
+            .runtime_port_early_connect,
         runtime_permission_status: match permission_mode {
             RuntimePermissionProbeMode::None => "interactive-not-run",
             RuntimePermissionProbeMode::Full => "passed",
