@@ -1140,15 +1140,17 @@ A separate authenticated-tree diagnostic now identifies two narrow WebKit API
 compatibility requirements without changing production authority. It copies
 only the indexed Proton tree into a private no-replace stage, re-hashes every
 source while copying, and adds a Zephium-owned prelude and background wrapper.
-The prelude preserves both native `chrome` and native `browser`, binds inherited
-native methods to their original receivers, and provides only an inert
-`runtime.onUpdateAvailable` event because Zephium's authenticated catalog owns
-updates. That diagnostic imports the real background, executes the isolated
-content-script prelude, renders the popup, and releases every native object.
+The prelude preserves native `chrome` and `browser` identities, creates only a
+missing alias, locks both global properties around the same native objects, and
+provides an inert `runtime.onUpdateAvailable` event because Zephium's
+authenticated catalog owns updates. That diagnostic imports the real
+background, executes the isolated content-script prelude, renders the popup,
+and releases every native object.
 It records `offscreen` as absent and `user_workflows=unassessed`; it neither
 proves Proton login/autofill compatibility nor authorizes a package. The result
-shows that the stock failure includes a missing catalog-update event and native
-receiver semantics, rather than requiring a Proton-specific product runtime.
+shows that the stock failure includes a missing catalog-update event and an
+unstable namespace-global seam, rather than requiring a Proton-specific product
+runtime.
 
 Both third-party contracts stay feature-gated and confer
 `product_authority=false`. Zephium must not hardcode either manager into the
@@ -1159,21 +1161,24 @@ non-authorizing boundary. `cargo xtask
 materialize-macos-extension-compatibility --extension PATH --tree-index PATH
 --output PATH` reopens an exact closed MV3 tree, rejects source drift and
 reserved-namespace collisions, and emits a separately indexed artifact. Its
-versioned WebKit adapter preserves native method receivers, supplies only the
-inert catalog-update event owned by Zephium, wraps classic or module background
-workers, prepends isolated content scripts, leaves `MAIN` scripts unchanged,
-and inserts the local prelude only into an explicit leading action-popup
-`<head>`. Ambiguous HTML, nonportable or absent resources, links, special
-files, unsupported worlds, and every file/tree budget violation fail closed.
+versioned WebKit adapter preserves and locks native namespace identities,
+supplies only the inert catalog-update event owned by Zephium, wraps classic or
+module background workers, prepends isolated content scripts, leaves `MAIN`
+scripts unchanged, and inserts the local prelude only into an explicit leading
+action-popup `<head>`. It does not proxy extension APIs: live WebKit evidence
+showed that proxy replacement accepts listener registration but breaks native
+message delivery. Ambiguous HTML, nonportable or absent resources, links,
+special files, unsupported worlds, and every file/tree budget violation fail
+closed.
 The emitted metadata binds source and output manifest/tree/index identities and
 states `product_authority=false`; it is not a release sealer, catalog entry, or
-redistribution decision. A Node contract gate exercises receiver preservation,
-nested namespaces, facade identity, idempotence, absent-native fail-closure,
+redistribution decision. A Node contract gate exercises native identity,
+locked-global and alias behavior, idempotence, unadaptable-native fail-closure,
 and the deliberate absence of page/network bridges.
 
 The exact Proton source transformed through that generic boundary produces a
-277-file, 20,127,230-byte tree with tree SHA-256
-`4d209e696e999f91b136fa2093c5385c60bd941071f7c2e5f0b5457b6108bb04`.
+277-file, 20,126,819-byte tree with tree SHA-256
+`92bc016384e69ab91a1166b3c84a1c6ac0cd9aaf0d83bdbff6949c6f49b5a810`.
 The feature-gated native probe independently pins the source and output
 identities before WebKit: the original background loads without context errors,
 the real popup observes the package-neutral compatibility world and renders,
@@ -1181,10 +1186,24 @@ and every native object releases. The synthetic login page still shows no
 Proton inline-autofill effect, and WebKit exposes no controller-visible content
 script in that run. Content-script behavior, login, vault, save, autofill, and
 user workflows therefore remain unassessed; this result proves a reusable
-background/popup adaptation seam, not Proton compatibility. The next gate is a
-Zephium-owned transformed fixture that proves isolated content execution and
-background messaging in CI, followed by real stock workflow tests before any
-package can be presented as installable.
+popup adaptation seam, not Proton compatibility.
+
+A separately indexed, Zephium-owned MV3 fixture now gates the package-neutral
+path without third-party bytes. `cargo xtask ci` materializes its exact source
+tree through the same offline transform and executes the result in public
+WKWebExtension APIs. On the reviewed macOS 26.6.1 runtime, native namespace
+identity remained intact and locked in both the isolated content world and a
+module background worker; a bounded background readiness barrier completed in
+88 ms; `runtime.sendMessage` returned a synchronous response; a separate
+`tabs.sendMessage` reached the content listener; the native sender tab was
+present; the page world could not observe the adapter marker; and controller,
+context, page, data store, and routing objects all released. The barrier uses
+Apple's public
+[`loadBackgroundContent`](https://developer.apple.com/documentation/webkit/wkwebextensioncontext/loadbackgroundcontent%28completionhandler%3A%29)
+completion contract and does not retain a hidden WebView or prevent ordinary
+MV3 suspension. This closes the transformed content/background execution gate;
+real stock login, vault, save, and autofill workflows remain the next product
+evidence before any package is presented as installable.
 
 ---
 
