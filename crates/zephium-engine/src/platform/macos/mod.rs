@@ -47,6 +47,8 @@ pub use stage::ContentStage;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_bitwarden_core_probe;
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_extension_compatibility_fixture_probe;
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_resource_transport_probe as run_web_extension_resource_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_stock_password_manager_compatibility_artifact_probe;

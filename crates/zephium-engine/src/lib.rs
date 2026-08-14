@@ -135,6 +135,19 @@ pub fn run_macos_stock_password_manager_compatibility_artifact_probe(
     platform::macos::run_stock_password_manager_compatibility_artifact_probe(artifact)
 }
 
+/// Executes the exact Zephium-owned package-neutral compatibility fixture.
+///
+/// The artifact remains feature-gated, non-authorizing diagnostic evidence.
+/// Passing proves isolated content/background messaging through native WebKit;
+/// it does not provision a product package or catalog entry.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_extension_compatibility_fixture_probe(
+    artifact: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_extension_compatibility_fixture_probe(artifact)
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

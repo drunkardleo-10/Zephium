@@ -9,6 +9,7 @@ mod artifact_tree;
 mod bitwarden_contract;
 mod bitwarden_core_artifact;
 mod compatibility_artifact;
+mod compatibility_fixture;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
@@ -655,6 +656,10 @@ pub(crate) fn run_stock_password_manager_compatibility_artifact_probe(
     artifact: &Path,
 ) -> Result<bool, String> {
     stock_password_manager::run_compatibility_artifact(artifact)
+}
+
+pub(crate) fn run_extension_compatibility_fixture_probe(artifact: &Path) -> Result<bool, String> {
+    compatibility_fixture::run(artifact)
 }
 
 pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {

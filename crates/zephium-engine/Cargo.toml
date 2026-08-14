@@ -62,6 +62,11 @@ name = "macos-web-extension-resource-probe"
 path = "src/bin/macos_web_extension_resource_probe.rs"
 required-features = ["native-web-extension-probes"]
 
+[[bin]]
+name = "macos-extension-compatibility-probe"
+path = "src/bin/macos_extension_compatibility_probe.rs"
+required-features = ["native-web-extension-probes"]
+
 [dependencies]
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true

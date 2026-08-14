@@ -1233,7 +1233,7 @@ fn validate_context_errors_bounded(
     Ok(())
 }
 
-fn load_background_content(
+pub(super) fn load_background_content(
     context: &WKWebExtensionContext,
     run_loop: &NSRunLoop,
     description: &str,

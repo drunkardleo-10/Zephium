@@ -695,6 +695,8 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_web_extension_resource_probe();
     #[cfg(target_os = "macos")]
+    run_macos_extension_compatibility_probe();
+    #[cfg(target_os = "macos")]
     run_macos_extension_product_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
 }
@@ -1202,6 +1204,51 @@ fn run_macos_web_extension_resource_probe() {
 
     let mut execute = vec!["run"];
     execute.extend(COMMON);
+    run("cargo", &execute);
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_extension_compatibility_probe() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let source = repository.join("crates/zephium-engine/fixtures/macos-extension-compatibility-v1");
+    let source_index = repository
+        .join("crates/zephium-engine/fixtures/macos-extension-compatibility-v1-tree.json");
+    let stage = tempfile::Builder::new()
+        .prefix("zephium-macos-extension-compatibility-ci-")
+        .tempdir()
+        .unwrap_or_else(|error| {
+            eprintln!("cannot create macOS compatibility CI stage: {error}");
+            exit(1);
+        });
+    let artifact = stage.path().join("artifact");
+    if let Err(error) =
+        macos_extension_compatibility::materialize(&source, &source_index, &artifact)
+    {
+        eprintln!("cannot materialize macOS compatibility CI artifact: {error}");
+        exit(1);
+    }
+    let Some(artifact) = artifact.to_str() else {
+        eprintln!("macOS compatibility CI artifact path is not UTF-8");
+        exit(1);
+    };
+
+    const COMMON: [&str; 7] = [
+        "--locked",
+        "-p",
+        "zephium-engine",
+        "--features",
+        "native-web-extension-probes",
+        "--bin",
+        "macos-extension-compatibility-probe",
+    ];
+    let mut clippy = vec!["clippy"];
+    clippy.extend(COMMON);
+    clippy.extend(["--", "-D", "warnings"]);
+    run("cargo", &clippy);
+
+    let mut execute = vec!["run"];
+    execute.extend(COMMON);
+    execute.extend(["--", "--artifact", artifact]);
     run("cargo", &execute);
 }
 
