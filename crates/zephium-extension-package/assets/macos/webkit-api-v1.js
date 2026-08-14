@@ -1,6 +1,7 @@
 (() => {
   "use strict";
   const installed = Symbol.for("zephium.webkit-api-compatibility.v1");
+  const modeMarker = Symbol.for("zephium.webkit-api-compatibility.mode.v1");
   if (globalThis[installed] === true) return;
 
   const inertCatalogUpdateEvent = Object.freeze({
@@ -13,88 +14,79 @@
       return false;
     },
   });
-  const objectProxies = new WeakMap();
-  const runtimeProxies = new WeakMap();
-  const boundFunctions = new WeakMap();
 
-  const bindFunction = (target, property, value) => {
-    let properties = boundFunctions.get(target);
-    if (properties === undefined) {
-      properties = new Map();
-      boundFunctions.set(target, properties);
-    }
-    const cached = properties.get(property);
-    if (cached?.source !== value) {
-      properties.set(property, { source: value, bound: value.bind(target) });
-    }
-    return properties.get(property).bound;
-  };
-
-  const wrap = (target, runtimeNamespace = false) => {
-    if ((typeof target !== "object" && typeof target !== "function") || target === null) {
-      return target;
-    }
-    const cache = runtimeNamespace ? runtimeProxies : objectProxies;
-    const cached = cache.get(target);
-    if (cached !== undefined) return cached;
-    const proxy = new Proxy(target, {
-      get(nativeTarget, property) {
-        const fixed = Reflect.getOwnPropertyDescriptor(nativeTarget, property);
-        if (fixed && !fixed.configurable && "value" in fixed && !fixed.writable) {
-          return fixed.value;
-        }
-        if (fixed && !fixed.configurable && !("value" in fixed) && fixed.get === undefined) {
-          return undefined;
-        }
-        if (
-          runtimeNamespace &&
-          property === "onUpdateAvailable" &&
-          Reflect.get(nativeTarget, property, nativeTarget) == null
-        ) {
-          return inertCatalogUpdateEvent;
-        }
-        const value = Reflect.get(nativeTarget, property, nativeTarget);
-        if (typeof value === "function") return bindFunction(nativeTarget, property, value);
-        return wrap(value, property === "runtime");
-      },
-      set(nativeTarget, property, value) {
-        const settled = Reflect.set(nativeTarget, property, value, nativeTarget);
-        if (settled) boundFunctions.get(nativeTarget)?.delete(property);
-        return settled;
-      },
-    });
-    cache.set(target, proxy);
-    return proxy;
-  };
-
-  const install = (name, nativeNamespace) => {
-    if (nativeNamespace?.runtime?.id == null) return false;
-    const compatible = wrap(nativeNamespace);
-    const descriptor = Reflect.getOwnPropertyDescriptor(globalThis, name);
+  const ensureCatalogUpdateEvent = (runtime) => {
+    if (runtime?.onUpdateAvailable != null) return true;
     try {
-      if (descriptor === undefined || descriptor.configurable) {
-        Object.defineProperty(globalThis, name, {
-          value: compatible,
-          writable: false,
-          enumerable: descriptor?.enumerable ?? false,
-          configurable: false,
-        });
-      } else {
-        globalThis[name] = compatible;
-      }
+      Object.defineProperty(runtime, "onUpdateAvailable", {
+        value: inertCatalogUpdateEvent,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      });
     } catch (_) {
       return false;
     }
-    return globalThis[name] === compatible;
+    return runtime.onUpdateAvailable === inertCatalogUpdateEvent;
   };
 
   const nativeChrome = globalThis.chrome;
   const nativeBrowser = globalThis.browser;
-  const chromeInstalled = install("chrome", nativeChrome ?? nativeBrowser);
-  const browserInstalled = install("browser", nativeBrowser ?? nativeChrome);
-  if (!chromeInstalled || !browserInstalled) {
+  const install = (name, nativeNamespace) => {
+    if (nativeNamespace?.runtime?.id == null) return "unavailable";
+    let aliased = false;
+    if (globalThis[name] == null) {
+      try {
+        Object.defineProperty(globalThis, name, {
+          value: nativeNamespace,
+          writable: false,
+          enumerable: false,
+          configurable: false,
+        });
+      } catch (_) {
+        return "unavailable";
+      }
+      aliased = true;
+    }
+    if (globalThis[name] !== nativeNamespace) return "unavailable";
+    const descriptor = Reflect.getOwnPropertyDescriptor(globalThis, name);
+    try {
+      if (descriptor?.configurable || ("value" in descriptor && descriptor.writable)) {
+        Object.defineProperty(globalThis, name, {
+          value: nativeNamespace,
+          writable: false,
+          enumerable: descriptor.enumerable,
+          configurable: false,
+        });
+      }
+    } catch (_) {
+      return "unavailable";
+    }
+    const settled = Reflect.getOwnPropertyDescriptor(globalThis, name);
+    const stable =
+      settled != null &&
+      !settled.configurable &&
+      (("value" in settled && !settled.writable && settled.value === nativeNamespace) ||
+        (!("value" in settled) && settled.set === undefined && globalThis[name] === nativeNamespace));
+    if (!stable) return "unavailable";
+    if (!ensureCatalogUpdateEvent(nativeNamespace.runtime)) return "unavailable";
+    return aliased ? "native-aliased" : "native-preserved";
+  };
+  const chromeMode = install("chrome", nativeChrome ?? nativeBrowser);
+  const browserMode = install("browser", nativeBrowser ?? nativeChrome);
+  if (chromeMode === "unavailable" || browserMode === "unavailable") {
     throw new Error("Zephium WebKit extension API surface is unavailable");
   }
+  const mode =
+    chromeMode === "native-preserved" && browserMode === "native-preserved"
+      ? "native-preserved"
+      : "native-aliased";
+  Object.defineProperty(globalThis, modeMarker, {
+    value: mode,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
   Object.defineProperty(globalThis, installed, {
     value: true,
     writable: false,

@@ -15,8 +15,16 @@ for (const forbidden of ["document", "window", "fetch", "XMLHttpRequest", "WebSo
 }
 
 function nativeNamespace(id) {
+  const onMessage = {
+    addListener() {},
+    removeListener() {},
+    hasListener() {
+      return false;
+    },
+  };
   const runtime = {
     id,
+    onMessage,
     getURL(path) {
       assert.equal(this, runtime, "runtime receiver was not preserved");
       return `native-extension://${id}/${path}`;
@@ -51,37 +59,47 @@ function run(context) {
 
 const nativeChrome = nativeNamespace("chrome-fixture");
 const chromeOnly = run({ chrome: nativeChrome });
+const installed = Symbol.for("zephium.webkit-api-compatibility.v1");
+const mode = Symbol.for("zephium.webkit-api-compatibility.mode.v1");
 assert.equal(chromeOnly.chrome.runtime.id, "chrome-fixture");
 assert.equal(chromeOnly.browser.runtime.id, "chrome-fixture");
-assert.notEqual(chromeOnly.chrome, nativeChrome);
+assert.equal(chromeOnly.chrome, nativeChrome, "native chrome identity changed");
+assert.equal(chromeOnly.browser, nativeChrome, "missing browser alias did not reuse chrome");
+for (const name of ["chrome", "browser"]) {
+  const descriptor = Object.getOwnPropertyDescriptor(chromeOnly, name);
+  assert.equal(descriptor?.value, nativeChrome);
+  assert.equal(descriptor?.writable, false);
+  assert.equal(descriptor?.configurable, false);
+}
 assert.equal(chromeOnly.chrome.runtime.fixed, nativeChrome.runtime.fixed);
 assert.equal(chromeOnly.chrome.runtime.missingAccessor, undefined);
-const getURL = chromeOnly.chrome.runtime.getURL;
-assert.equal(getURL, chromeOnly.chrome.runtime.getURL, "bound method identity drifted");
-assert.equal(getURL("asset.js"), "native-extension://chrome-fixture/asset.js");
-chromeOnly.chrome.runtime.getURL = function replacement(path) {
-  assert.equal(this, nativeChrome.runtime, "replacement receiver was not preserved");
-  return `replacement://${path}`;
-};
-assert.equal(chromeOnly.chrome.runtime.getURL("asset.js"), "replacement://asset.js");
-const replacementGetURL = chromeOnly.chrome.runtime.getURL;
-const nestedGet = chromeOnly.chrome.storage.local.get;
-assert.equal(nestedGet("key"), "key");
+assert.equal(
+  chromeOnly.chrome.runtime.onMessage,
+  nativeChrome.runtime.onMessage,
+  "native event identity changed",
+);
+assert.equal(
+  chromeOnly.chrome.runtime.getURL("asset.js"),
+  "native-extension://chrome-fixture/asset.js",
+);
+assert.equal(chromeOnly.chrome.storage.local.get("key"), "key");
 assert.equal(typeof chromeOnly.chrome.runtime.onUpdateAvailable.addListener, "function");
 assert.equal(chromeOnly.chrome.runtime.onUpdateAvailable.hasListeners(), false);
 assert.equal(Object.isFrozen(chromeOnly.chrome.runtime.onUpdateAvailable), true);
+assert.equal(chromeOnly[installed], true);
+assert.equal(chromeOnly[mode], "native-aliased");
 script.runInContext(chromeOnly, { timeout: 1_000 });
-assert.equal(
-  chromeOnly.chrome.runtime.getURL,
-  replacementGetURL,
-  "idempotent run replaced the API facade",
-);
+assert.equal(chromeOnly.chrome, nativeChrome, "idempotent run replaced native chrome");
+assert.equal(chromeOnly.browser, nativeChrome, "idempotent run replaced browser alias");
 
 const nativeBrowser = nativeNamespace("browser-fixture");
 const browserOnly = run({ browser: nativeBrowser });
 assert.equal(browserOnly.chrome.runtime.id, "browser-fixture");
 assert.equal(browserOnly.browser.runtime.id, "browser-fixture");
+assert.equal(browserOnly.chrome, nativeBrowser);
+assert.equal(browserOnly.browser, nativeBrowser);
 assert.equal(browserOnly.browser.runtime.getURL("x"), "native-extension://browser-fixture/x");
+assert.equal(browserOnly[mode], "native-aliased");
 
 assert.throws(
   () => run({}),
@@ -93,13 +111,36 @@ const lockedNative = nativeNamespace("locked-fixture");
 const locked = vm.createContext({});
 Object.defineProperty(locked, "chrome", {
   get: () => lockedNative,
-  set() {},
   configurable: false,
 });
+script.runInContext(locked, { timeout: 1_000 });
+assert.equal(locked.chrome, lockedNative);
+assert.equal(locked.browser.runtime.id, "locked-fixture");
+assert.equal(locked.chrome.runtime.onUpdateAvailable.hasListeners(), false);
+assert.equal(locked[installed], true);
+assert.equal(locked[mode], "native-aliased");
+
+const workerChrome = nativeNamespace("worker-chrome-fixture");
+const workerBrowser = nativeNamespace("worker-browser-fixture");
+const worker = run({
+  chrome: workerChrome,
+  browser: workerBrowser,
+  registration: {},
+  clients: {},
+});
+assert.equal(worker.chrome, workerChrome, "service-worker chrome identity changed");
+assert.equal(worker.browser, workerBrowser, "service-worker browser identity changed");
+assert.equal(worker.chrome.runtime.onUpdateAvailable.hasListeners(), false);
+assert.equal(worker.browser.runtime.onUpdateAvailable.hasListeners(), false);
+assert.equal(worker[installed], true);
+assert.equal(worker[mode], "native-preserved");
+
+const sealedNative = nativeNamespace("sealed-fixture");
+Object.preventExtensions(sealedNative.runtime);
 assert.throws(
-  () => script.runInContext(locked, { timeout: 1_000 }),
+  () => run({ chrome: sealedNative }),
   /Zephium WebKit extension API surface is unavailable/,
-  "a non-replaceable native namespace was mistaken for an installed facade",
+  "unadaptable native runtime did not fail closed",
 );
 
 console.log("macOS extension compatibility asset contract passed");

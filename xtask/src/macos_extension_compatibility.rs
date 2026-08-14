@@ -28,7 +28,7 @@ const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
 const TARGET: &str = "webkit-macos-native-v1";
 const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
-const BACKGROUND_WRAPPER: &str = "__zephium__/background-v1.js";
+const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
 const API_PRELUDE_SOURCE: &str =
@@ -140,7 +140,7 @@ pub(crate) fn materialize(
             "bytes": generated.parsed.total_bytes(),
         },
         "adaptations": [
-            "native-api-receiver-binding-v1",
+            "native-api-identity-preservation-v1",
             "catalog-update-event-stub-v1"
         ],
         "surfaces": {
@@ -319,11 +319,17 @@ fn adapt_background(
         "service_worker".to_owned(),
         Value::String(BACKGROUND_WRAPPER.to_owned()),
     );
-    let prelude = js_string(&format!("/{API_PRELUDE}"))?;
-    let original = js_string(&format!("/{original}"))?;
     let wrapper = match kind {
-        WorkerKind::Classic => format!("importScripts({prelude}, {original});\n"),
-        WorkerKind::Module => format!("import {prelude};\nimport {original};\n"),
+        WorkerKind::Classic => {
+            let prelude = js_string(&format!("/{API_PRELUDE}"))?;
+            let original = js_string(&format!("/{original}"))?;
+            format!("importScripts({prelude}, {original});\n")
+        }
+        WorkerKind::Module => {
+            let prelude = js_string(&format!("./{API_PRELUDE}"))?;
+            let original = js_string(&format!("./{original}"))?;
+            format!("import {prelude};\nimport {original};\n")
+        }
         WorkerKind::Absent => unreachable!(),
     };
     Ok((kind, Some(wrapper.into_bytes())))
@@ -478,9 +484,15 @@ fn tag_end(bytes: &[u8], start: usize) -> Result<usize, String> {
 
 fn reject_reserved_paths(index: &CanonicalExtensionTreeIndex) -> Result<(), String> {
     const RESERVED_NAMESPACE: &str = "__zephium__";
+    let wrapper = PortableRelativePath::parse(BACKGROUND_WRAPPER)
+        .map_err(|error| format!("internal compatibility path is invalid: {error}"))?
+        .collision_key();
     for file in index.files() {
         let collision = file.path().collision_key();
-        if collision.as_ref() == RESERVED_NAMESPACE || collision.starts_with("__zephium__/") {
+        if collision.as_ref() == RESERVED_NAMESPACE
+            || collision.starts_with("__zephium__/")
+            || collision == wrapper
+        {
             return Err(format!(
                 "extension tree collides with reserved compatibility namespace {RESERVED_NAMESPACE}"
             ));
@@ -758,8 +770,8 @@ mod tests {
         );
         let wrapper =
             fs::read_to_string(first.join(ARTIFACT_EXTENSION).join(BACKGROUND_WRAPPER)).unwrap();
-        assert!(wrapper.contains("import \"/__zephium__/webkit-api-v1.js\";"));
-        assert!(wrapper.contains("import \"/worker.js\";"));
+        assert!(wrapper.contains("import \"./__zephium__/webkit-api-v1.js\";"));
+        assert!(wrapper.contains("import \"./worker.js\";"));
         let popup =
             fs::read_to_string(first.join(ARTIFACT_EXTENSION).join("ui/popup.html")).unwrap();
         assert!(popup.contains(&format!(

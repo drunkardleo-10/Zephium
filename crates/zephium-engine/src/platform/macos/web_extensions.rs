@@ -8,6 +8,7 @@
 mod artifact_tree;
 mod bitwarden_contract;
 mod bitwarden_core_artifact;
+mod compatibility_artifact;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
