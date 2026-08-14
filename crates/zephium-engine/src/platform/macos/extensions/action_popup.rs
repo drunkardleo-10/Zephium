@@ -110,7 +110,13 @@ define_class!(
                 broker.finish_native_close();
             }
         }
+    }
 
+    // Notification selectors are ordinary Objective-C methods, not protocol
+    // overrides. Keeping this outside `NSPopoverDelegate` is load-bearing:
+    // objc2 validates protocol membership while registering the class and
+    // aborts a debug process if a foreign selector is placed in that impl.
+    impl ActionPopoverDelegate {
         #[unsafe(method(popupContentFrameDidChange:))]
         fn popup_content_frame_did_change(&self, _notification: &NSNotification) {
             if let Some(broker) = self.ivars().broker.upgrade() {
