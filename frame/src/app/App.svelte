@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
+  import ExtensionPermissionPrompt from "../features/extensions/ExtensionPermissionPrompt.svelte";
   import Launcher from "../features/launcher/Launcher.svelte";
   import * as sidebar from "../features/sidebar/sidebar-mode.svelte";
   import Dividers from "../features/split/Dividers.svelte";
@@ -18,6 +19,7 @@
 
   const currentWindow = getCurrentWindow();
   const isPanel = currentWindow.label === "panel";
+  let extensionPermissionPrompt = $derived(extensions.permissionPrompt());
 
   type ChromeShortcut = {
     matches: (event: KeyboardEvent) => boolean;
@@ -59,6 +61,9 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
+    // The native content stage is suppressed while this browser-owned modal
+    // is active. Keep chrome shortcuts from mutating tabs behind it as well.
+    if (extensionPermissionPrompt !== null) return;
     for (const shortcut of chromeShortcuts) {
       if (!shortcut.matches(event)) continue;
       event.preventDefault();
@@ -141,8 +146,15 @@
 {#if isPanel}
   <Launcher />
 {:else}
-  <Shell />
-  {#if !IS_MAC}
-    <Dividers />
+  <div class="contents" inert={extensionPermissionPrompt !== null}>
+    <Shell />
+    {#if !IS_MAC}
+      <Dividers />
+    {/if}
+  </div>
+  {#if extensionPermissionPrompt !== null}
+    {#key `${extensionPermissionPrompt.runtime_generation}:${extensionPermissionPrompt.request_id}`}
+      <ExtensionPermissionPrompt prompt={extensionPermissionPrompt} />
+    {/key}
   {/if}
 {/if}

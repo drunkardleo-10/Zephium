@@ -3,6 +3,7 @@ import type {
   ExtensionActionFailed,
   ExtensionActionsChanged,
   ExtensionManagementChanged,
+  ExtensionRuntimeGrantPromptChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -36,6 +37,9 @@ export const events = {
   extensionActionFailed: scopedEvent<ExtensionActionFailed>("zephium:extension-action-failed"),
   extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
     "zephium:extension-management",
+  ),
+  extensionRuntimeGrantPromptChanged: scopedEvent<ExtensionRuntimeGrantPromptChanged>(
+    "zephium:extension-runtime-grant-prompt",
   ),
   presentationTab: scopedEvent<PresentationTab>("zephium:presentation-tab"),
   uiCommand: scopedEvent<UiCommand>("zephium:ui-command"),

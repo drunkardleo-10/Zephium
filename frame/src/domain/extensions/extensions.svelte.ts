@@ -6,6 +6,8 @@ import type {
   ExtensionInstallCandidateView,
   ExtensionManagementEntryView,
   ExtensionManagementView,
+  ExtensionRuntimeGrantPromptEntryView,
+  ExtensionRuntimeGrantPromptView,
   OperationAdmission,
   OperationDisposition,
 } from "../../shared/ipc/bindings";
@@ -16,6 +18,7 @@ import * as operations from "../operations/operations";
 import {
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
+  ExtensionRuntimeGrantPromptProjectionModel,
   failureForContext,
   initialExtensionManagement,
   managementForProfile,
@@ -27,8 +30,10 @@ const MANAGEMENT_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 const model = new ExtensionProjectionModel();
 const managementModel = new ExtensionManagementProjectionModel();
+const runtimeGrantModel = new ExtensionRuntimeGrantPromptProjectionModel();
 let state = $state.raw<ExtensionActionsView>(model.actions);
 let managementState = $state.raw<ExtensionManagementView>(managementModel.management);
+let runtimeGrantState = $state.raw<ExtensionRuntimeGrantPromptView>(runtimeGrantModel.view);
 type VisibleFailure = Omit<ExtensionActionFailedView, "projection_revision"> & {
   projectionRevision?: string;
 };
@@ -41,6 +46,8 @@ type ManagementMutation = {
 let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
 let managementVisible = false;
+let runtimeGrantResponding = $state(false);
+let runtimeGrantNotice = $state<string | null>(null);
 
 let lifecycle = 0;
 let initialized = false;
@@ -58,6 +65,10 @@ export const management = (profileId: string | null) =>
   managementForProfile(managementState, profileId);
 export const activeManagementMutation = () => managementMutation;
 export const managementFailure = () => managementNotice;
+export const permissionPrompt = () => runtimeGrantState.prompt;
+export const permissionPromptBusy = () =>
+  runtimeGrantResponding || runtimeGrantState.prompt?.processing === true;
+export const permissionPromptFailure = () => runtimeGrantNotice;
 
 export function activeActions(profileId: string | null, tabId: string | null) {
   return profileId !== null &&
@@ -144,6 +155,14 @@ async function initialize(generation: number) {
       if (generation !== lifecycle || !managementModel.apply(event.payload)) return;
       managementState = managementModel.management;
     }),
+    events.extensionRuntimeGrantPromptChanged.listen((event) => {
+      if (generation !== lifecycle || !runtimeGrantModel.apply(event.payload)) return;
+      runtimeGrantState = runtimeGrantModel.view;
+      // The actor's exact replacement supersedes any in-flight presentation
+      // guard or diagnostic from the prior revision.
+      runtimeGrantResponding = false;
+      runtimeGrantNotice = null;
+    }),
   ]);
   if (generation !== lifecycle) {
     for (const stop of listeners) stop();
@@ -183,9 +202,99 @@ export function dispose() {
   invoking.clear();
   managementMutation = null;
   managementNotice = null;
+  runtimeGrantResponding = false;
+  runtimeGrantNotice = null;
   failure = null;
   if (managementVisible) void commands.extensionManagementSetVisible(false).catch(() => {});
   managementVisible = false;
+}
+
+function samePermissionPrompt(
+  left: ExtensionRuntimeGrantPromptEntryView | null,
+  right: ExtensionRuntimeGrantPromptEntryView,
+): boolean {
+  return (
+    left?.profile_id === right.profile_id &&
+    left.install_id === right.install_id &&
+    left.runtime_generation === right.runtime_generation &&
+    left.request_id === right.request_id
+  );
+}
+
+function runtimeGrantDispositionMessage(disposition: OperationDisposition): string | null {
+  if (disposition.outcome === "applied" || disposition.outcome === "no_op") return null;
+  switch (disposition.reason) {
+    case "invalid_scope":
+      return "This permission request is no longer available.";
+    case "store_conflict":
+      return "The extension's access changed. Review the new request and try again.";
+    case "store_outcome_unknown":
+    case "store_reconciliation_failed":
+      return "Zephium couldn't safely verify this permission change. Restart before trying again.";
+    case "store_admission_rejected":
+      return "Extension permissions are temporarily unavailable.";
+    default:
+      return "Zephium couldn't apply this permission change.";
+  }
+}
+
+async function settlePermissionPrompt(
+  prompt: ExtensionRuntimeGrantPromptEntryView,
+  allow: boolean,
+): Promise<void> {
+  if (!samePermissionPrompt(runtimeGrantState.prompt, prompt) || permissionPromptBusy()) return;
+  runtimeGrantResponding = true;
+  runtimeGrantNotice = null;
+  try {
+    try {
+      await operations.init();
+    } catch {
+      // The bounded native ledger remains the reconciliation path if scoped
+      // event registration races this foreground response.
+    }
+    const admission = await boundedIpc(
+      commands.extensionRuntimeGrantRespond(
+        prompt.profile_id,
+        prompt.install_id,
+        prompt.runtime_generation,
+        prompt.request_id,
+        allow,
+      ),
+      MANAGEMENT_IPC_TIMEOUT_MS,
+    );
+    if (!admission.accepted || admission.operation_id === null) {
+      runtimeGrantNotice = "This permission request is no longer available.";
+      runtimeGrantResponding = false;
+      return;
+    }
+
+    const resolution = await operations.waitForDisposition(
+      admission.operation_id,
+      MANAGEMENT_SETTLEMENT_TIMEOUT_MS,
+    );
+    if (!samePermissionPrompt(runtimeGrantState.prompt, prompt)) return;
+    if (resolution.state === "processed") {
+      runtimeGrantNotice = runtimeGrantDispositionMessage(resolution.disposition);
+      if (runtimeGrantNotice !== null) runtimeGrantResponding = false;
+    } else if (resolution.state === "pending") {
+      runtimeGrantNotice = "Zephium is still applying this permission change.";
+    } else {
+      runtimeGrantNotice = "Zephium couldn't verify this permission change.";
+      runtimeGrantResponding = false;
+    }
+  } catch {
+    if (samePermissionPrompt(runtimeGrantState.prompt, prompt)) {
+      runtimeGrantNotice = "Extension permissions are temporarily unavailable.";
+      runtimeGrantResponding = false;
+    }
+  }
+}
+
+export function respondToPermissionPrompt(
+  prompt: ExtensionRuntimeGrantPromptEntryView,
+  allow: boolean,
+): void {
+  void settlePermissionPrompt(prompt, allow);
 }
 
 export async function invoke(

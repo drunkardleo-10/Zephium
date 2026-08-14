@@ -38,6 +38,14 @@ impl Shell {
                     self.on_extension_browser_request(request.clone());
                     return;
                 }
+                EngineEvent::ExtensionRuntimeGrantRequested { prompt } => {
+                    self.on_extension_runtime_grant_prompt(prompt.as_ref().clone());
+                    return;
+                }
+                EngineEvent::ExtensionRuntimeGrantCancelled { runtime, request } => {
+                    self.cancel_extension_runtime_grant_prompt(*runtime, *request);
+                    return;
+                }
                 _ => {
                     crate::diagnostic!("engine: ignored native event before bootstrap");
                     return;
@@ -109,6 +117,12 @@ impl Shell {
             }
             EngineEvent::ExtensionBrowserRequested { request } => {
                 self.on_extension_browser_request(request)
+            }
+            EngineEvent::ExtensionRuntimeGrantRequested { prompt } => {
+                self.on_extension_runtime_grant_prompt(*prompt);
+            }
+            EngineEvent::ExtensionRuntimeGrantCancelled { runtime, request } => {
+                self.cancel_extension_runtime_grant_prompt(runtime, request)
             }
             EngineEvent::ExtensionActionsSnapshotSettled {
                 profile,
@@ -401,6 +415,8 @@ impl Shell {
             // Requests must reach their handler even during retirement so the
             // retained native completion receives an explicit rejection.
             EngineEvent::ExtensionBrowserRequested { .. } => None,
+            EngineEvent::ExtensionRuntimeGrantRequested { .. } => None,
+            EngineEvent::ExtensionRuntimeGrantCancelled { .. } => None,
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),

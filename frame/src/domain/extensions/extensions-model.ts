@@ -3,6 +3,7 @@ import type {
   ExtensionActionFailure,
   ExtensionActionsView,
   ExtensionManagementView,
+  ExtensionRuntimeGrantPromptView,
 } from "../../shared/ipc/bindings";
 import { ZERO_PROJECTION_REVISION } from "../tabs/tabs-model";
 
@@ -23,6 +24,13 @@ export function initialExtensionManagement(): ExtensionManagementView {
     catalog_revision: null,
     entries: [],
     candidates: [],
+  };
+}
+
+export function initialExtensionRuntimeGrantPrompt(): ExtensionRuntimeGrantPromptView {
+  return {
+    projection_revision: ZERO_PROJECTION_REVISION,
+    prompt: null,
   };
 }
 
@@ -95,6 +103,32 @@ export class ExtensionManagementProjectionModel {
     if (candidate.projection_revision <= this.#appliedRevision) return false;
     this.#appliedRevision = candidate.projection_revision;
     this.#management = candidate;
+    return true;
+  }
+}
+
+/**
+ * Independent revision admission for the process-wide native permission
+ * prompt. A replacement carrying `null` is authoritative closure; retaining
+ * the old prompt after that event would leave stale consent controls live.
+ */
+export class ExtensionRuntimeGrantPromptProjectionModel {
+  #view: ExtensionRuntimeGrantPromptView;
+  #appliedRevision: string;
+
+  constructor(initial: ExtensionRuntimeGrantPromptView = initialExtensionRuntimeGrantPrompt()) {
+    this.#view = initial;
+    this.#appliedRevision = initial.projection_revision;
+  }
+
+  get view(): ExtensionRuntimeGrantPromptView {
+    return this.#view;
+  }
+
+  apply(candidate: ExtensionRuntimeGrantPromptView): boolean {
+    if (candidate.projection_revision <= this.#appliedRevision) return false;
+    this.#appliedRevision = candidate.projection_revision;
+    this.#view = candidate;
     return true;
   }
 }

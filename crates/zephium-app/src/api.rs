@@ -16,7 +16,8 @@ use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, Navigatio
 use zephium_core::ports::extensions::ExtensionServiceLifecycle;
 use zephium_core::ports::extensions::{
     ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
-    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
+    ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
@@ -252,6 +253,14 @@ pub enum Command {
     /// subscription. Opening performs one explicit authenticated read; closing
     /// invalidates late callbacks and retains no polling work.
     SetExtensionManagementVisible(bool),
+    /// Browser-owned response to the exact currently projected native
+    /// optional-grant prompt. Public composition wraps this durable mutation
+    /// in `Operation`; all identities are stale-resistant echo tokens.
+    RespondToExtensionRuntimeGrantPrompt {
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionRuntimeGrantRequestId,
+        allow: bool,
+    },
     /// Internal exactly-once handoff from an admitted extension-service
     /// management callback. It is never accepted through public operation
     /// dispatch.
@@ -264,6 +273,12 @@ pub enum Command {
         request: u64,
         profile: ProfileId,
         outcome: ExtensionManagementCatalogOutcome,
+    },
+    /// Internal exactly-once callback from the serialized grant transaction.
+    ExtensionRuntimeGrantSettled {
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionRuntimeGrantRequestId,
+        settlement: Box<ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>>,
     },
     Search(String),
     OpenUrl(String),

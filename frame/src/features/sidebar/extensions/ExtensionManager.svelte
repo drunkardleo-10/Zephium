@@ -12,6 +12,10 @@
     ExtensionManagementRuntimeView,
   } from "../../../shared/ipc/bindings";
   import * as extensions from "../../../domain/extensions/extensions.svelte";
+  import {
+    apiPermissionLabel,
+    hostPermissionLabel,
+  } from "../../../domain/extensions/permission-labels";
   import * as tabs from "../../../domain/tabs/tabs.svelte";
   import Icon from "../../../shared/ui/Icon.svelte";
 
@@ -177,28 +181,6 @@
       : selectedOptionalHosts.filter((entry) => entry !== index);
     if (!fileAccessAvailable(candidate)) allowFileAccess = false;
   }
-
-  const permissionLabel = (permission: string) => {
-    const labels: Record<string, string> = {
-      activeTab: "Access the current tab after you use the extension",
-      alarms: "Schedule background tasks",
-      clipboardRead: "Read copied content",
-      clipboardWrite: "Copy content to the clipboard",
-      contextMenus: "Add items to page context menus",
-      idle: "Detect when the device is idle",
-      notifications: "Show notifications",
-      scripting: "Run extension scripts on allowed sites",
-      storage: "Store extension settings and data",
-      tabs: "Read tab titles and addresses",
-      unlimitedStorage: "Store data without the normal extension quota",
-      webNavigation: "Observe navigation on allowed sites",
-      webRequest: "Observe network requests on allowed sites",
-    };
-    return labels[permission] ?? permission;
-  };
-
-  const hostLabel = (pattern: string) =>
-    pattern === "<all_urls>" ? "Read and change data on all websites" : pattern;
 
   const COLLAPSED_REQUIRED_HOST_COUNT = 6;
 
@@ -450,10 +432,10 @@
                       {:else}
                         <ul class="mt-1 space-y-1 text-[10.5px] leading-4 text-muted">
                           {#each candidate.required_api as permission (permission)}
-                            <li>• {permissionLabel(permission)}</li>
+                            <li>• {apiPermissionLabel(permission)}</li>
                           {/each}
                           {#each showAllRequiredHosts ? candidate.required_hosts : candidate.required_hosts.slice(0, COLLAPSED_REQUIRED_HOST_COUNT) as pattern (pattern)}
-                            <li>• {hostLabel(pattern)}</li>
+                            <li>• {hostPermissionLabel(pattern)}</li>
                           {/each}
                         </ul>
                         {#if candidate.required_hosts.length > COLLAPSED_REQUIRED_HOST_COUNT}
@@ -486,7 +468,7 @@
                                   onchange={(event) =>
                                     selectOptionalApi(index, event.currentTarget.checked)}
                                 />
-                                <span>{permissionLabel(permission)}</span>
+                                <span>{apiPermissionLabel(permission)}</span>
                               </label>
                             {/each}
                             {#each candidate.optional_hosts as pattern, index (pattern)}
@@ -505,7 +487,7 @@
                                       event.currentTarget.checked,
                                     )}
                                 />
-                                <span>{hostLabel(pattern)}</span>
+                                <span>{hostPermissionLabel(pattern)}</span>
                               </label>
                             {/each}
                           </div>

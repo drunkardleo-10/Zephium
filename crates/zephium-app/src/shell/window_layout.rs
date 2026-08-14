@@ -26,6 +26,12 @@ impl Shell {
         let tree = self.pane_tree();
         let present = tree.as_ref().is_some_and(|t| self.present(t));
         let mut l = layout::compute(win.size, win.mode, win.metrics, present);
+        // A browser-owned extension consent prompt is window-modal. Native
+        // page views are sibling views above chrome on every platform, so CSS
+        // alone cannot prevent a page from obscuring the prompt or receiving
+        // input behind it. Remove content from the native stage and expand
+        // privileged chrome for exactly the lifetime of the retained prompt.
+        let extension_consent_active = self.extension_runtime_grants.active().is_some();
         // `Items` marks a prospective view resident before its CreateView
         // effect is dispatched. While the profile's first explicit native
         // policy is still compiling/installing, that effect is intentionally
@@ -35,7 +41,7 @@ impl Shell {
         // `relayout`, so the first visible layout remains correctly ordered
         // after native policy registration and view admission.
         let native_policy_available = self.blocker.native_policy_available(win.profile);
-        if !self.window_visible || !native_policy_available {
+        if !self.window_visible || !native_policy_available || extension_consent_active {
             l.content = None;
         }
         // Raw native children still receive their final geometry while a
@@ -44,7 +50,8 @@ impl Shell {
         // one visible leaf completed its exact chrome-verification transition.
         // The content stage itself is transparent and presentation-gated, so
         // it can sit above this real UI without painting an artificial box.
-        let chrome_present = self.window_visible
+        let chrome_present = !extension_consent_active
+            && self.window_visible
             && native_policy_available
             && tree.as_ref().is_some_and(|tree| {
                 tree.tabs().iter().any(|id| {

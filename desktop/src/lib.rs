@@ -93,6 +93,7 @@ const EVENT_TAB: &str = "zephium:tab";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_EXTENSION_MANAGEMENT: &str = "zephium:extension-management";
+const EVENT_EXTENSION_RUNTIME_GRANT_PROMPT: &str = "zephium:extension-runtime-grant-prompt";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
 const EVENT_UI: &str = "zephium:ui-command";
 const EVENT_SEARCH: &str = "zephium:search";
@@ -1142,6 +1143,9 @@ struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
 struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ExtensionRuntimeGrantPromptChanged(zephium_ipc::ExtensionRuntimeGrantPromptView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct UiCommand(String);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1315,6 +1319,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_install,
             extension_management_set_enabled,
             extension_management_uninstall,
+            extension_runtime_grant_respond,
             blocker_status,
             blocker_set_enabled,
             blocker_retry,
@@ -1349,6 +1354,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ExtensionActionsChanged,
             ExtensionActionFailed,
             ExtensionManagementChanged,
+            ExtensionRuntimeGrantPromptChanged,
             UiCommand,
             SearchChanged,
             LayoutChanged,
@@ -2200,6 +2206,62 @@ fn extension_management_set_visible(
         "extension_management_set_visible",
     ) && !shutdown_started(caller.app_handle())
         && shell.dispatch(Command::SetExtensionManagementVisible(visible))
+}
+
+/// Answers only the exact Shell-projected native permission prompt. The four
+/// identities are short-lived stale fences; permission names never cross this
+/// command boundary and the actor remains the sole owner of the retained
+/// request payload.
+#[tauri::command]
+#[specta::specta]
+fn extension_runtime_grant_respond(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    profile_id: String,
+    install_id: String,
+    runtime_generation: String,
+    request_id: String,
+    allow: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_runtime_grant_respond",
+    ) || shutdown_started(caller.app_handle())
+        || !bounded(&profile_id, MAX_ITEM_ID_BYTES)
+        || !bounded(&install_id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(profile) =
+        ProfileId::parse(&profile_id).filter(|profile| profile.to_string() == profile_id)
+    else {
+        return rejected_operation();
+    };
+    let Some(install) =
+        ExtensionInstallId::parse(&install_id).filter(|install| install.to_string() == install_id)
+    else {
+        return rejected_operation();
+    };
+    let Some(generation) =
+        fixed_nonzero_hex(&runtime_generation).and_then(ExtensionRuntimeGeneration::new)
+    else {
+        return rejected_operation();
+    };
+    let Some(request) = fixed_nonzero_hex(&request_id)
+        .and_then(zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId::new)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::RespondToExtensionRuntimeGrantPrompt {
+            runtime: ExtensionRuntimeInstance::new(profile, install, generation),
+            request,
+            allow,
+        },
+    )
 }
 
 /// Installs only a candidate from Shell's latest authenticated, retained
@@ -3768,6 +3830,12 @@ pub fn run() {
                     MAIN_LABEL,
                     EVENT_EXTENSION_MANAGEMENT,
                     &management,
+                ),
+                Projection::ExtensionRuntimeGrantPrompt(prompt) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_EXTENSION_RUNTIME_GRANT_PROMPT,
+                    &prompt,
                 ),
                 Projection::UiCommand(id) => {
                     if let Some(mode) = id.strip_prefix("theme.") {

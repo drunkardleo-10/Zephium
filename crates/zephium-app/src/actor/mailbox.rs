@@ -97,6 +97,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
+    + zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS
     + crate::api::MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS
     + 3;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
@@ -991,6 +992,7 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::BlockerStoreReady(_)
             | Command::ProfileDeletionReady(_)
             | Command::ExtensionManagementSettled { .. }
+            | Command::ExtensionRuntimeGrantSettled { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
                 EngineEvent::UrlChanged { .. }
@@ -1000,6 +1002,8 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ContentRulesSettled { .. }
                     | EngineEvent::UserContentSettled { .. }
                     | EngineEvent::ExtensionBrowserRequested { .. }
+                    | EngineEvent::ExtensionRuntimeGrantRequested { .. }
+                    | EngineEvent::ExtensionRuntimeGrantCancelled { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }

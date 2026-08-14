@@ -8,6 +8,7 @@ mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_management;
+mod extension_runtime_grants;
 mod favicons;
 mod operations;
 mod persistence;
@@ -26,6 +27,7 @@ use effects::{mutation_result, operation_result, NativeWork};
 use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
 use extension_management::ExtensionManagementState;
+use extension_runtime_grants::ExtensionRuntimeGrantPromptState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
@@ -115,11 +117,11 @@ use zephium_ipc::{
     ExtensionActionFailure, ExtensionActionsView, ExtensionInstallCandidateView,
     ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
     ExtensionManagementGrantView, ExtensionManagementPhase, ExtensionManagementRuntimeView,
-    ExtensionManagementView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
-    OperationReason, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
-    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
-    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
-    SpaceView, SplitGroupView, TabView,
+    ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView,
+    ItemsState, LayoutState, OperationDisposition, OperationOutcome, OperationReason,
+    ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind,
+    RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction, SearchResult, SearchResults,
+    SidebarNodeKindView, SidebarNodeView, SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -177,6 +179,7 @@ pub struct Shell {
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
     extension_actions: ExtensionActionState,
     extension_management: ExtensionManagementState,
+    extension_runtime_grants: ExtensionRuntimeGrantPromptState,
     /// Any terminal extension lifecycle failure permanently closes bootstrap
     /// and profile-deletion progress for this process while the desktop
     /// composition root converges on orderly shutdown.
@@ -380,6 +383,7 @@ impl Shell {
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
             extension_actions: ExtensionActionState::default(),
             extension_management: ExtensionManagementState::default(),
+            extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
@@ -452,6 +456,23 @@ impl Shell {
                     if let Some(mut completion) =
                         self.begin_extension_management(operation_id.clone(), command)
                     {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::RespondToExtensionRuntimeGrantPrompt {
+                    runtime,
+                    request,
+                    allow,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_extension_runtime_grant_response(
+                        operation_id.clone(),
+                        *runtime,
+                        *request,
+                        *allow,
+                    ) {
                         completion.operation_id = operation_id;
                         (self.emit)(Projection::OperationProcessed(completion));
                     }
@@ -579,6 +600,7 @@ impl Shell {
             | Command::InstallFocusedExtension { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
+            Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}
             Command::SetExtensionManagementVisible(visible) => {
                 self.set_extension_management_visible(visible)
             }
@@ -591,6 +613,11 @@ impl Shell {
                 profile,
                 outcome,
             } => self.settle_extension_management_catalog(request, profile, outcome),
+            Command::ExtensionRuntimeGrantSettled {
+                runtime,
+                request,
+                settlement,
+            } => self.settle_extension_runtime_grant(runtime, request, *settlement),
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);

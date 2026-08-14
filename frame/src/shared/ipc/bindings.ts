@@ -26,6 +26,13 @@ export const commands = {
 	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
+	/**
+	 *  Answers only the exact Shell-projected native permission prompt. The four
+	 *  identities are short-lived stale fences; permission names never cross this
+	 *  command boundary and the actor remains the sole owner of the retained
+	 *  request payload.
+	 */
+	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
@@ -61,6 +68,7 @@ export const events = {
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
 	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
+	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -377,6 +385,39 @@ export type ExtensionManagementView = {
 	catalog_revision: string | null,
 	entries: ExtensionManagementEntryView[],
 	candidates: ExtensionInstallCandidateView[],
+};
+
+export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
+
+/**
+ *  One browser-owned optional-permission consent surface. Every identity is a
+ *  short-lived echo token only; the Shell rejoins it to its retained native
+ *  request before a user response can reach the serialized grant service.
+ */
+export type ExtensionRuntimeGrantPromptEntryView = {
+	profile_id: string,
+	install_id: string,
+	runtime_generation: string,
+	request_id: string,
+	extension_name: string,
+	api_permissions: string[],
+	host_permissions: string[],
+	private_context: boolean,
+	/**
+	 *  True after an Allow gesture while the durable grant transaction is in
+	 *  flight. Chrome must disable both response buttons until replacement.
+	 */
+	processing: boolean,
+};
+
+/**
+ *  Exact replacement for the process-wide permission prompt surface. `None`
+ *  closes any prior prompt; Shell serializes the bounded native cohort so the
+ *  frame never chooses request ordering.
+ */
+export type ExtensionRuntimeGrantPromptView = {
+	projection_revision: string,
+	prompt: ExtensionRuntimeGrantPromptEntryView | null,
 };
 
 export type ItemsChanged = ItemsState;

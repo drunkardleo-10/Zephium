@@ -5,7 +5,7 @@ use zephium_core::blocker::{
     ContentRuleCoverage, ContentRuleDigest, ContentRules, NetworkDecision, NetworkRequest,
     NetworkRequestPolicy, ProfileBlockerConfig,
 };
-use zephium_core::extensions::ExtensionActionRequest;
+use zephium_core::extensions::{ExtensionActionRequest, ExtensionRuntimeInstance};
 use zephium_core::ids::WindowId;
 use zephium_core::ports::blocker::{
     BlockerCatalog, BlockerCatalogPhase, BlockerCatalogRefreshDispatch, BlockerCatalogSnapshot,
@@ -15,6 +15,7 @@ use zephium_core::ports::blocker::{
 use zephium_core::ports::engine::{
     ContentScope, NavigationRequestId, UserContent, UserContentGeneration, ZoomRequestId,
 };
+use zephium_core::ports::extensions::ExtensionRuntimeGrantPromptSettlement;
 use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome};
 use zephium_core::session::{
     PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
@@ -33,6 +34,7 @@ type HeldExtensionSetEnabled = zephium_core::ports::extensions::ExtensionSetEnab
 type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstallCallback;
 type HeldExtensionManagementCatalog =
     zephium_core::ports::extensions::ExtensionManagementCatalogCallback;
+type HeldExtensionRuntimeGrant = zephium_core::ports::extensions::ExtensionRuntimeGrantCallback;
 
 pub(crate) struct ImmediateAllowAllCompiler;
 
@@ -186,6 +188,15 @@ pub(super) struct FakeExtensionLifecycleState {
         )>,
     >,
     pub(super) uninstall_callbacks: Mutex<Vec<HeldExtensionUninstall>>,
+    pub(super) runtime_grant_calls: Mutex<
+        Vec<(
+            zephium_core::extensions::ExtensionNativeOwnershipKey,
+            zephium_core::extensions::ExtensionRuntimeGeneration,
+            zephium_core::ports::extensions::ExtensionRuntimeGrantRequest,
+            std::time::Instant,
+        )>,
+    >,
+    pub(super) runtime_grant_callbacks: Mutex<Vec<HeldExtensionRuntimeGrant>>,
     pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
     pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
     pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
@@ -415,6 +426,37 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
         admission
     }
 
+    fn begin_request_runtime_grants(
+        &mut self,
+        key: zephium_core::extensions::ExtensionNativeOwnershipKey,
+        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequest,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionRuntimeGrantCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        self.state
+            .runtime_grant_calls
+            .lock()
+            .unwrap()
+            .push((key, generation, request, deadline));
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state
+                .runtime_grant_callbacks
+                .lock()
+                .unwrap()
+                .push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
     fn shutdown_until(
         self: Box<Self>,
         deadline: std::time::Instant,
@@ -478,6 +520,13 @@ pub(crate) struct FakeEngine {
             ProfileId,
             ExtensionBrowserRequestId,
             ExtensionBrowserRequestSettlement,
+        )>,
+    >,
+    extension_runtime_grant_settlements: Mutex<
+        Vec<(
+            ExtensionRuntimeInstance,
+            zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+            ExtensionRuntimeGrantPromptSettlement,
         )>,
     >,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
@@ -584,6 +633,19 @@ impl FakeEngine {
         self.extension_browser_settlements.lock().unwrap().clone()
     }
 
+    fn extension_runtime_grant_settlements(
+        &self,
+    ) -> Vec<(
+        ExtensionRuntimeInstance,
+        zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+        ExtensionRuntimeGrantPromptSettlement,
+    )> {
+        self.extension_runtime_grant_settlements
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
     fn push_erasure_outcomes(&self, outcomes: impl IntoIterator<Item = ProfileDataErasureOutcome>) {
         self.erasure_outcomes.lock().unwrap().extend(outcomes);
     }
@@ -675,6 +737,18 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, request, settlement));
+        self.native_admission()
+    }
+    fn settle_extension_runtime_grant_prompt(
+        &self,
+        runtime: ExtensionRuntimeInstance,
+        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
+        settlement: ExtensionRuntimeGrantPromptSettlement,
+    ) -> NativeDispatch {
+        self.extension_runtime_grant_settlements
+            .lock()
+            .unwrap()
+            .push((runtime, request, settlement));
         self.native_admission()
     }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
@@ -1346,6 +1420,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActions(_) => {}
         Projection::ExtensionActionFailed(_) => {}
         Projection::ExtensionManagement(_) => {}
+        Projection::ExtensionRuntimeGrantPrompt(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
@@ -1595,6 +1670,7 @@ mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_runtime_grants;
 mod favicons;
 #[path = "navigation.rs"]
 mod navigation_tests;

@@ -13,6 +13,42 @@ struct SidebarProjection {
 }
 
 impl Shell {
+    pub(super) fn project_extension_runtime_grant_prompt(&self) {
+        let prompt = self
+            .extension_runtime_grants
+            .active()
+            .map(
+                |(prompt, processing)| ExtensionRuntimeGrantPromptEntryView {
+                    profile_id: prompt.runtime().profile().to_string(),
+                    install_id: prompt.runtime().install_id().to_string(),
+                    runtime_generation: format!("{:016x}", prompt.runtime().generation().get()),
+                    request_id: format!("{:016x}", prompt.id().get()),
+                    extension_name: prompt.extension_name().to_owned(),
+                    api_permissions: prompt
+                        .request()
+                        .api()
+                        .iter()
+                        .map(|permission| permission.as_str().to_owned())
+                        .collect(),
+                    host_permissions: prompt
+                        .request()
+                        .hosts()
+                        .iter()
+                        .map(|pattern| pattern.as_str().to_owned())
+                        .collect(),
+                    private_context: prompt.key().browsing_context()
+                        == zephium_core::extensions::ExtensionGrantBrowsingContext::Private,
+                    processing,
+                },
+            );
+        (self.emit)(Projection::ExtensionRuntimeGrantPrompt(
+            ExtensionRuntimeGrantPromptView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                prompt,
+            },
+        ));
+    }
+
     pub(super) fn project_extension_management_phase(
         &self,
         profile: ProfileId,

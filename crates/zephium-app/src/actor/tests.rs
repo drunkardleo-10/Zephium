@@ -329,6 +329,22 @@ fn exact_content_policy_retry_is_a_tracked_operation() {
 }
 
 #[test]
+fn runtime_extension_grant_response_is_a_tracked_operation() {
+    assert!(tracked_operation_command(
+        &Command::RespondToExtensionRuntimeGrantPrompt {
+            runtime: zephium_core::extensions::ExtensionRuntimeInstance::new(
+                ProfileId::from(17),
+                zephium_core::ids::ExtensionInstallId::from(19),
+                zephium_core::extensions::ExtensionRuntimeGeneration::new(3).unwrap(),
+            ),
+            request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId::new(5)
+                .unwrap(),
+            allow: true,
+        }
+    ));
+}
+
+#[test]
 fn content_policy_status_query_is_ordered_and_fails_boundedly_when_sealed() {
     let profile = ProfileId::from(23);
     let queue = CommandQueue::new();

@@ -705,6 +705,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::InstallFocusedExtension { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. }
+            | Command::RespondToExtensionRuntimeGrantPrompt { .. }
             | Command::OpenUrl(_)
             | Command::SetAppSetting { .. }
             | Command::DeleteProfile(_)

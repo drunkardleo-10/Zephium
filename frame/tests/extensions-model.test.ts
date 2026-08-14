@@ -3,19 +3,42 @@ import type {
   ExtensionActionFailedView,
   ExtensionActionsView,
   ExtensionManagementView,
+  ExtensionRuntimeGrantPromptView,
 } from "../src/shared/ipc/bindings";
 import {
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
+  ExtensionRuntimeGrantPromptProjectionModel,
   failureForContext,
   initialExtensionActions,
   initialExtensionManagement,
+  initialExtensionRuntimeGrantPrompt,
   managementForProfile,
 } from "../src/domain/extensions/extensions-model";
 import { ZERO_PROJECTION_REVISION } from "../src/domain/tabs/tabs-model";
 
 function revision(value: number): string {
   return value.toString(16).padStart(32, "0");
+}
+
+function grantPrompt(
+  value: number,
+  requestId = "0000000000000001",
+): ExtensionRuntimeGrantPromptView {
+  return {
+    projection_revision: revision(value),
+    prompt: {
+      profile_id: "profile-a",
+      install_id: "install-a",
+      runtime_generation: "0000000000000001",
+      request_id: requestId,
+      extension_name: "Bitwarden",
+      api_permissions: ["clipboardRead"],
+      host_permissions: ["https://example.com/*"],
+      private_context: false,
+      processing: false,
+    },
+  };
 }
 
 function actions(value: number, label = "Bitwarden"): ExtensionActionsView {
@@ -164,5 +187,27 @@ describe("extension management projection admission", () => {
     expect(managementForProfile(current, "profile-a")).toBe(current);
     expect(managementForProfile(current, "profile-b")).toBeNull();
     expect(managementForProfile(current, null)).toBeNull();
+  });
+});
+
+describe("extension runtime grant projection admission", () => {
+  it("starts closed at the zero revision", () => {
+    expect(initialExtensionRuntimeGrantPrompt()).toEqual({
+      projection_revision: ZERO_PROJECTION_REVISION,
+      prompt: null,
+    });
+  });
+
+  it("accepts only newer exact replacements, including authoritative closure", () => {
+    const model = new ExtensionRuntimeGrantPromptProjectionModel();
+    const current = grantPrompt(4);
+    expect(model.apply(current)).toBe(true);
+    expect(model.apply(grantPrompt(4, "0000000000000002"))).toBe(false);
+    expect(model.apply(grantPrompt(3, "0000000000000003"))).toBe(false);
+    expect(model.view).toBe(current);
+
+    const closed = { projection_revision: revision(5), prompt: null };
+    expect(model.apply(closed)).toBe(true);
+    expect(model.view).toBe(closed);
   });
 });

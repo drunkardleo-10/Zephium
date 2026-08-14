@@ -184,6 +184,33 @@ pub struct ExtensionManagementView {
     pub candidates: Vec<ExtensionInstallCandidateView>,
 }
 
+/// One browser-owned optional-permission consent surface. Every identity is a
+/// short-lived echo token only; the Shell rejoins it to its retained native
+/// request before a user response can reach the serialized grant service.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionRuntimeGrantPromptEntryView {
+    pub profile_id: String,
+    pub install_id: String,
+    pub runtime_generation: String,
+    pub request_id: String,
+    pub extension_name: String,
+    pub api_permissions: Vec<String>,
+    pub host_permissions: Vec<String>,
+    pub private_context: bool,
+    /// True after an Allow gesture while the durable grant transaction is in
+    /// flight. Chrome must disable both response buttons until replacement.
+    pub processing: bool,
+}
+
+/// Exact replacement for the process-wide permission prompt surface. `None`
+/// closes any prior prompt; Shell serializes the bounded native cohort so the
+/// frame never chooses request ordering.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionRuntimeGrantPromptView {
+    pub projection_revision: String,
+    pub prompt: Option<ExtensionRuntimeGrantPromptEntryView>,
+}
+
 /// The one retained split group owned by the focused window. Members are
 /// normalized references into [`ItemsState::tabs`] in native pane traversal
 /// order; geometry and mutable divider ratios remain native-only authority.
@@ -683,6 +710,7 @@ pub enum Projection {
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionManagement(ExtensionManagementView),
+    ExtensionRuntimeGrantPrompt(ExtensionRuntimeGrantPromptView),
     UiCommand(String),
     Search(SearchResults),
     Layout(LayoutState),
