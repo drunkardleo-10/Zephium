@@ -77,6 +77,8 @@ struct NativeTeardown {
     extension_script_count: usize,
     webview_requests: usize,
     operating_system: String,
+    popup_startup_millis: u128,
+    compatibility_failure: Option<String>,
 }
 
 pub(super) fn run(artifact: &Path) -> Result<bool, String> {
@@ -94,15 +96,32 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
         app.finishLaunching();
         let teardown = objc2::rc::autoreleasepool(|_| run_native(admitted, operating_system, mtm))?;
         super::set_phase("bitwarden-core-artifact-teardown-wait");
-        wait_for_teardown(&teardown)?;
+        let teardown_result = wait_for_teardown(&teardown);
+        match (&teardown.compatibility_failure, teardown_result) {
+            (Some(failure), Ok(())) => {
+                return Err(format!(
+                    "{failure}; popup_startup_ms={}; native_objects_released=passed; product_authority=false",
+                    teardown.popup_startup_millis,
+                ));
+            }
+            (Some(failure), Err(teardown_failure)) => {
+                return Err(format!(
+                    "{failure}; popup_startup_ms={}; teardown_failure={teardown_failure}; product_authority=false",
+                    teardown.popup_startup_millis,
+                ));
+            }
+            (None, Err(teardown_failure)) => return Err(teardown_failure),
+            (None, Ok(())) => {}
+        }
         println!(
-            "native-probe: macOS Bitwarden Core passed; os={}; source={}; tree_sha256={}; files={}; bytes={}; manifest_parse=passed; exact_native_grants=passed; content_registration=passed; extension_scripts={}; popup_background_startup=passed; offscreen_fallback=passed; inline_menu=disabled; background_diagnostics=probe-only; product_authority=false; native_objects_released=passed; webview_callbacks={}; lifecycle_objects_released={}",
+            "native-probe: macOS Bitwarden Core passed; os={}; source={}; tree_sha256={}; files={}; bytes={}; manifest_parse=passed; exact_native_grants=passed; content_registration=passed; extension_scripts={}; popup_background_startup=passed; popup_startup_ms={}; offscreen_fallback=passed; inline_menu=disabled; background_diagnostics=probe-only; product_authority=false; native_objects_released=passed; webview_callbacks={}; lifecycle_objects_released={}",
             teardown.operating_system,
             EXPECTED_SOURCE_TAG,
             teardown.tree_sha256,
             teardown.file_count,
             teardown.total_bytes,
             teardown.extension_script_count,
+            teardown.popup_startup_millis,
             teardown.webview_requests,
             teardown.lifecycle_drops.load(Ordering::Acquire),
         );
@@ -393,6 +412,7 @@ fn run_native(
     {
         return Err("Bitwarden Core action metadata is not usable".into());
     }
+    let popup_started = Instant::now();
     unsafe { context.performActionForTab(Some(tab_protocol)) };
     wait_for_popup_presentation(&action, &context, &run_loop)?;
     let popover = unsafe { action.popupPopover() }
@@ -401,16 +421,25 @@ fn run_native(
         .ok_or_else(|| "Bitwarden Core action returned no popup view".to_owned())?;
     super::assert_attached_controller(&popup, &bundle.controller)?;
     super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
-    wait_for_executable_popup(&popup, &action, &context, &run_loop)?;
+    let popup_outcome = wait_for_executable_popup(&popup, &action, &context, &run_loop);
+    let popup_startup_millis = popup_started.elapsed().as_millis();
     let popup_weak = Weak::from_retained(&popup);
 
-    super::validate_context_errors(&context, "Bitwarden Core")?;
+    let context_outcome = super::validate_context_errors(&context, "Bitwarden Core");
     popover.close();
     unsafe { action.closePopup() };
     drop(popup);
     drop(popover);
     drop(action);
-    validate_extension_page_canary(&context, &run_loop, mtm)?;
+    let canary_outcome = validate_extension_page_canary(&context, &run_loop, mtm);
+    let mut compatibility_failures = Vec::with_capacity(3);
+    for outcome in [popup_outcome, context_outcome, canary_outcome] {
+        if let Err(error) = outcome {
+            compatibility_failures.push(error);
+        }
+    }
+    let compatibility_failure =
+        (!compatibility_failures.is_empty()).then(|| compatibility_failures.join("; "));
     window.orderFrontRegardless();
     unsafe {
         bundle.controller.didFocusWindow(None);
@@ -438,6 +467,8 @@ fn run_native(
         extension_script_count,
         webview_requests: webview_requests.load(Ordering::Acquire),
         operating_system,
+        popup_startup_millis,
+        compatibility_failure,
     };
     drop(delegate);
     drop(extension_window);

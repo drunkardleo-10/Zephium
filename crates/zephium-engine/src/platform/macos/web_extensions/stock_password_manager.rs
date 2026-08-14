@@ -436,8 +436,13 @@ fn run_native(
         && popup_state.errors.is_empty();
     let popup_api_observed = (popup_state.chrome_runtime || popup_state.browser_runtime)
         && (popup_state.chrome_runtime_id || popup_state.browser_runtime_id);
-    let compatibility_failure = (!inline_executed || !popup_rendered || context_error_count != 0)
-        .then(|| {
+    let compatibility_failure = (!stock_runtime_is_compatible(
+        inline_executed,
+        popup_rendered,
+        popup_api_observed,
+        context_error_count,
+    ))
+    .then(|| {
             format!(
                 "stock extension compatibility failed: inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}"
             )
@@ -473,6 +478,15 @@ fn run_native(
     drop(server);
     drop(cross_server);
     Ok(teardown)
+}
+
+const fn stock_runtime_is_compatible(
+    inline_executed: bool,
+    popup_rendered: bool,
+    popup_api_observed: bool,
+    context_error_count: usize,
+) -> bool {
+    inline_executed && popup_rendered && popup_api_observed && context_error_count == 0
 }
 
 fn wait_for_page(
@@ -688,4 +702,15 @@ fn lower_hex(bytes: &[u8]) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing into a String cannot fail");
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stock_runtime_is_compatible;
+
+    #[test]
+    fn rendered_popup_without_extension_authority_is_not_compatible() {
+        assert!(!stock_runtime_is_compatible(true, true, false, 0));
+        assert!(stock_runtime_is_compatible(true, true, true, 0));
+    }
 }
