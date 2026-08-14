@@ -999,9 +999,11 @@ classifications before they become floor-wide claims.
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
 | Native messaging | Unsupported in the initial target | The optional permission is parsed, but product grant compilation prohibits it. Native biometric/application integration must be disclosed separately from core vault use. |
 | Programmatic main-world scripting | Native literal supported; pinned source requires a sealed adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
+| Runtime ports | Registered routing compatible; pre-listener connection not queued | A Zephium-owned extension page opens a named port only after the MV3 worker registers `runtime.onConnect`; the worker receives the port and completes an exact message round trip. A separate connection created immediately before listener registration returns a port, then disconnects without `runtime.lastError` and is not delivered after registration. Extensions that depend on Chrome queuing that startup race require a reviewed compatibility decision; ordinary registered port routing does not. |
 | Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |
 | Dynamic web-accessible resources | Compatible on the exercised runtime | A content script resolves an opaque runtime URL for a `use_dynamic_url` resource; the page loads and executes the declared resource. Revocation, multi-frame behavior, and hostile embedding remain separate gates. |
 | Manifest sandbox pages | Sealed adapter primitive compatible; pinned transform still required | WebKit does not enforce the declared sandbox and also ignores the intended isolation when the extension URL is placed in an explicit sandboxed iframe. The live gate proves the reviewed replacement topology: an inert public payload is fetched by the authenticated content-script host and instantiated through a Blob-backed `allow-scripts` frame; the child has a `null` message origin, no extension APIs, and no parent DOM authority, while the privileged leaf URL is not public. The exact Bitwarden button/list bundle transformation and authenticated message flow still require deterministic source/build adaptation and hostile end-to-end tests. |
+| Private extension-resource WebAssembly startup | Release-blocked on the exercised runtime | The pinned 7,378,704-byte SDK module is returned as `application/octet-stream`. Native streaming compilation rejects that MIME, the vendor `arrayBuffer()` fallback promise does not settle, and the popup event loop stops advancing before compilation starts. A separately labelled probe that wraps the same private response body with `Content-Type: application/wasm` in both popup and background also stalls during the streaming retry. This closes a header-only runtime workaround; it does not authorize embedding bytes, adding a generic resource bridge, or distributing a modified package. |
 | Alarms | Lifecycle admission compatible; delivery unassessed | The background creates an exact future alarm, reads back its name and finite scheduled time, clears it, and proves post-clear absence. Firing, service-worker wakeup, restart persistence, sleep/wake behavior, and long-duration drift remain release gates. |
 | Commands | Native dispatch compatible; keyboard routing unassessed | `commands.getAll` returns the exact six pinned command names. The host selects the native `autofill_login` command from the profile context, verifies its context identity, performs it through `WKWebExtensionContext`, and the background receives the exact `commands.onCommand` identifier. Physical shortcut event matching, collision handling, remapping, focus behavior, and `_execute_action` routing remain release gates. |
 | Context menus | Native projection compatible; click routing unassessed | The background creates and updates one tab-context item; `menuItemsForTab` returns exactly that updated native item for the product tab; the background then removes it and the probe settles only after removal. Product-tab menu presentation at a pointer location, click routing, frame/editable context, enablement updates, and teardown under navigation remain release gates. |
@@ -1061,7 +1063,13 @@ static/dynamic script loaded, but fails the 12-second executable-popup deadline
 while importing the 7.04 MiB SDK WebAssembly module. WebKit serves the private
 extension resource with a MIME type that rejects streaming compilation; the
 vendor webpack fallback is allowed to run, but does not settle within the UX
-deadline on the reviewed machine. Three uncontended release-build repetitions
+deadline on the reviewed machine. Bounded phase evidence on August 14 sharpens
+that result: the 7,378,704-byte resource returns status 200 and
+`application/octet-stream`; streaming rejects immediately, `arrayBuffer()`
+returns its promise immediately, that promise never resolves, and
+`WebAssembly.instantiate` is never called. A 100 ms probe timer also stops near
+188 ms, so the failure is resource-body/event-loop progress rather than slow
+compilation. Three uncontended release-build repetitions
 on August 13, 2026 reproduced the same `sdk-import` / `streaming-rejected`
 terminal state in 12.92–13.32 seconds, at 115–119 MB maximum resident set and
 approximately 110.5–111.0 MB peak footprint for the probe process. The blocker
@@ -1084,9 +1092,18 @@ rejected. The gate requires zero extension-handler callbacks, denies a foreign
 principal, and proves controller, context, view, data-store, and handler
 teardown. This rules out that public resource override on the exercised runtime;
 it does not claim that future WebKit releases cannot add a supported transport.
-The stock Bitwarden deadline therefore remains blocked unless upstream output
-changes, WebKit changes its private loader, or a separately approved sealed
-adaptation removes the dependency on that resource behavior.
+The separately labelled response-MIME diagnostic also retries native streaming
+with the original private body wrapped in a new `Response` carrying
+`application/wasm`. With that adaptation active in both the popup and MV3
+background, the runtime reaches `streaming-mime-retry` near 178 ms but neither
+the retry nor its timer advances before the same 12-second deadline; native
+extension objects also remain retained on that error path. The artifact records
+the adapter in both its compatibility and limitation contracts, remains
+`product_authority=false`, and cannot be confused with the baseline artifact.
+This closes a header-only response adaptation as well as the public scheme
+handler route. The stock Bitwarden deadline therefore remains blocked unless
+upstream output changes, WebKit changes its private loader, or a separately
+approved sealed adaptation removes the dependency on that resource behavior.
 
 The package-neutral Chrome acquisition boundary now authenticates CRX3 before
 materialization. It bounds the package and protobuf header, verifies every
@@ -1118,6 +1135,20 @@ therefore stay disabled until that lifecycle is bounded. This proves that this
 raw stock Chrome package is not usable on the exercised WKWebExtension runtime.
 It does **not** prove that Safari-authored packages or a reviewed
 package-neutral compatibility transform are impossible.
+
+A separate authenticated-tree diagnostic now identifies two narrow WebKit API
+compatibility requirements without changing production authority. It copies
+only the indexed Proton tree into a private no-replace stage, re-hashes every
+source while copying, and adds a Zephium-owned prelude and background wrapper.
+The prelude preserves both native `chrome` and native `browser`, binds inherited
+native methods to their original receivers, and provides only an inert
+`runtime.onUpdateAvailable` event because Zephium's authenticated catalog owns
+updates. That diagnostic imports the real background, executes the isolated
+content-script prelude, renders the popup, and releases every native object.
+It records `offscreen` as absent and `user_workflows=unassessed`; it neither
+proves Proton login/autofill compatibility nor authorizes a package. The result
+shows that the stock failure includes a missing catalog-update event and native
+receiver semantics, rather than requiring a Proton-specific product runtime.
 
 Both third-party contracts stay feature-gated and confer
 `product_authority=false`. Zephium must not hardcode either manager into the
