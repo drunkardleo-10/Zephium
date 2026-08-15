@@ -873,6 +873,18 @@ consistency checks prevent clock
 reuse from a torn or corrupted cohort; they cannot detect a coherent rollback
 of the entire database without an external anti-rollback anchor.
 
+The product-sealed catalog authority now distinguishes payload origin at the
+capability boundary. `AdmittedBundledCatalog` can contain only `BundledTree`
+rows; `AdmittedAcquiredCatalog` can contain only exact `AcquiredZip` rows and
+requires every row to carry a complete expected Chromium key identity. Both
+paths authenticate the same exact active catalog anchor and product-owned
+license policy, but their non-cloneable witnesses are nominally distinct and
+cannot cross into the wrong materializer. Acquired manifest admission has the
+same separate typed ingress. This adds no catalog, download, or startup work to
+ordinary builds: production sealed provisioning remains empty, arbitrary
+caller-parsed catalogs remain non-authoritative, and an acquired witness grants
+no network, archive, repository, profile, or native-runtime authority.
+
 The extension repository's materialization schema v3 retains the subordinate
 side of that cross-store join. Every durable package pin records the complete
 `(profile, install, regular/private context)` owner key, the exact catalog-set

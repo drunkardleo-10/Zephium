@@ -40,8 +40,9 @@ use crate::repository_e2e_fixture::{
     TREE_INDEX_BYTES,
 };
 use crate::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogInventoryDigest,
-    MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS, MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS,
+    AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
+    BundledCatalogInventoryDigest, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
+    MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS,
 };
 
 #[cfg(test)]
@@ -255,6 +256,37 @@ impl ProductExtensionManifestAuthority {
     pub fn admit_manifest(
         &self,
         catalog: &AdmittedBundledCatalog,
+        runtime_target: ProductExtensionRuntimeTarget,
+        package_key: ExtensionPackageKey,
+        tree_index: &CanonicalExtensionTreeIndex,
+        manifest_bytes: &[u8],
+    ) -> Result<ProductAdmittedExtensionManifest, ProductExtensionManifestAdmissionError> {
+        let profile = self
+            .profile(self.active_catalog, runtime_target, package_key)
+            .ok_or(ProductExtensionManifestAdmissionError::ProfileNotProvisioned)?;
+        let data = admit_manifest_data(
+            profile,
+            catalog.data(),
+            runtime_target,
+            package_key,
+            tree_index,
+            manifest_bytes,
+        )?;
+        Ok(ProductAdmittedExtensionManifest {
+            data,
+            _seal: ProductManifestWitnessSeal(()),
+        })
+    }
+
+    /// Admits exact manifest bytes for one acquired-catalog package.
+    ///
+    /// Catalog admission, CRX authentication, durable materialization, and
+    /// native activation remain independent. The distinct catalog capability
+    /// prevents this path from accepting caller-parsed or bundled-tree
+    /// metadata by accident.
+    pub fn admit_acquired_manifest(
+        &self,
+        catalog: &AdmittedAcquiredCatalog,
         runtime_target: ProductExtensionRuntimeTarget,
         package_key: ExtensionPackageKey,
         tree_index: &CanonicalExtensionTreeIndex,

@@ -59,6 +59,10 @@ pub const MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES: usize =
 pub const MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES: usize =
     MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES + ADMITTED_CATALOG_ACCOUNTING_OVERHEAD;
 
+/// Maximum logical memory retained by one admitted acquired-catalog witness.
+pub const MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES: usize =
+    MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES;
+
 /// Maximum logical memory retained by one admitted rollback-catalog witness.
 pub const MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES: usize =
     MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES;
@@ -90,10 +94,13 @@ pub enum ProductBundledCatalogGenerationRole {
     Rollback,
 }
 
-/// Product-owned authentication boundary for bundled extension catalogs.
+/// Product-owned authentication boundary for release-bundled catalog metadata.
 ///
 /// This type has no public anchor, policy, or trust-provider constructor. The
-/// only production constructor reads product-sealed compile-time state.
+/// only production constructor reads product-sealed compile-time state. Its
+/// legacy name describes where the catalog trust root lives, not where every
+/// package payload lives: acquired payload rows require the distinct
+/// [`Self::admit_acquired_catalog`] operation and witness.
 pub struct BundledPackageAuthority {
     active: SealedBundledCatalogGeneration,
     rollback: Box<[SealedBundledCatalogGeneration]>,
@@ -102,7 +109,7 @@ pub struct BundledPackageAuthority {
 
 impl BundledPackageAuthority {
     /// Opens the product-sealed authority or explicitly reports that this
-    /// build has no approved bundled extension package anchor.
+    /// build has no approved extension catalog anchor.
     pub fn product() -> Result<Self, BundledCatalogAdmissionError> {
         let (active, rollback) = sealed_product_bundled_catalog_generations()?
             .ok_or(BundledCatalogAdmissionError::Unprovisioned)?;
@@ -133,8 +140,23 @@ impl BundledPackageAuthority {
         catalog_bytes: &[u8],
     ) -> Result<AdmittedBundledCatalog, BundledCatalogAdmissionError> {
         self.active
-            .admit(catalog_bytes)
+            .admit(catalog_bytes, CatalogPayloadClass::BundledTree)
             .map(|data| AdmittedBundledCatalog { data })
+    }
+
+    /// Authenticates one exact active catalog of acquired CRX3 packages.
+    ///
+    /// This uses the same product-sealed active generation and license policy
+    /// as bundled metadata, but returns a nominally distinct witness that no
+    /// bundled-tree materializer can consume. Every package must name an exact
+    /// `AcquiredZip` payload and a complete expected Chromium key identity.
+    pub fn admit_acquired_catalog(
+        &self,
+        catalog_bytes: &[u8],
+    ) -> Result<AdmittedAcquiredCatalog, BundledCatalogAdmissionError> {
+        self.active
+            .admit(catalog_bytes, CatalogPayloadClass::AcquiredZip)
+            .map(|data| AdmittedAcquiredCatalog { data })
     }
 
     /// Authenticates one exact explicitly approved rollback catalog.
@@ -168,7 +190,11 @@ impl BundledPackageAuthority {
             })
             .ok_or(BundledCatalogAdmissionError::CatalogDigestMismatch)?;
         generation
-            .admit_prehashed(catalog_bytes, observed_digest)
+            .admit_prehashed(
+                catalog_bytes,
+                observed_digest,
+                CatalogPayloadClass::BundledTree,
+            )
             .map(|data| AdmittedRollbackBundledCatalog {
                 data,
                 _seal: RollbackCatalogWitnessSeal(()),
@@ -282,6 +308,27 @@ impl BundledPackageAuthority {
     }
 
     #[cfg(test)]
+    pub(crate) fn admit_fixture_acquired_catalog(
+        catalog_bytes: &[u8],
+        policy: ExtensionReleaseAdmissionPolicy,
+    ) -> Result<AdmittedAcquiredCatalog, BundledCatalogAdmissionError> {
+        let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
+            .map_err(BundledCatalogAdmissionError::Catalog)?;
+        let anchor = SealedBundledCatalogAnchor {
+            catalog_length: catalog_bytes.len(),
+            catalog_digest: ExtensionReleaseCatalogDigest::from_bytes(
+                Sha256::digest(catalog_bytes).into(),
+            ),
+            authority: catalog.authority(),
+            catalog_revision: catalog.revision(),
+            admission_policy_digest: catalog.admission_policy_sha256(),
+            inventory_digest: digest_catalog_inventory(&catalog)
+                .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?,
+        };
+        Self::from_sealed_parts(anchor, policy)?.admit_acquired_catalog(catalog_bytes)
+    }
+
+    #[cfg(test)]
     pub(crate) fn admit_fixture_rollback_catalog(
         active_catalog_bytes: &[u8],
         active_policy: ExtensionReleaseAdmissionPolicy,
@@ -388,6 +435,115 @@ impl AdmittedBundledCatalog {
     /// Returns the exact structural generation projection for durable metadata.
     ///
     /// This projection is not an admission or activation capability.
+    pub const fn generation_anchor(&self) -> BundledCatalogGenerationAnchor {
+        BundledCatalogGenerationAnchor::from_parts(
+            self.authority(),
+            self.revision(),
+            self.catalog_length(),
+            self.catalog_digest(),
+            self.inventory_digest(),
+        )
+    }
+
+    /// Classifies this admission against an optional durable high-water mark.
+    pub fn disposition_against(
+        &self,
+        checkpoint: Option<&BundledCatalogCheckpoint>,
+    ) -> BundledCatalogDisposition {
+        checkpoint.map_or(BundledCatalogDisposition::Candidate, |floor| {
+            floor.classify(&self.checkpoint())
+        })
+    }
+
+    pub(crate) const fn data(&self) -> &AdmittedCatalogData {
+        &self.data
+    }
+}
+
+/// Authenticated metadata for one active catalog of acquired CRX3 packages.
+///
+/// The exact catalog is still product-sealed; only package payload bytes are
+/// acquired on demand. This witness is nominally distinct from
+/// [`AdmittedBundledCatalog`], non-serializable, non-cloneable, and grants no
+/// network, archive, repository, profile, or native-runtime authority.
+///
+/// ```compile_fail
+/// use zephium_extension_authority::AdmittedAcquiredCatalog;
+/// fn require_clone<T: Clone>() {}
+/// fn duplicate() {
+///     require_clone::<AdmittedAcquiredCatalog>();
+/// }
+/// ```
+#[must_use = "admitted acquired metadata must be checkpointed or deliberately discarded"]
+pub struct AdmittedAcquiredCatalog {
+    data: AdmittedCatalogData,
+}
+
+const _: () =
+    assert!(std::mem::size_of::<AdmittedAcquiredCatalog>() <= ADMITTED_CATALOG_ACCOUNTING_OVERHEAD);
+
+impl fmt::Debug for AdmittedAcquiredCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedAcquiredCatalog")
+            .field("authority", &self.authority())
+            .field("revision", &self.revision())
+            .field("catalog_length", &self.catalog_length())
+            .field("catalog_digest", &self.catalog_digest())
+            .field("inventory_digest", &self.inventory_digest())
+            .field("package_count", &self.catalog().packages().len())
+            .field("retained_bytes", &self.retained_bytes())
+            .finish()
+    }
+}
+
+impl AdmittedAcquiredCatalog {
+    /// Returns authenticated, structurally parsed catalog metadata.
+    pub const fn catalog(&self) -> &ExtensionReleaseCatalog {
+        &self.data.catalog
+    }
+
+    /// Returns the trust-domain and epoch identity.
+    pub const fn authority(&self) -> ExtensionAuthorityId {
+        self.data.catalog.authority()
+    }
+
+    /// Returns the authenticated catalog revision.
+    pub const fn revision(&self) -> ExtensionReleaseCatalogRevision {
+        self.data.catalog.revision()
+    }
+
+    /// Returns SHA-256 of exact authenticated canonical catalog bytes.
+    pub const fn catalog_digest(&self) -> ExtensionReleaseCatalogDigest {
+        self.data.catalog.digest()
+    }
+
+    /// Returns the exact authenticated canonical catalog byte length.
+    pub const fn catalog_length(&self) -> u64 {
+        self.data.catalog_length
+    }
+
+    /// Returns the redundant deterministic package-inventory digest.
+    pub const fn inventory_digest(&self) -> BundledCatalogInventoryDigest {
+        self.data.inventory_digest
+    }
+
+    /// Returns the explicit logical retained-memory charge.
+    pub const fn retained_bytes(&self) -> usize {
+        self.data.retained_bytes
+    }
+
+    /// Creates the structural checkpoint projection suitable for durable state.
+    pub const fn checkpoint(&self) -> BundledCatalogCheckpoint {
+        BundledCatalogCheckpoint::from_parts(
+            self.authority(),
+            self.revision(),
+            self.catalog_digest(),
+            self.inventory_digest(),
+        )
+    }
+
+    /// Returns the exact structural generation projection for durable metadata.
     pub const fn generation_anchor(&self) -> BundledCatalogGenerationAnchor {
         BundledCatalogGenerationAnchor::from_parts(
             self.authority(),
@@ -576,6 +732,12 @@ type SealedBundledCatalogGenerations = (
     Box<[SealedBundledCatalogGeneration]>,
 );
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogPayloadClass {
+    BundledTree,
+    AcquiredZip,
+}
+
 impl SealedBundledCatalogGeneration {
     fn validate_configuration(&self) -> Result<(), BundledCatalogAdmissionError> {
         if self.anchor.catalog_length == 0
@@ -604,19 +766,21 @@ impl SealedBundledCatalogGeneration {
     fn admit(
         &self,
         catalog_bytes: &[u8],
+        payload_class: CatalogPayloadClass,
     ) -> Result<AdmittedCatalogData, BundledCatalogAdmissionError> {
         if catalog_bytes.len() != self.anchor.catalog_length {
             return Err(BundledCatalogAdmissionError::CatalogLengthMismatch);
         }
         let observed_digest =
             ExtensionReleaseCatalogDigest::from_bytes(Sha256::digest(catalog_bytes).into());
-        self.admit_prehashed(catalog_bytes, observed_digest)
+        self.admit_prehashed(catalog_bytes, observed_digest, payload_class)
     }
 
     fn admit_prehashed(
         &self,
         catalog_bytes: &[u8],
         observed_digest: ExtensionReleaseCatalogDigest,
+        payload_class: CatalogPayloadClass,
     ) -> Result<AdmittedCatalogData, BundledCatalogAdmissionError> {
         if observed_digest != self.anchor.catalog_digest {
             return Err(BundledCatalogAdmissionError::CatalogDigestMismatch);
@@ -635,11 +799,21 @@ impl SealedBundledCatalogGeneration {
         catalog
             .bind_admission_policy(&self.policy)
             .map_err(BundledCatalogAdmissionError::Catalog)?;
-        if catalog
+        let payloads_match = catalog
             .packages()
             .iter()
-            .any(|package| package.payload() != ExtensionPackagePayloadIdentity::BundledTree)
-        {
+            .all(|package| match payload_class {
+                CatalogPayloadClass::BundledTree => {
+                    package.payload() == ExtensionPackagePayloadIdentity::BundledTree
+                }
+                CatalogPayloadClass::AcquiredZip => {
+                    matches!(
+                        package.payload(),
+                        ExtensionPackagePayloadIdentity::AcquiredZip { .. }
+                    ) && package.chromium().is_some()
+                }
+            });
+        if !payloads_match {
             return Err(BundledCatalogAdmissionError::UnsupportedPayload);
         }
         let inventory_digest = digest_catalog_inventory(&catalog)
@@ -1279,8 +1453,45 @@ mod tests {
     }
 
     #[test]
-    fn bundled_trust_path_rejects_acquired_archives() {
-        let bytes = catalog_bytes_with(
+    fn acquired_catalog_admission_is_nominal_and_requires_full_chromium_identity() {
+        let acquired_package = package_json(
+            7,
+            &format!(
+                r#"{{"kind":"acquired_zip","length":4,"sha256":"{}"}}"#,
+                hex(8)
+            ),
+        )
+        .replace(
+            r#""chromium":null"#,
+            &format!(r#""chromium":{{"manifest_key_sha256":"{}"}}"#, hex(9)),
+        );
+        let bytes = catalog_bytes_with(AUTHORITY_BYTE, 1, POLICY_BYTE, &[acquired_package]);
+        let authority = authority_for(&bytes);
+        assert_eq!(
+            authority.admit_catalog(&bytes).unwrap_err(),
+            BundledCatalogAdmissionError::UnsupportedPayload
+        );
+        let acquired = authority.admit_acquired_catalog(&bytes).unwrap();
+        assert_eq!(acquired.catalog().packages().len(), 1);
+        assert!(matches!(
+            acquired.catalog().packages()[0].payload(),
+            ExtensionPackagePayloadIdentity::AcquiredZip { .. }
+        ));
+        assert!(acquired.retained_bytes() <= MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES);
+        assert_eq!(
+            acquired.disposition_against(None),
+            BundledCatalogDisposition::Candidate
+        );
+
+        let bundled_bytes = catalog_bytes();
+        assert_eq!(
+            authority_for(&bundled_bytes)
+                .admit_acquired_catalog(&bundled_bytes)
+                .unwrap_err(),
+            BundledCatalogAdmissionError::UnsupportedPayload
+        );
+
+        let missing_chromium = catalog_bytes_with(
             AUTHORITY_BYTE,
             1,
             POLICY_BYTE,
@@ -1292,9 +1503,10 @@ mod tests {
                 ),
             )],
         );
-        let authority = authority_for(&bytes);
         assert_eq!(
-            authority.admit_catalog(&bytes).unwrap_err(),
+            authority_for(&missing_chromium)
+                .admit_acquired_catalog(&missing_chromium)
+                .unwrap_err(),
             BundledCatalogAdmissionError::UnsupportedPayload
         );
     }

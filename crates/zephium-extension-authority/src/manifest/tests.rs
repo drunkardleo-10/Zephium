@@ -7,10 +7,11 @@ use zephium_core::extensions::{
     MAX_EXTENSION_UNMODELED_DECLARATIONS,
 };
 use zephium_extension_package::{
-    admit_extension_manifest, CanonicalExtensionTreeIndex, ExtensionManifestCompatibilityPolicy,
-    ExtensionManifestCompatibilitySubject, ExtensionPackageAdmissionPolicyDigest,
-    ExtensionReleaseAdmissionPolicy, ExtensionReleaseCatalog, ExtensionReleaseCatalogDigest,
-    ExtensionReleaseCatalogRevision, ExtensionReleaseLicenseRule,
+    admit_extension_manifest, CanonicalExtensionTreeIndex, ChromiumManifestKey,
+    ExtensionManifestCompatibilityPolicy, ExtensionManifestCompatibilitySubject,
+    ExtensionPackageAdmissionPolicyDigest, ExtensionReleaseAdmissionPolicy,
+    ExtensionReleaseCatalog, ExtensionReleaseCatalogDigest, ExtensionReleaseCatalogRevision,
+    ExtensionReleaseLicenseRule,
 };
 
 use super::*;
@@ -335,6 +336,66 @@ fn caller_owned_policy_can_mint_only_structural_output() {
     );
     #[cfg(not(zephium_internal_repository_e2e))]
     assert!(ProductExtensionManifestAuthority::product().is_err());
+}
+
+#[test]
+fn acquired_catalog_manifest_admission_preserves_its_nominal_boundary() {
+    let fixture = make_fixture(
+        br#"{"manifest_version":3,"name":"Acquired","version":"1","key":"Xw=="}"#,
+        1,
+        3,
+        1,
+        1,
+        1,
+    );
+    let chromium = ChromiumManifestKey::parse_canonical("Xw==").unwrap();
+    let acquired_bytes = String::from_utf8(fixture.catalog_bytes.clone())
+        .unwrap()
+        .replace(
+            r#""payload":{"kind":"bundled_tree"}"#,
+            &format!(
+                r#""payload":{{"kind":"acquired_zip","length":4,"sha256":"{}"}}"#,
+                hex([8; 32]),
+            ),
+        )
+        .replace(
+            r#""chromium":null"#,
+            &format!(
+                r#""chromium":{{"manifest_key_sha256":"{}"}}"#,
+                hex(chromium.digest().bytes()),
+            ),
+        )
+        .into_bytes();
+    let catalog =
+        BundledPackageAuthority::admit_fixture_acquired_catalog(&acquired_bytes, release_policy())
+            .unwrap();
+    let runtime_target = ProductExtensionRuntimeTarget::MacosNative;
+    let profile = profile_for_catalog(
+        catalog.catalog(),
+        catalog.authority(),
+        catalog.revision(),
+        catalog.catalog_length(),
+        catalog.catalog_digest(),
+        catalog.inventory_digest(),
+        &fixture.tree,
+        &fixture.manifest,
+        runtime_target,
+        runtime_target.compatibility_target_id(),
+        ExtensionCompatibilityLevel::Compatible,
+    );
+    let admitted = authority(profile)
+        .admit_acquired_manifest(
+            &catalog,
+            runtime_target,
+            catalog.catalog().packages()[0].identity().key(),
+            &fixture.tree,
+            &fixture.manifest,
+        )
+        .unwrap();
+    assert_eq!(
+        admitted.package_identity().payload(),
+        catalog.catalog().packages()[0].payload()
+    );
 }
 
 #[cfg(zephium_internal_repository_e2e)]

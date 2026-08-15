@@ -1,12 +1,14 @@
-//! Sealed authority for extension packages bundled with a Zephium release.
+//! Product-sealed authority for exact extension catalog metadata.
 //!
 //! This crate is the product authentication boundary above structurally parsed
 //! release catalogs and manifests. It deliberately owns no filesystem,
 //! archive, network, profile, native-webview, or runtime code. Catalog
 //! admission proves that one exact canonical catalog matches a compiled active
-//! or explicitly approved rollback generation and its exact policy. The active
-//! and rollback witnesses are intentionally different capabilities; only the
-//! active witness can advance the monotonic repository. Manifest admission
+//! or explicitly approved rollback generation and its exact policy. Active
+//! bundled-tree and acquired-CRX catalogs mint nominally distinct witnesses;
+//! neither can cross into the other's materializer. Active and rollback
+//! witnesses are also intentionally different capabilities; only an active
+//! witness can advance the monotonic repository. Manifest admission
 //! additionally binds the exact catalog generation, package, tree index,
 //! manifest, backend target, and reviewed compatibility matrix. Neither
 //! witness grants access to package bytes or authorizes native activation:
@@ -53,9 +55,9 @@ pub use manifest::{
     MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION,
 };
 pub use product::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledPackageAuthority,
-    BundledProductAuthorityStatus, ProductBundledCatalogGenerationRole,
-    MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES,
+    AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
+    BundledPackageAuthority, BundledProductAuthorityStatus, ProductBundledCatalogGenerationRole,
+    MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES, MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES,
     MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES,
     MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
     MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS,
