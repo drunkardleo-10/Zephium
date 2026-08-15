@@ -7,6 +7,7 @@ const contentModeAttribute = "data-zephium-compatibility-content-mode";
 const backgroundModeAttribute = "data-zephium-compatibility-background-mode";
 const credentialFillAttribute = "data-zephium-credential-fill";
 const credentialSelectionAttribute = "data-zephium-credential-selection";
+const credentialInlineAttribute = "data-zephium-credential-inline";
 const credentialToken = "zephium-credential-selection-v1";
 const credentialId = "fixture-login-v1";
 const root = document.documentElement;
@@ -102,6 +103,7 @@ function installCredentialSurface() {
 
   const host = document.createElement("span");
   host.setAttribute("data-zephium-credential-host", "v1");
+  host.style.cssText = "position:fixed;left:16px;top:16px;z-index:2147483647";
   const shadow = host.attachShadow({ mode: "closed" });
   const sandbox = document.createElement("iframe");
   sandbox.setAttribute("sandbox", "allow-scripts");
@@ -120,19 +122,28 @@ function installCredentialSurface() {
   let consumed = false;
   const onSelection = (event) => {
     if (
-      consumed ||
       event.source !== sandbox.contentWindow ||
       event.origin !== "null" ||
-      event.data?.kind !== "zephium-credential-inline-selection-v1" ||
       event.data?.nonce !== nonce ||
-      event.data?.credentialId !== credentialId ||
-      typeof event.data?.trusted !== "boolean"
+      typeof event.data?.kind !== "string"
+    ) {
+      return;
+    }
+    if (event.data.kind === "zephium-credential-inline-ready-v1") {
+      root.setAttribute(credentialInlineAttribute, "ready");
+      return;
+    }
+    if (
+      consumed ||
+      event.data.kind !== "zephium-credential-inline-selection-v1" ||
+      event.data.credentialId !== credentialId ||
+      event.data.trusted !== true
     ) {
       return;
     }
     consumed = true;
     removeEventListener("message", onSelection);
-    root.setAttribute(credentialSelectionAttribute, event.data.trusted ? "trusted" : "simulated");
+    root.setAttribute(credentialSelectionAttribute, "trusted");
     void Promise.resolve(
       api.runtime.sendMessage({
         kind: "credential-selection",
@@ -204,6 +215,7 @@ function installCredentialSurface() {
 
 root.setAttribute(credentialFillAttribute, "pending");
 root.setAttribute(credentialSelectionAttribute, "pending");
+root.setAttribute(credentialInlineAttribute, "pending");
 if (document.readyState === "loading") {
   addEventListener("DOMContentLoaded", installCredentialSurface, { once: true });
 } else {

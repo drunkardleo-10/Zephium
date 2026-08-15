@@ -5,9 +5,9 @@
 //! WKWebExtension APIs, proves an isolated content-to-background round trip,
 //! exercises a source-free credential-fill topology, proves the page world
 //! cannot observe extension APIs or the compatibility marker, and verifies
-//! complete native teardown. It grants no product or catalog authority; the
-//! automated inline selection is explicitly simulated rather than presented as
-//! trusted-user-gesture evidence.
+//! complete native teardown. It grants no product or catalog authority. The
+//! automated selection enters WebKit as a native AppKit mouse event and must
+//! emerge as a trusted DOM click; it is not a claim about physical hardware.
 
 use std::fs;
 use std::io::Read as _;
@@ -18,8 +18,11 @@ use std::time::Instant;
 
 use objc2::rc::Weak;
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-use objc2_foundation::{MainThreadMarker, NSRunLoop};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSEventType,
+    NSWindow,
+};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRunLoop};
 use objc2_web_kit::{
     WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
 };
@@ -42,27 +45,30 @@ const CONTENT_MODE_ATTRIBUTE: &str = "data-zephium-compatibility-content-mode";
 const BACKGROUND_MODE_ATTRIBUTE: &str = "data-zephium-compatibility-background-mode";
 const CREDENTIAL_FILL_ATTRIBUTE: &str = "data-zephium-credential-fill";
 const CREDENTIAL_SELECTION_ATTRIBUTE: &str = "data-zephium-credential-selection";
+const CREDENTIAL_INLINE_ATTRIBUTE: &str = "data-zephium-credential-inline";
 const CREDENTIAL_PAGE_EVENTS_ATTRIBUTE: &str = "data-zephium-credential-page-events";
 const CREDENTIAL_FORGERY_ATTRIBUTE: &str = "data-zephium-credential-forgery";
 const CREDENTIAL_HOST_ATTRIBUTE: &str = "data-zephium-credential-host";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_COMPATIBILITY_STATE:";
 const NATIVE_PERMISSIONS: [Permission; 1] = [Permission::Tabs];
+const CREDENTIAL_CLICK_X: f64 = 126.0;
+const CREDENTIAL_CLICK_TOP: f64 = 38.0;
 
 const SOURCE_FILES: usize = 4;
-const SOURCE_BYTES: u64 = 11_266;
+const SOURCE_BYTES: u64 = 11_788;
 const SOURCE_MANIFEST_SHA256: &str =
     "64acab3c045112e5e700cfc67e6d63f5ae73414a09dd24ad685b1bf6483aca3f";
-const SOURCE_TREE_SHA256: &str = "6776b88f4f8e516ce17aee5b9b1a6cb54d28f31ad780aaab0615b4db4d212317";
+const SOURCE_TREE_SHA256: &str = "53762a411029aa28bce9e3b30b2eb6001ee60277cbabcd4180f6510de19ecd07";
 const SOURCE_INDEX_SHA256: &str =
-    "e33fd936a7fb6274da5ba8943d27376d0814eedff28dfcfc1ddd02aefc665353";
+    "bbba00128ae070aeb65b5d75912fa855ddf2af1ba26b971c45e40ccb7e7fa19a";
 const OUTPUT_FILES: usize = 6;
-const OUTPUT_BYTES: u64 = 14_515;
+const OUTPUT_BYTES: u64 = 15_037;
 const OUTPUT_MANIFEST_SHA256: &str =
     "537c1d7611c7993eeb2e7a9cd7895b0ed7992b8aada37df4957c1f237857551e";
-const OUTPUT_TREE_SHA256: &str = "5139ebdae2a2e0eaac721af2261c5e6ab8594055c8daa663f7890a6a8b3000ca";
+const OUTPUT_TREE_SHA256: &str = "9c30da17de9ea808fe83a202ca483d18ba8de574404735ad1e8abd9435226b73";
 const OUTPUT_INDEX_SHA256: &str =
-    "df45c8d871415c7de0b7de6c03573c6d0fe97f7725d96db0f6f77a8d0de5b1ea";
+    "fa6f661ab71c822532fb35be676d6fc0bcfbba37d9a567b3ecaa067db3534acd";
 
 struct Teardown {
     controller: Weak<WKWebExtensionController>,
@@ -91,6 +97,7 @@ struct PageState {
     page_extension_api: bool,
     credential_fill: String,
     credential_selection: String,
+    credential_inline: String,
     credential_page_events: String,
     credential_forgery: String,
     credential_host_count: usize,
@@ -100,7 +107,8 @@ struct PageState {
 impl PageState {
     fn credential_workflow_passed(&self) -> bool {
         self.credential_fill == "passed"
-            && matches!(self.credential_selection.as_str(), "simulated" | "trusted")
+            && self.credential_selection == "trusted"
+            && self.credential_inline == "ready"
             && self.credential_page_events == "passed"
             && self.credential_forgery == "sent"
             && self.credential_host_count == 1
@@ -112,6 +120,35 @@ impl PageState {
         self.page_extension_api
             || self.credential_fill.starts_with("invalid:")
             || self.credential_host_count > 1
+            || !matches!(
+                self.credential_selection.as_str(),
+                "missing" | "pending" | "trusted"
+            )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PageExpectation {
+    Armed,
+    CredentialReady,
+    Passed,
+}
+
+impl PageExpectation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Armed => "armed",
+            Self::CredentialReady => "credential-ready",
+            Self::Passed => "passed",
+        }
+    }
+
+    fn is_satisfied(self, state: &PageState) -> bool {
+        match self {
+            Self::Armed => matches!(state.round_trip.as_str(), "armed" | "passed"),
+            Self::CredentialReady => state.credential_inline == "ready",
+            Self::Passed => state.round_trip == "passed" && state.credential_workflow_passed(),
+        }
     }
 }
 
@@ -371,22 +408,24 @@ fn run_native(
     let page_url = server.url("/login", "compatibility-fixture-v1");
     page.load_url(&page_url)
         .map_err(|error| format!("cannot navigate compatibility fixture page: {error}"))?;
-    let round_trip = match wait_for_page_state(&page, &run_loop, &page_url, "armed") {
-        Ok(state) if state.round_trip == "passed" && state.credential_workflow_passed() => {
-            Ok(state)
-        }
-        Ok(_) => wait_for_page_state(&page, &run_loop, &page_url, "passed"),
-        Err(error) => Err(error),
-    }
-    .and_then(|state| {
-        if state.content_mode.is_supported() && state.background_mode.is_supported() {
-            Ok(state)
-        } else {
-            Err(format!(
-                "compatibility fixture returned unsupported runtime modes: {state:?}"
-            ))
-        }
-    });
+    wait_for_page_state(&page, &run_loop, &page_url, PageExpectation::Armed)?;
+    wait_for_page_state(
+        &page,
+        &run_loop,
+        &page_url,
+        PageExpectation::CredentialReady,
+    )?;
+    dispatch_credential_selection(&window, &native_page)?;
+    let round_trip = wait_for_page_state(&page, &run_loop, &page_url, PageExpectation::Passed)
+        .and_then(|state| {
+            if state.content_mode.is_supported() && state.background_mode.is_supported() {
+                Ok(state)
+            } else {
+                Err(format!(
+                    "compatibility fixture returned unsupported runtime modes: {state:?}"
+                ))
+            }
+        });
     let content_mode = round_trip
         .as_ref()
         .map_or(CompatibilityMode::Pending, |state| state.content_mode);
@@ -466,11 +505,48 @@ fn run_native(
     Ok(teardown)
 }
 
+fn dispatch_credential_selection(window: &NSWindow, page: &WKWebView) -> Result<(), String> {
+    let frame = page.frame();
+    if !frame.origin.x.is_finite()
+        || !frame.origin.y.is_finite()
+        || !frame.size.width.is_finite()
+        || !frame.size.height.is_finite()
+        || frame.size.width <= CREDENTIAL_CLICK_X
+        || frame.size.height <= CREDENTIAL_CLICK_TOP
+    {
+        return Err("compatibility fixture WebView has invalid click geometry".into());
+    }
+    let location = NSPoint::new(
+        frame.origin.x + CREDENTIAL_CLICK_X,
+        frame.origin.y + frame.size.height - CREDENTIAL_CLICK_TOP,
+    );
+    super::set_phase("compatibility-fixture-credential-native-click");
+    for (event_type, pressure) in [
+        (NSEventType::LeftMouseDown, 1.0),
+        (NSEventType::LeftMouseUp, 0.0),
+    ] {
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            event_type,
+            location,
+            NSEventModifierFlags::empty(),
+            0.0,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            pressure,
+        )
+        .ok_or_else(|| "AppKit refused the compatibility fixture mouse event".to_owned())?;
+        window.sendEvent(&event);
+    }
+    Ok(())
+}
+
 fn wait_for_page_state(
     page: &wry::WebView,
     run_loop: &NSRunLoop,
     expected_url: &str,
-    expected_state: &str,
+    expectation: PageExpectation,
 ) -> Result<PageState, String> {
     let script = format!(
         r#"(() => {{
@@ -482,6 +558,7 @@ fn wait_for_page_state(
             pageExtensionApi: Boolean(globalThis.chrome?.runtime?.id || globalThis.browser?.runtime?.id),
             credentialFill: document.documentElement?.getAttribute({CREDENTIAL_FILL_ATTRIBUTE:?}) ?? "missing",
             credentialSelection: document.documentElement?.getAttribute({CREDENTIAL_SELECTION_ATTRIBUTE:?}) ?? "missing",
+            credentialInline: document.documentElement?.getAttribute({CREDENTIAL_INLINE_ATTRIBUTE:?}) ?? "missing",
             credentialPageEvents: document.documentElement?.getAttribute({CREDENTIAL_PAGE_EVENTS_ATTRIBUTE:?}) ?? "missing",
             credentialForgery: document.documentElement?.getAttribute({CREDENTIAL_FORGERY_ATTRIBUTE:?}) ?? "missing",
             credentialHostCount: document.querySelectorAll(`[${{String({CREDENTIAL_HOST_ATTRIBUTE:?})}}]`).length,
@@ -503,11 +580,7 @@ fn wait_for_page_state(
                     let state: PageState = serde_json::from_str(payload).map_err(|error| {
                         format!("compatibility fixture page evidence is invalid: {error}")
                     })?;
-                    if !state.page_adapter
-                        && (state.round_trip == expected_state
-                            || (expected_state == "armed" && state.round_trip == "passed"))
-                        && (expected_state != "passed" || state.credential_workflow_passed())
-                    {
+                    if !state.page_adapter && expectation.is_satisfied(&state) {
                         return Ok(state);
                     }
                     if state.page_adapter
@@ -528,7 +601,8 @@ fn wait_for_page_state(
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "compatibility fixture round trip timed out: url={:?}, title={:?}, state={last_state:?}",
+                "compatibility fixture {} timed out: url={:?}, title={:?}, state={last_state:?}",
+                expectation.label(),
                 page.url().ok(),
                 page.document_title().ok().flatten(),
             ));
@@ -561,7 +635,9 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{admit, OUTPUT_TREE_SHA256, SOURCE_TREE_SHA256};
+    use super::{
+        admit, CREDENTIAL_CLICK_TOP, CREDENTIAL_CLICK_X, OUTPUT_TREE_SHA256, SOURCE_TREE_SHA256,
+    };
 
     const CREDENTIAL_CONTENT: &str =
         include_str!("../../../../fixtures/macos-extension-compatibility-v1/content.js");
@@ -599,10 +675,17 @@ mod tests {
         for forbidden in ["chrome", "browser", "runtime", "username", "password"] {
             assert!(!CREDENTIAL_PAYLOAD.contains(forbidden));
         }
+        assert!(!CREDENTIAL_PAYLOAD.contains(".click()"));
+        assert!(CREDENTIAL_PAYLOAD.contains("zephium-credential-inline-ready-v1"));
+        assert!(CREDENTIAL_PAYLOAD.contains("width:220px;height:44px"));
         assert!(CREDENTIAL_CONTENT.contains("attachShadow({ mode: \"closed\" })"));
+        assert!(CREDENTIAL_CONTENT.contains("position:fixed;left:16px;top:16px;z-index:2147483647"));
         assert!(CREDENTIAL_CONTENT.contains("event.source !== sandbox.contentWindow"));
         assert!(CREDENTIAL_CONTENT.contains("event.origin !== \"null\""));
+        assert!(CREDENTIAL_CONTENT.contains("event.data.trusted !== true"));
         assert!(CREDENTIAL_CONTENT.contains("payload.length > 8192"));
         assert!(CREDENTIAL_BACKGROUND.contains("Number.isInteger(sender?.tab?.id)"));
+        assert_eq!(CREDENTIAL_CLICK_X, 16.0 + 220.0 / 2.0);
+        assert_eq!(CREDENTIAL_CLICK_TOP, 16.0 + 44.0 / 2.0);
     }
 }
