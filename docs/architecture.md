@@ -1438,13 +1438,14 @@ exact child-window identity plus a random nonce, and obtains the synthetic
 credential only through a sender-tab-bound background message. It fills through
 the native input setter and the page observes the expected `input` and `change`
 events. A page-world selection forgery is ignored, and the page observes
-neither the closed leaf nor extension APIs. The CI selection is deliberately
-programmatic and reported as
-`simulated`; it proves transport, isolation, fill semantics, and teardown, not a
-trusted physical gesture, real vault behavior, or stock-extension
-compatibility. Real stock login, vault, save, autofill, and user-gesture
-workflows remain product evidence before any package is presented as
-installable.
+neither the closed leaf nor extension APIs. The CI gate waits for the exact
+bounded leaf geometry, sends AppKit mouse-down/up events through the native
+window, and accepts the selection only when WebKit exposes the resulting DOM
+click as `isTrusted`. This proves native pointer routing, transport, isolation,
+fill semantics, and teardown; it is not evidence of physical input hardware,
+real vault behavior, or stock-extension compatibility. Real stock login,
+vault, save, autofill, and complete user workflows remain product evidence
+before any package is presented as installable.
 
 ---
 
