@@ -966,7 +966,9 @@ pub(crate) fn map_preparation_error(error: PreparationError) -> BundledPackageMa
 }
 
 #[cfg(feature = "acquired-packages")]
-fn map_acquired_preparation_error(error: PreparationError) -> AcquiredPackageMaterializationError {
+pub(crate) fn map_acquired_preparation_error(
+    error: PreparationError,
+) -> AcquiredPackageMaterializationError {
     match error {
         PreparationError::CatalogLengthMismatch | PreparationError::CatalogDigestMismatch => {
             AcquiredPackageMaterializationError::CatalogBytesMismatch
@@ -1022,7 +1024,9 @@ fn map_acquired_tree_error(error: TreeWriterError) -> AcquiredPackageMaterializa
 }
 
 #[cfg(feature = "acquired-packages")]
-fn map_acquired_object_error(error: PackageObjectError) -> AcquiredPackageMaterializationError {
+pub(crate) fn map_acquired_object_error(
+    error: PackageObjectError,
+) -> AcquiredPackageMaterializationError {
     match error {
         PackageObjectError::CapacityExhausted => {
             AcquiredPackageMaterializationError::CapacityExhausted

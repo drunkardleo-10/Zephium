@@ -480,6 +480,36 @@ impl ExtensionRepository {
         Ok(materialized)
     }
 
+    /// Read-only proof that the exact acquired active catalog is already the
+    /// durable high-water and its authenticated object was previously
+    /// published.
+    #[cfg(feature = "acquired-packages")]
+    pub(crate) fn writer_validate_active_acquired_catalog_materialized(
+        &mut self,
+        admitted: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<bool, ExtensionRepositoryError> {
+        if self.writer_is_sealed() {
+            return Err(ExtensionRepositoryError::Sealed);
+        }
+        validate_exact_catalog(admitted, exact_catalog_bytes)?;
+        self.state.validate()?;
+        let candidate = StoredCatalogCheckpoint::from_admitted(
+            admitted.checkpoint(),
+            exact_catalog_bytes.len(),
+        )?;
+        if self.state.checkpoint() != Some(&candidate) {
+            return Ok(false);
+        }
+        validate_catalog_lines(&self.state, admitted.catalog())?;
+        let materialized =
+            self.writer_validate_catalog_object(candidate.catalog_sha256, exact_catalog_bytes)?;
+        if materialized {
+            self.writer_seed_active_acquired_catalog(admitted)?;
+        }
+        Ok(materialized)
+    }
+
     /// Read-only proof that the exact explicitly approved rollback catalog was
     /// previously published beneath the active high-water.
     pub(crate) fn writer_validate_rollback_catalog_materialized(

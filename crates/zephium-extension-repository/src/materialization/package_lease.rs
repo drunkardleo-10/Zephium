@@ -13,7 +13,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::ExtensionInstallId;
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError,
+    AdmittedActiveCatalog, AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError,
     BundledPackageAuthority, ProductAdmittedExtensionManifest,
     ProductAdmittedRollbackExtensionManifest, ProductBundledCatalogGenerationRole,
     ProductExtensionManifestAdmissionError, ProductExtensionManifestAuthority,
@@ -30,13 +30,21 @@ use zephium_private_fs::{DirectoryIdentity, SealedPrivateDirectory};
 
 use super::cleanup::{validate_resumable_build_projection, CleanupError};
 use super::names::{catalog_set_record, package_record, tree_index_object, tree_object};
+#[cfg(feature = "acquired-packages")]
+use super::objects::{
+    preflight_acquired_package_object_capacity, verify_completed_acquired_active_package,
+};
 use super::objects::{
     preflight_package_object_capacity, verify_completed_active_package,
     verify_completed_rollback_package, PackageObjectError, PackageObjectIntentDisposition,
 };
 use super::prepare::{
     open_product_manifest_authority, prepare_active_package_from_preparsed,
-    prepare_rollback_package_from_preparsed, PreparationError,
+    prepare_rollback_package_from_preparsed, PreparationError, PreparedActivePackage,
+};
+#[cfg(feature = "acquired-packages")]
+use super::prepare::{
+    prepare_acquired_active_package_from_preparsed, PreparedAcquiredActivePackage,
 };
 use super::records::{
     CatalogSetRecord, PackageRecord, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
@@ -380,6 +388,112 @@ pub(crate) struct VerifiedRollbackPackageSnapshot {
     retained_bytes: usize,
 }
 
+enum PreparedActiveSnapshotPackage {
+    Bundled(PreparedActivePackage),
+    #[cfg(feature = "acquired-packages")]
+    Acquired(PreparedAcquiredActivePackage),
+}
+
+impl PreparedActiveSnapshotPackage {
+    fn record(&self) -> &PackageRecord {
+        match self {
+            Self::Bundled(prepared) => prepared.record(),
+            #[cfg(feature = "acquired-packages")]
+            Self::Acquired(prepared) => prepared.record(),
+        }
+    }
+
+    fn manifest(&self) -> &ProductAdmittedExtensionManifest {
+        match self {
+            Self::Bundled(prepared) => prepared.manifest(),
+            #[cfg(feature = "acquired-packages")]
+            Self::Acquired(prepared) => prepared.manifest(),
+        }
+    }
+
+    fn into_lease_parts(
+        self,
+    ) -> (
+        CanonicalExtensionTreeIndex,
+        ProductAdmittedExtensionManifest,
+    ) {
+        match self {
+            Self::Bundled(prepared) => prepared.into_lease_parts(),
+            #[cfg(feature = "acquired-packages")]
+            Self::Acquired(prepared) => prepared.into_lease_parts(),
+        }
+    }
+
+    fn verify_completed(
+        self,
+        runtime: &MaterializationRuntime,
+    ) -> Result<VerifiedActivePackageParts, SnapshotLoadError> {
+        let had_intent = runtime._build_intent.is_some();
+        let capacity = match &self {
+            Self::Bundled(prepared) => {
+                preflight_package_object_capacity(runtime, prepared.record())
+            }
+            #[cfg(feature = "acquired-packages")]
+            Self::Acquired(prepared) => {
+                preflight_acquired_package_object_capacity(runtime, prepared.record(), false)
+            }
+        }
+        .map_err(|error| SnapshotLoadError::Object {
+            phase: SnapshotObjectPhase::Preflight { had_intent },
+            error,
+        })?;
+        if capacity.intent_disposition() != PackageObjectIntentDisposition::CompletedReplay {
+            return Err(SnapshotLoadError::PackageNotMaterialized);
+        }
+        match self {
+            Self::Bundled(prepared) => {
+                let (record_id, record, root, records_parent, trees_parent, prepared) =
+                    verify_completed_active_package(runtime, capacity, prepared)
+                        .map_err(|error| SnapshotLoadError::Object {
+                            phase: SnapshotObjectPhase::Completed,
+                            error,
+                        })?
+                        .into_parts();
+                Ok(VerifiedActivePackageParts {
+                    record_id,
+                    record,
+                    root,
+                    records_parent,
+                    trees_parent,
+                    prepared: Self::Bundled(prepared),
+                })
+            }
+            #[cfg(feature = "acquired-packages")]
+            Self::Acquired(prepared) => {
+                let (record_id, record, root, records_parent, trees_parent, prepared) =
+                    verify_completed_acquired_active_package(runtime, capacity, prepared)
+                        .map_err(|error| SnapshotLoadError::Object {
+                            phase: SnapshotObjectPhase::Completed,
+                            error,
+                        })?
+                        .into_parts();
+                Ok(VerifiedActivePackageParts {
+                    record_id,
+                    record,
+                    root,
+                    records_parent,
+                    trees_parent,
+                    prepared: Self::Acquired(prepared),
+                })
+            }
+        }
+    }
+}
+
+struct VerifiedActivePackageParts {
+    record_id: Digest32,
+    record: PackageRecord,
+    root: Arc<SealedPrivateDirectory>,
+    records_parent: DirectoryIdentity,
+    trees_parent: DirectoryIdentity,
+    prepared: PreparedActiveSnapshotPackage,
+}
+
 macro_rules! impl_snapshot_projection {
     ($snapshot:ident, $manifest:ty) => {
         impl $snapshot {
@@ -592,7 +706,7 @@ pub(crate) fn load_active_package_snapshot(
     let authority =
         BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
     let catalog = authority
-        .admit_catalog(exact_catalog_bytes)
+        .admit_active_catalog(exact_catalog_bytes)
         .map_err(SnapshotLoadError::CatalogAdmission)?;
     require_eligibility_package(catalog.catalog(), eligibility)?;
     let LoadedRepositoryPackage {
@@ -604,7 +718,7 @@ pub(crate) fn load_active_package_snapshot(
         root: _,
     } = load_repository_package(runtime, current, eligibility.package().key())?;
     let manifest_authority = open_product_manifest_authority().map_err(map_preparation_error)?;
-    let prepared = prepare_active_package_from_preparsed(
+    let prepared = prepare_active_snapshot_package(
         &catalog,
         &manifest_authority,
         durable_record.manifest.runtime_target.product_target(),
@@ -612,8 +726,7 @@ pub(crate) fn load_active_package_snapshot(
         index,
         index_bytes,
         manifest_bytes,
-    )
-    .map_err(map_preparation_error)?;
+    )?;
     require_eligibility(
         prepared.manifest().package_identity(),
         prepared.manifest().descriptor(),
@@ -622,26 +735,14 @@ pub(crate) fn load_active_package_snapshot(
     if prepared.record() != &durable_record || prepared.record().record_id()? != record_id {
         return Err(SnapshotLoadError::DurableMismatch);
     }
-    let had_intent = runtime._build_intent.is_some();
-    let capacity =
-        preflight_package_object_capacity(runtime, prepared.record()).map_err(|error| {
-            SnapshotLoadError::Object {
-                phase: SnapshotObjectPhase::Preflight { had_intent },
-                error,
-            }
-        })?;
-    if capacity.intent_disposition() != PackageObjectIntentDisposition::CompletedReplay {
-        return Err(SnapshotLoadError::PackageNotMaterialized);
-    }
-    let completed =
-        verify_completed_active_package(runtime, capacity, prepared).map_err(|error| {
-            SnapshotLoadError::Object {
-                phase: SnapshotObjectPhase::Completed,
-                error,
-            }
-        })?;
-    let (verified_id, record, root, records_parent, trees_parent, prepared) =
-        completed.into_parts();
+    let VerifiedActivePackageParts {
+        record_id: verified_id,
+        record,
+        root,
+        records_parent,
+        trees_parent,
+        prepared,
+    } = prepared.verify_completed(runtime)?;
     if verified_id != record_id
         || records_parent != current.repository.records
         || trees_parent != current.repository.trees
@@ -665,6 +766,47 @@ pub(crate) fn load_active_package_snapshot(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_active_snapshot_package(
+    catalog: &AdmittedActiveCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    tree_index: CanonicalExtensionTreeIndex,
+    tree_index_bytes: Box<[u8]>,
+    manifest_bytes: Box<[u8]>,
+) -> Result<PreparedActiveSnapshotPackage, SnapshotLoadError> {
+    match catalog {
+        AdmittedActiveCatalog::Bundled(catalog) => prepare_active_package_from_preparsed(
+            catalog,
+            manifest_authority,
+            runtime_target,
+            package_key,
+            tree_index,
+            tree_index_bytes,
+            manifest_bytes,
+        )
+        .map(PreparedActiveSnapshotPackage::Bundled)
+        .map_err(map_preparation_error),
+        #[cfg(feature = "acquired-packages")]
+        AdmittedActiveCatalog::Acquired(catalog) => prepare_acquired_active_package_from_preparsed(
+            catalog,
+            manifest_authority,
+            runtime_target,
+            package_key,
+            tree_index,
+            tree_index_bytes,
+            manifest_bytes,
+        )
+        .map(PreparedActiveSnapshotPackage::Acquired)
+        .map_err(map_preparation_error),
+        #[cfg(not(feature = "acquired-packages"))]
+        AdmittedActiveCatalog::Acquired(_) => Err(SnapshotLoadError::CatalogAdmission(
+            BundledCatalogAdmissionError::UnsupportedPayload,
+        )),
+    }
+}
+
 pub(crate) fn load_active_manifest_bindings(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
@@ -677,7 +819,7 @@ pub(crate) fn load_active_manifest_bindings(
     let authority =
         BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
     let catalog = authority
-        .admit_catalog(exact_catalog_bytes)
+        .admit_active_catalog(exact_catalog_bytes)
         .map_err(SnapshotLoadError::CatalogAdmission)?;
     require_catalog_anchor(current, catalog.generation_anchor())?;
     if installs.installs().is_empty() {
@@ -710,7 +852,7 @@ pub(crate) fn load_active_management_manifests(
     let authority =
         BundledPackageAuthority::product().map_err(SnapshotLoadError::CatalogAuthority)?;
     let catalog = authority
-        .admit_catalog(exact_catalog_bytes)
+        .admit_active_catalog(exact_catalog_bytes)
         .map_err(SnapshotLoadError::CatalogAdmission)?;
     require_catalog_anchor(current, catalog.generation_anchor())?;
     if installs.installs().is_empty() {
@@ -887,7 +1029,7 @@ pub(crate) fn load_rollback_management_manifests(
 fn load_active_manifest_from_admitted(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
-    catalog: &AdmittedBundledCatalog,
+    catalog: &AdmittedActiveCatalog,
     manifest_authority: &ProductExtensionManifestAuthority,
     install: &ExtensionInstall,
 ) -> Result<Arc<ExtensionManifestDescriptor>, SnapshotLoadError> {
@@ -901,7 +1043,7 @@ fn load_active_manifest_from_admitted(
         root: _,
     } = load_repository_package(runtime, current, install.package().key())
         .map_err(map_bootstrap_package_load_error)?;
-    let prepared = prepare_active_package_from_preparsed(
+    let prepared = prepare_active_snapshot_package(
         catalog,
         manifest_authority,
         durable_record.manifest.runtime_target.product_target(),
@@ -909,8 +1051,7 @@ fn load_active_manifest_from_admitted(
         index,
         index_bytes,
         manifest_bytes,
-    )
-    .map_err(map_preparation_error)?;
+    )?;
     if prepared.record() != &durable_record || prepared.record().record_id()? != record_id {
         return Err(SnapshotLoadError::DurableMismatch);
     }
@@ -961,7 +1102,7 @@ fn load_rollback_manifest_from_admitted(
 fn load_active_management_manifest_from_admitted(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
-    catalog: &AdmittedBundledCatalog,
+    catalog: &AdmittedActiveCatalog,
     manifest_authority: &ProductExtensionManifestAuthority,
     install: &ExtensionInstall,
 ) -> Result<AuthenticatedManagementManifest, ManagementManifestLoadError> {
@@ -975,7 +1116,7 @@ fn load_active_management_manifest_from_admitted(
         root,
     } = load_repository_package(runtime, current, install.package().key())
         .map_err(map_bootstrap_package_load_error)?;
-    let prepared = prepare_active_package_from_preparsed(
+    let prepared = prepare_active_snapshot_package(
         catalog,
         manifest_authority,
         durable_record.manifest.runtime_target.product_target(),
@@ -983,8 +1124,7 @@ fn load_active_management_manifest_from_admitted(
         index,
         index_bytes,
         manifest_bytes,
-    )
-    .map_err(map_preparation_error)?;
+    )?;
     if prepared.record() != &durable_record
         || prepared
             .record()

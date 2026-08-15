@@ -93,6 +93,10 @@ pub(crate) struct PreparedAcquiredActivePackage {
 
 #[cfg(feature = "acquired-packages")]
 impl PreparedAcquiredActivePackage {
+    pub(crate) const fn manifest(&self) -> &ProductAdmittedExtensionManifest {
+        &self._manifest
+    }
+
     pub(super) const fn package_source(&self) -> BundledReleasePackageSourceIdentity {
         self.data.package_source
     }
@@ -111,6 +115,15 @@ impl PreparedAcquiredActivePackage {
 
     pub(crate) const fn record(&self) -> &PackageRecord {
         &self.data.record
+    }
+
+    pub(crate) fn into_lease_parts(
+        self,
+    ) -> (
+        CanonicalExtensionTreeIndex,
+        ProductAdmittedExtensionManifest,
+    ) {
+        (self.data.tree_index, self._manifest)
     }
 }
 

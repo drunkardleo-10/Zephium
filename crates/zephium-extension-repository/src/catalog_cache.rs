@@ -2,8 +2,10 @@
 
 use std::mem::size_of;
 
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
-    AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
+    AdmittedActiveCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
     BundledPackageAuthority, ProductBundledCatalogGenerationRole,
     MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
 };
@@ -285,21 +287,10 @@ impl ProductCatalogAdmissionCache {
             validate_role_against_high_water(role, anchor, high_water)?;
             match role {
                 ProductBundledCatalogGenerationRole::Active => {
-                    match authority.admit_catalog(exact_catalog_bytes) {
-                        Ok(admitted) => {
-                            (role, active_anchor(&admitted), admitted.catalog().clone())
-                        }
-                        Err(_) => {
-                            let admitted = authority
-                                .admit_acquired_catalog(exact_catalog_bytes)
-                                .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
-                            (
-                                role,
-                                acquired_active_anchor(&admitted),
-                                admitted.catalog().clone(),
-                            )
-                        }
-                    }
+                    let admitted = authority
+                        .admit_active_catalog(exact_catalog_bytes)
+                        .map_err(|_| ExtensionRepositoryError::RecoveryAmbiguous)?;
+                    (role, active_anchor(&admitted), admitted.catalog().clone())
                 }
                 ProductBundledCatalogGenerationRole::Rollback => {
                     let admitted = authority
@@ -392,7 +383,7 @@ impl ProductCatalogAdmissionCache {
         admitted: &AdmittedBundledCatalog,
     ) -> Result<(), ExtensionRepositoryError> {
         self.insert(
-            active_anchor(admitted),
+            bundled_active_anchor(admitted),
             ProductBundledCatalogGenerationRole::Active,
             identity,
             admitted.catalog().clone(),
@@ -493,7 +484,18 @@ fn validate_exact_catalog_bytes(
     Ok(())
 }
 
-fn active_anchor(admitted: &AdmittedBundledCatalog) -> CatalogAnchor {
+fn active_anchor(admitted: &AdmittedActiveCatalog) -> CatalogAnchor {
+    let anchor = admitted.generation_anchor();
+    CatalogAnchor {
+        authority_id: Digest32::from_bytes(anchor.authority().bytes()),
+        revision: anchor.revision().get(),
+        catalog_length: anchor.catalog_length(),
+        catalog_sha256: Digest32::from_bytes(anchor.catalog_digest().bytes()),
+        inventory_sha256: Digest32::from_bytes(anchor.inventory_digest().bytes()),
+    }
+}
+
+fn bundled_active_anchor(admitted: &AdmittedBundledCatalog) -> CatalogAnchor {
     CatalogAnchor {
         authority_id: Digest32::from_bytes(admitted.authority().bytes()),
         revision: admitted.revision().get(),
@@ -503,6 +505,7 @@ fn active_anchor(admitted: &AdmittedBundledCatalog) -> CatalogAnchor {
     }
 }
 
+#[cfg(feature = "acquired-packages")]
 fn acquired_active_anchor(admitted: &AdmittedAcquiredCatalog) -> CatalogAnchor {
     CatalogAnchor {
         authority_id: Digest32::from_bytes(admitted.authority().bytes()),

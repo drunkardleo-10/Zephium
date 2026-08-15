@@ -236,14 +236,16 @@ impl ExtensionRepository {
             })?;
             match current.role() {
                 VerifiedCatalogRole::Active => {
-                    authority.admit_catalog(&exact_catalog).map(|admitted| {
-                        admitted
-                            .catalog()
-                            .packages()
-                            .iter()
-                            .map(|package| package.identity().clone())
-                            .collect::<Vec<_>>()
-                    })
+                    authority
+                        .admit_active_catalog(&exact_catalog)
+                        .map(|admitted| {
+                            admitted
+                                .catalog()
+                                .packages()
+                                .iter()
+                                .map(|package| package.identity().clone())
+                                .collect::<Vec<_>>()
+                        })
                 }
                 VerifiedCatalogRole::Rollback => authority
                     .admit_rollback_catalog(&exact_catalog)

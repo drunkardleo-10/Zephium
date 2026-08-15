@@ -118,7 +118,7 @@ impl ExtensionRepository {
             .map_err(BundledPackageLeaseError::CatalogAuthority)?;
         let admitted_anchor = match current.role() {
             VerifiedCatalogRole::Active => authority
-                .admit_catalog(&exact_catalog)
+                .admit_active_catalog(&exact_catalog)
                 .map_err(|error| {
                     self.writer_seal();
                     BundledPackageLeaseError::CatalogAdmission(error)

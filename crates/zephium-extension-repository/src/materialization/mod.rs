@@ -38,6 +38,11 @@ mod tree_cleanup;
 mod tree_reader;
 mod tree_writer;
 
+#[cfg(feature = "acquired-packages")]
+pub(crate) use catalog_set::{
+    derive_acquired_active_catalog_set, verify_acquired_catalog_package,
+    AcquiredCatalogPackageVerificationError,
+};
 pub(crate) use catalog_set::{
     derive_active_catalog_set, derive_rollback_catalog_set, VerifiedActiveCatalogSet,
     VerifiedRollbackCatalogSet,

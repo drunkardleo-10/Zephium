@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -9,13 +10,33 @@ use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zephium_core::extensions::{ExtensionPackageKey, ExtensionPackagePayloadIdentity};
-use zephium_extension_authority::{BundledPackageAuthority, ProductExtensionRuntimeTarget};
+use zephium_core::extensions::{
+    ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest, ExtensionGrantAuthority,
+    ExtensionGrantBrowsingContext, ExtensionGrantCohort, ExtensionGrantManifestBinding,
+    ExtensionGrantManifestBindings, ExtensionInstall, ExtensionInstallCatalog,
+    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionNativeIncarnation,
+    ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryRevision,
+    ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
+    ExtensionNativeOwnershipPhase, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackagePinAcquisitionBinding, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibility,
+};
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
+use zephium_extension_authority::{
+    AdmittedAcquiredCatalog, BundledPackageAuthority, ProductExtensionManifestAuthority,
+    ProductExtensionRuntimeTarget,
+};
+use zephium_extension_package::CanonicalExtensionTreeIndex;
 use zephium_private_fs::LockedPrivateNamespace;
 
 use super::*;
+use crate::materialization::{current_catalog_set_projection, load_active_package_snapshot};
 use crate::repository_e2e_fixture as fixture;
-use crate::AcquiredReleaseLegalResource;
+use crate::{
+    AcquiredReleaseLegalResource, BundledCatalogGenerationRole, BundledCatalogSetIdentity,
+    BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome, BundledPackageLease,
+    BundledPackageRuntimeSelection,
+};
 
 const TEST_PKCS8_HEX: &str = "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420b292efbe9e5900abfc3bc4b37d42a907458782dde3880b8ae8ad11a020d21fefa14403420004b990fbfbf5bd1faa12b8ba853391b296c278b19458b07c3e449f94001c0b546c3fb016528ca59b3099fab07e0042b704734bbd924c4480db7834b7fa352ac011";
 const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
@@ -148,6 +169,98 @@ fn runtime_target() -> ProductExtensionRuntimeTarget {
     return ProductExtensionRuntimeTarget::MacosNative;
     #[cfg(target_os = "linux")]
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
+}
+
+fn acquired_eligibility(catalog: &AdmittedAcquiredCatalog) -> ExtensionRuntimeEligibility {
+    let tree =
+        CanonicalExtensionTreeIndex::parse_canonical(fixture::ACQUIRED_TREE_INDEX_BYTES).unwrap();
+    let authority = ProductExtensionManifestAuthority::product().unwrap();
+    let manifest = authority
+        .admit_acquired_manifest(
+            catalog,
+            runtime_target(),
+            ExtensionPackageKey::from_bytes(fixture::PACKAGE_KEY_BYTES),
+            &tree,
+            fixture::ACQUIRED_MANIFEST_BYTES,
+        )
+        .unwrap();
+    let install_id = ExtensionInstallId::from(17);
+    let descriptor = Arc::new(manifest.descriptor().clone());
+    let install = ExtensionInstall::from_persisted(
+        install_id,
+        ExtensionInstallRevision::INITIAL,
+        descriptor.package().clone(),
+        true,
+    );
+    let installs = ExtensionInstallCatalog::from_persisted(
+        ExtensionInstallCatalogRevision::INITIAL,
+        Some(install_id),
+        vec![install.clone()],
+    )
+    .unwrap();
+    let bindings = ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::new(
+        install_id,
+        Arc::clone(&descriptor),
+    )])
+    .unwrap();
+    let grants = ExtensionGrantAuthority::initialize(
+        &install,
+        descriptor.declarations().required_api().names().to_vec(),
+        descriptor
+            .declarations()
+            .required_host_authorities()
+            .into_iter()
+            .cloned()
+            .collect(),
+        false,
+        false,
+        &descriptor,
+    )
+    .unwrap();
+    ExtensionGrantCohort::from_persisted(ProfileId::from(19), installs, bindings, vec![grants])
+        .unwrap()
+        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+        .unwrap()
+}
+
+fn runtime_backend() -> ExtensionRuntimeBackendTarget {
+    match runtime_target() {
+        ProductExtensionRuntimeTarget::MacosNative => ExtensionRuntimeBackendTarget::MacosNative,
+        ProductExtensionRuntimeTarget::LinuxCompatibility => {
+            ExtensionRuntimeBackendTarget::LinuxCompatibility
+        }
+        _ => panic!("acquired repository E2E has an unsupported runtime target"),
+    }
+}
+
+fn acquired_binding(
+    catalog: &AdmittedAcquiredCatalog,
+    current: BundledCatalogSetIdentity,
+) -> ExtensionPackagePinAcquisitionBinding {
+    let eligibility = acquired_eligibility(catalog);
+    let native_incarnation = ExtensionNativeIncarnation::new(17).unwrap();
+    let entry = ExtensionNativeOwnershipEntry::from_persisted(
+        ExtensionNativeOwnershipKey::new(
+            eligibility.profile(),
+            eligibility.install_id(),
+            eligibility.browsing_context(),
+        ),
+        ExtensionNativeOwnershipOperation::new(native_incarnation.get()).unwrap(),
+        ExtensionNativeOwnershipEntryRevision::INITIAL,
+        eligibility.package().clone(),
+        ExtensionCatalogSetDigest::from_bytes(current.bytes()),
+        ExtensionCatalogGenerationRole::Active,
+        eligibility.catalog_revision(),
+        eligibility.install_revision(),
+        eligibility.grant_revision(),
+        eligibility.grant_digest(),
+        runtime_backend(),
+        native_incarnation,
+        ExtensionNativeOwnershipIntent::Acquire,
+        ExtensionNativeOwnershipPhase::NativeAbsentPreparing,
+    )
+    .unwrap();
+    ExtensionPackagePinAcquisitionBinding::mint(&entry, eligibility).unwrap()
 }
 
 fn decode_hex(bytes: &str) -> Vec<u8> {
@@ -405,4 +518,131 @@ fn marker_committed_crash_completes_without_crx_or_legal_source() {
         AcquiredPackageMaterializationOutcome::Materialized
     );
     assert_eq!(forbidden_legal.callbacks, 0);
+}
+
+#[test]
+fn acquired_catalog_selection_is_source_free_exact_and_restart_safe() {
+    let authority = BundledPackageAuthority::product().unwrap();
+    let catalog = authority
+        .admit_acquired_catalog(fixture::ACQUIRED_ACTIVE_CATALOG_BYTES)
+        .unwrap();
+    let crx = signed_fixture_crx();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let mut legal = LegalSource {
+        callbacks: 0,
+        fail_after_callback: false,
+    };
+    let package_key = ExtensionPackageKey::from_bytes(fixture::PACKAGE_KEY_BYTES);
+    let selection = [BundledPackageRuntimeSelection::new(
+        package_key,
+        runtime_target(),
+    )];
+
+    assert_eq!(
+        repository
+            .materialize_active_acquired_package(
+                &catalog,
+                fixture::ACQUIRED_ACTIVE_CATALOG_BYTES,
+                runtime_target(),
+                package_key,
+                &crx,
+                &mut legal,
+            )
+            .unwrap(),
+        AcquiredPackageMaterializationOutcome::Materialized
+    );
+    assert_eq!(legal.callbacks, 1);
+
+    let staged = match repository
+        .stage_active_acquired_catalog_set(
+            &catalog,
+            fixture::ACQUIRED_ACTIVE_CATALOG_BYTES,
+            &selection,
+        )
+        .unwrap()
+    {
+        BundledCatalogSetStageOutcome::Staged(identity) => identity,
+        other => panic!("fresh acquired selection returned {other:?}"),
+    };
+    assert_eq!(
+        repository
+            .promote_active_acquired_catalog_set(
+                &catalog,
+                fixture::ACQUIRED_ACTIVE_CATALOG_BYTES,
+                &selection,
+                staged,
+            )
+            .unwrap(),
+        BundledCatalogSetPromotionOutcome::Promoted(staged)
+    );
+
+    drop(repository);
+    let mut reopened = harness.open();
+    let current = reopened.current_bundled_catalog_set().unwrap().unwrap();
+    assert_eq!(current.identity(), staged);
+    assert_eq!(current.role(), BundledCatalogGenerationRole::Active);
+    let projection = current_catalog_set_projection(reopened.writer_materialization().unwrap())
+        .unwrap()
+        .unwrap();
+    let eligibility = acquired_eligibility(&catalog);
+    let snapshot = load_active_package_snapshot(
+        reopened.writer_materialization().unwrap(),
+        &projection,
+        fixture::ACQUIRED_ACTIVE_CATALOG_BYTES,
+        &eligibility,
+    )
+    .unwrap();
+    assert_eq!(snapshot.package(), eligibility.package());
+    assert_eq!(snapshot.descriptor(), eligibility.manifest());
+    let candidates = reopened
+        .authenticate_current_bundled_install_candidates()
+        .unwrap();
+    assert_eq!(candidates.current_catalog_set().identity(), staged);
+    assert_eq!(candidates.candidates().len(), 1);
+    assert_eq!(candidates.candidates()[0].package(), eligibility.package());
+    assert_eq!(
+        candidates.candidates()[0].manifest_arc().as_ref(),
+        eligibility.manifest()
+    );
+    let lease = match reopened
+        .acquire_bundled_package_lease(acquired_binding(&catalog, staged))
+        .unwrap()
+    {
+        BundledPackageLease::Active(lease) => lease,
+        BundledPackageLease::Rollback(_) => panic!("acquired active binding yielded rollback"),
+    };
+    assert_eq!(lease.current_catalog_set(), staged);
+    assert_eq!(lease.package(), eligibility.package());
+    let manifest_path =
+        zephium_extension_package::PortableRelativePath::parse("manifest.json").unwrap();
+    let manifest_bytes = lease
+        .with_resource_reader(&manifest_path, |reader| {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest_bytes, fixture::ACQUIRED_MANIFEST_BYTES);
+    assert_eq!(
+        reopened
+            .stage_active_acquired_catalog_set(
+                &catalog,
+                fixture::ACQUIRED_ACTIVE_CATALOG_BYTES,
+                &selection,
+            )
+            .unwrap(),
+        BundledCatalogSetStageOutcome::AlreadyCurrent(staged)
+    );
+    assert_eq!(
+        reopened
+            .promote_active_acquired_catalog_set(
+                &catalog,
+                fixture::ACQUIRED_ACTIVE_CATALOG_BYTES,
+                &selection,
+                staged,
+            )
+            .unwrap(),
+        BundledCatalogSetPromotionOutcome::IdempotentCurrent(staged)
+    );
 }

@@ -7,10 +7,17 @@
 
 use thiserror::Error;
 use zephium_core::extensions::ExtensionPackageKey;
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, ProductExtensionRuntimeTarget,
 };
 
+#[cfg(feature = "acquired-packages")]
+use crate::materialization::{
+    derive_acquired_active_catalog_set, verify_acquired_catalog_package,
+    AcquiredCatalogPackageVerificationError,
+};
 use crate::materialization::{
     derive_active_catalog_set, derive_rollback_catalog_set, open_product_manifest_authority,
     preflight_package_object_capacity, prepare_active_package, prepare_rollback_package,
@@ -25,6 +32,10 @@ use crate::writer::{
     completed_error_requires_sealing, map_object_error, map_preparation_error,
     publication_error_requires_sealing,
 };
+#[cfg(feature = "acquired-packages")]
+use crate::writer::{map_acquired_object_error, map_acquired_preparation_error};
+#[cfg(feature = "acquired-packages")]
+use crate::AcquiredPackageMaterializationError;
 use crate::{BundledPackageMaterializationError, ExtensionRepository, ExtensionRepositoryError};
 
 /// One exact runtime backend choice for one authenticated catalog package.
@@ -120,6 +131,10 @@ pub enum BundledCatalogSetError {
     /// Exact package preparation or durable object validation failed.
     #[error("extension catalog-set package verification failed: {0}")]
     Package(#[from] BundledPackageMaterializationError),
+    /// Exact acquired-package reconstruction or durable validation failed.
+    #[cfg(feature = "acquired-packages")]
+    #[error("acquired extension catalog-set package verification failed: {0}")]
+    AcquiredPackage(#[from] AcquiredPackageMaterializationError),
     /// The caller did not provide exactly one canonically ordered choice for
     /// every authenticated catalog package.
     #[error("extension catalog-set selection is not an exact catalog projection")]
@@ -160,8 +175,42 @@ impl ExtensionRepository {
         {
             return Err(BundledCatalogSetError::CatalogNotMaterialized);
         }
-        let (mut runtime, verified) =
+        let (runtime, verified) =
             self.produce_active_catalog_set(catalog, exact_catalog_bytes, selections, source)?;
+        self.finish_active_catalog_set_stage(runtime, verified)
+    }
+
+    /// Re-admits and source-free re-verifies a complete acquired active
+    /// selection, then exact-CAS publishes it as the sole durable candidate.
+    #[cfg(feature = "acquired-packages")]
+    pub fn stage_active_acquired_catalog_set(
+        &mut self,
+        catalog: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+        selections: &[BundledPackageRuntimeSelection],
+    ) -> Result<BundledCatalogSetStageOutcome, BundledCatalogSetError> {
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
+            .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
+        validate_projection(catalog.catalog(), selections)?;
+        if !self
+            .writer_validate_active_acquired_catalog_materialized(catalog, exact_catalog_bytes)
+            .map_err(repository_package_error)?
+        {
+            return Err(BundledCatalogSetError::CatalogNotMaterialized);
+        }
+        let (runtime, verified) = self.produce_acquired_active_catalog_set(catalog, selections)?;
+        self.finish_active_catalog_set_stage(runtime, verified)
+    }
+
+    fn finish_active_catalog_set_stage(
+        &mut self,
+        mut runtime: MaterializationRuntime,
+        verified: VerifiedActiveCatalogSet,
+    ) -> Result<BundledCatalogSetStageOutcome, BundledCatalogSetError> {
         let identity = verified.record_id();
         if runtime._state.candidate_catalog_set_id.is_some()
             && runtime._state.candidate_catalog_set_id != Some(identity)
@@ -281,6 +330,55 @@ impl ExtensionRepository {
         }
         let (runtime, verified) =
             self.produce_active_catalog_set(catalog, exact_catalog_bytes, selections, source)?;
+        self.finish_active_catalog_set_promotion(runtime, verified, expected)
+    }
+
+    /// Re-admits an exact acquired active candidate from repository-owned
+    /// objects and atomically promotes it to current without archive access.
+    #[cfg(feature = "acquired-packages")]
+    pub fn promote_active_acquired_catalog_set(
+        &mut self,
+        catalog: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+        selections: &[BundledPackageRuntimeSelection],
+        expected_candidate: BundledCatalogSetIdentity,
+    ) -> Result<BundledCatalogSetPromotionOutcome, BundledCatalogSetError> {
+        let runtime = self.runtime.clone();
+        let _operation = runtime
+            .enter()
+            .map_err(|error| repository_package_error(error.repository_error()))?;
+        self.writer_require_gc_idle()
+            .map_err(repository_package_error)?;
+        validate_projection(catalog.catalog(), selections)?;
+        if !self
+            .writer_validate_active_acquired_catalog_materialized(catalog, exact_catalog_bytes)
+            .map_err(repository_package_error)?
+        {
+            return Err(BundledCatalogSetError::CatalogNotMaterialized);
+        }
+        let expected = Digest32::from_bytes(expected_candidate.bytes());
+        let (candidate, current) = {
+            let runtime = self
+                .writer_materialization()
+                .map_err(repository_package_error)?;
+            (
+                runtime._state.candidate_catalog_set_id,
+                runtime._state.current_catalog_set_id,
+            )
+        };
+        if candidate != Some(expected) && !(candidate.is_none() && current == Some(expected)) {
+            return Err(BundledCatalogSetError::StaleSelection);
+        }
+        let (runtime, verified) = self.produce_acquired_active_catalog_set(catalog, selections)?;
+        self.finish_active_catalog_set_promotion(runtime, verified, expected)
+    }
+
+    fn finish_active_catalog_set_promotion(
+        &mut self,
+        runtime: MaterializationRuntime,
+        verified: VerifiedActiveCatalogSet,
+        expected: Digest32,
+    ) -> Result<BundledCatalogSetPromotionOutcome, BundledCatalogSetError> {
         let identity = verified.record_id();
         if identity != expected {
             return Err(self.finish_stale_catalog_set(runtime));
@@ -495,6 +593,50 @@ impl ExtensionRepository {
         Ok((runtime, verified))
     }
 
+    #[cfg(feature = "acquired-packages")]
+    fn produce_acquired_active_catalog_set(
+        &mut self,
+        catalog: &AdmittedAcquiredCatalog,
+        selections: &[BundledPackageRuntimeSelection],
+    ) -> Result<(MaterializationRuntime, VerifiedActiveCatalogSet), BundledCatalogSetError> {
+        let authority = open_product_manifest_authority().map_err(|error| {
+            BundledCatalogSetError::AcquiredPackage(map_acquired_preparation_error(error))
+        })?;
+        let mut packages = Vec::with_capacity(selections.len());
+        for selection in selections {
+            let completed = verify_acquired_catalog_package(
+                self.writer_materialization()
+                    .map_err(repository_package_error)?,
+                catalog,
+                &authority,
+                selection.runtime_target,
+                selection.package_key,
+            );
+            match completed {
+                Ok(completed) => packages.push(completed),
+                Err(AcquiredCatalogPackageVerificationError::Preparation(error)) => {
+                    return Err(BundledCatalogSetError::AcquiredPackage(
+                        map_acquired_preparation_error(error),
+                    ));
+                }
+                Err(AcquiredCatalogPackageVerificationError::Object(error)) => {
+                    return Err(self.finish_completed_acquired_object_failure(error));
+                }
+                Err(AcquiredCatalogPackageVerificationError::NotMaterialized) => {
+                    return Err(BundledCatalogSetError::PackageNotMaterialized);
+                }
+            }
+        }
+        let runtime = self
+            .writer_take_materialization()
+            .map_err(repository_package_error)?;
+        let verified = match derive_acquired_active_catalog_set(&runtime, catalog, packages) {
+            Ok(verified) => verified,
+            Err(error) => return Err(self.finish_catalog_set_object_failure(runtime, error)),
+        };
+        Ok((runtime, verified))
+    }
+
     fn produce_rollback_catalog_set<S: BundledReleaseByteSource>(
         &mut self,
         catalog: &AdmittedRollbackBundledCatalog,
@@ -575,6 +717,17 @@ impl ExtensionRepository {
             self.writer_seal();
         }
         BundledCatalogSetError::Package(map_object_error(error))
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn finish_completed_acquired_object_failure(
+        &mut self,
+        error: crate::materialization::PackageObjectError,
+    ) -> BundledCatalogSetError {
+        if completed_error_requires_sealing(error) {
+            self.writer_seal();
+        }
+        BundledCatalogSetError::AcquiredPackage(map_acquired_object_error(error))
     }
 
     fn finish_stale_catalog_set(
