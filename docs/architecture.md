@@ -1430,8 +1430,21 @@ Apple's public
 [`loadBackgroundContent`](https://developer.apple.com/documentation/webkit/wkwebextensioncontext/loadbackgroundcontent%28completionhandler%3A%29)
 completion contract and does not retain a hidden WebView or prevent ordinary
 MV3 suspension. This closes the transformed content/background execution gate;
-real stock login, vault, save, and autofill workflows remain the next product
-evidence before any package is presented as installable.
+the same source-free gate also exercises the reusable credential seam without
+shipping or adapting a password manager. The isolated content host discovers
+one exact username/current-password pair, creates a closed-shadow sandbox leaf
+from a bounded public inert payload, authenticates its one-use selection by
+exact child-window identity plus a random nonce, and obtains the synthetic
+credential only through a sender-tab-bound background message. It fills through
+the native input setter and the page observes the expected `input` and `change`
+events. A page-world selection forgery is ignored, and the page observes
+neither the closed leaf nor extension APIs. The CI selection is deliberately
+programmatic and reported as
+`simulated`; it proves transport, isolation, fill semantics, and teardown, not a
+trusted physical gesture, real vault behavior, or stock-extension
+compatibility. Real stock login, vault, save, autofill, and user-gesture
+workflows remain product evidence before any package is presented as
+installable.
 
 ---
 
