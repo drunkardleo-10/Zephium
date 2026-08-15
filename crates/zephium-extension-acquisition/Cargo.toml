@@ -1,0 +1,16 @@
+[package]
+name = "zephium-extension-acquisition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+sha2 = "=0.10.9"
+thiserror.workspace = true
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
+zephium-core = { path = "../zephium-core", version = "=0.1.0" }
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
+
+[dev-dependencies]
+ring.workspace = true

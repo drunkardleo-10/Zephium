@@ -257,6 +257,16 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   │                            package storage, rollback/clock authority.
 │   ├── zephium-blocker-service  candidate preparation, durable commit, and
 │   │                            exact compiler activation coordinator.
+│   ├── zephium-extension-package bounded manifests, catalogs, tree indexes,
+│   │                            portable paths, and CRX3 authentication.
+│   ├── zephium-extension-acquisition catalog-bound hostile ZIP preflight and
+│   │                            bounded streaming decompression.
+│   ├── zephium-extension-authority product-sealed catalog/manifest policy.
+│   ├── zephium-extension-repository immutable package materialization, atomic
+│   │                            catalog sets, leases, rollback, recovery, GC.
+│   ├── zephium-extension-runtime-api move-only native host authority.
+│   ├── zephium-extension-service serialized Store/repository/native lifecycle
+│   │                            and management transactions.
 │   ├── zephium-store            SQLite actor, migrations, FTS5, fakes.
 │   └── zephium-app              the actor shell: owns composed core state,
 │                                drives ports, builds projections.
@@ -936,6 +946,27 @@ fail-closed epoch: the unreleased v9-v11 shape recorded only an archive digest,
 so migration preserves the catalog revision and monotonic install-ID floor but
 invalidates those inexact install/grant rows. They must be reinstalled through
 the exact package authority and their old identities can never be reused.
+
+`zephium-extension-acquisition` owns the first acquired-package boundary and is
+not linked into the ordinary inert product path by any runtime crate. It accepts
+only CRX3 bytes whose signed developer key derives the product-expected
+Chromium id and whose inner ZIP byte length and SHA-256 exactly match an
+`AcquiredZip` catalog identity. Before constructing the ZIP parser, an
+allocation-free terminal-record preflight bounds the entry count and central
+directory. Complete preflight then admits only stored or deflated ordinary
+files/directories, canonical ASCII portable paths, one root `manifest.json`,
+and the existing per-file, aggregate-tree, entry, depth, and retained-memory
+ceilings. It rejects ZIP64/multi-disk framing, encryption, links and special
+files, duplicate/case/device/file-directory aliases, ambiguous local headers,
+and overlapping payload regions. Files can leave the boundary only through a
+bounded streaming copy that reaches EOF and therefore checks decompression,
+exact length, and ZIP CRC; the boundary opens no paths itself. The offline CRX
+probe materializer consumes this same implementation so diagnostic and future
+product definitions of safe extraction cannot drift. This is still structural
+evidence, not release authority, transport, or durable materialization: a
+product path must next stage the streamed files in the private repository,
+derive and authenticate the canonical tree/index and manifest, and publish the
+package record atomically before install or activation.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,
