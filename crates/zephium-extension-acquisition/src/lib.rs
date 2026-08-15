@@ -21,6 +21,7 @@ mod archive;
 
 pub use archive::{
     AcquiredExtensionArchive, AcquiredExtensionArchiveError, AcquiredExtensionArchiveFile,
-    AcquiredExtensionArchiveReadError, MAX_ACQUIRED_ARCHIVE_CENTRAL_DIRECTORY_BYTES,
-    MAX_ACQUIRED_ARCHIVE_RETAINED_BYTES,
+    AcquiredExtensionArchiveReadError, AcquiredExtensionFileReceipt, AcquiredExtensionTreeReceipt,
+    AcquiredExtensionTreeReceiptError, MAX_ACQUIRED_ARCHIVE_CENTRAL_DIRECTORY_BYTES,
+    MAX_ACQUIRED_ARCHIVE_RETAINED_BYTES, MAX_ACQUIRED_TREE_RECEIPT_RETAINED_BYTES,
 };

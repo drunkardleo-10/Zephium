@@ -4,7 +4,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{ExtensionArchiveDigest, ExtensionPackagePayloadIdentity};
-use zephium_extension_acquisition::AcquiredExtensionArchive;
+use zephium_extension_acquisition::{AcquiredExtensionArchive, AcquiredExtensionTreeReceipt};
 use zephium_extension_package::{
     ChromiumExtensionId, VerifiedCrx3Package, MAX_CRX3_HEADER_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
 };
@@ -27,8 +27,9 @@ pub(crate) fn check(path: &Path, expected_id: &str) -> Result<(), String> {
 ///
 /// This remains an offline probe utility, not product admission. It now uses
 /// the same bounded archive parser and streaming file boundary intended for
-/// acquired product packages; the resulting tree still needs a catalog
-/// envelope, canonical tree receipt, admitted manifest, and repository lease.
+/// acquired product packages and completes the same canonical stream receipt;
+/// the resulting tree still needs an authenticated catalog binding, admitted
+/// manifest, durable repository verification, and live lease.
 pub(crate) fn materialize_probe(
     path: &Path,
     expected_id: &str,
@@ -60,7 +61,7 @@ pub(crate) fn materialize_probe(
         .map_err(|error| format!("cannot atomically reserve materialization output: {error}"))?;
     restrict_directory(&output)?;
     let incomplete = output.join(".zephium-incomplete");
-    if let Err(error) = (|| {
+    let tree = match (|| {
         let marker = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -69,22 +70,29 @@ pub(crate) fn materialize_probe(
         marker
             .sync_all()
             .map_err(|error| format!("cannot sync materialization marker: {error}"))?;
-        extract_archive(&mut acquired, &output)?;
+        let tree = extract_archive(&mut acquired, &output)?;
         sync_directory(&output)?;
         fs::remove_file(&incomplete)
             .map_err(|error| format!("cannot retire materialization marker: {error}"))?;
-        sync_directory(&output)
+        sync_directory(&output)?;
+        Ok::<_, String>(tree)
     })() {
-        let _ = fs::remove_dir_all(&output);
-        return Err(error);
-    }
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&output);
+            return Err(error);
+        }
+    };
     sync_directory(&parent)?;
 
     print_authentication(&bytes, &package, &acquired);
     println!(
-        "CRX3 probe materialization passed: files={}; bytes={}; product_authority=false",
+        "CRX3 probe materialization passed: files={}; bytes={}; tree_sha256={}; index_sha256={}; receipt_retained_bytes={}; product_authority=false",
         acquired.files().len(),
         acquired.total_bytes(),
+        lower_hex(&tree.index().tree_sha256().bytes()),
+        lower_hex(&tree.index().index_sha256().bytes()),
+        tree.retained_bytes(),
     );
     Ok(())
 }
@@ -97,7 +105,11 @@ fn acquired_payload(archive: &[u8]) -> Result<ExtensionPackagePayloadIdentity, S
     .ok_or_else(|| "authenticated CRX ZIP is outside the acquired-payload bound".to_owned())
 }
 
-fn extract_archive(archive: &mut AcquiredExtensionArchive<'_>, root: &Path) -> Result<(), String> {
+fn extract_archive(
+    archive: &mut AcquiredExtensionArchive<'_>,
+    root: &Path,
+) -> Result<AcquiredExtensionTreeReceipt, String> {
+    let mut receipts = Vec::with_capacity(archive.files().len());
     for index in 0..archive.files().len() {
         let relative = archive.files()[index].path().as_str().to_owned();
         let destination = root.join(&relative);
@@ -112,7 +124,7 @@ fn extract_archive(archive: &mut AcquiredExtensionArchive<'_>, root: &Path) -> R
             .create_new(true)
             .open(&destination)
             .map_err(|error| format!("cannot create materialized file {relative:?}: {error}"))?;
-        archive
+        let receipt = archive
             .copy_file(index, &mut output)
             .map_err(|error| format!("cannot copy materialized file {relative:?}: {error}"))?;
         output
@@ -121,8 +133,11 @@ fn extract_archive(archive: &mut AcquiredExtensionArchive<'_>, root: &Path) -> R
             .map_err(|error| {
                 format!("cannot durably write materialized file {relative:?}: {error}")
             })?;
+        receipts.push(receipt);
     }
-    Ok(())
+    archive
+        .finish_tree(receipts)
+        .map_err(|error| format!("cannot complete canonical materialization receipt: {error}"))
 }
 
 fn read_crx(path: &Path) -> Result<Vec<u8>, String> {

@@ -2,13 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
 use std::mem::size_of;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zephium_core::extensions::ExtensionPackagePayloadIdentity;
 use zephium_extension_package::{
-    ChromiumExtensionId, ChromiumManifestKeyDigest, Crx3PackageError, PortableRelativePath,
-    VerifiedCrx3Package, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES,
-    MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_FILE_BYTES,
+    CanonicalExtensionTreeIndex, ChromiumExtensionId, ChromiumManifestKeyDigest, Crx3PackageError,
+    ExtensionReleasePackage, ExtensionReleaseTreeBinding, ExtensionTreeIndexError,
+    PortableRelativePath, VerifiedCrx3Package, MAX_EXTENSION_MANIFEST_BYTES,
+    MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILES,
+    MAX_EXTENSION_TREE_FILE_BYTES, MAX_EXTENSION_TREE_INDEX_BYTES,
+    MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES,
 };
 use zip::read::{ArchiveOffset, Config};
 use zip::{CompressionMethod, ZipArchive};
@@ -27,6 +31,7 @@ const UNIX_REGULAR_FILE: u32 = 0o100_000;
 const UNIX_DIRECTORY: u32 = 0o040_000;
 const ENTRY_ACCOUNTING_OVERHEAD: usize = 1_024;
 const ARCHIVE_ACCOUNTING_OVERHEAD: usize = 4_096;
+const TREE_RECEIPT_ACCOUNTING_OVERHEAD: usize = 4_096;
 const MAX_ENTRY_EXTRA_BYTES: usize = 4 * 1_024;
 
 /// Maximum central-directory bytes accepted before the ZIP crate may allocate.
@@ -42,6 +47,15 @@ pub const MAX_ACQUIRED_ARCHIVE_CENTRAL_DIRECTORY_BYTES: usize = 8 * 1_024 * 1_02
 /// package-neutral file plan, and conservative per-entry allocator overhead.
 /// The authenticated CRX and ZIP bytes are borrowed and are not charged here.
 pub const MAX_ACQUIRED_ARCHIVE_RETAINED_BYTES: usize = 16 * 1_024 * 1_024;
+
+/// Maximum logical heap retained by one completed acquired-tree receipt.
+///
+/// The receipt deliberately keeps both the exact canonical index bytes and
+/// the independently parsed index. Keeping both avoids reconstructing trust
+/// evidence later while making their combined memory cost explicit.
+pub const MAX_ACQUIRED_TREE_RECEIPT_RETAINED_BYTES: usize = MAX_EXTENSION_TREE_INDEX_BYTES
+    + MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES
+    + TREE_RECEIPT_ACCOUNTING_OVERHEAD;
 
 /// Stable refusal while authenticating and preflighting an acquired archive.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -59,6 +73,12 @@ pub enum AcquiredExtensionArchiveError {
     /// CRX3 developer authentication failed.
     #[error("acquired extension CRX3 authentication failed: {0}")]
     Crx3(#[from] Crx3PackageError),
+    /// The release row omits the Chromium identity required by a CRX package.
+    #[error("acquired extension release package has no Chromium identity")]
+    MissingChromiumIdentity,
+    /// The complete CRX developer-key digest differs from the release row.
+    #[error("acquired extension CRX developer key does not match the release package")]
+    DeveloperKeyMismatch,
     /// The classic ZIP end record is missing, duplicated, or not terminal.
     #[error("acquired extension ZIP has an ambiguous end record")]
     AmbiguousEndRecord,
@@ -86,6 +106,9 @@ pub enum AcquiredExtensionArchiveError {
     /// The archive does not contain exactly one root manifest file.
     #[error("acquired extension ZIP has no canonical root manifest")]
     MissingManifest,
+    /// The root manifest is empty or exceeds the manifest parser ceiling.
+    #[error("acquired extension ZIP root manifest has an invalid size")]
+    InvalidManifestSize,
     /// File count, per-file bytes, or aggregate expanded bytes exceed policy.
     #[error("acquired extension ZIP expanded tree exceeds its bound")]
     ExpandedTreeExceeded,
@@ -113,6 +136,114 @@ pub enum AcquiredExtensionArchiveReadError {
     /// The decompressor produced a different exact byte length.
     #[error("acquired extension file length changed")]
     LengthChanged,
+}
+
+/// Stable refusal while completing or binding one streamed acquired tree.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum AcquiredExtensionTreeReceiptError {
+    /// File receipts are missing, repeated, or belong to another payload.
+    #[error("acquired extension file receipts do not form one exact tree")]
+    InvalidReceiptCohort,
+    /// Canonical tree-index serialization failed.
+    #[error("acquired extension tree index could not be encoded")]
+    TreeIndexEncoding,
+    /// The shared canonical tree parser rejected the derived inventory.
+    #[error("acquired extension tree index is invalid: {0}")]
+    TreeIndexInvalid(#[source] ExtensionTreeIndexError),
+    /// The release row does not name this payload, tree, or Chromium identity.
+    #[error("acquired extension tree does not match the release package")]
+    ReleasePackageMismatch,
+    /// Bounded accounting overflowed or exceeded the receipt ceiling.
+    #[error("acquired extension tree receipt accounting failed")]
+    AccountingExceeded,
+}
+
+/// Proof that one planned archive file was streamed completely to a writer.
+///
+/// Fields are private and the value is not cloneable. Only
+/// [`AcquiredExtensionArchive::copy_file`] can issue a receipt, after exact
+/// decompressed length and ZIP CRC validation. This is a stream receipt, not a
+/// claim that an arbitrary writer persisted the bytes durably.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "a streamed file receipt must be included in exact tree completion"]
+pub struct AcquiredExtensionFileReceipt {
+    payload: ExtensionPackagePayloadIdentity,
+    file_index: usize,
+    length: u64,
+    sha256: [u8; 32],
+}
+
+/// Canonical identity of one completely streamed acquired extension tree.
+///
+/// This value binds exact file bytes, the authenticated CRX developer key, and
+/// the acquired ZIP payload. It remains structural evidence: release catalog
+/// authentication, manifest admission, durable staging verification, and
+/// atomic repository publication are separate authority boundaries.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "an acquired tree receipt must be bound before repository publication"]
+pub struct AcquiredExtensionTreeReceipt {
+    payload: ExtensionPackagePayloadIdentity,
+    extension_id: ChromiumExtensionId,
+    developer_key_sha256: ChromiumManifestKeyDigest,
+    index_bytes: Box<[u8]>,
+    index: CanonicalExtensionTreeIndex,
+    retained_bytes: usize,
+}
+
+impl AcquiredExtensionTreeReceipt {
+    /// Returns the exact authenticated acquired-ZIP identity.
+    pub const fn payload_identity(&self) -> ExtensionPackagePayloadIdentity {
+        self.payload
+    }
+
+    /// Returns the Chromium id derived from the authenticated CRX key.
+    pub const fn extension_id(&self) -> &ChromiumExtensionId {
+        &self.extension_id
+    }
+
+    /// Returns SHA-256 of the exact authenticated CRX developer key.
+    pub const fn developer_key_sha256(&self) -> ChromiumManifestKeyDigest {
+        self.developer_key_sha256
+    }
+
+    /// Returns exact canonical tree-index bytes.
+    pub const fn index_bytes(&self) -> &[u8] {
+        &self.index_bytes
+    }
+
+    /// Returns the independently parsed canonical tree index.
+    pub const fn index(&self) -> &CanonicalExtensionTreeIndex {
+        &self.index
+    }
+
+    /// Returns the conservative logical retained-memory charge.
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Cross-validates this receipt with one structurally parsed release row.
+    ///
+    /// The caller must separately prove that the row belongs to an admitted,
+    /// authenticated catalog. This method also requires the complete CRX key
+    /// digest, rather than relying only on the 128-bit Chromium id.
+    pub fn bind_release_package<'receipt>(
+        &'receipt self,
+        package: &'receipt ExtensionReleasePackage,
+    ) -> Result<ExtensionReleaseTreeBinding<'receipt>, AcquiredExtensionTreeReceiptError> {
+        let chromium = package
+            .chromium()
+            .ok_or(AcquiredExtensionTreeReceiptError::ReleasePackageMismatch)?;
+        if package.payload() != self.payload
+            || chromium.extension_id() != &self.extension_id
+            || chromium.manifest_key_sha256() != self.developer_key_sha256
+        {
+            return Err(AcquiredExtensionTreeReceiptError::ReleasePackageMismatch);
+        }
+        package
+            .bind_tree_index(&self.index)
+            .map_err(|_| AcquiredExtensionTreeReceiptError::ReleasePackageMismatch)
+    }
 }
 
 /// One canonical regular file in an authenticated acquired archive.
@@ -166,16 +297,48 @@ pub struct AcquiredExtensionArchive<'archive> {
 }
 
 impl<'archive> AcquiredExtensionArchive<'archive> {
+    /// Authenticates CRX3 bytes against one structurally parsed release row.
+    ///
+    /// The caller must separately prove that the release row belongs to an
+    /// admitted, authenticated catalog. Unlike [`Self::authenticate_crx3`],
+    /// this production-shaped boundary checks the complete 256-bit developer
+    /// key digest in addition to the derived Chromium id.
+    pub fn authenticate_release_package_crx3(
+        bytes: &'archive [u8],
+        package: &ExtensionReleasePackage,
+    ) -> Result<Self, AcquiredExtensionArchiveError> {
+        let chromium = package
+            .chromium()
+            .ok_or(AcquiredExtensionArchiveError::MissingChromiumIdentity)?;
+        let crx = VerifiedCrx3Package::parse_and_verify(bytes, Some(chromium.extension_id()))?;
+        if crx.developer_key_sha256() != chromium.manifest_key_sha256() {
+            return Err(AcquiredExtensionArchiveError::DeveloperKeyMismatch);
+        }
+        Self::from_verified_crx3(crx, package.payload())
+    }
+
     /// Authenticates and preflights exact CRX3 bytes against product evidence.
+    ///
+    /// This lower-level boundary is useful for diagnostics with an independently
+    /// trusted id and payload. Product materialization should prefer
+    /// [`Self::authenticate_release_package_crx3`] so the full developer-key
+    /// digest is bound before any file can be streamed.
     pub fn authenticate_crx3(
         bytes: &'archive [u8],
         expected_id: &ChromiumExtensionId,
         expected_payload: ExtensionPackagePayloadIdentity,
     ) -> Result<Self, AcquiredExtensionArchiveError> {
+        let crx = VerifiedCrx3Package::parse_and_verify(bytes, Some(expected_id))?;
+        Self::from_verified_crx3(crx, expected_payload)
+    }
+
+    fn from_verified_crx3(
+        crx: VerifiedCrx3Package<'archive>,
+        expected_payload: ExtensionPackagePayloadIdentity,
+    ) -> Result<Self, AcquiredExtensionArchiveError> {
         let (expected_length, expected_digest) = expected_payload
             .acquired_zip_evidence()
             .ok_or(AcquiredExtensionArchiveError::ExpectedAcquiredZip)?;
-        let crx = VerifiedCrx3Package::parse_and_verify(bytes, Some(expected_id))?;
         let zip_bytes = crx.archive_bytes();
         if usize::try_from(expected_length.get()).ok() != Some(zip_bytes.len()) {
             return Err(AcquiredExtensionArchiveError::ArchiveLengthMismatch);
@@ -252,7 +415,7 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
         &mut self,
         file_index: usize,
         destination: &mut impl Write,
-    ) -> Result<(), AcquiredExtensionArchiveReadError> {
+    ) -> Result<AcquiredExtensionFileReceipt, AcquiredExtensionArchiveReadError> {
         let Some(plan) = self.files.get(file_index) else {
             return Err(AcquiredExtensionArchiveReadError::InvalidIndex);
         };
@@ -274,8 +437,12 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
         {
             return Err(AcquiredExtensionArchiveReadError::MetadataChanged);
         }
-        let copied = std::io::copy(&mut entry.by_ref().take(expected_length), destination)
-            .map_err(|_| AcquiredExtensionArchiveReadError::CopyFailed)?;
+        let mut digesting_destination = DigestingWriter::new(destination);
+        let copied = std::io::copy(
+            &mut entry.by_ref().take(expected_length),
+            &mut digesting_destination,
+        )
+        .map_err(|_| AcquiredExtensionArchiveReadError::CopyFailed)?;
         if copied != expected_length {
             return Err(AcquiredExtensionArchiveReadError::LengthChanged);
         }
@@ -285,7 +452,94 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
             Ok(_) => return Err(AcquiredExtensionArchiveReadError::LengthChanged),
             Err(_) => return Err(AcquiredExtensionArchiveReadError::CopyFailed),
         }
-        Ok(())
+        Ok(AcquiredExtensionFileReceipt {
+            payload: self.payload,
+            file_index,
+            length: copied,
+            sha256: digesting_destination.finish(),
+        })
+    }
+
+    /// Completes one canonical tree from exactly one receipt per planned file.
+    ///
+    /// Receipts may arrive in any order. This method rejects missing,
+    /// duplicate, foreign-payload, or metadata-inconsistent receipts, derives
+    /// canonical index bytes, and sends those bytes through the same bounded
+    /// parser used for signed release indexes before returning evidence.
+    pub fn finish_tree(
+        &self,
+        receipts: impl IntoIterator<Item = AcquiredExtensionFileReceipt>,
+    ) -> Result<AcquiredExtensionTreeReceipt, AcquiredExtensionTreeReceiptError> {
+        let mut digests = vec![None; self.files.len()];
+        let mut observed = 0_usize;
+        for receipt in receipts {
+            observed = observed
+                .checked_add(1)
+                .ok_or(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort)?;
+            let Some(plan) = self.files.get(receipt.file_index) else {
+                return Err(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort);
+            };
+            let Some(slot) = digests.get_mut(receipt.file_index) else {
+                return Err(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort);
+            };
+            if observed > self.files.len()
+                || receipt.payload != self.payload
+                || receipt.length != plan.length
+                || slot.is_some()
+            {
+                return Err(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort);
+            }
+            *slot = Some(receipt.sha256);
+        }
+        if observed != self.files.len() || digests.iter().any(Option::is_none) {
+            return Err(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort);
+        }
+
+        let files = self
+            .files
+            .iter()
+            .zip(digests)
+            .map(|(file, sha256)| {
+                Ok(CanonicalTreeFile {
+                    path: file.path.as_str(),
+                    length: file.length,
+                    sha256: lower_hex(
+                        sha256.ok_or(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort)?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, AcquiredExtensionTreeReceiptError>>()?;
+        let encoded = serde_json::to_vec(&CanonicalTree {
+            schema_version: 1,
+            files,
+        })
+        .map_err(|_| AcquiredExtensionTreeReceiptError::TreeIndexEncoding)?;
+        if encoded.len() > MAX_EXTENSION_TREE_INDEX_BYTES {
+            return Err(AcquiredExtensionTreeReceiptError::TreeIndexInvalid(
+                ExtensionTreeIndexError::Json(zephium_extension_package::BoundedJsonError::Size),
+            ));
+        }
+        let index = CanonicalExtensionTreeIndex::parse_canonical(&encoded)
+            .map_err(AcquiredExtensionTreeReceiptError::TreeIndexInvalid)?;
+        if index.files().len() != self.files.len() || index.total_bytes() != self.total_bytes {
+            return Err(AcquiredExtensionTreeReceiptError::InvalidReceiptCohort);
+        }
+        let retained_bytes = size_of::<AcquiredExtensionTreeReceipt>()
+            .checked_add(encoded.len())
+            .and_then(|bytes| bytes.checked_add(index.retained_bytes()))
+            .and_then(|bytes| bytes.checked_add(self.extension_id.as_str().len()))
+            .ok_or(AcquiredExtensionTreeReceiptError::AccountingExceeded)?;
+        if retained_bytes > MAX_ACQUIRED_TREE_RECEIPT_RETAINED_BYTES {
+            return Err(AcquiredExtensionTreeReceiptError::AccountingExceeded);
+        }
+        Ok(AcquiredExtensionTreeReceipt {
+            payload: self.payload,
+            extension_id: self.extension_id.clone(),
+            developer_key_sha256: self.developer_key_sha256,
+            index_bytes: encoded.into_boxed_slice(),
+            index,
+            retained_bytes,
+        })
     }
 }
 
@@ -302,6 +556,65 @@ impl std::fmt::Debug for AcquiredExtensionArchive<'_> {
             .field("retained_bytes", &self.retained_bytes)
             .finish_non_exhaustive()
     }
+}
+
+struct DigestingWriter<'writer, W> {
+    destination: &'writer mut W,
+    digest: Sha256,
+}
+
+impl<'writer, W> DigestingWriter<'writer, W> {
+    fn new(destination: &'writer mut W) -> Self {
+        Self {
+            destination,
+            digest: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.digest.finalize().into()
+    }
+}
+
+impl<W: Write> Write for DigestingWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.destination.write(bytes)?;
+        let accepted = bytes.get(..written).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "destination over-reported accepted bytes",
+            )
+        })?;
+        self.digest.update(accepted);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.destination.flush()
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalTree<'path> {
+    schema_version: u32,
+    files: Vec<CanonicalTreeFile<'path>>,
+}
+
+#[derive(Serialize)]
+struct CanonicalTreeFile<'path> {
+    path: &'path str,
+    length: u64,
+    sha256: String,
+}
+
+fn lower_hex(bytes: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -473,6 +786,9 @@ fn preflight_entries<'archive>(
             if portable.as_str() == "manifest.json" {
                 if manifest_seen {
                     return Err(AcquiredExtensionArchiveError::DuplicatePath);
+                }
+                if length == 0 || length > MAX_EXTENSION_MANIFEST_BYTES as u64 {
+                    return Err(AcquiredExtensionArchiveError::InvalidManifestSize);
                 }
                 manifest_seen = true;
             }
@@ -680,6 +996,7 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
     use zephium_core::extensions::{ExtensionArchiveDigest, ExtensionPackagePayloadIdentity};
+    use zephium_extension_package::ExtensionReleaseCatalog;
     use zip::write::SimpleFileOptions;
 
     const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
@@ -778,6 +1095,48 @@ mod tests {
         .unwrap()
     }
 
+    fn stream_tree(
+        acquired: &mut AcquiredExtensionArchive<'_>,
+    ) -> (Vec<Vec<u8>>, AcquiredExtensionTreeReceipt) {
+        let mut files = Vec::new();
+        let mut receipts = Vec::new();
+        for index in 0..acquired.files().len() {
+            let mut bytes = Vec::new();
+            receipts.push(acquired.copy_file(index, &mut bytes).unwrap());
+            files.push(bytes);
+        }
+        let tree = acquired.finish_tree(receipts).unwrap();
+        (files, tree)
+    }
+
+    fn catalog_for(
+        archive: &[u8],
+        tree: &AcquiredExtensionTreeReceipt,
+        chromium_key: ChromiumManifestKeyDigest,
+    ) -> ExtensionReleaseCatalog {
+        let (_, archive_sha256) = payload(archive).acquired_zip_evidence().unwrap();
+        let index = tree.index();
+        let bytes = format!(
+            concat!(
+                r#"{{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"{}","admission_policy_sha256":"{}","packages":[{{"package_key":"{}","revision":1,"payload":{{"kind":"acquired_zip","length":{},"sha256":"{}"}},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_index_length":{},"tree_file_count":{},"tree_bytes":{},"chromium":{{"manifest_key_sha256":"{}"}},"provenance":{{"source_url":"https://example.com/releases/v1/extension.crx","upstream_version":"1","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MIT","attribution":"Example","redistribution":"Reviewed unmodified upstream release","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}]}}"#,
+            ),
+            lower_hex([1; 32]),
+            lower_hex([2; 32]),
+            lower_hex([3; 32]),
+            archive.len(),
+            lower_hex(archive_sha256.bytes()),
+            lower_hex(index.manifest_sha256().bytes()),
+            lower_hex(index.tree_sha256().bytes()),
+            lower_hex(index.index_sha256().bytes()),
+            index.index_bytes(),
+            index.files().len(),
+            index.total_bytes(),
+            lower_hex(chromium_key.bytes()),
+            lower_hex([8; 32]),
+        );
+        ExtensionReleaseCatalog::parse_canonical(bytes.as_bytes()).unwrap()
+    }
+
     #[test]
     fn authenticates_preflights_and_streams_one_exact_crx_tree() {
         let archive = zip(&[
@@ -795,7 +1154,7 @@ mod tests {
         assert_eq!(acquired.total_bytes(), 23);
         assert!(acquired.retained_bytes() <= MAX_ACQUIRED_ARCHIVE_RETAINED_BYTES);
         let mut manifest = Vec::new();
-        acquired.copy_file(0, &mut manifest).unwrap();
+        let _receipt = acquired.copy_file(0, &mut manifest).unwrap();
         assert_eq!(manifest, br#"{"manifest_version":3}"#);
     }
 
@@ -812,8 +1171,170 @@ mod tests {
                 .unwrap();
         assert!(acquired.files()[0].compressed_length() < acquired.files()[0].length());
         let mut observed = Vec::new();
-        acquired.copy_file(0, &mut observed).unwrap();
+        let _receipt = acquired.copy_file(0, &mut observed).unwrap();
         assert_eq!(observed, body);
+    }
+
+    #[test]
+    fn streamed_receipts_derive_one_canonical_tree_from_accepted_bytes() {
+        let manifest = br#"{"manifest_version":3}"#;
+        let script = b"console.log('acquired');";
+        let archive = zip_with_method(
+            &[
+                ("manifest.json", manifest.as_slice()),
+                ("src/content.js", script.as_slice()),
+            ],
+            CompressionMethod::Deflated,
+        );
+        let (crx, expected_id) = signed_crx(&archive);
+        let mut acquired =
+            AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                .unwrap();
+        let (observed, tree) = stream_tree(&mut acquired);
+
+        assert_eq!(observed, [manifest.to_vec(), script.to_vec()]);
+        assert_eq!(tree.payload_identity(), payload(&archive));
+        assert_eq!(tree.extension_id(), &expected_id);
+        assert_eq!(tree.index().files().len(), 2);
+        assert_eq!(tree.index().total_bytes(), acquired.total_bytes());
+        assert_eq!(
+            tree.index().files()[0].sha256(),
+            <[u8; 32]>::from(Sha256::digest(manifest))
+        );
+        assert_eq!(
+            tree.index().files()[1].sha256(),
+            <[u8; 32]>::from(Sha256::digest(script))
+        );
+        assert_eq!(
+            CanonicalExtensionTreeIndex::parse_canonical(tree.index_bytes()).unwrap(),
+            *tree.index()
+        );
+        assert!(tree.retained_bytes() <= MAX_ACQUIRED_TREE_RECEIPT_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn tree_completion_rejects_missing_duplicate_and_foreign_receipts() {
+        let archive = zip(&[("manifest.json", b"{}"), ("script.js", b"one")]);
+        let (crx, expected_id) = signed_crx(&archive);
+        let mut acquired =
+            AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                .unwrap();
+        let first = acquired.copy_file(0, &mut Vec::new()).unwrap();
+        assert_eq!(
+            acquired.finish_tree([first]).unwrap_err(),
+            AcquiredExtensionTreeReceiptError::InvalidReceiptCohort
+        );
+
+        let first_a = acquired.copy_file(0, &mut Vec::new()).unwrap();
+        let first_b = acquired.copy_file(0, &mut Vec::new()).unwrap();
+        assert_eq!(
+            acquired.finish_tree([first_a, first_b]).unwrap_err(),
+            AcquiredExtensionTreeReceiptError::InvalidReceiptCohort
+        );
+
+        let foreign_archive = zip(&[("manifest.json", b"{}"), ("script.js", b"two")]);
+        let (foreign_crx, foreign_id) = signed_crx(&foreign_archive);
+        let mut foreign = AcquiredExtensionArchive::authenticate_crx3(
+            &foreign_crx,
+            &foreign_id,
+            payload(&foreign_archive),
+        )
+        .unwrap();
+        let local = acquired.copy_file(0, &mut Vec::new()).unwrap();
+        let foreign = foreign.copy_file(1, &mut Vec::new()).unwrap();
+        assert_eq!(
+            acquired.finish_tree([local, foreign]).unwrap_err(),
+            AcquiredExtensionTreeReceiptError::InvalidReceiptCohort
+        );
+    }
+
+    #[test]
+    fn release_binding_requires_payload_tree_and_full_crx_key_digest() {
+        let archive = zip(&[("manifest.json", br#"{"manifest_version":3}"#)]);
+        let (crx, expected_id) = signed_crx(&archive);
+        let mut acquired =
+            AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                .unwrap();
+        let (_, tree) = stream_tree(&mut acquired);
+
+        let catalog = catalog_for(&archive, &tree, tree.developer_key_sha256());
+        let release_acquired = AcquiredExtensionArchive::authenticate_release_package_crx3(
+            &crx,
+            &catalog.packages()[0],
+        )
+        .unwrap();
+        assert_eq!(
+            release_acquired.developer_key_sha256(),
+            tree.developer_key_sha256()
+        );
+        let binding = tree.bind_release_package(&catalog.packages()[0]).unwrap();
+        assert_eq!(binding.index(), tree.index());
+        assert_eq!(binding.package(), &catalog.packages()[0]);
+
+        let mut colliding_id_key = tree.developer_key_sha256().bytes();
+        colliding_id_key[31] ^= 1;
+        let wrong_key = ChromiumManifestKeyDigest::from_bytes(colliding_id_key);
+        let wrong_catalog = catalog_for(&archive, &tree, wrong_key);
+        assert_eq!(
+            wrong_catalog.packages()[0]
+                .chromium()
+                .unwrap()
+                .extension_id(),
+            tree.extension_id()
+        );
+        assert_eq!(
+            AcquiredExtensionArchive::authenticate_release_package_crx3(
+                &crx,
+                &wrong_catalog.packages()[0],
+            )
+            .unwrap_err(),
+            AcquiredExtensionArchiveError::DeveloperKeyMismatch
+        );
+        assert_eq!(
+            tree.bind_release_package(&wrong_catalog.packages()[0])
+                .unwrap_err(),
+            AcquiredExtensionTreeReceiptError::ReleasePackageMismatch
+        );
+    }
+
+    #[test]
+    fn failed_or_invalid_writers_cannot_issue_file_receipts() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("refused"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct OverReportingWriter;
+        impl Write for OverReportingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len() + 1)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let archive = zip(&[("manifest.json", b"{}")]);
+        let (crx, expected_id) = signed_crx(&archive);
+        for mut destination in [
+            Box::new(FailingWriter) as Box<dyn Write>,
+            Box::new(OverReportingWriter) as Box<dyn Write>,
+        ] {
+            let mut acquired =
+                AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                    .unwrap();
+            assert_eq!(
+                acquired.copy_file(0, &mut destination).unwrap_err(),
+                AcquiredExtensionArchiveReadError::CopyFailed
+            );
+        }
     }
 
     #[test]
@@ -939,6 +1460,22 @@ mod tests {
             preflight_entries(parsed, &archive, envelope).unwrap_err(),
             AcquiredExtensionArchiveError::MissingManifest
         );
+
+        for manifest in [Vec::new(), vec![b'x'; MAX_EXTENSION_MANIFEST_BYTES + 1]] {
+            let archive = zip(&[("manifest.json", manifest.as_slice())]);
+            let envelope = preflight_envelope(&archive).unwrap();
+            let parsed = ZipArchive::with_config(
+                Config {
+                    archive_offset: ArchiveOffset::Known(0),
+                },
+                Cursor::new(archive.as_slice()),
+            )
+            .unwrap();
+            assert_eq!(
+                preflight_entries(parsed, &archive, envelope).unwrap_err(),
+                AcquiredExtensionArchiveError::InvalidManifestSize
+            );
+        }
 
         let mut trailing = zip(&[("manifest.json", b"{}")]);
         trailing.push(0);

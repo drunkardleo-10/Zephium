@@ -951,7 +951,10 @@ the exact package authority and their old identities can never be reused.
 not linked into the ordinary inert product path by any runtime crate. It accepts
 only CRX3 bytes whose signed developer key derives the product-expected
 Chromium id and whose inner ZIP byte length and SHA-256 exactly match an
-`AcquiredZip` catalog identity. Before constructing the ZIP parser, an
+`AcquiredZip` catalog identity. The production-shaped release-row constructor
+also requires the complete 256-bit CRX developer-key digest from the row's
+Chromium identity; the shorter derived extension id is not treated as complete
+key authority. Before constructing the ZIP parser, an
 allocation-free terminal-record preflight bounds the entry count and central
 directory. Complete preflight then admits only stored or deflated ordinary
 files/directories, canonical ASCII portable paths, one root `manifest.json`,
@@ -960,13 +963,23 @@ ceilings. It rejects ZIP64/multi-disk framing, encryption, links and special
 files, duplicate/case/device/file-directory aliases, ambiguous local headers,
 and overlapping payload regions. Files can leave the boundary only through a
 bounded streaming copy that reaches EOF and therefore checks decompression,
-exact length, and ZIP CRC; the boundary opens no paths itself. The offline CRX
-probe materializer consumes this same implementation so diagnostic and future
-product definitions of safe extraction cannot drift. This is still structural
-evidence, not release authority, transport, or durable materialization: a
-product path must next stage the streamed files in the private repository,
-derive and authenticate the canonical tree/index and manifest, and publish the
-package record atomically before install or activation.
+exact length, and ZIP CRC; the boundary opens no paths itself. Every successful
+copy returns one non-cloneable receipt containing the digest of the exact byte
+prefix the destination writer accepted. An exact, duplicate-free receipt cohort
+derives canonical tree-index bytes, reparses them through the shared bounded
+canonical index boundary, and retains both forms under one named memory
+ceiling. Binding that completed tree to a release row rechecks the acquired
+payload, full CRX key digest, derived id, manifest digest, tree digest, index
+digest/length, file count, and aggregate bytes.
+
+The offline CRX probe materializer consumes this same implementation and
+completes the stream receipt after per-file synchronization, so diagnostic and
+future product definitions of safe extraction cannot drift. This remains
+structural evidence, not release authority, transport, or proof that an
+arbitrary writer durably preserved what it accepted. A product path must next
+stage files in the private repository, re-open and re-hash the closed staged
+tree, admit the authenticated catalog row and manifest, persist the canonical
+index, and publish the package record atomically before install or activation.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,
@@ -1151,8 +1164,9 @@ payload. The offline probe materializer then preflights every archive entry,
 rejects encryption, links, special files, nonportable paths, cross-platform
 collisions, file/directory conflicts, duplicate entries, and decompression
 budget violations before writing into a private, incomplete-marked,
-no-replace tree. A canonical closed-tree index is still diagnostic evidence;
-catalog release authority, a materialization receipt, and a live lease remain
+no-replace tree. It now completes the canonical stream receipt, but that receipt
+still does not prove a filesystem snapshot: catalog release authority, staged
+tree re-verification, atomic repository publication, and a live lease remain
 separate requirements.
 
 The second stock-manager gate uses the unmodified Chrome Web Store CRX for
