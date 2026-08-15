@@ -46,6 +46,12 @@ pub const MAX_EXTENSION_MANIFEST_DECLARATIONS: usize = MAX_EXTENSION_API_PERMISS
     + MAX_EXTENSION_UNMODELED_DECLARATIONS
     + 15;
 pub const MAX_EXTENSION_MANIFEST_RETAINED_BYTES: usize = 4 * 1024 * 1024;
+/// Exact reviewed profile that authorizes Zephium's sealed macOS broker.
+///
+/// This is a compatibility profile, not a durable native backend: both the
+/// ordinary and brokered profiles are owned by the same `WKWebExtension`
+/// controller namespace.
+pub const MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET: &str = "macos.wkwebextension-brokered.v1";
 
 const MANIFEST_ACCOUNTING_FIXED_BYTES: usize = 2 * 1024;
 const PACKAGE_LINE_IDENTITY_DOMAIN: &[u8] = b"zephium.extension.package-line-identity.v1\0";

@@ -18,8 +18,8 @@ use zephium_core::extensions::{
     ExtensionAuthorityId, ExtensionCompatibilityLevel, ExtensionCompatibilityProfileDigest,
     ExtensionCompatibilityTargetId, ExtensionManifestDeclaration, ExtensionManifestDescriptor,
     ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackageRevision, ExtensionTreeDigest, MAX_EXTENSION_MANIFEST_DECLARATIONS,
-    MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ExtensionPackageRevision, ExtensionTreeDigest, MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+    MAX_EXTENSION_MANIFEST_DECLARATIONS, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 #[cfg(zephium_internal_repository_e2e)]
 use zephium_extension_package::ExtensionReleaseCatalog;
@@ -48,7 +48,7 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
-const MAX_PRODUCT_RUNTIME_TARGETS: usize = 4;
+const MAX_PRODUCT_RUNTIME_TARGETS: usize = 5;
 const MACOS_NATIVE_COMPATIBILITY_TARGET: &str = "macos.wkwebextension.v1";
 const MACOS_COMPATIBILITY_TARGET: &str = "macos.zephium-mv3-compat.v1";
 const LINUX_COMPATIBILITY_TARGET: &str = "linux.zephium-mv3-compat.v1";
@@ -104,6 +104,8 @@ pub const MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES: usize =
 pub enum ProductExtensionRuntimeTarget {
     /// Apple's native `WKWebExtension` runtime.
     MacosNative,
+    /// Apple's native runtime plus Zephium's sealed one-shot broker schema.
+    MacosNativeBrokered,
     /// Zephium's compatibility runtime hosted by `WKWebView`.
     MacosCompatibility,
     /// Zephium's compatibility runtime hosted by WebKitGTK.
@@ -121,6 +123,7 @@ impl ProductExtensionRuntimeTarget {
     pub const fn compatibility_target_id(self) -> &'static str {
         match self {
             Self::MacosNative => MACOS_NATIVE_COMPATIBILITY_TARGET,
+            Self::MacosNativeBrokered => MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
             Self::MacosCompatibility => MACOS_COMPATIBILITY_TARGET,
             Self::LinuxCompatibility => LINUX_COMPATIBILITY_TARGET,
             Self::WindowsNative => WINDOWS_NATIVE_COMPATIBILITY_TARGET,
@@ -1121,11 +1124,11 @@ fn validate_catalog_generations(
     Ok(())
 }
 
-// Deliberately absent from ordinary builds until the exact reviewed Bitwarden
-// Core manifests, redistribution artifacts, active and rollback catalog
-// anchors, per-backend compatibility matrices, and admission digests are
-// available. This is the only production provisioning slot; never populate it
-// from runtime bytes, configuration, or environment variables.
+// Deliberately absent from ordinary builds until exact reviewed extension
+// manifests, redistribution artifacts, active and rollback catalog anchors,
+// per-profile compatibility matrices, and admission digests are available.
+// This is the only production provisioning slot; never populate it from
+// runtime bytes, configuration, or environment variables.
 #[cfg(not(zephium_internal_repository_e2e))]
 fn sealed_product_manifest_provisioning(
 ) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
@@ -1289,9 +1292,9 @@ const fn repository_e2e_runtime_targets() -> &'static [ProductExtensionRuntimeTa
     &[ProductExtensionRuntimeTarget::WindowsNative]
 }
 
-const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION == 32);
-const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES == 32);
-const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_ACROSS_GENERATIONS == 96);
+const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION == 40);
+const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES == 40);
+const _: () = assert!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_ACROSS_GENERATIONS == 120);
 const _: () = assert!(
     MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_ACROSS_GENERATIONS
         == MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION

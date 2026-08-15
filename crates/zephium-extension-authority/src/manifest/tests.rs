@@ -299,11 +299,11 @@ fn authority_with_rollback(
 #[cfg(not(zephium_internal_repository_e2e))]
 #[test]
 fn production_authority_is_explicitly_unprovisioned() {
-    assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION, 32);
-    assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES, 32);
+    assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION, 40);
+    assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES, 40);
     assert_eq!(
         MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_ACROSS_GENERATIONS,
-        96
+        120
     );
     assert!(matches!(
         ProductExtensionManifestAuthority::product(),

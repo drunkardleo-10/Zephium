@@ -20,7 +20,8 @@ use super::cohort::ExtensionGrantCohortEntry;
 use super::transient::ExtensionRuntimeFingerprintInput;
 use super::{
     ApiPermissionName, ExtensionApiGrantDecision, ExtensionCatalogGenerationRole,
-    ExtensionCatalogSetDigest, ExtensionDocumentPurpose, ExtensionGrantAuthority,
+    ExtensionCatalogSetDigest, ExtensionCompatibilityBrokerPurpose,
+    ExtensionCompatibilityBrokerWitness, ExtensionDocumentPurpose, ExtensionGrantAuthority,
     ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision, ExtensionInstall,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
     ExtensionNativeGrantProjection, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
@@ -28,6 +29,7 @@ use super::{
     ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionRuntimeBackendTarget,
     ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
     ExtensionUrlScopeDecision, ExtensionUserInvocationKind,
+    MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -319,6 +321,22 @@ fn scripting_api_permission() -> &'static ApiPermissionName {
         ApiPermissionName::parse_exact("scripting")
             .expect("the closed scripting permission token must remain valid")
     })
+}
+
+fn history_api_permission() -> &'static ApiPermissionName {
+    static HISTORY: OnceLock<ApiPermissionName> = OnceLock::new();
+    HISTORY.get_or_init(|| {
+        ApiPermissionName::parse_exact("history")
+            .expect("the closed history permission token must remain valid")
+    })
+}
+
+fn compatibility_broker_api_permission(
+    purpose: ExtensionCompatibilityBrokerPurpose,
+) -> &'static ApiPermissionName {
+    match purpose {
+        ExtensionCompatibilityBrokerPurpose::RecentHistory => history_api_permission(),
+    }
 }
 
 fn invocation_api_permission(
@@ -862,6 +880,38 @@ impl ExtensionRuntimeOperationAuthority {
         })
     }
 
+    /// Mints authority for one closed Zephium compatibility-broker operation.
+    ///
+    /// This does not authorize generic native messaging. The native adapter
+    /// must additionally bind the callback to this exact published runtime,
+    /// accept only Zephium's fixed internal application identifier, and
+    /// consume the returned witness when constructing the Shell request.
+    pub fn mint_compatibility_broker_witness(
+        &self,
+        runtime: &ExtensionRuntimeFingerprint,
+        purpose: ExtensionCompatibilityBrokerPurpose,
+    ) -> Result<ExtensionCompatibilityBrokerWitness, ExtensionOperationAuthorityDenial> {
+        if runtime != &self.fingerprint {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        if self.eligibility.manifest.compatibility_target().as_str()
+            != MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        if self
+            .eligibility
+            .decide_api(compatibility_broker_api_permission(purpose))
+            != ExtensionApiGrantDecision::Granted
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        Ok(ExtensionCompatibilityBrokerWitness::new(
+            self.fingerprint.clone(),
+            purpose,
+        ))
+    }
+
     pub(super) const fn eligibility(&self) -> &ExtensionRuntimeEligibility {
         &self.eligibility
     }
@@ -1029,6 +1079,24 @@ mod tests {
         optional_hosts: &[&str],
         content_script_hosts: &[&[&str]],
     ) -> Arc<ExtensionManifestDescriptor> {
+        projection_manifest_for_target(
+            required_api,
+            optional_api,
+            required_hosts,
+            optional_hosts,
+            content_script_hosts,
+            "test.runtime.authority.v1",
+        )
+    }
+
+    fn projection_manifest_for_target(
+        required_api: &[&str],
+        optional_api: &[&str],
+        required_hosts: &[&str],
+        optional_hosts: &[&str],
+        content_script_hosts: &[&[&str]],
+        compatibility_target: &str,
+    ) -> Arc<ExtensionManifestDescriptor> {
         let scripts = content_script_hosts
             .iter()
             .filter(|patterns| !patterns.is_empty())
@@ -1070,7 +1138,7 @@ mod tests {
                 package(),
                 3,
                 declarations,
-                ExtensionCompatibilityTargetId::parse_exact("test.runtime.authority.v1").unwrap(),
+                ExtensionCompatibilityTargetId::parse_exact(compatibility_target).unwrap(),
                 compatibility,
             )
             .unwrap(),
@@ -1701,6 +1769,94 @@ mod tests {
                 ExtensionDocumentPurpose::InsertCss,
             ),
             Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch)
+        ));
+    }
+
+    #[test]
+    fn compatibility_broker_witness_requires_exact_history_authority() {
+        let profile = ProfileId::from(63);
+        let install_id = ExtensionInstallId::from(65);
+        let generation = ExtensionRuntimeGeneration::new(69).unwrap();
+        let history_manifest = projection_manifest_for_target(
+            &["history"],
+            &[],
+            &[],
+            &[],
+            &[],
+            MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+        );
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            profile,
+            install_id,
+            generation,
+            history_manifest,
+            &["history"],
+            &[],
+            false,
+            false,
+        );
+        let witness = authority
+            .mint_compatibility_broker_witness(
+                &runtime,
+                ExtensionCompatibilityBrokerPurpose::RecentHistory,
+            )
+            .unwrap();
+        assert_eq!(witness.runtime_instance(), runtime.instance());
+        assert_eq!(
+            witness.purpose(),
+            ExtensionCompatibilityBrokerPurpose::RecentHistory
+        );
+        let request = crate::extensions::ExtensionCompatibilityBrokerRequest::authorize(
+            crate::extensions::ExtensionCompatibilityBrokerRequestId::new(1).unwrap(),
+            crate::extensions::ExtensionCompatibilityBrokerOperation::RecentHistory { limit: 25 },
+            witness,
+        )
+        .unwrap();
+        assert_eq!(request.runtime(), runtime.instance());
+
+        let optional_history_manifest = projection_manifest_for_target(
+            &[],
+            &["history"],
+            &[],
+            &[],
+            &[],
+            MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+        );
+        let (without_history, without_history_runtime) = eligible_runtime_with_manifest(
+            profile,
+            install_id,
+            generation.next().unwrap(),
+            optional_history_manifest,
+            &[],
+            &[],
+            false,
+            false,
+        );
+        assert!(matches!(
+            without_history.mint_compatibility_broker_witness(
+                &without_history_runtime,
+                ExtensionCompatibilityBrokerPurpose::RecentHistory,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+        ));
+
+        let ordinary_manifest = projection_manifest(&["history"], &[], &[], &[], &[]);
+        let (ordinary, ordinary_runtime) = eligible_runtime_with_manifest(
+            profile,
+            install_id,
+            generation.next().unwrap().next().unwrap(),
+            ordinary_manifest,
+            &["history"],
+            &[],
+            false,
+            false,
+        );
+        assert!(matches!(
+            ordinary.mint_compatibility_broker_witness(
+                &ordinary_runtime,
+                ExtensionCompatibilityBrokerPurpose::RecentHistory,
+            ),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
         ));
     }
 

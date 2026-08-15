@@ -629,6 +629,9 @@ fn runtime_backend(snapshot: &VerifiedRuntimeSnapshot) -> Option<ExtensionRuntim
         ProductExtensionRuntimeTarget::MacosNative => {
             Some(ExtensionRuntimeBackendTarget::MacosNative)
         }
+        ProductExtensionRuntimeTarget::MacosNativeBrokered => {
+            Some(ExtensionRuntimeBackendTarget::MacosNative)
+        }
         ProductExtensionRuntimeTarget::MacosCompatibility => {
             Some(ExtensionRuntimeBackendTarget::MacosCompatibility)
         }

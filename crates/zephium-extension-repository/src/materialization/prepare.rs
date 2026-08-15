@@ -955,6 +955,9 @@ fn stored_runtime_target(
     #[allow(unreachable_patterns)]
     match runtime_target {
         ProductExtensionRuntimeTarget::MacosNative => Ok(StoredRuntimeTarget::MacosNative),
+        ProductExtensionRuntimeTarget::MacosNativeBrokered => {
+            Ok(StoredRuntimeTarget::MacosNativeBrokered)
+        }
         ProductExtensionRuntimeTarget::MacosCompatibility => {
             Ok(StoredRuntimeTarget::MacosCompatibility)
         }
@@ -1169,6 +1172,10 @@ mod tests {
         assert_eq!(
             stored_runtime_target(ProductExtensionRuntimeTarget::MacosNative).unwrap(),
             StoredRuntimeTarget::MacosNative
+        );
+        assert_eq!(
+            stored_runtime_target(ProductExtensionRuntimeTarget::MacosNativeBrokered).unwrap(),
+            StoredRuntimeTarget::MacosNativeBrokered
         );
         assert_eq!(
             stored_runtime_target(ProductExtensionRuntimeTarget::MacosCompatibility).unwrap(),

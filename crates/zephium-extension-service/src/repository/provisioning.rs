@@ -2,14 +2,13 @@
 
 use std::io::{Cursor, Read};
 
-use zephium_core::extensions::{
-    ExtensionCatalogSetDigest, ExtensionPackageKey, ExtensionRuntimeBackendTarget,
-};
+use zephium_core::extensions::{ExtensionCatalogSetDigest, ExtensionPackageKey};
 use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationOutcome, ExtensionAcquiredCatalogActivationRequest,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionAcquiredRuntimeSelection, MAX_EXTENSION_ACQUIRED_CATALOG_BYTES,
-    MAX_EXTENSION_ACQUIRED_CRX_BYTES, MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES,
+    ExtensionAcquiredRuntimeProfile, ExtensionAcquiredRuntimeSelection,
+    MAX_EXTENSION_ACQUIRED_CATALOG_BYTES, MAX_EXTENSION_ACQUIRED_CRX_BYTES,
+    MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES,
 };
 use zephium_extension_authority::{BundledPackageAuthority, ProductExtensionRuntimeTarget};
 use zephium_extension_package::{
@@ -42,7 +41,7 @@ impl ServiceRepository {
         let Some(repository) = self.repository.as_mut() else {
             return ExtensionAcquiredPackageProvisioningOutcome::Unavailable;
         };
-        let (catalog_bytes, package_key, backend, crx3_bytes, legal_notice_bytes) =
+        let (catalog_bytes, package_key, runtime_profile, crx3_bytes, legal_notice_bytes) =
             request.into_parts();
         let authority = match BundledPackageAuthority::product() {
             Ok(authority) => authority,
@@ -56,7 +55,7 @@ impl ServiceRepository {
         match repository.materialize_active_acquired_package(
             &catalog,
             &catalog_bytes,
-            product_target(backend),
+            product_target(runtime_profile),
             package_key,
             &crx3_bytes,
             &mut legal,
@@ -169,16 +168,19 @@ impl AcquiredReleaseLegalSource for ExactLegalNoticeSource {
     }
 }
 
-const fn product_target(backend: ExtensionRuntimeBackendTarget) -> ProductExtensionRuntimeTarget {
-    match backend {
-        ExtensionRuntimeBackendTarget::MacosNative => ProductExtensionRuntimeTarget::MacosNative,
-        ExtensionRuntimeBackendTarget::MacosCompatibility => {
+const fn product_target(profile: ExtensionAcquiredRuntimeProfile) -> ProductExtensionRuntimeTarget {
+    match profile {
+        ExtensionAcquiredRuntimeProfile::MacosNative => ProductExtensionRuntimeTarget::MacosNative,
+        ExtensionAcquiredRuntimeProfile::MacosNativeBrokered => {
+            ProductExtensionRuntimeTarget::MacosNativeBrokered
+        }
+        ExtensionAcquiredRuntimeProfile::MacosCompatibility => {
             ProductExtensionRuntimeTarget::MacosCompatibility
         }
-        ExtensionRuntimeBackendTarget::LinuxCompatibility => {
+        ExtensionAcquiredRuntimeProfile::LinuxCompatibility => {
             ProductExtensionRuntimeTarget::LinuxCompatibility
         }
-        ExtensionRuntimeBackendTarget::WindowsNative => {
+        ExtensionAcquiredRuntimeProfile::WindowsNative => {
             ProductExtensionRuntimeTarget::WindowsNative
         }
     }
@@ -189,7 +191,7 @@ const fn repository_selection(
 ) -> BundledPackageRuntimeSelection {
     BundledPackageRuntimeSelection::new(
         selection.package_key(),
-        product_target(selection.runtime_backend()),
+        product_target(selection.runtime_profile()),
     )
 }
 
@@ -254,5 +256,26 @@ fn classify_activation_error(
             AcquiredPackageMaterializationError::InterruptedBuildSettlement(_),
         ) => ExtensionAcquiredCatalogActivationOutcome::FailedClosed,
         _ => ExtensionAcquiredCatalogActivationOutcome::Rejected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acquired_profile_mapping_preserves_broker_policy_without_splitting_native_ownership() {
+        assert_eq!(
+            product_target(ExtensionAcquiredRuntimeProfile::MacosNative),
+            ProductExtensionRuntimeTarget::MacosNative
+        );
+        assert_eq!(
+            product_target(ExtensionAcquiredRuntimeProfile::MacosNativeBrokered),
+            ProductExtensionRuntimeTarget::MacosNativeBrokered
+        );
+        assert_eq!(
+            ExtensionAcquiredRuntimeProfile::MacosNativeBrokered.runtime_backend(),
+            zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative
+        );
     }
 }

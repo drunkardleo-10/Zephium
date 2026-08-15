@@ -2487,6 +2487,7 @@ fn runtime_target(
 ) -> Result<ExtensionRuntimeTarget, BundledRuntimePackageAccessBuildError> {
     match target {
         ProductExtensionRuntimeTarget::MacosNative
+        | ProductExtensionRuntimeTarget::MacosNativeBrokered
         | ProductExtensionRuntimeTarget::WindowsNative => {
             Ok(ExtensionRuntimeTarget::NativeWebExtension)
         }
@@ -2520,7 +2521,8 @@ fn runtime_native_identity(
             .map_err(|_| BundledRuntimePackageAccessBuildError::InternalBindingMismatch)
     };
     match target {
-        ProductExtensionRuntimeTarget::MacosNative => {
+        ProductExtensionRuntimeTarget::MacosNative
+        | ProductExtensionRuntimeTarget::MacosNativeBrokered => {
             Ok(ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(native_id()?))
         }
         ProductExtensionRuntimeTarget::WindowsNative => {
@@ -3018,6 +3020,16 @@ mod tests {
         );
         assert_eq!(
             encoded_id(
+                runtime_native_identity(
+                    ProductExtensionRuntimeTarget::MacosNativeBrokered,
+                    Some(&key)
+                )
+                .unwrap()
+            ),
+            expected
+        );
+        assert_eq!(
+            encoded_id(
                 runtime_native_identity(ProductExtensionRuntimeTarget::WindowsNative, Some(&key))
                     .unwrap()
             ),
@@ -3029,6 +3041,7 @@ mod tests {
     fn native_identity_projection_is_target_exact_and_fails_closed_without_a_key() {
         for target in [
             ProductExtensionRuntimeTarget::MacosNative,
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
             ProductExtensionRuntimeTarget::WindowsNative,
         ] {
             assert_eq!(
@@ -3040,6 +3053,13 @@ mod tests {
         let key = key("Xw==");
         assert!(matches!(
             runtime_native_identity(ProductExtensionRuntimeTarget::MacosNative, Some(&key)),
+            Ok(ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(_))
+        ));
+        assert!(matches!(
+            runtime_native_identity(
+                ProductExtensionRuntimeTarget::MacosNativeBrokered,
+                Some(&key)
+            ),
             Ok(ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(_))
         ));
         assert!(matches!(
@@ -3097,7 +3117,13 @@ mod tests {
             Some(&key("Xw==")),
         )
         .unwrap();
+        let brokered = runtime_native_identity(
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            Some(&key("Xw==")),
+        )
+        .unwrap();
         let macos_expected = durable_expected_native_identity(macos).unwrap().unwrap();
+        let brokered_expected = durable_expected_native_identity(brokered).unwrap().unwrap();
         let windows_expected = durable_expected_native_identity(windows).unwrap().unwrap();
         let different_macos = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
             ExtensionRuntimeBackendTarget::MacosNative,
@@ -3112,6 +3138,19 @@ mod tests {
         assert!(native_identity_expectation_matches_durable(
             windows,
             Some(windows_expected)
+        ));
+        assert!(native_identity_expectation_matches_durable(
+            brokered,
+            Some(brokered_expected)
+        ));
+        assert_eq!(brokered_expected, macos_expected);
+        assert!(native_identity_expectation_matches_durable(
+            brokered,
+            Some(macos_expected)
+        ));
+        assert!(native_identity_expectation_matches_durable(
+            macos,
+            Some(brokered_expected)
         ));
         assert!(!native_identity_expectation_matches_durable(macos, None));
         assert!(!native_identity_expectation_matches_durable(windows, None));

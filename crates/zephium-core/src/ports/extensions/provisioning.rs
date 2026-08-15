@@ -28,6 +28,50 @@ pub const MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES: usize =
 
 const MAX_ACQUIRED_CATALOG_SELECTIONS: usize = 8;
 
+/// Closed reviewed package profile requested at the untrusted transport edge.
+///
+/// Profiles can share a durable native backend while carrying different
+/// compatibility contracts. In particular, both macOS native profiles own
+/// the same `WKWebExtension` resources; only the brokered profile may mint
+/// Zephium compatibility-broker capabilities after product admission.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ExtensionAcquiredRuntimeProfile {
+    /// Unmodified Apple native compatibility contract.
+    MacosNative,
+    /// Apple native runtime with Zephium's sealed one-shot adapter contract.
+    MacosNativeBrokered,
+    /// Zephium compatibility runtime hosted by `WKWebView`.
+    MacosCompatibility,
+    /// Zephium compatibility runtime hosted by WebKitGTK.
+    LinuxCompatibility,
+    /// WebView2's native extension runtime.
+    WindowsNative,
+}
+
+impl ExtensionAcquiredRuntimeProfile {
+    /// Durable native/runtime resource family used by this profile.
+    pub const fn runtime_backend(self) -> ExtensionRuntimeBackendTarget {
+        match self {
+            Self::MacosNative | Self::MacosNativeBrokered => {
+                ExtensionRuntimeBackendTarget::MacosNative
+            }
+            Self::MacosCompatibility => ExtensionRuntimeBackendTarget::MacosCompatibility,
+            Self::LinuxCompatibility => ExtensionRuntimeBackendTarget::LinuxCompatibility,
+            Self::WindowsNative => ExtensionRuntimeBackendTarget::WindowsNative,
+        }
+    }
+
+    /// Existing unbrokered profile for one durable backend.
+    pub const fn from_runtime_backend(backend: ExtensionRuntimeBackendTarget) -> Self {
+        match backend {
+            ExtensionRuntimeBackendTarget::MacosNative => Self::MacosNative,
+            ExtensionRuntimeBackendTarget::MacosCompatibility => Self::MacosCompatibility,
+            ExtensionRuntimeBackendTarget::LinuxCompatibility => Self::LinuxCompatibility,
+            ExtensionRuntimeBackendTarget::WindowsNative => Self::WindowsNative,
+        }
+    }
+}
+
 /// One move-only, path-free package payload from an authenticated transport.
 ///
 /// Construction enforces transport memory ceilings only. It does not parse or
@@ -36,7 +80,7 @@ const MAX_ACQUIRED_CATALOG_SELECTIONS: usize = 8;
 pub struct ExtensionAcquiredPackageProvisioningRequest {
     catalog_bytes: Vec<u8>,
     package_key: ExtensionPackageKey,
-    runtime_backend: ExtensionRuntimeBackendTarget,
+    runtime_profile: ExtensionAcquiredRuntimeProfile,
     crx3_bytes: Vec<u8>,
     legal_notice_bytes: Vec<u8>,
     retained_bytes: usize,
@@ -48,6 +92,23 @@ impl ExtensionAcquiredPackageProvisioningRequest {
         catalog_bytes: Vec<u8>,
         package_key: ExtensionPackageKey,
         runtime_backend: ExtensionRuntimeBackendTarget,
+        crx3_bytes: Vec<u8>,
+        legal_notice_bytes: Vec<u8>,
+    ) -> Result<Self, ExtensionAcquiredProvisioningRequestError> {
+        Self::new_for_profile(
+            catalog_bytes,
+            package_key,
+            ExtensionAcquiredRuntimeProfile::from_runtime_backend(runtime_backend),
+            crx3_bytes,
+            legal_notice_bytes,
+        )
+    }
+
+    /// Creates one bounded request for an exact reviewed runtime profile.
+    pub fn new_for_profile(
+        catalog_bytes: Vec<u8>,
+        package_key: ExtensionPackageKey,
+        runtime_profile: ExtensionAcquiredRuntimeProfile,
         crx3_bytes: Vec<u8>,
         legal_notice_bytes: Vec<u8>,
     ) -> Result<Self, ExtensionAcquiredProvisioningRequestError> {
@@ -80,7 +141,7 @@ impl ExtensionAcquiredPackageProvisioningRequest {
         Ok(Self {
             catalog_bytes,
             package_key,
-            runtime_backend,
+            runtime_profile,
             crx3_bytes,
             legal_notice_bytes,
             retained_bytes,
@@ -94,7 +155,12 @@ impl ExtensionAcquiredPackageProvisioningRequest {
 
     /// Returns the requested reviewed runtime backend.
     pub const fn runtime_backend(&self) -> ExtensionRuntimeBackendTarget {
-        self.runtime_backend
+        self.runtime_profile.runtime_backend()
+    }
+
+    /// Returns the exact requested reviewed compatibility profile.
+    pub const fn runtime_profile(&self) -> ExtensionAcquiredRuntimeProfile {
+        self.runtime_profile
     }
 
     /// Returns the exact logical memory charged while this request is pending.
@@ -108,14 +174,14 @@ impl ExtensionAcquiredPackageProvisioningRequest {
     ) -> (
         Vec<u8>,
         ExtensionPackageKey,
-        ExtensionRuntimeBackendTarget,
+        ExtensionAcquiredRuntimeProfile,
         Vec<u8>,
         Vec<u8>,
     ) {
         (
             self.catalog_bytes,
             self.package_key,
-            self.runtime_backend,
+            self.runtime_profile,
             self.crx3_bytes,
             self.legal_notice_bytes,
         )
@@ -127,7 +193,7 @@ impl fmt::Debug for ExtensionAcquiredPackageProvisioningRequest {
         formatter
             .debug_struct("ExtensionAcquiredPackageProvisioningRequest")
             .field("package_key", &self.package_key)
-            .field("runtime_backend", &self.runtime_backend)
+            .field("runtime_profile", &self.runtime_profile)
             .field("catalog_bytes", &self.catalog_bytes.len())
             .field("crx3_bytes", &self.crx3_bytes.len())
             .field("legal_notice_bytes", &self.legal_notice_bytes.len())
@@ -136,11 +202,11 @@ impl fmt::Debug for ExtensionAcquiredPackageProvisioningRequest {
     }
 }
 
-/// One package/backend row in an exact complete acquired-catalog selection.
+/// One package/profile row in an exact complete acquired-catalog selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensionAcquiredRuntimeSelection {
     package_key: ExtensionPackageKey,
-    runtime_backend: ExtensionRuntimeBackendTarget,
+    runtime_profile: ExtensionAcquiredRuntimeProfile,
 }
 
 impl ExtensionAcquiredRuntimeSelection {
@@ -149,9 +215,20 @@ impl ExtensionAcquiredRuntimeSelection {
         package_key: ExtensionPackageKey,
         runtime_backend: ExtensionRuntimeBackendTarget,
     ) -> Self {
+        Self::new_for_profile(
+            package_key,
+            ExtensionAcquiredRuntimeProfile::from_runtime_backend(runtime_backend),
+        )
+    }
+
+    /// Creates one non-authorizing exact profile selection row.
+    pub const fn new_for_profile(
+        package_key: ExtensionPackageKey,
+        runtime_profile: ExtensionAcquiredRuntimeProfile,
+    ) -> Self {
         Self {
             package_key,
-            runtime_backend,
+            runtime_profile,
         }
     }
 
@@ -162,7 +239,12 @@ impl ExtensionAcquiredRuntimeSelection {
 
     /// Returns the selected runtime backend.
     pub const fn runtime_backend(self) -> ExtensionRuntimeBackendTarget {
-        self.runtime_backend
+        self.runtime_profile.runtime_backend()
+    }
+
+    /// Returns the exact selected compatibility profile.
+    pub const fn runtime_profile(self) -> ExtensionAcquiredRuntimeProfile {
+        self.runtime_profile
     }
 }
 
@@ -319,12 +401,45 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(!debug.contains("[1, 2]"));
         assert!(!debug.contains("[3, 4, 5]"));
-        let (catalog, key, backend, crx, legal) = request.into_parts();
+        let (catalog, key, profile, crx, legal) = request.into_parts();
         assert_eq!(&*catalog, &[1, 2]);
         assert_eq!(key, package(1));
-        assert_eq!(backend, ExtensionRuntimeBackendTarget::MacosNative);
+        assert_eq!(profile, ExtensionAcquiredRuntimeProfile::MacosNative);
         assert_eq!(&*crx, &[3, 4, 5]);
         assert_eq!(&*legal, &[6]);
+    }
+
+    #[test]
+    fn brokered_profile_is_distinct_but_shares_the_macos_native_backend() {
+        assert_ne!(
+            ExtensionAcquiredRuntimeProfile::MacosNative,
+            ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
+        );
+        assert_eq!(
+            ExtensionAcquiredRuntimeProfile::MacosNative.runtime_backend(),
+            ExtensionRuntimeBackendTarget::MacosNative
+        );
+        assert_eq!(
+            ExtensionAcquiredRuntimeProfile::MacosNativeBrokered.runtime_backend(),
+            ExtensionRuntimeBackendTarget::MacosNative
+        );
+
+        let request = ExtensionAcquiredPackageProvisioningRequest::new_for_profile(
+            vec![1],
+            package(2),
+            ExtensionAcquiredRuntimeProfile::MacosNativeBrokered,
+            vec![2],
+            vec![3],
+        )
+        .unwrap();
+        assert_eq!(
+            request.runtime_profile(),
+            ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
+        );
+        assert_eq!(
+            request.runtime_backend(),
+            ExtensionRuntimeBackendTarget::MacosNative
+        );
     }
 
     #[test]

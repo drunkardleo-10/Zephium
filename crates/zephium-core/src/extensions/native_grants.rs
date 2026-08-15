@@ -16,11 +16,11 @@ use std::sync::Arc;
 use crate::injection::MatchPattern;
 
 use super::{
-    ApiPermissionName, ExtensionApiGrantDecision, ExtensionGrantAuthority,
-    ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
-    ExtensionManifestDeclarations, ExtensionManifestDescriptor, ExtensionRuntimeFingerprint,
-    ExtensionUrlScopeDecision, MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
-    MAX_EXTENSION_HOST_GRANTS,
+    ApiPermissionName, ExtensionApiGrantDecision, ExtensionCompatibilityTargetId,
+    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
+    ExtensionGrantRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
+    ExtensionRuntimeFingerprint, ExtensionUrlScopeDecision,
+    MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS, MAX_EXTENSION_HOST_GRANTS,
 };
 
 const REQUIRED_HOST_SOURCE_INDEX: usize = 0;
@@ -380,6 +380,11 @@ impl ExtensionNativeGrantSnapshot {
     /// Browsing partition for which every retained decision is effective.
     pub const fn browsing_context(&self) -> ExtensionGrantBrowsingContext {
         self.runtime.browsing_context()
+    }
+
+    /// Exact reviewed compatibility profile bound into the admitted manifest.
+    pub fn compatibility_target(&self) -> &ExtensionCompatibilityTargetId {
+        self.manifest.compatibility_target()
     }
 
     fn projection(&self) -> ExtensionNativeGrantProjection<'_> {

@@ -156,6 +156,7 @@ impl TreeIndexAnchor {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StoredRuntimeTarget {
     MacosNative,
+    MacosNativeBrokered,
     MacosCompatibility,
     LinuxCompatibility,
     WindowsNative,
@@ -165,6 +166,7 @@ impl StoredRuntimeTarget {
     pub(crate) const fn product_target(self) -> ProductExtensionRuntimeTarget {
         match self {
             Self::MacosNative => ProductExtensionRuntimeTarget::MacosNative,
+            Self::MacosNativeBrokered => ProductExtensionRuntimeTarget::MacosNativeBrokered,
             Self::MacosCompatibility => ProductExtensionRuntimeTarget::MacosCompatibility,
             Self::LinuxCompatibility => ProductExtensionRuntimeTarget::LinuxCompatibility,
             Self::WindowsNative => ProductExtensionRuntimeTarget::WindowsNative,
@@ -173,7 +175,9 @@ impl StoredRuntimeTarget {
 
     pub(crate) const fn platform_family(self) -> StoredRuntimePlatformFamily {
         match self {
-            Self::MacosNative | Self::MacosCompatibility => StoredRuntimePlatformFamily::Macos,
+            Self::MacosNative | Self::MacosNativeBrokered | Self::MacosCompatibility => {
+                StoredRuntimePlatformFamily::Macos
+            }
             Self::LinuxCompatibility => StoredRuntimePlatformFamily::Linux,
             Self::WindowsNative => StoredRuntimePlatformFamily::Windows,
         }
@@ -187,6 +191,9 @@ impl StoredRuntimeTarget {
             (self, expected),
             (
                 Self::MacosNative,
+                ExtensionRuntimeBackendTarget::MacosNative
+            ) | (
+                Self::MacosNativeBrokered,
                 ExtensionRuntimeBackendTarget::MacosNative
             ) | (
                 Self::MacosCompatibility,
@@ -438,6 +445,10 @@ pub(crate) mod tests {
         let pairs = [
             (
                 StoredRuntimeTarget::MacosNative,
+                ExtensionRuntimeBackendTarget::MacosNative,
+            ),
+            (
+                StoredRuntimeTarget::MacosNativeBrokered,
                 ExtensionRuntimeBackendTarget::MacosNative,
             ),
             (

@@ -10,6 +10,7 @@
 mod action;
 mod browser_surface;
 mod cohort;
+mod compatibility_broker;
 mod grants;
 mod identity;
 mod install;
@@ -44,6 +45,18 @@ pub use cohort::{
     ExtensionGrantManifestBinding, ExtensionGrantManifestBindings,
     MAX_EXTENSION_GRANT_COHORT_RETAINED_BYTES,
     MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+};
+pub use compatibility_broker::{
+    ExtensionCompatibilityBrokerOperation, ExtensionCompatibilityBrokerPurpose,
+    ExtensionCompatibilityBrokerRejection, ExtensionCompatibilityBrokerRequest,
+    ExtensionCompatibilityBrokerRequestError, ExtensionCompatibilityBrokerRequestId,
+    ExtensionCompatibilityBrokerResult, ExtensionCompatibilityBrokerSettlement,
+    ExtensionCompatibilityBrokerWitness, ExtensionCompatibilityHistoryEntry,
+    EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
+    MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES,
+    MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES, MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS,
+    MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS,
+    MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS_PER_PROFILE,
 };
 pub use grants::{
     ExtensionApiGrantDecision, ExtensionGrantApplication, ExtensionGrantApplyError,
@@ -80,8 +93,8 @@ pub use manifest::{
     ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest, ExtensionManifestVersion,
     ExtensionMinimumChromiumVersion, ExtensionOverrideTarget, ExtensionPackageLineIdentity,
     ExtensionSandboxDeclaration, ExtensionUnmodeledDeclarationName,
-    ExtensionWebAccessibleResourceDeclaration, MAX_EXTENSION_API_PERMISSIONS,
-    MAX_EXTENSION_API_PERMISSION_NAME_BYTES, MAX_EXTENSION_COMMANDS,
+    ExtensionWebAccessibleResourceDeclaration, MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+    MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_API_PERMISSION_NAME_BYTES, MAX_EXTENSION_COMMANDS,
     MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS, MAX_EXTENSION_CONTENT_SCRIPT_FILES,
     MAX_EXTENSION_CONTENT_SCRIPT_GLOBS, MAX_EXTENSION_CONTENT_SCRIPT_PATTERNS,
     MAX_EXTENSION_HOST_PERMISSION_CANONICAL_BYTES, MAX_EXTENSION_HOST_PERMISSION_PATTERNS,

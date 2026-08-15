@@ -25,9 +25,10 @@ pub use provisioning::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
     ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionAcquiredProvisioningRequestError, ExtensionAcquiredRuntimeSelection,
-    MAX_EXTENSION_ACQUIRED_CATALOG_BYTES, MAX_EXTENSION_ACQUIRED_CRX_BYTES,
-    MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES, MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
+    ExtensionAcquiredProvisioningRequestError, ExtensionAcquiredRuntimeProfile,
+    ExtensionAcquiredRuntimeSelection, MAX_EXTENSION_ACQUIRED_CATALOG_BYTES,
+    MAX_EXTENSION_ACQUIRED_CRX_BYTES, MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES,
+    MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
 };
 pub use runtime_grants::{
     ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptError,
