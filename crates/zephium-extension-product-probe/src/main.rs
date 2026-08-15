@@ -29,8 +29,12 @@ use zephium_core::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
     ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
     ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
-    ExtensionGrantBrowsingContext, ExtensionPopupAnchor, MAX_EXTENSION_POPUP_HEIGHT,
-    MAX_EXTENSION_POPUP_WIDTH, MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH,
+    ExtensionCompatibilityBrokerOperation, ExtensionCompatibilityBrokerRequest,
+    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerResult,
+    ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityHistoryEntry,
+    ExtensionGrantBrowsingContext, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH, MIN_EXTENSION_POPUP_HEIGHT,
+    MIN_EXTENSION_POPUP_WIDTH,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
@@ -39,17 +43,23 @@ use zephium_core::ports::extensions::{
     ExtensionManagementAdmission, ExtensionRuntimeGrantOutcome,
     ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRuntimeState,
 };
+use zephium_core::ports::store::{HistoryHit, Store};
+use zephium_extension_authority::ProductExtensionRuntimeTarget;
 use zephium_extension_service::{
     ExtensionServiceOwner, ExtensionServicePhase, ExtensionServiceShutdownOutcome,
     ExtensionServiceStartupOutcome, ExtensionServiceStartupWait,
 };
 
 use authenticated_fixture::AuthenticatedFixture;
-use macos_harness::MacosEngineHarness;
+use macos_harness::{ExecutableExtensionCoordinator, MacosEngineHarness};
 use page_server::PageServer;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const PROCESS_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(75);
+const NATIVE_RUNTIME_ARGUMENT: &str = "macos-native";
+const BROKERED_RUNTIME_ARGUMENT: &str = "macos-native-brokered";
+const NATIVE_READY_MARKER: &str = "ready:1";
+const BROKERED_READY_MARKER: &str = "ready-brokered:1";
 static PROBE_PHASE: Mutex<&'static str> = Mutex::new("process-start");
 
 fn deadline() -> Instant {
@@ -59,19 +69,32 @@ fn deadline() -> Instant {
 }
 
 fn main() {
+    let runtime_target = match selected_runtime_target() {
+        Ok(runtime_target) => runtime_target,
+        Err(error) => {
+            eprintln!("extension-product-probe: failed: {error}");
+            std::process::exit(2);
+        }
+    };
     let watchdog_completed = arm_process_watchdog();
-    let outcome = run();
+    let outcome = run(runtime_target);
     watchdog_completed.store(true, Ordering::Release);
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
                 measurements.profile_view.as_millis(),
                 measurements.popup_presentation.as_millis(),
                 measurements.service_shutdown.as_millis(),
                 measurements.engine_shutdown.as_millis(),
+                if is_brokered_runtime(runtime_target) {
+                    "passed"
+                } else {
+                    "not-enabled"
+                },
             );
         }
         Ok(ProbeDisposition::UnsupportedRuntime(version)) => {
@@ -83,6 +106,35 @@ fn main() {
             eprintln!("extension-product-probe: failed: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+fn selected_runtime_target() -> Result<ProductExtensionRuntimeTarget, String> {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.len() != 2 || arguments[0] != "--runtime" {
+        return Err(format!(
+            "expected exactly `--runtime {NATIVE_RUNTIME_ARGUMENT}|{BROKERED_RUNTIME_ARGUMENT}`"
+        ));
+    }
+    match arguments[1].to_str() {
+        Some(NATIVE_RUNTIME_ARGUMENT) => Ok(ProductExtensionRuntimeTarget::MacosNative),
+        Some(BROKERED_RUNTIME_ARGUMENT) => Ok(ProductExtensionRuntimeTarget::MacosNativeBrokered),
+        _ => Err("unsupported or non-UTF-8 product-probe runtime target".to_owned()),
+    }
+}
+
+const fn is_brokered_runtime(runtime_target: ProductExtensionRuntimeTarget) -> bool {
+    matches!(
+        runtime_target,
+        ProductExtensionRuntimeTarget::MacosNativeBrokered
+    )
+}
+
+const fn runtime_target_argument(runtime_target: ProductExtensionRuntimeTarget) -> &'static str {
+    match runtime_target {
+        ProductExtensionRuntimeTarget::MacosNative => NATIVE_RUNTIME_ARGUMENT,
+        ProductExtensionRuntimeTarget::MacosNativeBrokered => BROKERED_RUNTIME_ARGUMENT,
+        _ => "unsupported",
     }
 }
 
@@ -411,9 +463,171 @@ impl ProductBrowserModel {
     }
 }
 
-fn run() -> Result<ProbeDisposition, String> {
+struct PendingHistoryRead {
+    runtime: ExtensionRuntimeInstance,
+    request: ExtensionCompatibilityBrokerRequestId,
+    result: mpsc::Receiver<Vec<HistoryHit>>,
+    worker: thread::JoinHandle<()>,
+}
+
+struct ProductCompatibilityBrokerModel {
+    profile: zephium_core::ids::ProfileId,
+    required: bool,
+    store: Arc<zephium_store::SqliteStore>,
+    pending: Option<PendingHistoryRead>,
+    completed: bool,
+}
+
+impl ProductCompatibilityBrokerModel {
+    fn new(
+        profile: zephium_core::ids::ProfileId,
+        required: bool,
+        store: Arc<zephium_store::SqliteStore>,
+    ) -> Self {
+        Self {
+            profile,
+            required,
+            store,
+            pending: None,
+            completed: false,
+        }
+    }
+
+    fn handle(&mut self, request: ExtensionCompatibilityBrokerRequest) -> Result<(), String> {
+        if !self.required {
+            return Err("ordinary native runtime reached the sealed compatibility broker".into());
+        }
+        if self.completed || self.pending.is_some() {
+            return Err(
+                "brokered product fixture issued more than one compatibility request".into(),
+            );
+        }
+        let ExtensionCompatibilityBrokerOperation::RecentHistory { limit } = request.operation();
+        if request.runtime().profile() != self.profile || limit != 2 {
+            return Err("brokered history request escaped its exact product profile".into());
+        }
+        let store = Arc::clone(&self.store);
+        let profile = self.profile;
+        let (result_tx, result) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("zephium-extension-product-probe-history".to_owned())
+            .spawn(move || {
+                let hits = store.recent_history(profile, u32::from(limit));
+                let _ = result_tx.send(hits);
+            })
+            .map_err(|error| format!("cannot spawn bounded history reader: {error}"))?;
+        self.pending = Some(PendingHistoryRead {
+            runtime: request.runtime(),
+            request: request.id(),
+            result,
+            worker,
+        });
+        Ok(())
+    }
+
+    fn poll(&mut self, engine: &zephium_engine::WebviewEngine) -> Result<(), String> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(());
+        };
+        let hits = match pending.result.try_recv() {
+            Ok(hits) => hits,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err("bounded history reader disconnected without a result".into())
+            }
+        };
+        let pending = self
+            .pending
+            .take()
+            .expect("observed broker result retains its exact pending request");
+        pending
+            .worker
+            .join()
+            .map_err(|_| "bounded history reader panicked".to_owned())?;
+        let entries = hits
+            .into_iter()
+            .map(|hit| ExtensionCompatibilityHistoryEntry {
+                url: hit.url,
+                title: hit.title,
+                last_visit: hit.last_visit,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if engine.settle_extension_compatibility_broker_request(
+            pending.runtime,
+            pending.request,
+            ExtensionCompatibilityBrokerSettlement::Applied(
+                ExtensionCompatibilityBrokerResult::RecentHistory(entries),
+            ),
+        ) != NativeDispatch::Scheduled
+        {
+            return Err("brokered history settlement was not scheduled".into());
+        }
+        self.completed = true;
+        Ok(())
+    }
+
+    fn verify_complete(&self) -> Result<(), String> {
+        if self.pending.is_some() || self.completed != self.required {
+            return Err(format!(
+                "brokered history evidence was incomplete: required={}, completed={}, pending={}",
+                self.required,
+                self.completed,
+                self.pending.is_some(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct ProductExecutionModel {
+    browser: ProductBrowserModel,
+    broker: ProductCompatibilityBrokerModel,
+}
+
+impl ExecutableExtensionCoordinator for ProductExecutionModel {
+    fn poll(&mut self, engine: &zephium_engine::WebviewEngine) -> Result<(), String> {
+        self.broker.poll(engine)
+    }
+
+    fn handle_browser_request(
+        &mut self,
+        engine: &zephium_engine::WebviewEngine,
+        request: ExtensionBrowserRequest,
+    ) -> Result<(), String> {
+        self.browser.handle(engine, request)
+    }
+
+    fn handle_compatibility_broker_request(
+        &mut self,
+        _engine: &zephium_engine::WebviewEngine,
+        request: ExtensionCompatibilityBrokerRequest,
+    ) -> Result<(), String> {
+        self.broker.handle(request)
+    }
+}
+
+impl ProductExecutionModel {
+    fn verify_complete(&self) -> Result<(), String> {
+        self.browser.verify_complete()?;
+        self.broker.verify_complete()
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "{}; broker required={}, completed={}, pending={}",
+            self.browser.summary(),
+            self.broker.required,
+            self.broker.completed,
+            self.broker.pending.is_some(),
+        )
+    }
+}
+
+fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition, String> {
     set_phase("authenticated-fixture");
-    let mut fixture = AuthenticatedFixture::new()?;
+    let mut fixture = AuthenticatedFixture::new(runtime_target)?;
+    let store = fixture.store()?;
     set_phase("engine-install");
     let Some(mut engine) = MacosEngineHarness::install(fixture.engine_data_root())? else {
         return Ok(ProbeDisposition::UnsupportedRuntime(
@@ -622,14 +836,29 @@ fn run() -> Result<ProbeDisposition, String> {
     }
     let durable_grant_rebind = durable_grant_rebind_started.elapsed();
 
-    let mut browser_model = ProductBrowserModel::new(profile, page_url, item);
+    let mut execution = ProductExecutionModel {
+        browser: ProductBrowserModel::new(profile, page_url, item),
+        broker: ProductCompatibilityBrokerModel::new(
+            profile,
+            is_brokered_runtime(runtime_target),
+            store,
+        ),
+    };
     set_phase("executable-mv3");
-    if let Err(error) = engine.wait_for_executable_extension(item, deadline(), |native, request| {
-        browser_model.handle(native, request)
-    }) {
-        return Err(format!("{error}; {}", browser_model.summary()));
+    if let Err(error) = engine.wait_for_executable_extension(
+        item,
+        if is_brokered_runtime(runtime_target) {
+            BROKERED_READY_MARKER
+        } else {
+            NATIVE_READY_MARKER
+        },
+        deadline(),
+        &mut execution,
+    ) {
+        return Err(format!("{error}; {}", execution.summary()));
     }
-    browser_model.verify_complete()?;
+    execution.verify_complete()?;
+    let mut browser_model = execution.browser;
     let profile_view = view_started.elapsed();
 
     set_phase("native-popup");

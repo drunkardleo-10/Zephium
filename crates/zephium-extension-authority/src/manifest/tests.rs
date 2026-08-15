@@ -766,6 +766,10 @@ fn every_runtime_target_is_bound_to_one_exact_policy_revision() {
             MACOS_NATIVE_COMPATIBILITY_TARGET,
         ),
         (
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+        ),
+        (
             ProductExtensionRuntimeTarget::MacosCompatibility,
             MACOS_COMPATIBILITY_TARGET,
         ),

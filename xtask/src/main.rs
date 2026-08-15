@@ -1465,9 +1465,12 @@ fn run_macos_extension_product_probe() {
     clippy.extend(["--", "-D", "warnings"]);
     run_with_internal_repository_cfg(&clippy);
 
-    let mut execute = vec!["run"];
-    execute.extend(COMMON);
-    run_with_internal_repository_cfg(&execute);
+    for runtime in ["macos-native", "macos-native-brokered"] {
+        let mut execute = vec!["run"];
+        execute.extend(COMMON);
+        execute.extend(["--", "--runtime", runtime]);
+        run_with_internal_repository_cfg(&execute);
+    }
 }
 
 fn check_blocker_security_fork() {

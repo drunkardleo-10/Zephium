@@ -5,8 +5,9 @@ let popupExecutions = 0;
 
 function settle(message) {
   const value =
-    message?.state === "ready" && message?.count === 1
-      ? "ready:1"
+    (message?.state === "ready" || message?.state === "ready-brokered") &&
+    message?.count === 1
+      ? `${message.state}:1`
       : `invalid-response:${message?.state ?? "missing"}`;
   document.documentElement.setAttribute(marker, value);
 }

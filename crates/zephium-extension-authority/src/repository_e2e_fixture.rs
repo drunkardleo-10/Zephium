@@ -18,10 +18,10 @@ pub(crate) const LICENSE_EXPRESSION: &str = "MPL-2.0";
 /// Exact manifest retained by the authenticated fixture tree.
 pub(crate) const MANIFEST_BYTES: &[u8] = include_bytes!("../fixtures/repository-e2e/manifest.json");
 /// Independently pinned byte length of [`MANIFEST_BYTES`].
-pub(crate) const MANIFEST_LENGTH: usize = 859;
+pub(crate) const MANIFEST_LENGTH: usize = 887;
 /// Independently pinned lowercase SHA-256 of [`MANIFEST_BYTES`].
 pub(crate) const MANIFEST_SHA256_HEX: &str =
-    "a1c44c37b427d0f64ea5cfef196ce06f5dfd295714dcacff8907fab6f05097e1";
+    "b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a";
 
 /// Exact MV3 service worker retained by the authenticated fixture tree.
 #[allow(dead_code)] // Consumed by path-including repository and product probes.
@@ -53,15 +53,15 @@ pub(crate) fn tree_file_bytes(path: &str) -> Option<&'static [u8]> {
 }
 
 /// Exact canonical five-file tree index bound into both package generations.
-pub(crate) const TREE_INDEX_BYTES: &[u8] = br#"{"schema_version":1,"files":[{"path":"background.js","length":3645,"sha256":"b5b957008c851da101e5a27e019a841887bff56eda183bab21bd554bc9da9d66"},{"path":"content.js","length":970,"sha256":"9ddf5c80c4a6f23386c848c5e118fce55f6ea0c6e1fb96e3a1f172349275c4ca"},{"path":"manifest.json","length":859,"sha256":"a1c44c37b427d0f64ea5cfef196ce06f5dfd295714dcacff8907fab6f05097e1"},{"path":"popup.html","length":370,"sha256":"240e93d64a85474bc8025eb3d55af77d72419ecf990ad36079963bebf7590057"},{"path":"popup.js","length":881,"sha256":"c974331caed235a26b1ee046aec3267062a5cf90603cb2d8463ac87c9cd8696f"}]}"#;
+pub(crate) const TREE_INDEX_BYTES: &[u8] = br#"{"schema_version":1,"files":[{"path":"background.js","length":5750,"sha256":"086b2b4ef8e1dbcb05bb94cec35a62d3c67b5a84369ebf5afd81325999cb9239"},{"path":"content.js","length":1026,"sha256":"a88e32bc1c3a4b92cfe532763d673f2dfe36ba3a968268e8f244c248178347b3"},{"path":"manifest.json","length":887,"sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a"},{"path":"popup.html","length":370,"sha256":"240e93d64a85474bc8025eb3d55af77d72419ecf990ad36079963bebf7590057"},{"path":"popup.js","length":881,"sha256":"c974331caed235a26b1ee046aec3267062a5cf90603cb2d8463ac87c9cd8696f"}]}"#;
 /// Independently pinned byte length of [`TREE_INDEX_BYTES`].
-pub(crate) const TREE_INDEX_LENGTH: usize = 590;
+pub(crate) const TREE_INDEX_LENGTH: usize = 591;
 /// Independently pinned lowercase SHA-256 of [`TREE_INDEX_BYTES`].
 pub(crate) const TREE_INDEX_SHA256_HEX: &str =
-    "21214f5ff60018ad11d3320a89f359ab1e3a7f0eca256b1b264ddfa0382821ae";
+    "1178ef95053528dc1121e9117f3fed9865c36de5ddcd62de5ece889a6b57f0b9";
 /// Independently pinned lowercase SHA-256 of the canonical tree inventory.
 pub(crate) const TREE_SHA256_HEX: &str =
-    "cd316524cf369ef8a095a3a8a4cf7a3aa449fd5ce3cc285c5dbf66d0e64350f9";
+    "622a73d3aa7a6599b3f8a7f11f75d8f1a7221bb6f01c693b7127ad44d74e20f7";
 
 /// Exact one-byte legal-notice object bound into both package generations.
 pub(crate) const LEGAL_NOTICE_BYTES: &[u8] = b"L";
@@ -79,7 +79,7 @@ pub(crate) const LEGAL_NOTICE_SHA256_HEX: &str =
         reason = "the alternate acquired authority replaces this active fixture"
     )
 )]
-pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"a1c44c37b427d0f64ea5cfef196ce06f5dfd295714dcacff8907fab6f05097e1","tree_sha256":"cd316524cf369ef8a095a3a8a4cf7a3aa449fd5ce3cc285c5dbf66d0e64350f9","tree_index_sha256":"21214f5ff60018ad11d3320a89f359ab1e3a7f0eca256b1b264ddfa0382821ae","tree_index_length":590,"tree_file_count":5,"tree_bytes":6725,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","tree_sha256":"622a73d3aa7a6599b3f8a7f11f75d8f1a7221bb6f01c693b7127ad44d74e20f7","tree_index_sha256":"1178ef95053528dc1121e9117f3fed9865c36de5ddcd62de5ece889a6b57f0b9","tree_index_length":591,"tree_file_count":5,"tree_bytes":8914,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned byte length of [`ACTIVE_CATALOG_BYTES`].
 #[cfg_attr(
     zephium_internal_acquired_repository_e2e,
@@ -98,19 +98,19 @@ pub(crate) const ACTIVE_CATALOG_LENGTH: usize = 1253;
     )
 )]
 pub(crate) const ACTIVE_CATALOG_SHA256_HEX: &str =
-    "cdac8b7bc11e1238ba5b93efd548c65fdc4c2127502f0b9fbfc84ead61983244";
+    "850a0da70aba043c0347901b883d443af5ed191bbff19f61c8a86afe9a0739b5";
 
 /// Exact canonical explicitly approved rollback catalog at revision one.
-pub(crate) const ROLLBACK_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"a1c44c37b427d0f64ea5cfef196ce06f5dfd295714dcacff8907fab6f05097e1","tree_sha256":"cd316524cf369ef8a095a3a8a4cf7a3aa449fd5ce3cc285c5dbf66d0e64350f9","tree_index_sha256":"21214f5ff60018ad11d3320a89f359ab1e3a7f0eca256b1b264ddfa0382821ae","tree_index_length":590,"tree_file_count":5,"tree_bytes":6725,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ROLLBACK_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","tree_sha256":"622a73d3aa7a6599b3f8a7f11f75d8f1a7221bb6f01c693b7127ad44d74e20f7","tree_index_sha256":"1178ef95053528dc1121e9117f3fed9865c36de5ddcd62de5ece889a6b57f0b9","tree_index_length":591,"tree_file_count":5,"tree_bytes":8914,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned byte length of [`ROLLBACK_CATALOG_BYTES`].
 pub(crate) const ROLLBACK_CATALOG_LENGTH: usize = 1253;
 /// Independently pinned lowercase SHA-256 of [`ROLLBACK_CATALOG_BYTES`].
 pub(crate) const ROLLBACK_CATALOG_SHA256_HEX: &str =
-    "a8854f5147b2f2c2314f015da5100822801bb462dfa1c0e898f99be47bbd0c0f";
+    "e3e07ab1e8b8dcb45f34fd57779260a1fea0a62122b35dc2a62ae3b5f04390ed";
 
 /// Independently pinned lowercase SHA-256 of the closed catalog inventory.
 pub(crate) const CATALOG_INVENTORY_SHA256_HEX: &str =
-    "cfa1495e51abdd1f81d4ddaf2654179bdbe70886b594be150c44b0aed9c62cba";
+    "cb508921e0072ce7977eab5edb8bed008a43a4a4388c6a7722a7c09927079431";
 
 /// Exact manifest used only by the acquired-package authority configuration.
 #[cfg(zephium_internal_acquired_repository_e2e)]

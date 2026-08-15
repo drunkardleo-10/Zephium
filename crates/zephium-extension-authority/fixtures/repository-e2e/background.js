@@ -4,6 +4,12 @@ const optionalAccess = {
   permissions: ["tabs"],
   origins: ["https://optional.example/*"],
 };
+const brokerApplication = "app.zephium.extension-broker.v1";
+const brokerRequest = "v1/history.recent/2";
+const brokerExpected = [
+  ["https://second.example/path", "Second visited page"],
+  ["https://first.example/path", "First visited page"],
+];
 
 function boundedDetail(error) {
   return String(error?.message ?? error ?? "unknown")
@@ -24,6 +30,65 @@ async function report(tabId, state, count) {
       text: `ERR:${boundedDetail(error)}`.slice(0, 32),
     });
   }
+}
+
+function sendBrokerMessage() {
+  const runtime = globalThis.chrome?.runtime ?? api.runtime;
+  return new Promise((resolve, reject) => {
+    if (typeof runtime?.sendNativeMessage !== "function") {
+      reject(new Error("native broker API absent"));
+      return;
+    }
+    runtime.sendNativeMessage(brokerApplication, brokerRequest, (reply) => {
+      const error = runtime.lastError;
+      if (error) {
+        reject(new Error(error.message ?? "native broker rejected request"));
+      } else {
+        resolve(reply);
+      }
+    });
+  });
+}
+
+async function brokerState() {
+  let encoded;
+  try {
+    encoded = await sendBrokerMessage();
+  } catch {
+    // The ordinary native profile declares but never grants this broker-only
+    // pair. Its exact expected behavior is rejection; the host-side probe
+    // requires broker success only for the separately authenticated brokered
+    // profile, so an unexpected success here cannot be hidden.
+    return "ready";
+  }
+  if (typeof encoded !== "string" || encoded.length > 64 * 1024) {
+    return "broker-response-shape-failed";
+  }
+  let response;
+  try {
+    response = JSON.parse(encoded);
+  } catch {
+    return "broker-response-json-failed";
+  }
+  if (response?.v !== 1 || !Array.isArray(response.items)) {
+    return "broker-response-version-failed";
+  }
+  if (response.items.length !== brokerExpected.length) {
+    return "broker-response-count-failed";
+  }
+  for (let index = 0; index < brokerExpected.length; index += 1) {
+    const item = response.items[index];
+    const [url, title] = brokerExpected[index];
+    if (
+      item?.url !== url ||
+      item?.title !== title ||
+      !Number.isSafeInteger(item?.lastVisit) ||
+      item.lastVisit < 0
+    ) {
+      return "broker-response-content-failed";
+    }
+  }
+  return "ready-brokered";
 }
 
 async function runProductProbe(tab) {
@@ -96,7 +161,7 @@ async function runProductProbe(tab) {
   if (finalTabs.length !== 1 || finalTabs[0]?.id !== tab.id) {
     return { state: "tabs-remove-failed" };
   }
-  return { count: value.count, state: "ready" };
+  return { count: value.count, state: await brokerState() };
 }
 
 api.action.onClicked.addListener(async (tab) => {
@@ -111,7 +176,7 @@ api.action.onClicked.addListener(async (tab) => {
       return;
     }
     const result = await runProductProbe(tab);
-    if (result.state === "ready") {
+    if (result.state === "ready" || result.state === "ready-brokered") {
       await api.action.setPopup({ popup: "popup.html" });
     }
     await report(tab.id, result.state, result.count);

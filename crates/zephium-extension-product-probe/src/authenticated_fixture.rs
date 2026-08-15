@@ -62,23 +62,24 @@ pub(crate) struct AuthenticatedFixture {
 }
 
 impl AuthenticatedFixture {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub(crate) fn new(runtime_target: ProductExtensionRuntimeTarget) -> Result<Self, String> {
         let temporary = tempfile::tempdir_in("/private/tmp")
             .map_err(|error| format!("cannot create private probe directory: {error}"))?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("cannot secure private probe directory: {error}"))?;
 
-        let manifest = provision_authenticated_repository(temporary.path())?;
+        let manifest = provision_authenticated_repository(temporary.path(), runtime_target)?;
         let store = Arc::new(
             SqliteStore::open(temporary.path())
                 .map_err(|error| format!("cannot open product-probe Store: {error}"))?,
         );
         let profile = ProfileId::from(PROBE_PROFILE);
         provision_profile(store.as_ref(), profile)?;
+        provision_history(store.as_ref(), profile)?;
         let authority = store
             .claim_extension_service_store_authority()
             .map_err(|error| format!("cannot claim extension-service Store authority: {error}"))?;
-        provision_store(&authority, profile, &manifest)?;
+        provision_store(&authority, profile, &manifest, runtime_target)?;
 
         Ok(Self {
             temporary: Some(temporary),
@@ -91,6 +92,13 @@ impl AuthenticatedFixture {
 
     pub(crate) const fn profile(&self) -> ProfileId {
         self.profile
+    }
+
+    pub(crate) fn store(&self) -> Result<Arc<SqliteStore>, String> {
+        self.store
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "product-probe Store was already consumed".to_owned())
     }
 
     pub(crate) fn engine_data_root(&self) -> PathBuf {
@@ -205,16 +213,17 @@ impl Drop for AuthenticatedFixture {
 
 fn provision_authenticated_repository(
     root: &Path,
+    runtime_target: ProductExtensionRuntimeTarget,
 ) -> Result<Arc<ExtensionManifestDescriptor>, String> {
     let repository_path = root.join(EXTENSION_REPOSITORY_DIRECTORY_NAME);
     let active = admitted_active_catalog()?;
-    let manifest = admitted_manifest(&active)?;
+    let manifest = admitted_manifest(&active, runtime_target)?;
     let mut repository = ExtensionRepository::open(
         LockedPrivateNamespace::open_or_create(&repository_path)
             .map_err(|error| format!("cannot admit private extension repository: {error}"))?,
     )
     .map_err(|error| format!("cannot open extension repository: {error}"))?;
-    establish_active(&mut repository, &active)?;
+    establish_active(&mut repository, &active, runtime_target)?;
     drop(repository);
     Ok(manifest)
 }
@@ -234,17 +243,46 @@ fn provision_profile(store: &impl Store, profile: ProfileId) -> Result<(), Strin
     Ok(())
 }
 
+fn provision_history(store: &impl Store, profile: ProfileId) -> Result<(), String> {
+    store.record_visit(
+        profile,
+        "https://first.example/path".to_owned(),
+        "First visited page".to_owned(),
+    );
+    store.record_visit(
+        profile,
+        "https://second.example/path".to_owned(),
+        "Second visited page".to_owned(),
+    );
+    if !store.flush_until(deadline()) {
+        return Err("Store did not flush product-probe history".to_owned());
+    }
+    Ok(())
+}
+
 fn provision_store(
     store: &ExtensionServiceStoreAuthority,
     profile: ProfileId,
     manifest: &Arc<ExtensionManifestDescriptor>,
+    runtime_target: ProductExtensionRuntimeTarget,
 ) -> Result<(), String> {
     let install = ExtensionInstallId::from(1);
     let provisional = ExtensionInstall::new(install, manifest.package().clone());
     let declarations = manifest.declarations();
+    let mut granted_api = declarations.required_api().names().to_vec();
+    if runtime_target == ProductExtensionRuntimeTarget::MacosNativeBrokered {
+        granted_api.extend(
+            declarations
+                .optional_api()
+                .names()
+                .iter()
+                .filter(|permission| matches!(permission.as_str(), "history" | "nativeMessaging"))
+                .cloned(),
+        );
+    }
     let grants = ExtensionGrantAuthority::initialize(
         &provisional,
-        declarations.required_api().names().to_vec(),
+        granted_api,
         declarations
             .required_host_authorities()
             .into_iter()
@@ -308,6 +346,7 @@ fn admitted_active_catalog() -> Result<AdmittedBundledCatalog, String> {
 
 fn admitted_manifest(
     active: &AdmittedBundledCatalog,
+    runtime_target: ProductExtensionRuntimeTarget,
 ) -> Result<Arc<ExtensionManifestDescriptor>, String> {
     let tree = CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES)
         .map_err(|error| format!("internal tree index was rejected: {error:?}"))?;
@@ -315,7 +354,7 @@ fn admitted_manifest(
         .map_err(|error| format!("internal manifest authority is unavailable: {error:?}"))?
         .admit_manifest(
             active,
-            ProductExtensionRuntimeTarget::MacosNative,
+            runtime_target,
             package_key(),
             &tree,
             fixture::MANIFEST_BYTES,
@@ -327,13 +366,14 @@ fn admitted_manifest(
 fn establish_active(
     repository: &mut ExtensionRepository,
     active: &AdmittedBundledCatalog,
+    runtime_target: ProductExtensionRuntimeTarget,
 ) -> Result<(), String> {
     let mut materialize = FixtureSource;
     if !matches!(
         repository.materialize_active_bundled_package(
             active,
             fixture::ACTIVE_CATALOG_BYTES,
-            ProductExtensionRuntimeTarget::MacosNative,
+            runtime_target,
             package_key(),
             &mut materialize,
         ),
@@ -348,7 +388,7 @@ fn establish_active(
         .stage_active_bundled_catalog_set(
             active,
             fixture::ACTIVE_CATALOG_BYTES,
-            &selection(),
+            &selection(runtime_target),
             &mut stage,
         )
         .map_err(|error| format!("cannot stage authenticated catalog: {error}"))?
@@ -363,7 +403,7 @@ fn establish_active(
         repository.promote_active_bundled_catalog_set(
             active,
             fixture::ACTIVE_CATALOG_BYTES,
-            &selection(),
+            &selection(runtime_target),
             identity,
             &mut promote,
         ),
@@ -412,10 +452,10 @@ fn package_key() -> ExtensionPackageKey {
     ExtensionPackageKey::from_bytes(fixture::PACKAGE_KEY_BYTES)
 }
 
-fn selection() -> [BundledPackageRuntimeSelection; 1] {
+fn selection(runtime_target: ProductExtensionRuntimeTarget) -> [BundledPackageRuntimeSelection; 1] {
     [BundledPackageRuntimeSelection::new(
         package_key(),
-        ProductExtensionRuntimeTarget::MacosNative,
+        runtime_target,
     )]
 }
 

@@ -673,8 +673,11 @@ fn actor_install_reauthenticates_selection_and_refuses_unrequested_file_scope() 
     assert_eq!(harness.probe.bind_calls(), 0);
     assert_eq!(harness.probe.activation_calls(), 0);
 
+    // The authenticated fixture declares three canonical optional APIs. Model
+    // a stale Shell projection that claims a fourth and selects its last index;
+    // the service must reauthenticate against the exact manifest and refuse.
     let out_of_range =
-        ExtensionInitialGrantSelection::new(vec![1], 2, Vec::new(), 0, false, false).unwrap();
+        ExtensionInitialGrantSelection::new(vec![3], 4, Vec::new(), 0, false, false).unwrap();
     let out_of_range =
         ExtensionServiceLifecycle::install_until(&mut owner, candidate(), out_of_range, deadline());
     assert_eq!(out_of_range.outcome(), &ExtensionInstallOutcome::Conflict);

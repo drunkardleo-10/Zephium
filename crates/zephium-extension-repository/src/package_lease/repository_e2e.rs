@@ -4270,6 +4270,16 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
             observation.api,
             vec![
                 (
+                    "history".to_owned(),
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+                (
+                    "nativeMessaging".to_owned(),
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+                (
                     "storage".to_owned(),
                     ExtensionNativeGrantRequirement::Required,
                     ExtensionNativeGrantDecision::Granted,
@@ -4417,6 +4427,16 @@ fn runtime_host_binding_is_exact_for_active_and_rollback_roles() {
         assert_eq!(
             observation.api,
             vec![
+                (
+                    "history".to_owned(),
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
+                (
+                    "nativeMessaging".to_owned(),
+                    ExtensionNativeGrantRequirement::Optional,
+                    ExtensionNativeGrantDecision::Denied,
+                ),
                 (
                     "storage".to_owned(),
                     ExtensionNativeGrantRequirement::Required,

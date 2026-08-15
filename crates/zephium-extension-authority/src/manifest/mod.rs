@@ -1278,6 +1278,7 @@ fn invalid_repository_e2e_configuration<Error>(
 const fn repository_e2e_runtime_targets() -> &'static [ProductExtensionRuntimeTarget] {
     &[
         ProductExtensionRuntimeTarget::MacosNative,
+        ProductExtensionRuntimeTarget::MacosNativeBrokered,
         ProductExtensionRuntimeTarget::MacosCompatibility,
     ]
 }

@@ -23,6 +23,7 @@ use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
     ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionBrowserRequest,
+    ExtensionCompatibilityBrokerRequest,
 };
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ItemId, ProfileId};
@@ -42,10 +43,25 @@ const MAX_TASKS_PER_PUMP: usize = 64;
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const HTML_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 const EXTENSION_MARKER: &str = "data-zephium-extension-product-probe";
-const EXTENSION_MARKER_VALUE: &str = "ready:1";
 const EXTENSION_POPUP_MARKER: &str = "data-zephium-extension-popup-probe";
 
 type MainTask = Box<dyn FnOnce() + Send + 'static>;
+
+pub(crate) trait ExecutableExtensionCoordinator {
+    fn poll(&mut self, engine: &WebviewEngine) -> Result<(), String>;
+
+    fn handle_browser_request(
+        &mut self,
+        engine: &WebviewEngine,
+        request: ExtensionBrowserRequest,
+    ) -> Result<(), String>;
+
+    fn handle_compatibility_broker_request(
+        &mut self,
+        engine: &WebviewEngine,
+        request: ExtensionCompatibilityBrokerRequest,
+    ) -> Result<(), String>;
+}
 
 pub(crate) fn operating_system_version() -> String {
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
@@ -605,16 +621,15 @@ impl MacosEngineHarness {
     pub(crate) fn wait_for_executable_extension(
         &mut self,
         item: ItemId,
+        expected_marker_value: &str,
         deadline: Instant,
-        mut handle_browser_request: impl FnMut(
-            &WebviewEngine,
-            ExtensionBrowserRequest,
-        ) -> Result<(), String>,
+        coordinator: &mut impl ExecutableExtensionCoordinator,
     ) -> Result<(), String> {
-        let expected = format!(r#"{EXTENSION_MARKER}="{EXTENSION_MARKER_VALUE}""#);
+        let expected = format!(r#"{EXTENSION_MARKER}="{expected_marker_value}""#);
         let failure_prefix = format!(r#"{EXTENSION_MARKER}=""#);
         let mut next_observation = Instant::now();
         self.pump_until("executable MV3 extension observation", deadline, |harness| {
+            coordinator.poll(&harness.engine)?;
             loop {
                 match harness.events.try_recv() {
                     Ok(EngineEvent::HtmlExtracted {
@@ -641,7 +656,7 @@ impl MacosEngineHarness {
                                 .collect::<String>();
                             if value != "armed" {
                                 return Err(format!(
-                                    "authenticated extension reported marker {value:?}; expected {EXTENSION_MARKER_VALUE:?}"
+                                    "authenticated extension reported marker {value:?}; expected {expected_marker_value:?}"
                                 ));
                             }
                         }
@@ -653,7 +668,13 @@ impl MacosEngineHarness {
                         return Err("profile view crashed during extension execution".to_owned())
                     }
                     Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
-                        handle_browser_request(&harness.engine, request)?;
+                        coordinator.handle_browser_request(&harness.engine, request)?;
+                    }
+                    Ok(EngineEvent::ExtensionCompatibilityBrokerRequested { request }) => {
+                        coordinator.handle_compatibility_broker_request(
+                            &harness.engine,
+                            *request,
+                        )?;
                     }
                     Ok(_) => {}
                     Err(mpsc::TryRecvError::Empty) => break,
