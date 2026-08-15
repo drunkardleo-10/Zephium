@@ -6141,6 +6141,24 @@ fn history_adapter_bounds_inputs_outputs_and_sanitizes_titles() {
 }
 
 #[test]
+fn recent_history_is_profile_scoped_deduplicated_and_bounded() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://example.com/old", "Old title");
+    hub.record_visit(profile, "https://example.com/peer", "Peer");
+    hub.record_visit(profile, "https://example.com/old", "Latest title");
+
+    let hits = hub.recent_history(profile, u32::MAX);
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].url, "https://example.com/old");
+    assert_eq!(hits[0].title, "Latest title");
+    assert_eq!(hits[1].url, "https://example.com/peer");
+    assert!(hub.recent_history(ProfileId::from(99), 10).is_empty());
+    assert!(hub.recent_history(profile, 0).is_empty());
+}
+
+#[test]
 fn favicons_roundtrip_with_age() {
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&sample()).unwrap();

@@ -9,12 +9,12 @@ mod web_extensions;
 
 pub(crate) use extensions::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    ControllerBrowserRequestSettlement, ControllerErasureSettlement, ControllerErasureTicket,
-    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
-    ControllerRuntimeGrantSettlement, MacosNativeActionFailure, MacosNativeRuntimeActivation,
-    MacosNativeRuntimeFailure, MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity,
-    MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, PersistentControllerRegistry,
-    ProfileControllerErasure,
+    ControllerBrowserRequestSettlement, ControllerCompatibilityBrokerSettlement,
+    ControllerErasureSettlement, ControllerErasureTicket, ControllerNamespaceRecoveryAudit,
+    ControllerPreparation, ControllerRegistryError, ControllerRuntimeGrantSettlement,
+    MacosNativeActionFailure, MacosNativeRuntimeActivation, MacosNativeRuntimeFailure,
+    MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
+    MacosNativeRuntimeRetirement, PersistentControllerRegistry, ProfileControllerErasure,
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};

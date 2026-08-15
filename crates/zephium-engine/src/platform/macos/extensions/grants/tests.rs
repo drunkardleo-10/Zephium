@@ -31,6 +31,13 @@ fn identity(seed: u8) -> PlanIdentity {
     }
 }
 
+fn brokered_identity(seed: u8) -> PlanIdentity {
+    PlanIdentity {
+        schema: MacosNativeGrantSchema::WkWebExtensionBrokeredV1,
+        ..identity(seed)
+    }
+}
+
 fn api(
     name: &str,
     requirement: ExtensionNativeGrantRequirement,
@@ -100,6 +107,43 @@ fn compiled_api_permissions(plan: &MacosNativeGrantPlan) -> Vec<&str> {
 
 fn compiled_host_patterns(plan: &MacosNativeGrantPlan) -> Vec<&str> {
     plan.granted_host_patterns().collect()
+}
+
+#[test]
+fn brokered_schema_adds_only_history_and_the_fixed_native_channel_grant() {
+    let grants = [
+        api("history", REQUIRED, GRANTED),
+        api("nativeMessaging", REQUIRED, GRANTED),
+        api("storage", REQUIRED, GRANTED),
+    ];
+    let plan = compile_projection(CompilerInput {
+        identity: brokered_identity(9),
+        browsing_context: ExtensionGrantBrowsingContext::Regular,
+        file_access_granted: false,
+        private_access_granted: false,
+        api_count: grants.len(),
+        api_grants: grants,
+        host_count: 0,
+        host_grants: std::iter::empty(),
+    })
+    .expect("brokered v1 permission cohort");
+
+    assert_eq!(
+        compiled_api_permissions(&plan),
+        ["nativeMessaging", "storage"]
+    );
+    assert_eq!(
+        plan.schema(),
+        MacosNativeGrantSchema::WkWebExtensionBrokeredV1
+    );
+    assert_eq!(
+        MacosNativeGrantSchema::WkWebExtensionV1.permission_disposition("history"),
+        Err(MacosNativeGrantPlanError::UnsupportedApiPermission)
+    );
+    assert_eq!(
+        MacosNativeGrantSchema::WkWebExtensionV1.permission_disposition("nativeMessaging"),
+        Ok(MacosNativeApiPermissionDisposition::ProductProhibited)
+    );
 }
 
 #[test]

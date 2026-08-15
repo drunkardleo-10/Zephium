@@ -567,11 +567,13 @@ impl fmt::Debug for MacosNativeRuntimeOwner {
 pub(crate) fn prepare_native_runtime_activation(
     native_root: &mut ExtensionRuntimeNativeRootLease,
     grants: &ExtensionNativeGrantSnapshot,
+    backend: zephium_core::extensions::ExtensionRuntimeBackendTarget,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
 ) -> Result<PreparedMacosNativeRuntimeActivation, MacosNativeRuntimeFailure> {
     let mtm = admit_runtime()?;
-    let grants = compile_native_grant_plan(grants).map_err(MacosNativeRuntimeFailure::GrantPlan)?;
+    let grants =
+        compile_native_grant_plan(grants, backend).map_err(MacosNativeRuntimeFailure::GrantPlan)?;
     let resource_url = verified_resource_url(native_root)?;
     Ok(PreparedMacosNativeRuntimeActivation {
         resource_url,

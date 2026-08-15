@@ -196,11 +196,22 @@ impl Error for MacosNativeGrantPlanError {}
 #[allow(dead_code)] // Consumed by the feature-gated native adapter slice.
 pub(super) fn compile_native_grant_plan(
     snapshot: &ExtensionNativeGrantSnapshot,
+    backend: zephium_core::extensions::ExtensionRuntimeBackendTarget,
 ) -> Result<MacosNativeGrantPlan, MacosNativeGrantPlanError> {
     let runtime = snapshot.runtime();
+    if backend != zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative {
+        return Err(MacosNativeGrantPlanError::UnsupportedApiPermission);
+    }
+    let schema = if snapshot.compatibility_target().as_str()
+        == zephium_core::extensions::MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
+    {
+        MacosNativeGrantSchema::WkWebExtensionBrokeredV1
+    } else {
+        MacosNativeGrantSchema::WkWebExtensionV1
+    };
     compile_projection(CompilerInput {
         identity: PlanIdentity {
-            schema: MacosNativeGrantSchema::WkWebExtensionV1,
+            schema,
             apply_mode:
                 MacosNativeGrantApplyMode::ReplaceCompleteGrantedSetsClearDeniedAndVerifyReadback,
             runtime: runtime.instance(),
@@ -382,6 +393,7 @@ pub(crate) enum MacosNativeApiPermission {
     DeclarativeNetRequestFeedback,
     DeclarativeNetRequestWithHostAccess,
     Menus,
+    NativeMessaging,
     Notifications,
     Scripting,
     Storage,
@@ -412,6 +424,7 @@ enum MacosNativeApiPermissionDisposition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MacosNativeGrantSchema {
     WkWebExtensionV1 = 1,
+    WkWebExtensionBrokeredV1 = 2,
 }
 
 /// Mandatory semantics for applying one complete compiled plan.
@@ -432,6 +445,19 @@ impl MacosNativeGrantSchema {
     ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
         match self {
             Self::WkWebExtensionV1 => Self::wk_web_extension_v1_permission(name),
+            Self::WkWebExtensionBrokeredV1 => Self::wk_web_extension_brokered_v1_permission(name),
+        }
+    }
+
+    fn wk_web_extension_brokered_v1_permission(
+        name: &str,
+    ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
+        match name {
+            "history" => Ok(MacosNativeApiPermissionDisposition::NotInNativePermissionSet),
+            "nativeMessaging" => Ok(MacosNativeApiPermissionDisposition::Native(
+                MacosNativeApiPermission::NativeMessaging,
+            )),
+            _ => Self::wk_web_extension_v1_permission(name),
         }
     }
 
@@ -555,6 +581,7 @@ impl MacosNativeApiPermission {
             Self::DeclarativeNetRequestFeedback => "declarativeNetRequestFeedback",
             Self::DeclarativeNetRequestWithHostAccess => "declarativeNetRequestWithHostAccess",
             Self::Menus => "menus",
+            Self::NativeMessaging => "nativeMessaging",
             Self::Notifications => "notifications",
             Self::Scripting => "scripting",
             Self::Storage => "storage",

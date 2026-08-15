@@ -2,7 +2,8 @@
 
 use zephium_core::extensions::{
     ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
-    MAX_EXTENSION_BROWSER_WINDOWS,
+    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
+    ExtensionRuntimeInstance, MAX_EXTENSION_BROWSER_WINDOWS,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::extensions::{
@@ -45,6 +46,67 @@ impl EngineHost {
         let _ = self
             .macos_extension_controllers
             .timeout_browser_request(profile, request);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finalize_extension_compatibility_broker_request(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionCompatibilityBrokerRequestId,
+    ) {
+        let subject = self
+            .macos_extension_controllers
+            .compatibility_broker_subject(profile, request)
+            .ok()
+            .flatten();
+        let witness = subject.and_then(|(context, operation)| {
+            self.extension_runtime_registry
+                .compatibility_broker_witness_for_macos_context(
+                    profile,
+                    context,
+                    operation.purpose(),
+                )
+                .ok()
+                .flatten()
+        });
+        let _ = self
+            .macos_extension_controllers
+            .finalize_compatibility_broker_request(profile, request, witness);
+    }
+
+    pub(crate) fn settle_extension_compatibility_broker_request(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionCompatibilityBrokerRequestId,
+        settlement: ExtensionCompatibilityBrokerSettlement,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            matches!(
+                self.macos_extension_controllers
+                    .settle_compatibility_broker_request(runtime, request, settlement),
+                Ok(
+                    crate::platform::imp::ControllerCompatibilityBrokerSettlement::Settled
+                        | crate::platform::imp::ControllerCompatibilityBrokerSettlement::Stale
+                )
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (runtime, request, settlement);
+            false
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn timeout_extension_compatibility_broker_request(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionCompatibilityBrokerRequestId,
+    ) {
+        let _ = self
+            .macos_extension_controllers
+            .timeout_compatibility_broker_request(profile, request);
     }
 
     #[cfg(target_os = "macos")]

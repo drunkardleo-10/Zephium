@@ -27,7 +27,9 @@ use objc2_web_kit::{
 };
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
-    ExtensionBrowserSurface, ExtensionNativeNamespaceScope,
+    ExtensionBrowserSurface, ExtensionCompatibilityBrokerOperation,
+    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
+    ExtensionCompatibilityBrokerWitness, ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit;
@@ -38,6 +40,7 @@ use super::browser_surface::BrowserSurfaceDiagnostics;
 #[cfg(feature = "native-web-extension-probes")]
 use super::browser_surface::ProbeBrowserSurfaceIdentity;
 use super::browser_surface::{BrowserSurfaceError, MacosExtensionBrowserSurfaceHost};
+use super::compatibility_broker::{CompatibilityBrokerPool, CompatibilityBrokerSettlementOutcome};
 use super::erasure::{
     ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
     ProfileControllerErasure,
@@ -326,6 +329,7 @@ pub(crate) struct PersistentControllerRegistry {
     browser_request_sink: Option<crate::EngineEventIngressSink>,
     browser_request_pool: Rc<BrowserRequestPool>,
     runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
+    compatibility_broker_pool: Option<Rc<CompatibilityBrokerPool>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,6 +359,13 @@ pub(crate) enum ControllerRuntimeGrantSettlement {
     Stale,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerCompatibilityBrokerSettlement {
+    ControllerUnprepared,
+    Settled,
+    Stale,
+}
+
 impl PersistentControllerRegistry {
     pub(crate) fn new() -> Self {
         Self {
@@ -364,6 +375,7 @@ impl PersistentControllerRegistry {
             browser_request_sink: None,
             browser_request_pool: Rc::new(BrowserRequestPool::new()),
             runtime_grant_pool: Rc::new(RuntimeGrantRequestPool::new()),
+            compatibility_broker_pool: None,
         }
     }
 
@@ -742,6 +754,106 @@ impl PersistentControllerRegistry {
         }
     }
 
+    pub(crate) fn compatibility_broker_subject(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionCompatibilityBrokerRequestId,
+    ) -> Result<
+        Option<(
+            *const WKWebExtensionContext,
+            ExtensionCompatibilityBrokerOperation,
+        )>,
+        ControllerRegistryError,
+    > {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .compatibility_broker_context_identity(request)
+            .zip(
+                entry
+                    .browser_surface
+                    .compatibility_broker_operation(request),
+            ))
+    }
+
+    pub(crate) fn finalize_compatibility_broker_request(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionCompatibilityBrokerRequestId,
+        witness: Option<ExtensionCompatibilityBrokerWitness>,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .finalize_compatibility_broker_request(request, witness))
+    }
+
+    pub(crate) fn settle_compatibility_broker_request(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionCompatibilityBrokerRequestId,
+        settlement: ExtensionCompatibilityBrokerSettlement,
+    ) -> Result<ControllerCompatibilityBrokerSettlement, ControllerRegistryError> {
+        let profile = runtime.profile();
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(ControllerCompatibilityBrokerSettlement::ControllerUnprepared);
+        };
+        validate_entry_identity(entry)?;
+        match entry
+            .browser_surface
+            .settle_compatibility_broker_request(runtime, request, settlement)
+        {
+            CompatibilityBrokerSettlementOutcome::Settled => {
+                Ok(ControllerCompatibilityBrokerSettlement::Settled)
+            }
+            CompatibilityBrokerSettlementOutcome::Stale => {
+                Ok(ControllerCompatibilityBrokerSettlement::Stale)
+            }
+            CompatibilityBrokerSettlementOutcome::IntegrityFailed => {
+                self.slots.poison();
+                Err(ControllerRegistryError::BrowserSurfaceIntegrity)
+            }
+        }
+    }
+
+    pub(crate) fn timeout_compatibility_broker_request(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionCompatibilityBrokerRequestId,
+    ) -> bool {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return false;
+        };
+        entry
+            .browser_surface
+            .timeout_compatibility_broker_request(request)
+    }
+
+    pub(crate) fn cancel_compatibility_broker_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const WKWebExtensionContext,
+    ) {
+        if let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile) {
+            entry
+                .browser_surface
+                .cancel_compatibility_broker_context(context);
+        }
+    }
+
     /// Clears an authorized profile's delegate graph after all of its views
     /// and runtime contexts have retired. An absent controller is inert; no
     /// native namespace is created by cleanup.
@@ -1027,14 +1139,25 @@ impl PersistentControllerRegistry {
         let sink = self.browser_request_sink.clone();
         let request_pool = self.browser_request_pool.clone();
         let runtime_grant_pool = self.runtime_grant_pool.clone();
-        let candidate =
-            match catch_native(|| create_entry(profile, sink, request_pool, runtime_grant_pool)) {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    self.slots.poison();
-                    return Err(error);
-                }
-            };
+        let compatibility_broker_pool = self
+            .compatibility_broker_pool
+            .get_or_insert_with(|| Rc::new(CompatibilityBrokerPool::new()))
+            .clone();
+        let candidate = match catch_native(|| {
+            create_entry(
+                profile,
+                sink,
+                request_pool,
+                runtime_grant_pool,
+                compatibility_broker_pool,
+            )
+        }) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.slots.poison();
+                return Err(error);
+            }
+        };
         let aliased = self.slots.entries.values().any(|other| match other {
             PersistentControllerSlot::Prepared(other) => {
                 Retained::as_ptr(&other.controller) == Retained::as_ptr(&candidate.controller)
@@ -1281,6 +1404,7 @@ fn create_entry(
     browser_request_sink: Option<crate::EngineEventIngressSink>,
     browser_request_pool: Rc<BrowserRequestPool>,
     runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
+    compatibility_broker_pool: Rc<CompatibilityBrokerPool>,
 ) -> Result<PersistentControllerEntry, ControllerRegistryError> {
     let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
     let identifier = NSUUID::from_bytes(profile.bytes());
@@ -1307,6 +1431,7 @@ fn create_entry(
         browser_request_sink,
         browser_request_pool,
         runtime_grant_pool,
+        compatibility_broker_pool,
     )
     .map_err(map_browser_surface_error)?;
     browser_surface.attach(&controller);

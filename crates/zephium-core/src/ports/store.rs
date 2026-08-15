@@ -709,6 +709,10 @@ pub trait Store {
     /// Prefix search over the profile's history FTS index, deduped by url,
     /// most recent first.
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
+    /// Bounded, deduplicated recent history for browser-owned consumers such
+    /// as a reviewed extension compatibility adapter. Implementations must
+    /// keep profile isolation and the same URL/title validation as search.
+    fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit>;
     /// Age in seconds of the cached icon for a page origin, None when absent.
     fn favicon_age(&self, profile: ProfileId, origin: &str) -> Option<i64>;
     fn save_favicon(

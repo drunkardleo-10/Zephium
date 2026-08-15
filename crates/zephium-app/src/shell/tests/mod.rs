@@ -522,6 +522,13 @@ pub(crate) struct FakeEngine {
             ExtensionBrowserRequestSettlement,
         )>,
     >,
+    extension_compatibility_settlements: Mutex<
+        Vec<(
+            ExtensionRuntimeInstance,
+            zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
+            zephium_core::extensions::ExtensionCompatibilityBrokerSettlement,
+        )>,
+    >,
     extension_runtime_grant_settlements: Mutex<
         Vec<(
             ExtensionRuntimeInstance,
@@ -633,6 +640,19 @@ impl FakeEngine {
         self.extension_browser_settlements.lock().unwrap().clone()
     }
 
+    fn extension_compatibility_settlements(
+        &self,
+    ) -> Vec<(
+        ExtensionRuntimeInstance,
+        zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
+        zephium_core::extensions::ExtensionCompatibilityBrokerSettlement,
+    )> {
+        self.extension_compatibility_settlements
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
     fn extension_runtime_grant_settlements(
         &self,
     ) -> Vec<(
@@ -737,6 +757,18 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, request, settlement));
+        self.native_admission()
+    }
+    fn settle_extension_compatibility_broker_request(
+        &self,
+        runtime: ExtensionRuntimeInstance,
+        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
+        settlement: zephium_core::extensions::ExtensionCompatibilityBrokerSettlement,
+    ) -> NativeDispatch {
+        self.extension_compatibility_settlements
+            .lock()
+            .unwrap()
+            .push((runtime, request, settlement));
         self.native_admission()
     }
     fn settle_extension_runtime_grant_prompt(
@@ -1205,6 +1237,17 @@ impl Store for FakeStore {
         }
         self.history.clone()
     }
+    fn recent_history(
+        &self,
+        _profile: ProfileId,
+        limit: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryHit> {
+        self.history
+            .iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .cloned()
+            .collect()
+    }
     fn favicon_age(&self, _profile: ProfileId, origin: &str) -> Option<i64> {
         self.icon_ages.lock().unwrap().get(origin).copied()
     }
@@ -1670,6 +1713,7 @@ mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_compatibility_broker;
 mod extension_runtime_grants;
 mod favicons;
 #[path = "navigation.rs"]

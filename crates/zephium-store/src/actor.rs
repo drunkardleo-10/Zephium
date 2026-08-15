@@ -676,6 +676,7 @@ enum Cmd {
     ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
+    RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
     FreshFaviconRaster(ProfileId, String, i64, Sender<Option<Vec<u8>>>),
     SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
@@ -2495,6 +2496,25 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::RecentHistory(
+                profile,
+                limit.min(MAX_HISTORY_RESULTS),
+                tx,
+            ))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
     fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
         let (tx, rx) = mpsc::channel();
         if self.tx.try_send(Cmd::PendingProfileDeletions(tx)).is_err() {
@@ -3022,6 +3042,9 @@ fn actor(
             }
             Some(Cmd::SearchHistory(profile, query, limit, reply)) => {
                 let _ = reply.send(hub.search_history(profile, &query, limit));
+            }
+            Some(Cmd::RecentHistory(profile, limit, reply)) => {
+                let _ = reply.send(hub.recent_history(profile, limit));
             }
             Some(Cmd::FaviconAge(profile, origin, reply)) => {
                 let _ = reply.send(hub.favicon_age(profile, &origin));

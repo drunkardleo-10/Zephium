@@ -488,7 +488,10 @@ fn catch_native<T>(
 fn resolve_permission(
     permission: MacosNativeApiPermission,
 ) -> Result<Retained<NSString>, MacosGrantApplicationError> {
-    if permission == MacosNativeApiPermission::Notifications {
+    if matches!(
+        permission,
+        MacosNativeApiPermission::Notifications | MacosNativeApiPermission::NativeMessaging
+    ) {
         // `WKWebExtensionPermission` is an extensible NSString enum. WebKit
         // publishes `notifications` in the exact Bitwarden contract's
         // requested-permission set but exposes no public data symbol for it.
@@ -516,6 +519,9 @@ fn resolve_permission(
             b"WKWebExtensionPermissionDeclarativeNetRequestWithHostAccess\0".as_slice()
         }
         MacosNativeApiPermission::Menus => b"WKWebExtensionPermissionMenus\0".as_slice(),
+        MacosNativeApiPermission::NativeMessaging => {
+            unreachable!("handled as extensible literal")
+        }
         MacosNativeApiPermission::Notifications => unreachable!("handled as extensible literal"),
         MacosNativeApiPermission::Scripting => b"WKWebExtensionPermissionScripting\0".as_slice(),
         MacosNativeApiPermission::Storage => b"WKWebExtensionPermissionStorage\0".as_slice(),
@@ -557,6 +563,7 @@ mod tests {
             MacosNativeApiPermission::DeclarativeNetRequestFeedback,
             MacosNativeApiPermission::DeclarativeNetRequestWithHostAccess,
             MacosNativeApiPermission::Menus,
+            MacosNativeApiPermission::NativeMessaging,
             MacosNativeApiPermission::Notifications,
             MacosNativeApiPermission::Scripting,
             MacosNativeApiPermission::Storage,
@@ -565,7 +572,7 @@ mod tests {
             MacosNativeApiPermission::WebNavigation,
             MacosNativeApiPermission::WebRequest,
         ];
-        assert_eq!(permissions.len(), 16);
+        assert_eq!(permissions.len(), 17);
         assert!(permissions.len() <= MAX_NATIVE_PERMISSION_ENTRIES);
         for permission in permissions {
             assert!(permission.as_str().len() <= 64);

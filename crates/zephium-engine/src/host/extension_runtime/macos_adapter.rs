@@ -121,6 +121,7 @@ pub(super) fn begin_native_activation(
         match prepare_native_runtime_activation(
             native_root,
             grants.native_snapshot(),
+            reservation.owner().backend,
             expected_owner,
             controller,
         ) {
@@ -173,6 +174,11 @@ pub(super) fn begin_native_retirement(
         );
     host.macos_extension_controllers
         .cancel_runtime_grant_context(
+            ticket.owner().key.profile(),
+            owner.runtime_grant_context_identity(),
+        );
+    host.macos_extension_controllers
+        .cancel_compatibility_broker_context(
             ticket.owner().key.profile(),
             owner.runtime_grant_context_identity(),
         );

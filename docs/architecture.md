@@ -1139,15 +1139,18 @@ teardown gate.
 This closes an important admission ambiguity: parser acceptance is not runtime
 support. The current `macos.wkwebextension.v1` grant schema therefore continues
 to reject those five non-representable permissions instead of silently
-dropping them or changing the meaning of an existing schema tag. A future
-native broker must prove background and extension-page behavior through a
-capability-limited channel and then ship under a new compatibility/grant schema;
-a generic page-world bridge is prohibited. If WebKit provides no safe
-background integration point, packages that require these APIs belong on the
-separate macOS compatibility-runtime target, not the native target. In
-particular, the current native target cannot classify Vimium as compatible;
-tabs/storage availability alone does not establish its keyboard-navigation,
-Vomnibar, history, bookmark, session, or search workflows.
+dropping them or changing the meaning of an existing schema tag. A distinct
+`macos.wkwebextension-brokered.v1` compatibility profile now exists for exact,
+reviewed package adapters. Both profiles use the same durable `MacosNative`
+backend and native owner identity because they own the same WKWebExtension
+controller/context resources; the profile is retained independently in the
+authenticated package record and admitted manifest. It is not a fifth
+persistence backend or controller namespace. A generic page-world or generic
+native-messaging bridge remains prohibited. Packages that need broader emulated
+APIs still belong on the separate macOS compatibility-runtime target. In
+particular, neither native profile currently classifies Vimium as compatible;
+tabs/storage plus one history operation do not establish its keyboard-
+navigation, Vomnibar, bookmark, session, notification, or search workflows.
 
 WebKit does expose a narrower compatibility seam through
 `WKWebExtensionControllerDelegate`, and the live gate now classifies it without
@@ -1169,12 +1172,36 @@ retained and dispatched non-reentrantly on the main queue, but JavaScript does
 not observe it within the two-second gate. The extension then disconnects and
 the native handler, port, delegate, view, context, controller, and store all
 release. The classification is therefore `extension-to-host-only / native
-host-send accepted-unobserved`, not a bidirectional port. Product grant
-compilation continues to prohibit `nativeMessaging`, ordinary builds do not
+host-send accepted-unobserved`, not a bidirectional port. The initial native
+grant schema continues to prohibit `nativeMessaging`, ordinary builds do not
 enable the message-port binding feature, and the probe does not make an
 unmodified extension call this identifier. Any reviewed adapter using the
 one-shot channel belongs to a new compatibility/grant schema; it cannot silently
 change `macos.wkwebextension.v1` or expose arbitrary native application names.
+
+The first production-shaped operation on that new profile is bounded recent
+history. The extension side can send only the canonical
+`v1/history.recent/<limit>` string to the fixed internal application identifier;
+the parser accepts `1..=100` and at most 128 UTF-8 bytes. Native code joins the
+callback to the exact controller and loaded context, resolves the exact
+published runtime, consumes a move-only witness that proves both the brokered
+profile and an effective `history` grant, and then emits a typed Shell request.
+Shell performs a profile-scoped Store read through a bounded fair queue. The
+query considers at most the newest 4,096 history rows, deduplicates by URL,
+validates URLs, sanitizes titles, and returns at most 100 rows. The native reply
+is capped at 64 KiB, every request has a five-second watchdog, and pending work
+is capped at 8 per profile and 32 process-wide. Context retirement, timeout,
+shutdown, stale runtime settlement, overload, and malformed responses all
+complete the retained one-shot callback with an explicit error. Four extension
+reads yield to a pending browser-owned history/favicon read, so an admitted
+adapter cannot starve ordinary browser UX.
+
+This is not a generic `chrome.history` implementation or a compatibility claim.
+The native channel primitive has live source-free WebKit evidence, while the
+new authority-to-Store production path currently has unit/component coverage
+only. A source-free live gate through the brokered product profile, followed by
+an exact reviewed adapter and release-build latency/RSS/endurance evidence,
+remains mandatory before any package can depend on this operation.
 
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
@@ -1183,7 +1210,7 @@ change `macos.wkwebextension.v1` or expose arbitrary native application names.
 | System notifications | Degraded | The pinned composition selects `UnsupportedSystemNotificationsService` when `chrome.notifications` is absent. In-extension auth-request flows may remain available, but OS notification presentation/click handling is unavailable. |
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
-| Native messaging | Unsupported in the initial native target | The optional permission is parsed, but product grant compilation prohibits it. The Zephium-owned broker probe proves a fixed-identifier, principal-bound one-shot round trip for a future compatibility target; persistent ports are extension-to-host-only on the exercised runtime. Neither result exposes arbitrary native applications or enables Bitwarden's optional native integration. Native biometric/application integration must be disclosed separately from core vault use. |
+| Native messaging | Unsupported in the initial native target | The optional permission is parsed, but `macos.wkwebextension.v1` product grant compilation prohibits it. The separate brokered profile grants only Zephium's fixed internal one-shot channel to an exact reviewed adapter; persistent ports are extension-to-host-only on the exercised runtime. It exposes neither arbitrary native applications nor Bitwarden's optional native integration. Native biometric/application integration must be disclosed separately from core vault use. |
 | Programmatic main-world scripting | Native literal supported; pinned source requires a sealed adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
 | Runtime ports | Registered routing compatible; pre-listener connection not queued | A Zephium-owned extension page opens a named port only after the MV3 worker registers `runtime.onConnect`; the worker receives the port and completes an exact message round trip. A separate connection created immediately before listener registration returns a port, then disconnects without `runtime.lastError` and is not delivered after registration. Extensions that depend on Chrome queuing that startup race require a reviewed compatibility decision; ordinary registered port routing does not. |
 | Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |

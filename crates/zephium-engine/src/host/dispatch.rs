@@ -62,8 +62,9 @@ type HostTask = Box<dyn FnOnce(&mut EngineHost)>;
 const EXTENSION_RUNTIME_TERMINAL_CAPACITY: usize =
     2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
 #[cfg(target_os = "macos")]
-const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize =
-    2 * zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS;
+const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize = 2
+    * (zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
+        + zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS);
 
 type ExtensionRuntimeTerminalSlots = ExactTerminalSlots<EXTENSION_RUNTIME_TERMINAL_CAPACITY>;
 #[cfg(target_os = "macos")]
@@ -734,8 +735,9 @@ pub(super) fn extension_runtime_terminals_are_quiescent() -> bool {
 }
 
 /// Admit a Shell settlement or watchdog for an already-retained native
-/// browser-request completion. The fixed FIFO is sized from the global
-/// request ceiling, so WebKit re-entry cannot crowd it out with renderer work.
+/// browser-request or compatibility-broker completion. The fixed FIFO is
+/// sized from both global request ceilings, so WebKit re-entry cannot crowd
+/// it out with renderer work.
 #[cfg(target_os = "macos")]
 pub(crate) fn with_extension_browser_request_terminal<F>(f: F) -> bool
 where

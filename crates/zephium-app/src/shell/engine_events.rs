@@ -38,6 +38,10 @@ impl Shell {
                     self.on_extension_browser_request(request.clone());
                     return;
                 }
+                EngineEvent::ExtensionCompatibilityBrokerRequested { request } => {
+                    self.on_extension_compatibility_broker_request(request.as_ref().clone());
+                    return;
+                }
                 EngineEvent::ExtensionRuntimeGrantRequested { prompt } => {
                     self.on_extension_runtime_grant_prompt(prompt.as_ref().clone());
                     return;
@@ -117,6 +121,9 @@ impl Shell {
             }
             EngineEvent::ExtensionBrowserRequested { request } => {
                 self.on_extension_browser_request(request)
+            }
+            EngineEvent::ExtensionCompatibilityBrokerRequested { request } => {
+                self.on_extension_compatibility_broker_request(*request)
             }
             EngineEvent::ExtensionRuntimeGrantRequested { prompt } => {
                 self.on_extension_runtime_grant_prompt(*prompt);
@@ -415,6 +422,7 @@ impl Shell {
             // Requests must reach their handler even during retirement so the
             // retained native completion receives an explicit rejection.
             EngineEvent::ExtensionBrowserRequested { .. } => None,
+            EngineEvent::ExtensionCompatibilityBrokerRequested { .. } => None,
             EngineEvent::ExtensionRuntimeGrantRequested { .. } => None,
             EngineEvent::ExtensionRuntimeGrantCancelled { .. } => None,
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),

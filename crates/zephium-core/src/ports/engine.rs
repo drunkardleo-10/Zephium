@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
-    ExtensionBrowserSurface, ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
+    ExtensionBrowserSurface, ExtensionCompatibilityBrokerRequest,
+    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
+    ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
@@ -625,6 +627,17 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Settles one exact, authority-bound Zephium compatibility request. The
+    /// native adapter retains the one-shot reply and independently times it
+    /// out; this port exposes no arbitrary native application identifier.
+    fn settle_extension_compatibility_broker_request(
+        &self,
+        _runtime: ExtensionRuntimeInstance,
+        _request: ExtensionCompatibilityBrokerRequestId,
+        _settlement: ExtensionCompatibilityBrokerSettlement,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Settles one exact native optional-grant callback cohort after Shell has
     /// obtained a user decision and, for `Granted`, the serialized extension
     /// service has durably committed and rebound that complete cohort.
@@ -793,6 +806,11 @@ pub enum EngineEvent {
     /// [`Engine::settle_extension_browser_request`].
     ExtensionBrowserRequested {
         request: ExtensionBrowserRequest,
+    },
+    /// One exact published runtime invoked a product-sealed compatibility
+    /// operation after native context binding and API authority were proven.
+    ExtensionCompatibilityBrokerRequested {
+        request: Box<ExtensionCompatibilityBrokerRequest>,
     },
     /// A native WebExtension context requested one complete optional API/host
     /// cohort. The engine retains and times out every platform completion;

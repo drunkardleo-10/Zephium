@@ -161,6 +161,7 @@ use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
     ExtensionActionSnapshotSettlement, ExtensionBrowserRequestId,
     ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
+    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
     ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Rect;
@@ -644,6 +645,7 @@ impl RetirementGate {
             // it after profile retirement so Shell can explicitly reject the
             // retained native completion instead of waiting for its timeout.
             event @ EngineEvent::ExtensionBrowserRequested { .. }
+            | event @ EngineEvent::ExtensionCompatibilityBrokerRequested { .. }
             | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
             | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. } => Some(event),
             event @ EngineEvent::TitleChanged { id, .. }
@@ -1447,6 +1449,29 @@ impl Engine for WebviewEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (profile, request, settlement);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn settle_extension_compatibility_broker_request(
+        &self,
+        runtime: ExtensionRuntimeInstance,
+        request: ExtensionCompatibilityBrokerRequestId,
+        settlement: ExtensionCompatibilityBrokerSettlement,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::with_extension_browser_request_terminal(move |host| {
+                    let _ = host.settle_extension_compatibility_broker_request(
+                        runtime, request, settlement,
+                    );
+                });
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (runtime, request, settlement);
             NativeDispatch::Unsupported
         }
     }

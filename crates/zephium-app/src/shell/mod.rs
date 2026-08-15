@@ -7,6 +7,7 @@ mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_compatibility_broker;
 mod extension_management;
 mod extension_runtime_grants;
 mod favicons;
@@ -1166,6 +1167,11 @@ impl Shell {
                 query,
                 hits,
             } => self.on_history_read(generation, profile, query, hits),
+            StoreReadResult::ExtensionRecentHistory {
+                runtime,
+                request,
+                hits,
+            } => self.on_extension_recent_history_read(runtime, request, hits),
             StoreReadResult::Favicon {
                 generation,
                 id,

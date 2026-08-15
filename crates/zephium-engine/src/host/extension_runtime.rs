@@ -23,8 +23,9 @@ use std::time::Instant;
 
 use crate::MainThreadDispatch;
 use zephium_core::extensions::{
-    ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
-    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+    ExtensionActiveTabGrantWitness, ExtensionCompatibilityBrokerPurpose,
+    ExtensionCompatibilityBrokerWitness, ExtensionDocumentAuthorityWitness,
+    ExtensionDocumentPurpose, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
     ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
@@ -1175,6 +1176,33 @@ impl ReservationControl {
         authority.mint_document_authority_witness(runtime, purpose)
     }
 
+    fn mint_compatibility_broker_witness(
+        &self,
+        owner: OwnerKey,
+        generation: ExtensionRuntimeHostRegistryGeneration,
+        runtime: &ExtensionRuntimeFingerprint,
+        purpose: ExtensionCompatibilityBrokerPurpose,
+    ) -> Result<ExtensionCompatibilityBrokerWitness, ExtensionOperationAuthorityDenial> {
+        if owner != self.owner() || generation != self.generation {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        let state = self.lock_authority_for_witness()?;
+        let ReservationAuthorityState::Published {
+            evidence,
+            authority: Some(authority),
+        } = &*state
+        else {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        };
+        if authority.fingerprint() != runtime {
+            return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
+        }
+        if !self.accepts_publication_evidence(*evidence) {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        authority.mint_compatibility_broker_witness(runtime, purpose)
+    }
+
     fn accepts_publication_evidence(&self, evidence: ExtensionRuntimeOwnershipEvidence) -> bool {
         matches!(
             &self.binding,
@@ -2222,6 +2250,39 @@ impl ExtensionRuntimeRegistry {
             .with_owned_macos_runtime(&runtime, |owner| owner.runtime_grant_display_name())?
             .flatten();
         Ok(name.map(|name| (runtime, name)))
+    }
+
+    /// Resolves a native callback to exactly one broker-enabled published
+    /// runtime and mints only the closed operation authority it requested.
+    #[cfg(target_os = "macos")]
+    pub(super) fn compatibility_broker_witness_for_macos_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const objc2_web_kit::WKWebExtensionContext,
+        purpose: ExtensionCompatibilityBrokerPurpose,
+    ) -> Result<Option<ExtensionCompatibilityBrokerWitness>, ExtensionRuntimeHostBindError> {
+        let Some(runtime) = self.published_runtime_for_macos_context(profile, context)? else {
+            return Ok(None);
+        };
+        let index = self.published_runtime_index(&runtime)?;
+        let reservation = Arc::clone(&self.entries[index].reservation);
+        if reservation.owner().backend != ExtensionRuntimeBackendTarget::MacosNative {
+            return Ok(None);
+        }
+        match reservation.mint_compatibility_broker_witness(
+            reservation.owner(),
+            reservation.generation,
+            &runtime,
+            purpose,
+        ) {
+            Ok(witness) => Ok(Some(witness)),
+            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing) => Ok(None),
+            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch) => {
+                self.fail_invariant();
+                Err(ExtensionRuntimeHostBindError::InternalInvariant)
+            }
+            Err(_) => Err(ExtensionRuntimeHostBindError::Unavailable),
+        }
     }
 
     /// Mints `activeTab` only when the exact published authority declares it.

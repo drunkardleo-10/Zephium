@@ -1028,6 +1028,35 @@ These inherited properties must not be overstated:
   The GTK4/WebKitGTK 6 migration must retire the explicitly allowlisted GTK3 advisories
   and re-audit the vendored Wry patch.
 
+### Extension compatibility broker
+
+The macOS native extension compatibility broker is a narrow zone-1 service,
+not native-messaging authority for installed extensions. It accepts only the
+fixed internal identifier `app.zephium.extension-broker.v1`, a canonical
+versioned string request, and a loaded context belonging to the exact retained
+controller. Product authority must have admitted the distinct brokered
+compatibility profile, and the published runtime must consume an operation-
+specific witness proving the effective API grant before Shell sees a request.
+The initial operation is read-only recent history; it carries no SQL, path,
+hostname, arbitrary application identifier, generic fetch, or page-world
+payload.
+
+Native, Shell, and Store enforce independent bounds: 128 request bytes, 64 KiB
+response bytes, 100 result rows, a five-second native deadline, 8 pending
+requests per profile, and 32 process-wide. Reads remain profile-scoped, reject
+degraded/recovery-required storage, inspect only a bounded recent window,
+deduplicate URLs, validate navigation schemes, and sanitize titles. Retirement
+and shutdown cancel retained callbacks; late Store results can settle only the
+exact runtime generation and request identity. The ordinary
+`macos.wkwebextension.v1` profile still prohibits `nativeMessaging` and cannot
+mint broker witnesses. Persistent ports and arbitrary native hosts remain
+unsupported.
+
+This boundary has live evidence for WebKit's one-shot principal-bound channel,
+but the complete brokered product-profile path does not yet have a live native
+gate. No extension compatibility claim may rely on it until that gate and
+release-build resource/endurance measurements pass.
+
 ## Features deliberately not claimed
 
 The following are roadmap items or disabled backends, not current security guarantees:

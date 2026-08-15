@@ -158,6 +158,74 @@ impl Hub {
         .unwrap_or_default()
     }
 
+    pub(crate) fn recent_history(&mut self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+            || limit == 0
+        {
+            return Vec::new();
+        }
+        let limit = limit.min(MAX_HISTORY_RESULTS);
+        let Ok(conn) = self.profile_conn(profile) else {
+            return Vec::new();
+        };
+        let recent_floor = conn
+            .query_row(
+                "SELECT COALESCE((
+                     SELECT id FROM history
+                     ORDER BY id DESC LIMIT 1 OFFSET ?1
+                 ), 0)",
+                [MAX_HISTORY_SEARCH_ROWS - 1],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(i64::MAX);
+        let Ok(mut stmt) = conn.prepare_cached(
+            "WITH ranked AS (
+                 SELECT id, url, title, visited_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY url ORDER BY visited_at DESC, id DESC
+                        ) AS rank
+                 FROM history
+                 WHERE id >= ?4
+             )
+             SELECT url, title, visited_at
+             FROM ranked
+             WHERE rank = 1
+               AND length(CAST(url AS BLOB)) <= ?2
+               AND length(CAST(title AS BLOB)) <= ?3
+             ORDER BY visited_at DESC, id DESC
+             LIMIT ?1",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(
+            params![
+                limit,
+                MAX_URL_BYTES as i64,
+                MAX_TITLE_BYTES as i64,
+                recent_floor
+            ],
+            |row| {
+                Ok(HistoryHit {
+                    url: row.get(0)?,
+                    title: row.get(1)?,
+                    last_visit: row.get(2)?,
+                })
+            },
+        )
+        .map(|rows| {
+            rows.filter_map(Result::ok)
+                .filter(|hit| navigation::is_allowed_str(&hit.url))
+                .map(|mut hit| {
+                    hit.title = sanitize_page_title(&hit.title);
+                    hit
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn history_matches(&mut self, profile: ProfileId, query: &str) -> i64 {
         self.profile_conn(profile)

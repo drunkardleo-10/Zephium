@@ -30,8 +30,8 @@ use serde_json::{json, Value};
 
 const CONTRACT_PRINCIPAL: &str = "dddddddddddddddddddddddddddddddd";
 const APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
-const ONE_SHOT_REQUEST: &str = "zephium-broker-one-shot-request";
-const ONE_SHOT_REPLY: &str = "zephium-broker-one-shot-reply";
+const ONE_SHOT_REQUEST: &str = "v1/history.recent/2";
+const ONE_SHOT_REPLY: &str = r#"{"v":1,"items":[]}"#;
 const PORT_REQUEST: &str = "zephium-broker-port-request";
 const PORT_REPLY: &str = "zephium-broker-port-reply";
 const PORT_REPLY_UNOBSERVED: &str = "host-reply-unobserved";
