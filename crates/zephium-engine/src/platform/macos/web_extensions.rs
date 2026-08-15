@@ -11,6 +11,7 @@ mod bitwarden_core_artifact;
 mod compatibility_artifact;
 mod compatibility_fixture;
 mod major_extension_contract;
+mod native_broker_contract;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
@@ -66,7 +67,7 @@ const HTTP_RESPONSE_LIMIT: usize = 256 * 1024;
 const MAX_HTTP_REQUESTS: usize = 128;
 const MAX_EXTENSION_SCRIPT_DELTA: usize = 16;
 const MAX_WEBVIEW_CALLBACKS: usize = 1_024;
-const EXPECTED_NATIVE_CONTROLLERS: usize = 4;
+const EXPECTED_NATIVE_CONTROLLERS: usize = 5;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
 const PERSISTENT_PROFILE_A: u128 = 0xf0cc_44f2_4355_4cf9_a74f_27fe_6cb3_7eda;
 const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
@@ -437,6 +438,7 @@ struct Fixture {
     permission_path: std::path::PathBuf,
     bitwarden_contract_path: std::path::PathBuf,
     major_extension_contract_path: std::path::PathBuf,
+    native_broker_contract_path: std::path::PathBuf,
     runtime_paths: persistent_runtime::RuntimeFixturePaths,
 }
 
@@ -459,6 +461,7 @@ impl Fixture {
         permission_requests::write_fixture(&permission_path)?;
         let bitwarden_contract_path = bitwarden_contract::write_fixture(temp.path())?;
         let major_extension_contract_path = major_extension_contract::write_fixture(temp.path())?;
+        let native_broker_contract_path = native_broker_contract::write_fixture(temp.path())?;
         let runtime_paths = persistent_runtime::write_runtime_extensions(temp.path())?;
         Ok(Self {
             _temp: temp,
@@ -467,6 +470,7 @@ impl Fixture {
             permission_path,
             bitwarden_contract_path,
             major_extension_contract_path,
+            native_broker_contract_path,
             runtime_paths,
         })
     }
@@ -553,6 +557,8 @@ struct ProbeTeardown {
     bitwarden_runtime_port_early_connect: &'static str,
     major_extension_native_permissions: Box<str>,
     major_extension_namespaces: Box<str>,
+    native_broker_port: Weak<objc2_web_kit::WKWebExtensionMessagePort>,
+    native_broker_delegate_drops: Arc<AtomicUsize>,
     runtime_permission_status: &'static str,
     runtime_permission_readback: String,
     runtime_permission_callbacks_coalesced_before_settlement: bool,
@@ -609,7 +615,7 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_one_shot=round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -617,6 +623,7 @@ fn run_web_extension_probe_with_permissions(
             teardown.runtime_permission_replacement_settlement_stranded,
             teardown.major_extension_native_permissions,
             teardown.major_extension_namespaces,
+            teardown.native_broker_delegate_drops.load(Ordering::Acquire),
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
             teardown.bitwarden_runtime_port_early_connect,
@@ -802,6 +809,12 @@ fn run_supported_probe(
     let major_extension = load_extension(&fixture.major_extension_contract_path, &run_loop, mtm)?;
     set_phase("major-extension-contract-runtime");
     let major_extension_teardown = major_extension_contract::run(&major_extension, &run_loop, mtm)?;
+    set_phase("native-broker-contract-parse");
+    let native_broker_extension =
+        load_extension(&fixture.native_broker_contract_path, &run_loop, mtm)?;
+    set_phase("native-broker-contract-runtime");
+    let native_broker_teardown =
+        native_broker_contract::run(&native_broker_extension, &run_loop, mtm)?;
     set_phase("runtime-extension-parse");
     let runtime_writer = load_extension(&fixture.runtime_paths.writer, &run_loop, mtm)?;
     let runtime_verifier_one = load_extension(&fixture.runtime_paths.verifier_one, &run_loop, mtm)?;
@@ -842,6 +855,7 @@ fn run_supported_probe(
     let controller_weaks = vec![
         bitwarden_contract_teardown.controller,
         major_extension_teardown.controller.clone(),
+        native_broker_teardown.controller.clone(),
         Weak::from_retained(&primary_bundle.controller),
         Weak::from_retained(&secondary_bundle.controller),
     ];
@@ -875,6 +889,7 @@ fn run_supported_probe(
     let mut context_weaks = vec![
         bitwarden_contract_teardown.context,
         major_extension_teardown.context.clone(),
+        native_broker_teardown.context.clone(),
         Weak::from_retained(&primary_context),
         Weak::from_retained(&peer_context),
         Weak::from_retained(&secondary_context),
@@ -1415,6 +1430,7 @@ fn run_supported_probe(
     drop(runtime_verifier_two);
     drop(runtime_empty);
     drop(major_extension);
+    drop(native_broker_extension);
     drop(primary_bundle);
     drop(secondary_bundle);
     drop(primary_server);
@@ -1431,11 +1447,11 @@ fn run_supported_probe(
             .into_iter()
             .chain(permission_request_evidence.extension_views)
             .collect(),
-        capability_views: vec![major_extension_teardown.view],
-        capability_stores: vec![major_extension_teardown.store],
+        capability_views: vec![major_extension_teardown.view, native_broker_teardown.view],
+        capability_stores: vec![major_extension_teardown.store, native_broker_teardown.store],
         controllers: controller_weaks,
         contexts: context_weaks,
-        expected_contexts: 5 + runtime_permission_contexts,
+        expected_contexts: 6 + runtime_permission_contexts,
         expected_extension_ui_views: 2 + runtime_permission_views,
         lifecycle_drops,
         baseline_script_count: baseline_inventory.len(),
@@ -1461,6 +1477,8 @@ fn run_supported_probe(
             .join(",")
             .into_boxed_str(),
         major_extension_namespaces: major_extension_teardown.namespace_summary,
+        native_broker_port: native_broker_teardown.port,
+        native_broker_delegate_drops: native_broker_teardown.delegate_drops,
         runtime_permission_status: match permission_mode {
             RuntimePermissionProbeMode::None => "interactive-not-run",
             RuntimePermissionProbeMode::Full => "passed",
@@ -2094,8 +2112,8 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
 fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
     const EXPECTED_EXTENSION_PRODUCT_VIEWS: usize = 1;
     const EXPECTED_EXTENSION_PRODUCT_STORES: usize = 1;
-    const EXPECTED_CAPABILITY_VIEWS: usize = 1;
-    const EXPECTED_CAPABILITY_STORES: usize = 1;
+    const EXPECTED_CAPABILITY_VIEWS: usize = 2;
+    const EXPECTED_CAPABILITY_STORES: usize = 2;
     const EXPECTED_PROFILE_VIEWS: usize = 7;
     const EXPECTED_PROFILE_OWNERS: usize = 6;
     const EXPECTED_PROFILE_CONTEXTS: usize = 4;
@@ -2196,13 +2214,18 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
             && profile_controllers_released
             && profile_stores_released
             && profile_lifecycle_released
+            && teardown.native_broker_port.load().is_none()
+            && teardown
+                .native_broker_delegate_drops
+                .load(Ordering::Acquire)
+                == 1
             && teardown.lifecycle_drops.load(Ordering::Acquire) == 3
         {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, extension_product_views_released={}/{}, extension_product_stores_released={}/{}, extension_ui_views_released={}/{}, capability_views_released={}/{}, capability_stores_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
+                "native teardown did not converge: view={}, extension_product_views_released={}/{}, extension_product_stores_released={}/{}, extension_ui_views_released={}/{}, capability_views_released={}/{}, capability_stores_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, native_broker_port_released={}, native_broker_delegate_drops={}/1, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
                 teardown.view.load().is_none(),
                 teardown.extension_product_views.iter().filter(|view| view.load().is_none()).count(),
                 teardown.extension_product_views.len(),
@@ -2226,6 +2249,8 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
                 teardown.profile_controllers.len(),
                 teardown.profile_stores.iter().filter(|store| store.load().is_none()).count(),
                 teardown.profile_stores.len(),
+                teardown.native_broker_port.load().is_none(),
+                teardown.native_broker_delegate_drops.load(Ordering::Acquire),
                 teardown.lifecycle_drops.load(Ordering::Acquire),
                 profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS,
             ));

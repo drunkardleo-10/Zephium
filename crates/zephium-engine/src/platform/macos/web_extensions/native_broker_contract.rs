@@ -1,0 +1,638 @@
+//! Live proof for WebKit's principal-bound extension-to-application channel.
+//!
+//! This source-free fixture does not enable product native messaging. It uses
+//! one fixed internal application identifier, exact bounded payloads, one
+//! message and one port, and a nonpersistent controller/store. Passing proves
+//! a full one-shot request/reply channel and records the currently asymmetric
+//! persistent-port behavior; it grants no generic native-host authority.
+
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use dispatch2::DispatchQueue;
+use objc2::rc::{Retained, Weak};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2_foundation::{
+    MainThreadMarker, NSDictionary, NSError, NSObjectProtocol, NSRunLoop, NSString,
+};
+use objc2_web_kit::{
+    WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
+    WKWebExtensionController, WKWebExtensionControllerDelegate, WKWebExtensionMessagePort,
+    WKWebView, WKWebsiteDataStore,
+};
+use serde_json::{json, Value};
+
+const CONTRACT_PRINCIPAL: &str = "dddddddddddddddddddddddddddddddd";
+const APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
+const ONE_SHOT_REQUEST: &str = "zephium-broker-one-shot-request";
+const ONE_SHOT_REPLY: &str = "zephium-broker-one-shot-reply";
+const PORT_REQUEST: &str = "zephium-broker-port-request";
+const PORT_REPLY: &str = "zephium-broker-port-reply";
+const PORT_REPLY_UNOBSERVED: &str = "host-reply-unobserved";
+const PENDING_TITLE: &str = "zephium-native-broker-contract-pending";
+
+#[derive(Default)]
+struct BrokerState {
+    expected_controller: Cell<Option<NonNull<WKWebExtensionController>>>,
+    expected_context: Cell<Option<NonNull<WKWebExtensionContext>>>,
+    one_shot_calls: Cell<usize>,
+    one_shot_exact: Cell<bool>,
+    port_connect_calls: Cell<usize>,
+    port_connect_exact: Cell<bool>,
+    port_message_calls: Cell<usize>,
+    port_message_exact: Cell<bool>,
+    port_send_completions: Cell<usize>,
+    port_disconnects: Cell<usize>,
+    failure: RefCell<Option<String>>,
+}
+
+impl BrokerState {
+    fn snapshot(&self) -> (usize, bool, usize, bool, usize, bool, usize, usize) {
+        (
+            self.one_shot_calls.get(),
+            self.one_shot_exact.get(),
+            self.port_connect_calls.get(),
+            self.port_connect_exact.get(),
+            self.port_message_calls.get(),
+            self.port_message_exact.get(),
+            self.port_send_completions.get(),
+            self.port_disconnects.get(),
+        )
+    }
+
+    fn bind(
+        &self,
+        controller: &WKWebExtensionController,
+        context: &WKWebExtensionContext,
+    ) -> Result<(), String> {
+        if self
+            .expected_controller
+            .replace(Some(NonNull::from(controller)))
+            .is_some()
+            || self
+                .expected_context
+                .replace(Some(NonNull::from(context)))
+                .is_some()
+        {
+            return Err("native broker probe identity was bound more than once".into());
+        }
+        Ok(())
+    }
+
+    fn record_failure(&self, failure: impl Into<String>) {
+        let mut slot = self.failure.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(failure.into());
+        }
+    }
+
+    fn exact_identity(
+        &self,
+        controller: &WKWebExtensionController,
+        context: &WKWebExtensionContext,
+    ) -> bool {
+        self.expected_controller.get() == Some(NonNull::from(controller))
+            && self.expected_context.get() == Some(NonNull::from(context))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(failure) = self.failure.borrow().as_ref() {
+            return Err(format!("native broker callback failed closed: {failure}"));
+        }
+        let actual = self.snapshot();
+        let expected = (1, true, 1, true, 1, true, 1, 1);
+        if actual != expected {
+            return Err(format!(
+                "native broker callback cardinality/identity drifted: expected {expected:?}, got {actual:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct BrokerDelegateIvars {
+    state: Rc<BrokerState>,
+    port: RefCell<Option<Retained<WKWebExtensionMessagePort>>>,
+    lifecycle_drops: Arc<AtomicUsize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumNativeBrokerProbeDelegate"]
+    #[ivars = BrokerDelegateIvars]
+    struct BrokerDelegate;
+
+    unsafe impl NSObjectProtocol for BrokerDelegate {}
+
+    unsafe impl WKWebExtensionControllerDelegate for BrokerDelegate {
+        #[unsafe(method(webExtensionController:sendMessage:toApplicationWithIdentifier:forExtensionContext:replyHandler:))]
+        unsafe fn send_message(
+            &self,
+            controller: &WKWebExtensionController,
+            message: &AnyObject,
+            application_identifier: Option<&NSString>,
+            context: &WKWebExtensionContext,
+            reply: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+        ) {
+            let state = &self.ivars().state;
+            state.one_shot_calls.set(state.one_shot_calls.get() + 1);
+            let exact = state.one_shot_calls.get() == 1
+                && state.exact_identity(controller, context)
+                && application_identifier.is_some_and(|identifier| {
+                    identifier.isEqualToString(&NSString::from_str(APPLICATION_IDENTIFIER))
+                })
+                && message.downcast_ref::<NSString>().is_some_and(|message| {
+                    message.isEqualToString(&NSString::from_str(ONE_SHOT_REQUEST))
+                });
+            state.one_shot_exact.set(exact);
+            if exact {
+                let response = NSString::from_str(ONE_SHOT_REPLY);
+                reply.call((
+                    Retained::as_ptr(&response).cast_mut().cast(),
+                    std::ptr::null_mut(),
+                ));
+            } else {
+                state.record_failure(
+                    "one-shot identity, identifier, payload, or cardinality mismatch",
+                );
+                complete_with_error(reply, 1);
+            }
+        }
+
+        #[unsafe(method(webExtensionController:connectUsingMessagePort:forExtensionContext:completionHandler:))]
+        unsafe fn connect_port(
+            &self,
+            controller: &WKWebExtensionController,
+            port: &WKWebExtensionMessagePort,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let state = self.ivars().state.clone();
+            state
+                .port_connect_calls
+                .set(state.port_connect_calls.get() + 1);
+            let identifier = port.applicationIdentifier();
+            let exact = state.port_connect_calls.get() == 1
+                && state.exact_identity(controller, context)
+                && identifier.as_ref().is_some_and(|identifier| {
+                    identifier.isEqualToString(&NSString::from_str(APPLICATION_IDENTIFIER))
+                })
+                && self.ivars().port.borrow().is_none();
+            state.port_connect_exact.set(exact);
+            if !exact {
+                state.record_failure("port identity, identifier, or cardinality mismatch");
+                complete_error_only(completion, 2);
+                return;
+            }
+
+            let Some(retained_port) = Retained::retain(NonNull::from(port).as_ptr()) else {
+                state.record_failure("WebKit port could not be retained");
+                complete_error_only(completion, 3);
+                return;
+            };
+            let weak_port = Weak::from_retained(&retained_port);
+            let message_state = state.clone();
+            // Retain the outbound value for the native port lifetime. A send
+            // completion proves enqueueing, not that WebKit copied a temporary
+            // Objective-C value before returning to this handler.
+            let port_reply_key = NSString::from_str("reply");
+            let port_reply_value = NSString::from_str(PORT_REPLY);
+            let port_reply = NSDictionary::from_slices(&[&*port_reply_key], &[&*port_reply_value]);
+            let message_handler =
+                block2::RcBlock::new(move |message: *mut AnyObject, error: *mut NSError| {
+                    message_state
+                        .port_message_calls
+                        .set(message_state.port_message_calls.get() + 1);
+                    let exact_message = error.is_null()
+                        && message_state.port_message_calls.get() == 1
+                        && unsafe { message.as_ref() }
+                            .and_then(AnyObject::downcast_ref::<NSString>)
+                            .is_some_and(|message| {
+                                message.isEqualToString(&NSString::from_str(PORT_REQUEST))
+                            });
+                    message_state.port_message_exact.set(exact_message);
+                    if !exact_message {
+                        message_state
+                            .record_failure("port message payload, error, or cardinality mismatch");
+                        return;
+                    }
+                    let Some(port) = weak_port.load() else {
+                        message_state.record_failure("retained native broker port disappeared");
+                        return;
+                    };
+                    let reply = port_reply.clone();
+                    let send_state = message_state.clone();
+                    let send = block2::RcBlock::new(move || {
+                        let completion_state = send_state.clone();
+                        let send_completion = block2::RcBlock::new(move |error: *mut NSError| {
+                            completion_state
+                                .port_send_completions
+                                .set(completion_state.port_send_completions.get() + 1);
+                            if !error.is_null() || completion_state.port_send_completions.get() != 1
+                            {
+                                completion_state.record_failure(
+                                    "native broker port reply failed or settled more than once",
+                                );
+                            }
+                        });
+                        unsafe {
+                            port.sendMessage_completionHandler(
+                                Some(&reply),
+                                Some(&send_completion),
+                            );
+                        }
+                    });
+                    // WebKit invokes `messageHandler` while it is delivering
+                    // extension-to-host traffic. Send one main-queue turn
+                    // later so the reverse message cannot be lost to
+                    // re-entrant port dispatch. `dispatch_async` copies the
+                    // heap block and the queue is the same UI actor as `port`.
+                    unsafe {
+                        DispatchQueue::main().exec_async_with_block(block2::RcBlock::as_ptr(&send));
+                    }
+                });
+            let disconnect_state = state.clone();
+            let disconnect_handler = block2::RcBlock::new(move |error: *mut NSError| {
+                disconnect_state
+                    .port_disconnects
+                    .set(disconnect_state.port_disconnects.get() + 1);
+                if !error.is_null() || disconnect_state.port_disconnects.get() != 1 {
+                    disconnect_state.record_failure(
+                        "native broker port disconnected with an error or more than once",
+                    );
+                }
+            });
+            port.setMessageHandler(Some(&message_handler));
+            port.setDisconnectHandler(Some(&disconnect_handler));
+            self.ivars().port.replace(Some(retained_port));
+            completion.call((std::ptr::null_mut(),));
+        }
+    }
+);
+
+impl BrokerDelegate {
+    fn new(
+        mtm: MainThreadMarker,
+        state: Rc<BrokerState>,
+        lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(BrokerDelegateIvars {
+            state,
+            port: RefCell::new(None),
+            lifecycle_drops,
+        });
+        // SAFETY: NSObject is the declared superclass and all ivars are fully
+        // initialized before its initializer is invoked.
+        unsafe { msg_send![super(object), init] }
+    }
+
+    fn release_port(&self) {
+        if let Some(port) = self.ivars().port.borrow_mut().take() {
+            // SAFETY: the retained port and copied handlers are main-thread
+            // objects. Clear callbacks first so releasing the last host retain
+            // cannot re-enter probe state during teardown.
+            unsafe {
+                port.setMessageHandler(None);
+                port.setDisconnectHandler(None);
+                if !port.isDisconnected() {
+                    port.disconnect();
+                }
+            }
+            drop(port);
+        }
+    }
+
+    fn port_weak(&self) -> Option<Weak<WKWebExtensionMessagePort>> {
+        self.ivars().port.borrow().as_ref().map(Weak::from_retained)
+    }
+}
+
+impl Drop for BrokerDelegate {
+    fn drop(&mut self) {
+        self.ivars().lifecycle_drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(super) struct RuntimeEvidence {
+    pub(super) controller: Weak<WKWebExtensionController>,
+    pub(super) context: Weak<WKWebExtensionContext>,
+    pub(super) view: Weak<WKWebView>,
+    pub(super) store: Weak<WKWebsiteDataStore>,
+    pub(super) port: Weak<WKWebExtensionMessagePort>,
+    pub(super) delegate_drops: Arc<AtomicUsize>,
+}
+
+pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
+    let path = root.join("native-broker-contract");
+    std::fs::create_dir(&path)
+        .map_err(|error| format!("cannot create native-broker contract fixture: {error}"))?;
+    let manifest = json!({
+        "manifest_version": 3,
+        "name": "Zephium Native Broker Contract Probe",
+        "version": "1.0.0",
+        "description": "Zephium-owned principal-bound native broker fixture.",
+        "permissions": ["nativeMessaging"]
+    });
+    write(&path, "manifest.json", &manifest.to_string())?;
+    write(
+        &path,
+        "probe.html",
+        "<!doctype html><meta charset=\"utf-8\"><title>zephium-native-broker-contract-pending</title><script src=\"probe.js\"></script>",
+    )?;
+    let script = format!(
+        r#"(() => {{
+    'use strict';
+    const api = globalThis.chrome?.runtime;
+    const settle = (oneShot, port) => {{
+        document.title = JSON.stringify({{ oneShot, port }});
+    }};
+    if (!api?.sendNativeMessage || !api?.connectNative) {{
+        settle("absent", "absent");
+        return;
+    }}
+    api.sendNativeMessage({application_identifier:?}, {one_shot_request:?}, (reply) => {{
+        const oneShot = api.lastError ? `error:${{api.lastError.message}}` : reply;
+        let nativePort;
+        try {{
+            nativePort = api.connectNative({application_identifier:?});
+        }} catch (error) {{
+            settle(oneShot, `error:${{String(error?.message ?? error)}}`);
+            return;
+        }}
+        const timeout = setTimeout(() => {{
+            nativePort.disconnect();
+            settle(oneShot, {port_reply_unobserved:?});
+        }}, 2000);
+        nativePort.onMessage.addListener((message) => {{
+            clearTimeout(timeout);
+            nativePort.disconnect();
+            settle(oneShot, message?.reply ?? "invalid-reply");
+        }});
+        nativePort.onDisconnect.addListener(() => {{
+            if (api.lastError) {{
+                clearTimeout(timeout);
+                settle(oneShot, `error:${{api.lastError.message}}`);
+            }}
+        }});
+        nativePort.postMessage({port_request:?});
+    }});
+}})()"#,
+        application_identifier = APPLICATION_IDENTIFIER,
+        one_shot_request = ONE_SHOT_REQUEST,
+        port_request = PORT_REQUEST,
+        port_reply_unobserved = PORT_REPLY_UNOBSERVED,
+    );
+    write(&path, "probe.js", &script)?;
+    Ok(path)
+}
+
+pub(super) fn run(
+    extension: &WKWebExtension,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+) -> Result<RuntimeEvidence, String> {
+    inspect_parse_contract(extension)?;
+    let bundle = super::new_nonpersistent_controller(mtm)?;
+    let controller = bundle.controller.clone();
+    let store = bundle._data_store.clone();
+    let context = super::new_context(extension, CONTRACT_PRINCIPAL)?;
+    let state = Rc::new(BrokerState::default());
+    state.bind(&controller, &context)?;
+    let permission = NSString::from_str("nativeMessaging");
+    // SAFETY: this feature-only gate applies one exact parser-returned token
+    // before context load. Product compilation continues to prohibit it.
+    unsafe {
+        context.setPermissionStatus_forPermission(
+            WKWebExtensionContextPermissionStatus::GrantedExplicitly,
+            &permission,
+        );
+    }
+    if unsafe { context.permissionStatusForPermission(&permission) }
+        != WKWebExtensionContextPermissionStatus::GrantedExplicitly
+        || unsafe { context.grantedPermissions() }.count() != 1
+    {
+        super::super::extensions::clear_all_probe_grants(&context)
+            .map_err(|error| format!("native broker grant rollback failed: {error}"))?;
+        return Err("native broker exact grant readback failed".into());
+    }
+
+    let delegate_drops = Arc::new(AtomicUsize::new(0));
+    let delegate = BrokerDelegate::new(mtm, state.clone(), delegate_drops.clone());
+    let delegate_protocol = ProtocolObject::from_ref(&*delegate);
+    // SAFETY: controller and delegate are main-thread retained objects; the
+    // delegate remains alive until after context unload and port release.
+    unsafe { controller.setDelegate(Some(delegate_protocol)) };
+
+    let controller_weak = Weak::from_retained(&controller);
+    let context_weak = Weak::from_retained(&context);
+    let store_weak = Weak::from_retained(&store);
+    let mut window = None;
+    let mut view = None;
+    let mut view_weak = None;
+    let mut loaded = false;
+    let gate = (|| {
+        super::load_context(&controller, &context, "native-broker contract")?;
+        loaded = true;
+        let configuration = unsafe { context.webViewConfiguration() }.ok_or_else(|| {
+            "loaded native-broker contract returned no extension-page configuration".to_owned()
+        })?;
+        let probe_window = super::new_window(mtm)?;
+        let host =
+            super::profile_isolation::host_for_window(&probe_window, "native-broker contract")?;
+        let probe_view = super::profile_isolation::build_profile_view(&host, configuration)?;
+        probe_window.orderFrontRegardless();
+        let native_view = super::super::native::webkit(&probe_view);
+        super::assert_attached_controller(&native_view, &controller)?;
+        super::profile_isolation::assert_attached_store(&native_view, &store)?;
+        view_weak = Some(Weak::from_retained(&native_view));
+        drop(native_view);
+        let page = unsafe { context.baseURL() }
+            .URLByAppendingPathComponent(&NSString::from_str("probe.html"))
+            .and_then(|url| url.absoluteString())
+            .ok_or_else(|| "native-broker contract produced no probe URL".to_owned())?
+            .to_string();
+        probe_view
+            .load_url(&page)
+            .map_err(|error| format!("cannot navigate native-broker contract: {error}"))?;
+        view = Some(probe_view);
+        window = Some(probe_window);
+        wait_for_evidence(
+            view.as_ref().expect("native-broker view was stored"),
+            &context,
+            run_loop,
+            &state,
+        )
+    })();
+    let port_weak = delegate.port_weak();
+
+    let mut cleanup_failures = Vec::new();
+    if loaded {
+        if let Err(error) = super::unload_context(&controller, &context, "native-broker contract") {
+            cleanup_failures.push(error);
+        }
+    }
+    delegate.release_port();
+    if let Err(error) = super::super::extensions::clear_all_probe_grants(&context) {
+        cleanup_failures.push(format!("native-broker grant cleanup failed: {error}"));
+    }
+    // SAFETY: the context is unloaded and the native port handlers are clear.
+    unsafe { controller.setDelegate(None) };
+    drop(view.take());
+    if let Some(window) = window.take() {
+        window.close();
+        drop(window);
+    }
+    drop(context);
+    drop(delegate);
+    drop(controller);
+    drop(store);
+    drop(bundle);
+
+    let cleanup = if cleanup_failures.is_empty() {
+        Ok(())
+    } else {
+        Err(cleanup_failures.join("; "))
+    };
+    match (gate, cleanup) {
+        (Ok(()), Ok(())) => Ok(RuntimeEvidence {
+            controller: controller_weak,
+            context: context_weak,
+            view: view_weak.expect("successful native-broker gate constructed a view"),
+            store: store_weak,
+            port: port_weak.expect("successful native-broker gate retained its exact port"),
+            delegate_drops,
+        }),
+        (Err(gate), Ok(())) => Err(gate),
+        (Ok(()), Err(cleanup)) => Err(format!("native-broker cleanup failed: {cleanup}")),
+        (Err(gate), Err(cleanup)) => Err(format!(
+            "{gate}; native-broker cleanup also failed: {cleanup}"
+        )),
+    }
+}
+
+fn inspect_parse_contract(extension: &WKWebExtension) -> Result<(), String> {
+    if unsafe { extension.manifestVersion() } != 3.0 {
+        return Err("native-broker contract was not parsed as manifest v3".into());
+    }
+    let errors = unsafe { extension.errors() };
+    let permissions = unsafe { extension.requestedPermissions() };
+    let exact_permission = permissions.count() == 1
+        && permissions
+            .allObjects()
+            .objectAtIndex(0)
+            .isEqualToString(&NSString::from_str("nativeMessaging"));
+    if errors.count() != 0 || !exact_permission {
+        return Err(format!(
+            "native-broker parse contract drifted: errors={}, permissions={:?}",
+            errors.count(),
+            (0..permissions.count())
+                .map(|index| permissions.allObjects().objectAtIndex(index).to_string())
+                .collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_evidence(
+    view: &wry::WebView,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    state: &BrokerState,
+) -> Result<(), String> {
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    let mut page_settled = false;
+    loop {
+        if let Some(failure) = state.failure.borrow().as_ref() {
+            return Err(format!("native broker callback failed: {failure}"));
+        }
+        if !page_settled {
+            let title = view
+                .document_title()
+                .map_err(|error| format!("cannot inspect native-broker probe title: {error}"))?;
+            if let Some(title) = title
+                .as_deref()
+                .filter(|title| !title.is_empty() && *title != PENDING_TITLE)
+            {
+                let evidence: Value = serde_json::from_str(title).map_err(|error| {
+                    format!("native-broker probe returned invalid evidence {title:?}: {error}")
+                })?;
+                if evidence
+                    != json!({
+                        "oneShot": ONE_SHOT_REPLY,
+                        "port": PORT_REPLY_UNOBSERVED
+                    })
+                {
+                    return Err(format!(
+                        "native-broker page evidence drifted: {evidence}; callbacks={:?}",
+                        state.snapshot()
+                    ));
+                }
+                page_settled = true;
+            }
+        }
+        if page_settled && state.port_disconnects.get() == 1 {
+            return state.validate();
+        }
+        super::validate_context_errors(context, "native-broker contract")?;
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "native-broker probe timed out at {:?}; callbacks={:?}",
+                view.url().ok(),
+                state.snapshot()
+            ));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn complete_with_error(
+    completion: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+    code: isize,
+) {
+    let error = probe_error(code);
+    completion.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+}
+
+fn complete_error_only(completion: &block2::DynBlock<dyn Fn(*mut NSError)>, code: isize) {
+    let error = probe_error(code);
+    completion.call((Retained::as_ptr(&error).cast_mut(),));
+}
+
+fn probe_error(code: isize) -> Retained<NSError> {
+    let domain = NSString::from_str("app.zephium.native-broker-probe");
+    unsafe { NSError::errorWithDomain_code_userInfo(&domain, code, None) }
+}
+
+fn write(directory: &Path, name: &str, contents: &str) -> Result<(), String> {
+    std::fs::write(directory.join(name), contents)
+        .map_err(|error| format!("cannot write native-broker contract fixture {name}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_has_one_closed_internal_identifier_and_no_network_surface() {
+        let temp = tempfile::tempdir().expect("temporary contract root");
+        let fixture = write_fixture(temp.path()).expect("native-broker contract fixture");
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(fixture.join("manifest.json")).expect("manifest bytes"),
+        )
+        .expect("manifest JSON");
+        assert_eq!(manifest["permissions"], json!(["nativeMessaging"]));
+        let script = std::fs::read_to_string(fixture.join("probe.js")).expect("probe script");
+        assert_eq!(script.matches(APPLICATION_IDENTIFIER).count(), 2);
+        assert!(script.contains("sendNativeMessage"));
+        assert!(script.contains("connectNative"));
+        assert!(!script.contains("fetch("));
+        assert!(!script.contains("XMLHttpRequest"));
+    }
+}

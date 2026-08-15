@@ -1149,6 +1149,33 @@ particular, the current native target cannot classify Vimium as compatible;
 tabs/storage availability alone does not establish its keyboard-navigation,
 Vomnibar, history, bookmark, session, or search workflows.
 
+WebKit does expose a narrower compatibility seam through
+`WKWebExtensionControllerDelegate`, and the live gate now classifies it without
+enabling it in product policy. A separate Zephium-owned extension declares
+`nativeMessaging`, receives that one exact grant only inside the feature-gated
+probe, and uses the fixed internal identifier
+`app.zephium.extension-broker.v1`. The delegate compares both controller and
+`WKWebExtensionContext` identities before reading a bounded string payload. A
+one-shot `runtime.sendNativeMessage` request completes a full extension-to-host
+and host-to-extension reply round trip. This is a viable primitive for a
+future capability-limited compatibility broker, subject to a versioned
+protocol, per-operation authority, request/response byte ceilings, deadlines,
+overload behavior, and release-build latency/RSS measurement.
+
+Persistent native ports are asymmetric on the exercised runtime. The delegate
+receives the exact context-bound connection and one extension message; a
+native object-shaped reply reports successful send completion after being
+retained and dispatched non-reentrantly on the main queue, but JavaScript does
+not observe it within the two-second gate. The extension then disconnects and
+the native handler, port, delegate, view, context, controller, and store all
+release. The classification is therefore `extension-to-host-only / native
+host-send accepted-unobserved`, not a bidirectional port. Product grant
+compilation continues to prohibit `nativeMessaging`, ordinary builds do not
+enable the message-port binding feature, and the probe does not make an
+unmodified extension call this identifier. Any reviewed adapter using the
+one-shot channel belongs to a new compatibility/grant schema; it cannot silently
+change `macos.wkwebextension.v1` or expose arbitrary native application names.
+
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
 | MV3 backup-localStorage through `offscreen` | Requires a reviewed Bitwarden Core adapter before release | The pinned entrypoint always selects [`OffscreenStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/storage/offscreen-storage.service.ts) for MV3. Primary writes survive because the upstream [`PrimarySecondaryStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/libs/common/src/platform/storage/primary-secondary-storage.service.ts) settles both writes, but a primary miss reaches the absent API. Zephium must select a deterministic primary-only/recovery-compatible adapter in its sealed build and test migration, missing-key, and recovery behavior; it must not inject a page-world shim. |
@@ -1156,7 +1183,7 @@ Vomnibar, history, bookmark, session, or search workflows.
 | System notifications | Degraded | The pinned composition selects `UnsupportedSystemNotificationsService` when `chrome.notifications` is absent. In-extension auth-request flows may remain available, but OS notification presentation/click handling is unavailable. |
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
-| Native messaging | Unsupported in the initial target | The optional permission is parsed, but product grant compilation prohibits it. Native biometric/application integration must be disclosed separately from core vault use. |
+| Native messaging | Unsupported in the initial native target | The optional permission is parsed, but product grant compilation prohibits it. The Zephium-owned broker probe proves a fixed-identifier, principal-bound one-shot round trip for a future compatibility target; persistent ports are extension-to-host-only on the exercised runtime. Neither result exposes arbitrary native applications or enables Bitwarden's optional native integration. Native biometric/application integration must be disclosed separately from core vault use. |
 | Programmatic main-world scripting | Native literal supported; pinned source requires a sealed adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
 | Runtime ports | Registered routing compatible; pre-listener connection not queued | A Zephium-owned extension page opens a named port only after the MV3 worker registers `runtime.onConnect`; the worker receives the port and completes an exact message round trip. A separate connection created immediately before listener registration returns a port, then disconnects without `runtime.lastError` and is not delivered after registration. Extensions that depend on Chrome queuing that startup race require a reviewed compatibility decision; ordinary registered port routing does not. |
 | Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |
