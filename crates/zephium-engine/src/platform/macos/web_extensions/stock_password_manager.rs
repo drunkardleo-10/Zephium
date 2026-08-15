@@ -50,11 +50,13 @@ const EXPECTED_WASM_FILES: usize = 5;
 const PAGE_READY_TITLE: &str = "zephium-stock-password-page-ready";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_STOCK_POPUP_STATE:";
+const ISOLATED_CONTENT_STATE_PREFIX: &str = "ZEPHIUM_STOCK_ISOLATED_CONTENT_STATE:";
 const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1024;
 const WEBKIT_API_PRELUDE: &str = "zephium-webkit-api-compatibility.js";
 const WEBKIT_BACKGROUND_WRAPPER: &str = "zephium-webkit-background-wrapper.js";
 const WEBKIT_API_COMPATIBILITY_ATTRIBUTE: &str = "data-zephium-webkit-api-compatibility";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
+const COMPATIBILITY_MODE_SYMBOL: &str = "zephium.webkit-api-compatibility.mode.v1";
 const EXPECTED_COMPATIBILITY_FILE_COUNT: usize = 277;
 const EXPECTED_COMPATIBILITY_TOTAL_BYTES: u64 = 20_126_819;
 const EXPECTED_COMPATIBILITY_INDEX_SHA256: &str =
@@ -225,6 +227,8 @@ struct NativeTeardown {
     inline_field_markers: usize,
     inline_roots: usize,
     inline_extension_frames: usize,
+    background_preload_millis: Option<u128>,
+    isolated_content_adapter_mode: Option<String>,
     popup_root_children: usize,
     popup_offscreen_namespace: String,
     page_api_compatibility: String,
@@ -259,6 +263,16 @@ struct PopupState {
     offscreen: String,
     compatibility_state: String,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IsolatedContentState {
+    state: String,
+    installed: Option<bool>,
+    mode: Option<String>,
+    chrome_runtime: Option<bool>,
+    browser_runtime: Option<bool>,
 }
 
 pub(super) fn run(extension: &Path, tree_index: &Path, mode: ProbeMode) -> Result<bool, String> {
@@ -302,7 +316,7 @@ fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS stock password manager passed; target=proton-pass; version={VERSION}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS stock password manager passed; target=proton-pass; version={VERSION}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; isolated_content_adapter={}; background_preload_ms={}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             probe_mode_name(teardown.probe_mode),
             teardown.probe_mode != ProbeMode::Stock,
@@ -311,6 +325,13 @@ fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
             teardown.inline_roots,
             teardown.inline_extension_frames,
             teardown.page_api_compatibility,
+            teardown
+                .isolated_content_adapter_mode
+                .as_deref()
+                .unwrap_or("not-requested"),
+            teardown
+                .background_preload_millis
+                .map_or_else(|| "not-requested".to_owned(), |value| value.to_string()),
             teardown.popup_root_children,
             teardown.popup_api_compatibility,
             teardown.background_diagnostic_badge,
@@ -784,6 +805,23 @@ fn run_native(
         "stock extension published surface",
     )?;
 
+    // The package-neutral artifact must prove that its wrapped MV3 background
+    // is executable before content and popup observations are interpreted.
+    // This is a one-shot probe barrier through WebKit's public completion API;
+    // it does not retain a hidden view or grant product activation authority.
+    let background_preload_millis = if admitted.probe_mode == ProbeMode::WebkitCompatibilityArtifact
+    {
+        let started = Instant::now();
+        super::persistent_runtime::load_background_content(
+            &context,
+            &run_loop,
+            "stock password-manager compatibility artifact",
+        )?;
+        Some(started.elapsed().as_millis())
+    } else {
+        None
+    };
+
     super::set_phase("stock-password-manager-content-execution");
     let page_url = server.url("/login", "stock-password-manager");
     page.load_url(&page_url)
@@ -813,6 +851,10 @@ fn run_native(
     super::assert_attached_controller(&popup, &bundle.controller)?;
     super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
     let popup_state = wait_for_executable_popup(&popup, &run_loop)?;
+    let isolated_content_adapter_mode = (admitted.probe_mode
+        == ProbeMode::WebkitCompatibilityArtifact)
+        .then(|| wait_for_isolated_content_adapter(&popup, &run_loop))
+        .transpose()?;
     let popup_weak = Weak::from_retained(&popup);
     let background_diagnostic_badge = unsafe { action.badgeText() }.to_string();
     let background_action_label = unsafe { action.label() }.to_string();
@@ -852,6 +894,7 @@ fn run_native(
         inline_executed,
         popup_rendered,
         popup_api_observed,
+        isolated_content_adapter_mode: isolated_content_adapter_mode.as_deref(),
         page_api_compatibility: &page_state.compatibility_state,
         popup_api_compatibility: &popup_state.compatibility_state,
         background_action_label: &background_action_label,
@@ -877,6 +920,8 @@ fn run_native(
         inline_field_markers: page_state.field_markers,
         inline_roots: page_state.roots,
         inline_extension_frames: page_state.extension_frames,
+        background_preload_millis,
+        isolated_content_adapter_mode,
         popup_root_children: popup_state.root_children,
         popup_offscreen_namespace: popup_state.offscreen,
         page_api_compatibility: page_state.compatibility_state,
@@ -907,6 +952,7 @@ struct StockRuntimeObservation<'a> {
     inline_executed: bool,
     popup_rendered: bool,
     popup_api_observed: bool,
+    isolated_content_adapter_mode: Option<&'a str>,
     page_api_compatibility: &'a str,
     popup_api_compatibility: &'a str,
     background_action_label: &'a str,
@@ -936,6 +982,10 @@ fn stock_runtime_is_compatible(observation: StockRuntimeObservation<'_>) -> bool
             observation.popup_rendered
                 && observation.popup_api_observed
                 && observation.popup_api_compatibility == "package-neutral-v1"
+                && matches!(
+                    observation.isolated_content_adapter_mode,
+                    Some("native-preserved" | "native-aliased")
+                )
                 && observation.context_error_count == 0
         }
     }
@@ -1110,6 +1160,102 @@ fn wait_for_executable_popup(
     }
 }
 
+fn wait_for_isolated_content_adapter(
+    popup: &WKWebView,
+    run_loop: &NSRunLoop,
+) -> Result<String, String> {
+    let script = format!(
+        r#"(() => {{
+          const key = '__zephiumStockIsolatedContentProbe';
+          const publish = (value) => {{
+            globalThis[key].result = value;
+            document.title = {ISOLATED_CONTENT_STATE_PREFIX:?} + JSON.stringify(value);
+          }};
+          if (globalThis[key]?.result) {{
+            document.title = {ISOLATED_CONTENT_STATE_PREFIX:?} + JSON.stringify(globalThis[key].result);
+            return;
+          }}
+          if (globalThis[key]?.started) return;
+          globalThis[key] = {{ started: true, result: null }};
+          const api = globalThis.chrome ?? globalThis.browser;
+          if (!api?.tabs?.query || !api?.scripting?.executeScript) {{
+            publish({{ state: 'api-absent' }});
+            return;
+          }}
+          Promise.resolve(api.tabs.query({{ active: true, currentWindow: true }}))
+            .then((tabs) => {{
+              const tabId = tabs?.length === 1 ? tabs[0]?.id : null;
+              if (!Number.isInteger(tabId)) throw new Error('active-tab-unavailable');
+              return api.scripting.executeScript({{
+                target: {{ tabId, allFrames: false }},
+                func: () => ({{
+                  installed: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true,
+                  mode: globalThis[Symbol.for({COMPATIBILITY_MODE_SYMBOL:?})] ?? 'missing',
+                  chromeRuntime: Boolean(globalThis.chrome?.runtime?.id),
+                  browserRuntime: Boolean(globalThis.browser?.runtime?.id),
+                }}),
+              }});
+            }})
+            .then((results) => {{
+              const value = Array.isArray(results) && results.length === 1
+                ? results[0]?.result
+                : null;
+              if (!value || typeof value !== 'object') throw new Error('execution-result-invalid');
+              publish({{
+                state: 'settled',
+                installed: value.installed === true,
+                mode: typeof value.mode === 'string' ? value.mode : 'invalid',
+                chromeRuntime: value.chromeRuntime === true,
+                browserRuntime: value.browserRuntime === true,
+              }});
+            }})
+            .catch((error) => publish({{
+              state: `rejected:${{String(error?.message ?? error ?? 'unknown').slice(0, 160)}}`,
+            }}));
+        }})()"#
+    );
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    let mut last_state = None;
+    loop {
+        unsafe {
+            popup.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+        }
+        if let Some(title) = unsafe { popup.title() }.map(|title| title.to_string()) {
+            if let Some(payload) = title.strip_prefix(ISOLATED_CONTENT_STATE_PREFIX) {
+                if payload.len() <= MAX_DIAGNOSTIC_TITLE_BYTES {
+                    let state: IsolatedContentState =
+                        serde_json::from_str(payload).map_err(|error| {
+                            format!("stock isolated-content evidence is invalid: {error}")
+                        })?;
+                    if state.state == "settled"
+                        && state.installed == Some(true)
+                        && matches!(
+                            state.mode.as_deref(),
+                            Some("native-preserved" | "native-aliased")
+                        )
+                        && state.chrome_runtime == Some(true)
+                        && state.browser_runtime == Some(true)
+                    {
+                        return Ok(state.mode.expect("validated adapter mode is present"));
+                    }
+                    if state.state != "settled" {
+                        return Err(format!(
+                            "stock isolated-content adapter probe failed: {state:?}"
+                        ));
+                    }
+                    last_state = Some(state);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "stock isolated-content adapter probe timed out: state={last_state:?}"
+            ));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
 fn wait_for_teardown(teardown: &NativeTeardown) -> Result<(), String> {
     let run_loop = NSRunLoop::mainRunLoop();
     let deadline = Instant::now() + super::TEARDOWN_TIMEOUT;
@@ -1185,6 +1331,7 @@ mod tests {
             inline_executed: true,
             popup_rendered: true,
             popup_api_observed: false,
+            isolated_content_adapter_mode: None,
             page_api_compatibility: "unmodified",
             popup_api_compatibility: "unmodified",
             background_action_label: "",
@@ -1195,6 +1342,7 @@ mod tests {
             inline_executed: true,
             popup_rendered: true,
             popup_api_observed: true,
+            isolated_content_adapter_mode: None,
             page_api_compatibility: "unmodified",
             popup_api_compatibility: "unmodified",
             background_action_label: "",
@@ -1209,6 +1357,7 @@ mod tests {
             inline_executed: false,
             popup_rendered: true,
             popup_api_observed: false,
+            isolated_content_adapter_mode: None,
             page_api_compatibility: "aliased",
             popup_api_compatibility: "aliased",
             background_action_label: "ZEPHIUM_PROTON_BACKGROUND:imported:aliased",
@@ -1219,6 +1368,7 @@ mod tests {
             inline_executed: false,
             popup_rendered: true,
             popup_api_observed: false,
+            isolated_content_adapter_mode: None,
             page_api_compatibility: "native-chrome+catalog-update",
             popup_api_compatibility: "native-chrome+catalog-update",
             background_action_label:
@@ -1257,6 +1407,7 @@ mod tests {
                 inline_executed: false,
                 popup_rendered: true,
                 popup_api_observed: false,
+                isolated_content_adapter_mode: None,
                 page_api_compatibility: page,
                 popup_api_compatibility: popup,
                 background_action_label: action_label,
@@ -1266,12 +1417,13 @@ mod tests {
     }
 
     #[test]
-    fn package_neutral_artifact_requires_its_popup_world_marker() {
-        let observation = |state, errors| StockRuntimeObservation {
+    fn package_neutral_artifact_requires_popup_and_isolated_content_markers() {
+        let observation = |state, content, errors| StockRuntimeObservation {
             mode: ProbeMode::WebkitCompatibilityArtifact,
             inline_executed: false,
             popup_rendered: true,
             popup_api_observed: true,
+            isolated_content_adapter_mode: content,
             page_api_compatibility: "unmodified",
             popup_api_compatibility: state,
             background_action_label: "Proton Pass: Free Password Manager",
@@ -1279,11 +1431,27 @@ mod tests {
         };
         assert!(stock_runtime_is_compatible(observation(
             "package-neutral-v1",
+            Some("native-preserved"),
             0
         )));
-        assert!(!stock_runtime_is_compatible(observation("unmodified", 0)));
+        assert!(!stock_runtime_is_compatible(observation(
+            "unmodified",
+            Some("native-preserved"),
+            0
+        )));
         assert!(!stock_runtime_is_compatible(observation(
             "package-neutral-v1",
+            None,
+            0
+        )));
+        assert!(!stock_runtime_is_compatible(observation(
+            "package-neutral-v1",
+            Some("missing"),
+            0
+        )));
+        assert!(!stock_runtime_is_compatible(observation(
+            "package-neutral-v1",
+            Some("native-aliased"),
             1
         )));
     }
