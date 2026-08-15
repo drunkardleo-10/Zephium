@@ -122,6 +122,27 @@ pub enum ExtensionManagementCompatibilityView {
     Degraded,
 }
 
+/// One browser-owned explanation for a reviewed platform degradation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExtensionManagementLimitationView {
+    ApiPermission { name: String },
+    HostAccess,
+    Background,
+    Action,
+    Offscreen,
+    NativeMessaging,
+    BrowserOverride,
+    ExtensionPagesCsp,
+    Sandbox,
+    ContentScripts,
+    WebAccessibleResources,
+    MinimumBrowserVersion,
+    Commands,
+    SidePanel,
+    ManagedStorage,
+}
+
 /// Non-authorizing summary of the atomic grant row joined to an install.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ExtensionManagementGrantView {
@@ -147,6 +168,7 @@ pub struct ExtensionManagementEntryView {
     pub runtime_generation: Option<String>,
     pub grants: ExtensionManagementGrantView,
     pub compatibility: ExtensionManagementCompatibilityView,
+    pub limitations: Vec<ExtensionManagementLimitationView>,
 }
 
 /// One authenticated package offered by Zephium's current curated catalog.
@@ -169,6 +191,7 @@ pub struct ExtensionInstallCandidateView {
     pub optional_hosts: Vec<String>,
     pub supports_file_access: bool,
     pub compatibility: ExtensionManagementCompatibilityView,
+    pub limitations: Vec<ExtensionManagementLimitationView>,
 }
 
 /// Exact replacement management cohort for the focused profile.

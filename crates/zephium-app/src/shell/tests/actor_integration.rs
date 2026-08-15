@@ -33,6 +33,7 @@ fn extension_management_catalog(
         runtime,
         zephium_core::ports::extensions::ExtensionManagementGrantState::Uninitialized,
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Compatible,
+        Vec::new(),
     )
     .expect("fixture management row must be valid");
     zephium_core::ports::extensions::ExtensionManagementCatalog::new(
@@ -92,6 +93,12 @@ fn extension_install_candidate_catalog(
         vec!["notifications".into(), "tabs".into()],
         vec!["https://optional.example/*".into()],
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Degraded,
+        vec![
+            zephium_core::ports::extensions::ExtensionManagementLimitation::api_permission(
+                "webRequest",
+            )
+            .expect("fixture limitation must be valid"),
+        ],
     )
     .expect("fixture candidate must be valid");
     (
@@ -665,6 +672,14 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
     assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
     assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);
     assert_eq!(ready.candidates[0].optional_api, ["notifications", "tabs"]);
+    assert_eq!(
+        ready.candidates[0].limitations,
+        [
+            zephium_ipc::ExtensionManagementLimitationView::ApiPermission {
+                name: "webRequest".to_owned(),
+            }
+        ]
+    );
     assert_eq!(
         ready.candidates[0].optional_hosts,
         ["https://optional.example/*"]

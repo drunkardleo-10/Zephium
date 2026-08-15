@@ -323,6 +323,7 @@ export type ExtensionInstallCandidateView = {
 	optional_hosts: string[],
 	supports_file_access: boolean,
 	compatibility: ExtensionManagementCompatibilityView,
+	limitations: ExtensionManagementLimitationView[],
 };
 
 /**
@@ -355,6 +356,7 @@ export type ExtensionManagementEntryView = {
 	runtime_generation: string | null,
 	grants: ExtensionManagementGrantView,
 	compatibility: ExtensionManagementCompatibilityView,
+	limitations: ExtensionManagementLimitationView[],
 };
 
 /**  Non-authorizing summary of the atomic grant row joined to an install. */
@@ -366,6 +368,9 @@ export type ExtensionManagementGrantView = {
 	file_access: boolean,
 	private_access: boolean,
 };
+
+/**  One browser-owned explanation for a reviewed platform degradation. */
+export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" };
 
 /**  Settlement of the focused profile's lazy installed-extension projection. */
 export type ExtensionManagementPhase = "loading" | "ready" | "unavailable" | "rejected" | "failed_closed";

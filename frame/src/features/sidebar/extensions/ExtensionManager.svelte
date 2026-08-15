@@ -9,11 +9,13 @@
   import type {
     ExtensionInstallCandidateView,
     ExtensionManagementEntryView,
+    ExtensionManagementLimitationView,
     ExtensionManagementRuntimeView,
   } from "../../../shared/ipc/bindings";
   import * as extensions from "../../../domain/extensions/extensions.svelte";
   import {
     apiPermissionLabel,
+    compatibilityLimitationLabel,
     hostPermissionLabel,
   } from "../../../domain/extensions/permission-labels";
   import * as tabs from "../../../domain/tabs/tabs.svelte";
@@ -204,6 +206,11 @@
         return "Disabled";
     }
   };
+
+  const limitationKey = (limitation: ExtensionManagementLimitationView) =>
+    limitation.type === "api_permission"
+      ? `${limitation.type}:${limitation.name}`
+      : limitation.type;
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} onpointerdown={handleWindowPointerDown} />
@@ -329,9 +336,14 @@
                     </div>
 
                     {#if entry.compatibility === "degraded"}
-                      <p class="mt-1 text-[10.5px] leading-4 text-warning">
-                        Some extension features are limited on this platform.
-                      </p>
+                      <ul class="mt-1 text-[10.5px] leading-4 text-warning">
+                        {#each entry.limitations.slice(0, 3) as limitation (limitationKey(limitation))}
+                          <li>• {compatibilityLimitationLabel(limitation)}</li>
+                        {/each}
+                        {#if entry.limitations.length > 3}
+                          <li>• {entry.limitations.length - 3} more limitations</li>
+                        {/if}
+                      </ul>
                     {/if}
                     {#if entry.grants.initialized}
                       <p class="mt-1 text-[10.5px] leading-4 text-muted">
@@ -416,7 +428,7 @@
                       {/if}
                       {#if candidate.compatibility === "degraded"}
                         <p class="mt-1 text-[10.5px] leading-4 text-warning">
-                          Some extension features are limited on this platform.
+                          Review platform limitations before installing.
                         </p>
                       {/if}
                     </div>
@@ -424,6 +436,18 @@
 
                   {#if reviewingCandidate === candidate.candidate_index}
                     <div class="mt-2 border-t border-border pt-2">
+                      {#if candidate.limitations.length > 0}
+                        <div class="mb-2 rounded-md bg-warning/10 px-2 py-1.5">
+                          <p class="text-[11px] leading-4 font-medium text-warning">
+                            Platform limitations
+                          </p>
+                          <ul class="mt-1 space-y-0.5 text-[10.5px] leading-4 text-warning">
+                            {#each candidate.limitations as limitation (limitationKey(limitation))}
+                              <li>• {compatibilityLimitationLabel(limitation)}</li>
+                            {/each}
+                          </ul>
+                        </div>
+                      {/if}
                       <p class="text-[11px] leading-4 font-medium text-text">Required access</p>
                       {#if candidate.required_api.length === 0 && candidate.required_hosts.length === 0}
                         <p class="mt-1 text-[10.5px] leading-4 text-muted">

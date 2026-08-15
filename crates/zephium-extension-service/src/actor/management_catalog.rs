@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext, ExtensionGrantManifestBinding,
-    ExtensionGrantManifestBindings, ExtensionNativeOwnershipKey,
+    ExtensionGrantManifestBindings, ExtensionManifestDeclaration, ExtensionNativeOwnershipKey,
     MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::ProfileId;
@@ -13,7 +13,7 @@ use zephium_core::ports::extensions::{
     ExtensionInstallCandidateEntry, ExtensionInstallCandidateSelector, ExtensionInstallSelector,
     ExtensionManagementCatalog, ExtensionManagementCatalogOutcome,
     ExtensionManagementCompatibility, ExtensionManagementEntry, ExtensionManagementGrantState,
-    ExtensionManagementRuntimeState,
+    ExtensionManagementLimitation, ExtensionManagementRuntimeState,
 };
 use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionInstallCatalogLoadOutcome,
@@ -145,7 +145,7 @@ pub(super) fn load(
                 }
             }
         };
-        let Some(compatibility) = compatibility(candidate.manifest_arc()) else {
+        let Some((compatibility, limitations)) = compatibility(candidate.manifest_arc()) else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
         };
         let selector = ExtensionInstallSelector::new(
@@ -163,6 +163,7 @@ pub(super) fn load(
             runtime_state,
             grants,
             compatibility,
+            limitations,
         ) {
             Ok(entry) => entry,
             Err(_) => return ExtensionManagementCatalogOutcome::FailedClosed,
@@ -176,7 +177,7 @@ pub(super) fn load(
         if catalog.by_package(authority, key).is_some() {
             continue;
         }
-        let Some(compatibility) = compatibility(candidate.manifest_arc()) else {
+        let Some((compatibility, limitations)) = compatibility(candidate.manifest_arc()) else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
         };
         let declarations = candidate.manifest_arc().declarations();
@@ -216,6 +217,7 @@ pub(super) fn load(
                 .map(|pattern| Box::<str>::from(pattern.as_str()))
                 .collect(),
             compatibility,
+            limitations,
         ) {
             Ok(entry) => entry,
             Err(_) => return ExtensionManagementCatalogOutcome::FailedClosed,
@@ -243,13 +245,63 @@ pub(super) fn load(
 
 fn compatibility(
     manifest: &zephium_core::extensions::ExtensionManifestDescriptor,
-) -> Option<ExtensionManagementCompatibility> {
-    ExtensionManagementCompatibility::from_levels(
+) -> Option<(
+    ExtensionManagementCompatibility,
+    Vec<ExtensionManagementLimitation>,
+)> {
+    let compatibility = ExtensionManagementCompatibility::from_levels(
         manifest
             .compatibility()
             .iter()
             .map(|classification| classification.level()),
-    )
+    )?;
+    let mut limitations = Vec::new();
+    for classification in manifest.compatibility().iter().filter(|classification| {
+        classification.level() == zephium_core::extensions::ExtensionCompatibilityLevel::Degraded
+    }) {
+        let limitation = match classification.declaration() {
+            ExtensionManifestDeclaration::RequiredApiPermission(name)
+            | ExtensionManifestDeclaration::OptionalApiPermission(name) => {
+                ExtensionManagementLimitation::api_permission(name.as_str()).ok()?
+            }
+            ExtensionManifestDeclaration::RequiredHostPermission(_)
+            | ExtensionManifestDeclaration::OptionalHostPermission(_) => {
+                ExtensionManagementLimitation::HostAccess
+            }
+            ExtensionManifestDeclaration::Background => ExtensionManagementLimitation::Background,
+            ExtensionManifestDeclaration::Action => ExtensionManagementLimitation::Action,
+            ExtensionManifestDeclaration::Offscreen => ExtensionManagementLimitation::Offscreen,
+            ExtensionManifestDeclaration::NativeMessaging => {
+                ExtensionManagementLimitation::NativeMessaging
+            }
+            ExtensionManifestDeclaration::Override(_) => {
+                ExtensionManagementLimitation::BrowserOverride
+            }
+            ExtensionManifestDeclaration::ExtensionPagesCsp => {
+                ExtensionManagementLimitation::ExtensionPagesCsp
+            }
+            ExtensionManifestDeclaration::Sandbox => ExtensionManagementLimitation::Sandbox,
+            ExtensionManifestDeclaration::ContentScript { .. } => {
+                ExtensionManagementLimitation::ContentScripts
+            }
+            ExtensionManifestDeclaration::WebAccessibleResources { .. } => {
+                ExtensionManagementLimitation::WebAccessibleResources
+            }
+            ExtensionManifestDeclaration::MinimumChromiumVersion(_) => {
+                ExtensionManagementLimitation::MinimumBrowserVersion
+            }
+            ExtensionManifestDeclaration::Commands(_) => ExtensionManagementLimitation::Commands,
+            ExtensionManifestDeclaration::SidePanel { .. } => {
+                ExtensionManagementLimitation::SidePanel
+            }
+            ExtensionManifestDeclaration::ManagedStorageSchema { .. } => {
+                ExtensionManagementLimitation::ManagedStorage
+            }
+            ExtensionManifestDeclaration::UnmodeledAuthority(_) => return None,
+        };
+        limitations.push(limitation);
+    }
+    Some((compatibility, limitations))
 }
 
 fn classify_repository_error(

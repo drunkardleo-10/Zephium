@@ -848,6 +848,7 @@ mod state_tests {
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
         )
         .unwrap();
         ExtensionManagementCatalog::new(

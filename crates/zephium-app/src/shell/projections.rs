@@ -128,6 +128,11 @@ impl Shell {
                             ExtensionManagementCompatibilityView::Degraded
                         }
                     },
+                    limitations: entry
+                        .limitations()
+                        .iter()
+                        .map(extension_management_limitation_view)
+                        .collect(),
                 }
             })
             .collect();
@@ -171,6 +176,11 @@ impl Shell {
                         ExtensionManagementCompatibilityView::Degraded
                     }
                 },
+                limitations: candidate
+                    .limitations()
+                    .iter()
+                    .map(extension_management_limitation_view)
+                    .collect(),
             })
             .collect();
         (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
@@ -517,6 +527,46 @@ impl Shell {
     pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
         let parsed = url::Url::parse(url).ok()?;
         self.favicon_key_for(profile, &origin_of(&parsed)?)
+    }
+}
+
+fn extension_management_limitation_view(
+    limitation: &ExtensionManagementLimitation,
+) -> ExtensionManagementLimitationView {
+    match limitation {
+        ExtensionManagementLimitation::ApiPermission(name) => {
+            ExtensionManagementLimitationView::ApiPermission {
+                name: name.to_string(),
+            }
+        }
+        ExtensionManagementLimitation::HostAccess => ExtensionManagementLimitationView::HostAccess,
+        ExtensionManagementLimitation::Background => ExtensionManagementLimitationView::Background,
+        ExtensionManagementLimitation::Action => ExtensionManagementLimitationView::Action,
+        ExtensionManagementLimitation::Offscreen => ExtensionManagementLimitationView::Offscreen,
+        ExtensionManagementLimitation::NativeMessaging => {
+            ExtensionManagementLimitationView::NativeMessaging
+        }
+        ExtensionManagementLimitation::BrowserOverride => {
+            ExtensionManagementLimitationView::BrowserOverride
+        }
+        ExtensionManagementLimitation::ExtensionPagesCsp => {
+            ExtensionManagementLimitationView::ExtensionPagesCsp
+        }
+        ExtensionManagementLimitation::Sandbox => ExtensionManagementLimitationView::Sandbox,
+        ExtensionManagementLimitation::ContentScripts => {
+            ExtensionManagementLimitationView::ContentScripts
+        }
+        ExtensionManagementLimitation::WebAccessibleResources => {
+            ExtensionManagementLimitationView::WebAccessibleResources
+        }
+        ExtensionManagementLimitation::MinimumBrowserVersion => {
+            ExtensionManagementLimitationView::MinimumBrowserVersion
+        }
+        ExtensionManagementLimitation::Commands => ExtensionManagementLimitationView::Commands,
+        ExtensionManagementLimitation::SidePanel => ExtensionManagementLimitationView::SidePanel,
+        ExtensionManagementLimitation::ManagedStorage => {
+            ExtensionManagementLimitationView::ManagedStorage
+        }
     }
 }
 

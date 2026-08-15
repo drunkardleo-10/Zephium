@@ -9,6 +9,7 @@ use crate::extensions::{
     ExtensionInstallCatalogRevision, ExtensionRuntimeGeneration, MAX_EXTENSION_API_PERMISSIONS,
     MAX_EXTENSION_API_PERMISSION_NAME_BYTES, MAX_EXTENSION_HOST_GRANTS,
     MAX_EXTENSION_HOST_PERMISSION_PATTERNS, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    MAX_EXTENSION_MANIFEST_DECLARATIONS,
 };
 use crate::ids::ProfileId;
 use crate::injection::{MatchPattern, MAX_MATCH_PATTERN_BYTES};
@@ -17,6 +18,11 @@ use super::{ExtensionInstallCandidateSelector, ExtensionInstallSelector};
 
 /// Maximum bytes in one browser-rendered extension metadata field.
 pub const MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES: usize = 4 * 1024;
+/// Maximum distinct reviewed degradation disclosures retained for one row.
+///
+/// Every API permission can retain its own label; all other declaration kinds
+/// collapse into the fourteen fixed browser-owned feature categories below.
+pub const MAX_EXTENSION_MANAGEMENT_LIMITATIONS: usize = MAX_EXTENSION_API_PERMISSIONS + 14;
 /// Maximum retained bytes for the complete management catalog of one profile.
 pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
     ExtensionManagementCatalog,
@@ -27,7 +33,10 @@ pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
         * (size_of::<ExtensionInstallCandidateEntry>()
             + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
             + MAX_EXTENSION_API_PERMISSIONS * MAX_EXTENSION_API_PERMISSION_NAME_BYTES
-            + MAX_EXTENSION_HOST_GRANTS * MAX_MATCH_PATTERN_BYTES);
+            + MAX_EXTENSION_HOST_GRANTS * MAX_MATCH_PATTERN_BYTES)
+    + 2 * MAX_EXTENSION_INSTALLS_PER_PROFILE
+        * MAX_EXTENSION_MANAGEMENT_LIMITATIONS
+        * (size_of::<ExtensionManagementLimitation>() + MAX_EXTENSION_API_PERMISSION_NAME_BYTES);
 
 /// Truthful process-local state of one regular extension runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +79,60 @@ impl ExtensionManagementCompatibility {
     }
 }
 
+/// Browser-owned description of one reviewed compatibility degradation.
+///
+/// The variants deliberately describe product features rather than native API
+/// failures. Only `ApiPermission` retains manifest text, and its constructor
+/// revalidates the same bounded permission-token grammar before that text may
+/// reach privileged UI.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ExtensionManagementLimitation {
+    ApiPermission(Box<str>),
+    HostAccess,
+    Background,
+    Action,
+    Offscreen,
+    NativeMessaging,
+    BrowserOverride,
+    ExtensionPagesCsp,
+    Sandbox,
+    ContentScripts,
+    WebAccessibleResources,
+    MinimumBrowserVersion,
+    Commands,
+    SidePanel,
+    ManagedStorage,
+}
+
+impl ExtensionManagementLimitation {
+    pub fn api_permission(
+        name: impl Into<Box<str>>,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        let name = name.into();
+        if ApiPermissionName::parse_exact(&name)
+            .ok()
+            .is_none_or(|parsed| parsed.as_str() != name.as_ref())
+        {
+            return Err(ExtensionManagementProjectionError::InvalidPermission);
+        }
+        Ok(Self::ApiPermission(name))
+    }
+
+    pub fn api_permission_name(&self) -> Option<&str> {
+        match self {
+            Self::ApiPermission(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    const fn retained_text_bytes(&self) -> usize {
+        match self {
+            Self::ApiPermission(name) => name.len(),
+            _ => 0,
+        }
+    }
+}
+
 /// Sanitized summary of the exact atomic grant row joined to an install.
 ///
 /// Counts and toggles are display data only. They do not implement permission
@@ -99,6 +162,7 @@ pub struct ExtensionManagementEntry {
     runtime: ExtensionManagementRuntimeState,
     grants: ExtensionManagementGrantState,
     compatibility: ExtensionManagementCompatibility,
+    limitations: Box<[ExtensionManagementLimitation]>,
     retained_bytes: usize,
 }
 
@@ -118,6 +182,7 @@ impl ExtensionManagementEntry {
         runtime: ExtensionManagementRuntimeState,
         grants: ExtensionManagementGrantState,
         compatibility: ExtensionManagementCompatibility,
+        limitations: Vec<ExtensionManagementLimitation>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
         let name = name.into();
         let version = version.into();
@@ -140,8 +205,22 @@ impl ExtensionManagementEntry {
             })
             .and_then(|bytes| bytes.checked_add(author.as_ref().map_or(0, |value| value.len())))
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        let limitations = canonical_limitations(compatibility, limitations)?;
+        let limitation_bytes = limitations
+            .iter()
+            .try_fold(0_usize, |bytes, limitation| {
+                bytes.checked_add(limitation.retained_text_bytes())
+            })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         let retained_bytes = size_of::<Self>()
             .checked_add(text_bytes)
+            .and_then(|bytes| {
+                limitations
+                    .len()
+                    .checked_mul(size_of::<ExtensionManagementLimitation>())
+                    .and_then(|limitation_bytes| bytes.checked_add(limitation_bytes))
+            })
+            .and_then(|bytes| bytes.checked_add(limitation_bytes))
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         Ok(Self {
             selector,
@@ -152,6 +231,7 @@ impl ExtensionManagementEntry {
             runtime,
             grants,
             compatibility,
+            limitations,
             retained_bytes,
         })
     }
@@ -188,6 +268,10 @@ impl ExtensionManagementEntry {
         self.compatibility
     }
 
+    pub fn limitations(&self) -> &[ExtensionManagementLimitation] {
+        &self.limitations
+    }
+
     pub const fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -208,6 +292,7 @@ pub struct ExtensionInstallCandidateEntry {
     optional_hosts: Box<[Box<str>]>,
     supports_file_access: bool,
     compatibility: ExtensionManagementCompatibility,
+    limitations: Box<[ExtensionManagementLimitation]>,
     retained_bytes: usize,
 }
 
@@ -225,6 +310,7 @@ impl ExtensionInstallCandidateEntry {
         optional_api: Vec<Box<str>>,
         optional_hosts: Vec<Box<str>>,
         compatibility: ExtensionManagementCompatibility,
+        limitations: Vec<ExtensionManagementLimitation>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
         let name = name.into();
         let version = version.into();
@@ -292,6 +378,13 @@ impl ExtensionInstallCandidateEntry {
             .and_then(|count| count.checked_add(optional_api.len()))
             .and_then(|count| count.checked_add(optional_hosts.len()))
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        let limitations = canonical_limitations(compatibility, limitations)?;
+        let limitation_text_bytes = limitations
+            .iter()
+            .try_fold(0_usize, |bytes, limitation| {
+                bytes.checked_add(limitation.retained_text_bytes())
+            })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         let retained_bytes = size_of::<Self>()
             .checked_add(text_bytes)
             .and_then(|bytes| {
@@ -299,6 +392,13 @@ impl ExtensionInstallCandidateEntry {
                     .checked_mul(size_of::<Box<str>>())
                     .and_then(|permission_bytes| bytes.checked_add(permission_bytes))
             })
+            .and_then(|bytes| {
+                limitations
+                    .len()
+                    .checked_mul(size_of::<ExtensionManagementLimitation>())
+                    .and_then(|limitation_bytes| bytes.checked_add(limitation_bytes))
+            })
+            .and_then(|bytes| bytes.checked_add(limitation_text_bytes))
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         Ok(Self {
             selector,
@@ -312,6 +412,7 @@ impl ExtensionInstallCandidateEntry {
             optional_hosts: optional_hosts.into_boxed_slice(),
             supports_file_access,
             compatibility,
+            limitations,
             retained_bytes,
         })
     }
@@ -375,9 +476,34 @@ impl ExtensionInstallCandidateEntry {
         self.compatibility
     }
 
+    pub fn limitations(&self) -> &[ExtensionManagementLimitation] {
+        &self.limitations
+    }
+
     pub const fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+}
+
+fn canonical_limitations(
+    compatibility: ExtensionManagementCompatibility,
+    mut limitations: Vec<ExtensionManagementLimitation>,
+) -> Result<Box<[ExtensionManagementLimitation]>, ExtensionManagementProjectionError> {
+    if limitations.len() > MAX_EXTENSION_MANIFEST_DECLARATIONS {
+        return Err(ExtensionManagementProjectionError::TooManyPermissions);
+    }
+    limitations.sort_unstable();
+    limitations.dedup();
+    if limitations.len() > MAX_EXTENSION_MANAGEMENT_LIMITATIONS {
+        return Err(ExtensionManagementProjectionError::TooManyPermissions);
+    }
+    if matches!(compatibility, ExtensionManagementCompatibility::Compatible)
+        != limitations.is_empty()
+    {
+        return Err(ExtensionManagementProjectionError::InvalidCompatibility);
+    }
+    limitations.shrink_to_fit();
+    Ok(limitations.into_boxed_slice())
 }
 
 fn canonical_api_permissions(
@@ -526,6 +652,7 @@ pub enum ExtensionManagementProjectionError {
     MixedCatalog,
     TooManyPermissions,
     InvalidPermission,
+    InvalidCompatibility,
     InvalidDisplayText,
     AccountingOverflow,
     RetainedBytesExceeded,
@@ -540,6 +667,7 @@ impl fmt::Display for ExtensionManagementProjectionError {
             Self::MixedCatalog => "extension management entries span profile catalogs",
             Self::TooManyPermissions => "too many extension install permissions",
             Self::InvalidPermission => "invalid extension install permission",
+            Self::InvalidCompatibility => "invalid extension compatibility disclosure",
             Self::InvalidDisplayText => "invalid extension management display text",
             Self::AccountingOverflow => "extension management accounting overflow",
             Self::RetainedBytesExceeded => "extension management retained-byte bound exceeded",
@@ -636,6 +764,7 @@ mod tests {
             ExtensionManagementRuntimeState::PendingActivation,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
         )
         .unwrap()
     }
@@ -670,6 +799,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
         )
         .unwrap()
     }
@@ -715,6 +845,7 @@ mod tests {
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     ExtensionManagementCompatibility::Compatible,
+                    Vec::new(),
                 ),
                 Err(ExtensionManagementProjectionError::InvalidDisplayText)
             ));
@@ -736,6 +867,60 @@ mod tests {
             ]),
             None
         );
+    }
+
+    #[test]
+    fn compatibility_disclosures_are_exact_canonical_and_consistent() {
+        let profile = ProfileId::from(1);
+        let degraded = ExtensionManagementEntry::new(
+            selector(profile, 1),
+            "Fixture",
+            None,
+            None,
+            "1.0.0",
+            ExtensionManagementRuntimeState::Disabled,
+            ExtensionManagementGrantState::Uninitialized,
+            ExtensionManagementCompatibility::Degraded,
+            vec![
+                ExtensionManagementLimitation::ContentScripts,
+                ExtensionManagementLimitation::api_permission("webRequest").unwrap(),
+                ExtensionManagementLimitation::ContentScripts,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            degraded.limitations(),
+            &[
+                ExtensionManagementLimitation::ApiPermission("webRequest".into()),
+                ExtensionManagementLimitation::ContentScripts,
+            ]
+        );
+        assert_eq!(
+            ExtensionManagementLimitation::api_permission("bad permission"),
+            Err(ExtensionManagementProjectionError::InvalidPermission)
+        );
+        for (compatibility, limitations) in [
+            (
+                ExtensionManagementCompatibility::Compatible,
+                vec![ExtensionManagementLimitation::Background],
+            ),
+            (ExtensionManagementCompatibility::Degraded, Vec::new()),
+        ] {
+            assert!(matches!(
+                ExtensionManagementEntry::new(
+                    selector(profile, 2),
+                    "Fixture",
+                    None,
+                    None,
+                    "1.0.0",
+                    ExtensionManagementRuntimeState::Disabled,
+                    ExtensionManagementGrantState::Uninitialized,
+                    compatibility,
+                    limitations,
+                ),
+                Err(ExtensionManagementProjectionError::InvalidCompatibility)
+            ));
+        }
     }
 
     #[test]
@@ -785,6 +970,7 @@ mod tests {
             vec!["tabs".into(), "notifications".into()],
             vec!["file:///*".into(), "https://optional.example/*".into()],
             ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(
@@ -821,6 +1007,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 ExtensionManagementCompatibility::Compatible,
+                Vec::new(),
             ),
             Err(ExtensionManagementProjectionError::InvalidPermission)
         ));
@@ -838,6 +1025,7 @@ mod tests {
                 vec!["storage".into()],
                 Vec::new(),
                 ExtensionManagementCompatibility::Compatible,
+                Vec::new(),
             ),
             Err(ExtensionManagementProjectionError::InvalidPermission)
         ));

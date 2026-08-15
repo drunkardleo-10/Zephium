@@ -14,9 +14,10 @@ mod runtime_grants;
 
 pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
-    ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementProjectionError,
-    ExtensionManagementRuntimeState, MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES,
-    MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
+    ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementLimitation,
+    ExtensionManagementProjectionError, ExtensionManagementRuntimeState,
+    MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
+    MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
 };
 pub use runtime_grants::{
     ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptError,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   apiPermissionLabel,
+  compatibilityLimitationLabel,
   hostPermissionLabel,
 } from "../src/domain/extensions/permission-labels";
 
@@ -19,6 +20,18 @@ describe("extension permission copy", () => {
     expect(apiPermissionLabel("clipboardRead")).toBe("Read copied content");
     expect(apiPermissionLabel("futureCapability")).toBe(
       "Use the futureCapability browser capability",
+    );
+  });
+
+  it("turns typed compatibility limits into specific browser-owned disclosures", () => {
+    expect(compatibilityLimitationLabel({ type: "api_permission", name: "fontSettings" })).toBe(
+      "Limited: Read and change browser font settings",
+    );
+    expect(compatibilityLimitationLabel({ type: "content_scripts" })).toBe(
+      "Some page scripts have platform limitations",
+    );
+    expect(compatibilityLimitationLabel({ type: "native_messaging" })).toBe(
+      "Connections to native apps are limited",
     );
   });
 });

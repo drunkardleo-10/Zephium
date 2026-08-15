@@ -785,8 +785,15 @@ optional declaration to denied, and can return only bounded indexes into the
 exact canonical candidate retained by Shell. The serialized service
 reauthenticates that package, resolves the selected declarations from its
 manifest, and atomically initializes the grant cohort; local-file and private
-browsing access remain separate explicit decisions. Dynamic optional-grant
-requests are still denied by the native default and have no user prompt. The
+browsing access remain separate explicit decisions. Reviewed degraded
+declarations also flow from that exact admitted manifest into a bounded typed
+disclosure cohort. API names are revalidated tokens; structural declarations
+collapse into browser-owned feature categories; compatible rows cannot carry
+limitations and degraded rows cannot omit them. The install review renders the
+complete cohort before consent, while installed rows show a bounded summary;
+neither surface receives native error strings or invents compatibility from a
+package name. Dynamic optional-grant requests are still denied by the native
+default and have no user prompt. The
 remaining release gaps include that runtime permission broker, the complete
 permission and API matrix, quotas, release-build resource evidence, and
 endurance. Older admitted

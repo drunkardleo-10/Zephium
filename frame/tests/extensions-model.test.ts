@@ -98,6 +98,7 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
           private_access: false,
         },
         compatibility: "degraded",
+        limitations: [{ type: "api_permission", name: "webRequest" }],
       },
     ],
     candidates: [],

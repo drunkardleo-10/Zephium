@@ -94,7 +94,7 @@ use zephium_core::ports::engine::{
     NavigationPresentationId, Partition, ProfileDataErasureOutcome, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
-    ExtensionManagementCompatibility, ExtensionManagementGrantState,
+    ExtensionManagementCompatibility, ExtensionManagementGrantState, ExtensionManagementLimitation,
     ExtensionManagementRuntimeState, ExtensionProfileRetirementDisposition,
     ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
 };
@@ -116,12 +116,13 @@ use zephium_ipc::{
     BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
     ExtensionActionFailure, ExtensionActionsView, ExtensionInstallCandidateView,
     ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
-    ExtensionManagementGrantView, ExtensionManagementPhase, ExtensionManagementRuntimeView,
-    ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView,
-    ItemsState, LayoutState, OperationDisposition, OperationOutcome, OperationReason,
-    ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind,
-    RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction, SearchResult, SearchResults,
-    SidebarNodeKindView, SidebarNodeView, SidebarSectionView, SpaceView, SplitGroupView, TabView,
+    ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
+    ExtensionManagementRuntimeView, ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView,
+    ExtensionRuntimeGrantPromptView, ItemsState, LayoutState, OperationDisposition,
+    OperationOutcome, OperationReason, ProfileKindView, ProfileView, Projection,
+    RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
+    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
+    SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
