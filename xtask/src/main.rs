@@ -683,13 +683,12 @@ fn ci() {
         run_native_adapter_clippy(manifest, features, "--all-targets");
         run_native_adapter_clippy(manifest, features, "--lib");
     }
-    // The desktop test suite regenerates frame/src/shared/ipc/bindings.ts, so the
-    // frontend typecheck after it doubles as a Rust/TS drift check.
-    run("cargo", &["test", "--workspace"]);
-    run_internal_extension_authority_gates();
-    for (manifest, features) in NATIVE_ADAPTERS {
-        run_native_adapter_tests(manifest, features);
-    }
+    // Run display-dependent AppKit/WebKit gates before the long workspace and
+    // vendored-adapter test inventory. On macOS, a heavily exercised test
+    // process cohort can leave LaunchServices/GPU helper admission transiently
+    // unavailable even though the exact same probe passes in a fresh turn.
+    // Reordering preserves one strict attempt and avoids hiding regressions
+    // behind retries.
     #[cfg(target_os = "macos")]
     run_macos_principal_isolation_probe();
     #[cfg(target_os = "macos")]
@@ -700,6 +699,13 @@ fn ci() {
     run_macos_extension_compatibility_probe();
     #[cfg(target_os = "macos")]
     run_macos_extension_product_probe();
+    // The desktop test suite regenerates frame/src/shared/ipc/bindings.ts, so the
+    // frontend typecheck after it doubles as a Rust/TS drift check.
+    run("cargo", &["test", "--workspace"]);
+    run_internal_extension_authority_gates();
+    for (manifest, features) in NATIVE_ADAPTERS {
+        run_native_adapter_tests(manifest, features);
+    }
     run("pnpm", &["--dir", "frame", "run", "check"]);
 }
 
@@ -1502,9 +1508,16 @@ fn check_blocker_security_fork() {
 fn share_workspace_target_dir() {
     // Excluded fork manifests otherwise create independent multi-gigabyte
     // target trees. Preserve an explicit caller override, but make local gates
-    // share Cargo's fingerprinted workspace output.
+    // share Cargo's fingerprinted workspace output. Keep the value lexically
+    // canonical: AppKit/WebKit child probes use their executable path while
+    // issuing helper-process sandbox extensions, and a `..` component can make
+    // that native admission fail even though the path resolves to the same
+    // inode.
     if std::env::var_os("CARGO_TARGET_DIR").is_none() {
-        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask must remain directly beneath the workspace root");
+        let target = workspace.join("target");
         std::env::set_var("CARGO_TARGET_DIR", target);
     }
 }
