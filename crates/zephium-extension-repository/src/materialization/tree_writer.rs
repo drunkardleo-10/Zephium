@@ -7,12 +7,19 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zephium_core::extensions::ExtensionTreeDigest;
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_acquisition::{
+    AcquiredExtensionArchive, AcquiredExtensionArchiveReadError, AcquiredExtensionTreeReceipt,
+    AcquiredExtensionTreeReceiptError,
+};
 #[cfg(test)]
 use zephium_extension_package::MAX_EXTENSION_RELATIVE_PATH_DEPTH;
 use zephium_extension_package::{
     CanonicalExtensionTreeIndex, ExtensionTreeFile, PortableRelativePath,
     MAX_EXTENSION_TREE_ENTRIES,
 };
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_package::{ExtensionReleasePackage, MAX_EXTENSION_MANIFEST_BYTES};
 use zephium_private_fs::{
     ByteLimit, DirectoryIdentity, FileIdentity, PrivateChildKind, PrivateComponent,
     PrivateDirectory, PrivateEntryName, PrivateFsError, PrivateFsTransitionError,
@@ -36,6 +43,39 @@ pub(crate) struct AuthenticatedTreeStage {
     directory: SealedPrivateDirectory,
     parent_identity: DirectoryIdentity,
     _inventory: VerifiedTreeInventory,
+}
+
+/// Reverified create-new tree stage and exact acquired-package evidence.
+///
+/// This capability remains prepublication and linear. Its stream receipt has
+/// already been bound to the release row, while its sealed filesystem tree has
+/// been independently enumerated and re-hashed against the derived index.
+#[cfg(feature = "acquired-packages")]
+#[allow(
+    dead_code,
+    reason = "the opt-in acquired staging gate lands before its durable transaction caller"
+)]
+pub(crate) struct AuthenticatedAcquiredTreeStage {
+    tree: AuthenticatedTreeStage,
+    receipt: AcquiredExtensionTreeReceipt,
+    manifest_bytes: Box<[u8]>,
+}
+
+#[cfg(feature = "acquired-packages")]
+impl AuthenticatedAcquiredTreeStage {
+    #[allow(
+        dead_code,
+        reason = "the opt-in acquired staging gate lands before its durable transaction caller"
+    )]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        AuthenticatedTreeStage,
+        AcquiredExtensionTreeReceipt,
+        Box<[u8]>,
+    ) {
+        (self.tree, self.receipt, self.manifest_bytes)
+    }
 }
 
 impl AuthenticatedTreeStage {
@@ -97,17 +137,33 @@ pub(crate) enum TreeWriterError {
     /// The fixed signed-resource adapter failed its own source boundary.
     #[error("bundled extension tree source failed: {0}")]
     Source(BundledReleaseSourceError),
+    /// The authenticated archive failed while producing one exact file.
+    #[cfg(feature = "acquired-packages")]
+    #[allow(
+        dead_code,
+        reason = "the opt-in acquired staging gate lands before its durable transaction caller"
+    )]
+    #[error("acquired extension archive stream failed: {0}")]
+    AcquiredArchive(AcquiredExtensionArchiveReadError),
+    /// Stream receipts could not complete or bind one exact acquired tree.
+    #[cfg(feature = "acquired-packages")]
+    #[allow(
+        dead_code,
+        reason = "the opt-in acquired staging gate lands before its durable transaction caller"
+    )]
+    #[error("acquired extension tree receipt failed: {0}")]
+    AcquiredTree(AcquiredExtensionTreeReceiptError),
     /// A private-filesystem operation failed while its namespace remained
     /// usable and every attempted consuming transition stayed pre-commit.
-    #[error("bundled extension tree filesystem failed: {0}")]
+    #[error("extension tree filesystem failed: {0}")]
     Filesystem(PrivateFsError),
     /// Observed bytes, names, kinds, counts, or digests did not equal the
     /// authenticated canonical inventory.
-    #[error("bundled extension tree did not match its canonical inventory")]
+    #[error("extension tree did not match its canonical inventory")]
     ExactMismatch,
     /// A consuming seal, unseal, publication, or removal may have committed,
     /// and no live capability remains from which to continue safely.
-    #[error("bundled extension tree transition settlement is ambiguous")]
+    #[error("extension tree transition settlement is ambiguous")]
     TransitionAmbiguous,
 }
 
@@ -129,35 +185,224 @@ pub(crate) fn build_authenticated_tree_stage<S: BundledReleaseByteSource>(
 ) -> Result<AuthenticatedTreeStage, TreeWriterError> {
     validate_build_inputs(package, index, manifest_bytes)?;
 
-    let parent_identity = trees.identity();
-    let root = trees
-        .create_new_private_child(stage_name)
-        .map_err(map_filesystem)?;
-    let mut directories = vec![root];
-    let mut directory_names = Vec::<PrivateEntryName>::new();
+    let mut stage = TreeStageBuilder::new(trees, stage_name)?;
 
     for file in index.files() {
-        let components = file.path().as_str().split('/').collect::<Vec<_>>();
+        stage.write_file(file.path(), |parent, file_name| {
+            if file.path().as_str() == "manifest.json" {
+                write_retained_manifest(parent, file_name, file, manifest_bytes)
+            } else {
+                write_source_file(parent, file_name, package, file, source)
+            }
+        })?;
+    }
+
+    let (sealed, parent_identity) = stage.finish()?;
+    let inventory = verify_sealed_tree_contents(&sealed, index)?;
+
+    Ok(AuthenticatedTreeStage {
+        directory: sealed,
+        parent_identity,
+        _inventory: inventory,
+    })
+}
+
+/// Streams one authenticated acquired archive into a private sealed stage.
+///
+/// Archive bytes cross directly from the bounded decompressor into create-new
+/// private files. Only the bounded root manifest is retained for the later
+/// manifest-admission boundary. The completed stream receipts are bound to the
+/// exact release row before the closed tree is independently enumerated and
+/// re-hashed, so neither a callback success nor an archive receipt alone can
+/// mint publication authority.
+#[cfg(feature = "acquired-packages")]
+#[allow(
+    dead_code,
+    reason = "the opt-in acquired staging gate lands before its durable transaction caller"
+)]
+pub(crate) fn build_authenticated_acquired_tree_stage(
+    trees: &PrivateDirectory,
+    stage_name: &PrivateComponent,
+    package: &ExtensionReleasePackage,
+    archive: &mut AcquiredExtensionArchive<'_>,
+) -> Result<AuthenticatedAcquiredTreeStage, TreeWriterError> {
+    validate_acquired_build_inputs(package, archive)?;
+
+    let manifest_length = archive
+        .files()
+        .iter()
+        .find(|file| file.path().as_str() == "manifest.json")
+        .ok_or(TreeWriterError::ExactMismatch)?
+        .length();
+    let manifest_capacity =
+        usize::try_from(manifest_length).map_err(|_| TreeWriterError::ExactMismatch)?;
+    if manifest_capacity == 0 || manifest_capacity > MAX_EXTENSION_MANIFEST_BYTES {
+        return Err(TreeWriterError::ExactMismatch);
+    }
+
+    let mut manifest_bytes = Vec::with_capacity(manifest_capacity);
+    let mut receipts = Vec::with_capacity(archive.files().len());
+    let mut stage = TreeStageBuilder::new(trees, stage_name)?;
+
+    for file_index in 0..archive.files().len() {
+        // Copy the small structural fields before mutably borrowing the
+        // archive for decompression. No archive bytes are retained here.
+        let (path, length, retain_manifest) = {
+            let file = archive
+                .files()
+                .get(file_index)
+                .ok_or(TreeWriterError::ExactMismatch)?;
+            (
+                file.path().clone(),
+                file.length(),
+                file.path().as_str() == "manifest.json",
+            )
+        };
+        let expected_length = streaming_length(length)?;
+
+        stage.write_file(&path, |parent, file_name| {
+            let nested = archive
+                .with_file_reader(file_index, |reader| {
+                    if retain_manifest {
+                        let mut recording =
+                            RecordingReader::new(reader, &mut manifest_bytes, manifest_capacity);
+                        parent
+                            .write_new_entry_from_reader(file_name, &mut recording, expected_length)
+                            .map_err(map_acquired_streaming_write)
+                    } else {
+                        parent
+                            .write_new_entry_from_reader(file_name, reader, expected_length)
+                            .map_err(map_acquired_streaming_write)
+                    }
+                })
+                .map_err(TreeWriterError::AcquiredArchive)?;
+            let (identity, receipt) = nested?;
+            receipts.push(receipt);
+            Ok(identity)
+        })?;
+    }
+
+    let receipt = archive
+        .finish_tree(receipts)
+        .map_err(TreeWriterError::AcquiredTree)?;
+    receipt
+        .bind_release_package(package)
+        .map_err(TreeWriterError::AcquiredTree)?;
+    verify_retained_acquired_manifest(receipt.index(), &manifest_bytes)?;
+
+    let (sealed, parent_identity) = stage.finish()?;
+    let inventory = verify_sealed_tree_contents(&sealed, receipt.index())?;
+    let tree = AuthenticatedTreeStage {
+        directory: sealed,
+        parent_identity,
+        _inventory: inventory,
+    };
+    Ok(AuthenticatedAcquiredTreeStage {
+        tree,
+        receipt,
+        manifest_bytes: manifest_bytes.into_boxed_slice(),
+    })
+}
+
+#[cfg(feature = "acquired-packages")]
+#[allow(
+    dead_code,
+    reason = "reachable only from the pending acquired staging transaction"
+)]
+fn validate_acquired_build_inputs(
+    package: &ExtensionReleasePackage,
+    archive: &AcquiredExtensionArchive<'_>,
+) -> Result<(), TreeWriterError> {
+    let chromium = package.chromium().ok_or(TreeWriterError::AcquiredTree(
+        AcquiredExtensionTreeReceiptError::ReleasePackageMismatch,
+    ))?;
+    if package.payload() != archive.payload_identity()
+        || chromium.extension_id() != archive.extension_id()
+        || chromium.manifest_key_sha256() != archive.developer_key_sha256()
+        || package.tree_file_count() != archive.files().len()
+        || package.tree_bytes() != archive.total_bytes()
+    {
+        return Err(TreeWriterError::AcquiredTree(
+            AcquiredExtensionTreeReceiptError::ReleasePackageMismatch,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acquired-packages")]
+#[allow(
+    dead_code,
+    reason = "reachable only from the pending acquired staging transaction"
+)]
+fn verify_retained_acquired_manifest(
+    index: &CanonicalExtensionTreeIndex,
+    manifest_bytes: &[u8],
+) -> Result<(), TreeWriterError> {
+    let manifest = index
+        .files()
+        .iter()
+        .find(|file| file.path().as_str() == "manifest.json")
+        .ok_or(TreeWriterError::ExactMismatch)?;
+    if usize::try_from(manifest.length()).ok() != Some(manifest_bytes.len())
+        || <[u8; 32]>::from(Sha256::digest(manifest_bytes)) != manifest.sha256()
+    {
+        return Err(TreeWriterError::ExactMismatch);
+    }
+    Ok(())
+}
+
+struct TreeStageBuilder {
+    parent_identity: DirectoryIdentity,
+    directories: Vec<PrivateDirectory>,
+    directory_names: Vec<PrivateEntryName>,
+}
+
+impl TreeStageBuilder {
+    fn new(
+        trees: &PrivateDirectory,
+        stage_name: &PrivateComponent,
+    ) -> Result<Self, TreeWriterError> {
+        let root = trees
+            .create_new_private_child(stage_name)
+            .map_err(map_filesystem)?;
+        Ok(Self {
+            parent_identity: trees.identity(),
+            directories: vec![root],
+            directory_names: Vec::new(),
+        })
+    }
+
+    fn write_file(
+        &mut self,
+        path: &PortableRelativePath,
+        write: impl FnOnce(
+            &PrivateDirectory,
+            &PrivateEntryName,
+        ) -> Result<FileIdentity, TreeWriterError>,
+    ) -> Result<(), TreeWriterError> {
+        let components = path.as_str().split('/').collect::<Vec<_>>();
         let parent_components = &components[..components.len().saturating_sub(1)];
-        let common = directory_names
+        let common = self
+            .directory_names
             .iter()
             .zip(parent_components)
             .take_while(|(current, expected)| current.as_str() == **expected)
             .count();
 
-        while directory_names.len() > common {
-            seal_top_directory(&mut directories)?;
-            directory_names.pop();
+        while self.directory_names.len() > common {
+            seal_top_directory(&mut self.directories)?;
+            self.directory_names.pop();
         }
         for component in &parent_components[common..] {
             let name = entry_name(component)?;
-            let child = directories
+            let child = self
+                .directories
                 .last()
                 .ok_or(TreeWriterError::ExactMismatch)?
                 .create_new_entry_child(&name)
                 .map_err(map_filesystem)?;
-            directories.push(child);
-            directory_names.push(name);
+            self.directories.push(child);
+            self.directory_names.push(name);
         }
 
         let file_name = entry_name(
@@ -166,31 +411,29 @@ pub(crate) fn build_authenticated_tree_stage<S: BundledReleaseByteSource>(
                 .copied()
                 .ok_or(TreeWriterError::ExactMismatch)?,
         )?;
-        let parent = directories.last().ok_or(TreeWriterError::ExactMismatch)?;
-        let writable_identity = if file.path().as_str() == "manifest.json" {
-            write_retained_manifest(parent, &file_name, file, manifest_bytes)?
-        } else {
-            write_source_file(parent, &file_name, package, file, source)?
-        };
-        seal_file_with_same_identity(parent, &file_name, writable_identity)?;
+        let parent = self
+            .directories
+            .last()
+            .ok_or(TreeWriterError::ExactMismatch)?;
+        let writable_identity = write(parent, &file_name)?;
+        seal_file_with_same_identity(parent, &file_name, writable_identity)
     }
 
-    while directories.len() > 1 {
-        seal_top_directory(&mut directories)?;
+    fn finish(mut self) -> Result<(SealedPrivateDirectory, DirectoryIdentity), TreeWriterError> {
+        while self.directories.len() > 1 {
+            seal_top_directory(&mut self.directories)?;
+        }
+        let root = self
+            .directories
+            .pop()
+            .ok_or(TreeWriterError::ExactMismatch)?;
+        let identity = root.identity();
+        let sealed = root.seal().map_err(map_transition)?;
+        if sealed.identity() != identity {
+            return Err(map_filesystem(PrivateFsError::IdentityAmbiguous));
+        }
+        Ok((sealed, self.parent_identity))
     }
-    let root = directories.pop().ok_or(TreeWriterError::ExactMismatch)?;
-    let identity = root.identity();
-    let sealed = root.seal().map_err(map_transition)?;
-    if sealed.identity() != identity {
-        return Err(map_filesystem(PrivateFsError::IdentityAmbiguous));
-    }
-    let inventory = verify_sealed_tree_contents(&sealed, index)?;
-
-    Ok(AuthenticatedTreeStage {
-        directory: sealed,
-        parent_identity,
-        _inventory: inventory,
-    })
 }
 
 /// Exhaustively re-authenticates one sealed tree from its observed inventory.
@@ -514,6 +757,24 @@ fn map_streaming_write(error: StreamingWriteError) -> TreeWriterError {
     }
 }
 
+#[cfg(feature = "acquired-packages")]
+#[allow(
+    dead_code,
+    reason = "reachable only from the pending acquired staging transaction"
+)]
+fn map_acquired_streaming_write(error: StreamingWriteError) -> TreeWriterError {
+    match error {
+        StreamingWriteError::Filesystem(error) => map_filesystem(error),
+        StreamingWriteError::SourceRead => {
+            TreeWriterError::AcquiredArchive(AcquiredExtensionArchiveReadError::CopyFailed)
+        }
+        StreamingWriteError::SourceTooShort | StreamingWriteError::SourceTooLong => {
+            TreeWriterError::AcquiredArchive(AcquiredExtensionArchiveReadError::LengthChanged)
+        }
+        StreamingWriteError::SinkLengthMismatch => TreeWriterError::ExactMismatch,
+    }
+}
+
 fn map_transition<S>(error: PrivateFsTransitionError<S>) -> TreeWriterError {
     let (error, state) = error.into_parts();
     if state.is_some() && !is_terminal_filesystem(error) {
@@ -583,6 +844,59 @@ impl Read for DigestingReader<'_> {
     }
 }
 
+/// Tees the one bounded manifest stream into its later admission buffer.
+///
+/// This wrapper never owns the archive reader and rejects growth beyond the
+/// archive-preflighted manifest length. Every other package resource stays
+/// streaming-only and therefore has constant memory cost.
+#[cfg(feature = "acquired-packages")]
+#[allow(
+    dead_code,
+    reason = "reachable only from the pending acquired staging transaction"
+)]
+struct RecordingReader<'reader, 'bytes> {
+    inner: &'reader mut dyn Read,
+    bytes: &'bytes mut Vec<u8>,
+    maximum: usize,
+}
+
+#[cfg(feature = "acquired-packages")]
+impl<'reader, 'bytes> RecordingReader<'reader, 'bytes> {
+    #[allow(
+        dead_code,
+        reason = "reachable only from the pending acquired staging transaction"
+    )]
+    fn new(inner: &'reader mut dyn Read, bytes: &'bytes mut Vec<u8>, maximum: usize) -> Self {
+        Self {
+            inner,
+            bytes,
+            maximum,
+        }
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+impl Read for RecordingReader<'_, '_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        let accepted = buffer
+            .get(..read)
+            .ok_or_else(|| io::Error::other("acquired manifest reader over-reported a read"))?;
+        let next = self
+            .bytes
+            .len()
+            .checked_add(read)
+            .ok_or_else(|| io::Error::other("acquired manifest byte count overflow"))?;
+        if next > self.maximum {
+            return Err(io::Error::other(
+                "acquired manifest exceeded its authenticated length",
+            ));
+        }
+        self.bytes.extend_from_slice(accepted);
+        Ok(read)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,6 +939,13 @@ mod tests {
         use std::collections::BTreeMap;
         use std::fs;
 
+        #[cfg(feature = "acquired-packages")]
+        use ring::rand::SystemRandom;
+        #[cfg(feature = "acquired-packages")]
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+
+        #[cfg(feature = "acquired-packages")]
+        use zephium_core::extensions::ExtensionArchiveDigest;
         use zephium_core::extensions::{
             ExtensionAuthorityId, ExtensionManifestDigest, ExtensionPackageIdentity,
             ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
@@ -632,10 +953,14 @@ mod tests {
         use zephium_extension_authority::{
             BundledCatalogGenerationAnchor, BundledCatalogInventoryDigest,
         };
+        #[cfg(feature = "acquired-packages")]
+        use zephium_extension_package::{ChromiumManifestKeyDigest, ExtensionReleaseCatalog};
         use zephium_extension_package::{
             ExtensionReleaseCatalogDigest, ExtensionReleaseCatalogRevision,
         };
         use zephium_private_fs::{ByteLimit, LockedPrivateNamespace};
+        #[cfg(feature = "acquired-packages")]
+        use zip::write::SimpleFileOptions;
 
         use super::*;
         use crate::materialization::source::{
@@ -646,6 +971,11 @@ mod tests {
             br#"{"manifest_version":3,"name":"Tree Writer Fixture","version":"1.0"}"#;
         const ICON: &[u8] = b"icon bytes";
         const SCRIPT: &[u8] = b"globalThis.zephiumFixture = true;";
+        #[cfg(feature = "acquired-packages")]
+        const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
+            0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+            0xce, 0x3d, 0x03, 0x01, 0x07,
+        ];
 
         struct FixtureTree {
             index: CanonicalExtensionTreeIndex,
@@ -780,6 +1110,110 @@ mod tests {
             (parent, namespace, trees)
         }
 
+        #[cfg(feature = "acquired-packages")]
+        fn acquired_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut cursor = Cursor::new(Vec::new());
+            {
+                let mut writer = zip::ZipWriter::new(&mut cursor);
+                for (name, bytes) in entries {
+                    writer
+                        .start_file(*name, SimpleFileOptions::default())
+                        .unwrap();
+                    io::Write::write_all(&mut writer, bytes).unwrap();
+                }
+                writer.finish().unwrap();
+            }
+            cursor.into_inner()
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        fn push_varint(bytes: &mut Vec<u8>, mut value: u64) {
+            loop {
+                let mut byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value != 0 {
+                    byte |= 0x80;
+                }
+                bytes.push(byte);
+                if value == 0 {
+                    return;
+                }
+            }
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        fn push_bytes_field(bytes: &mut Vec<u8>, number: u64, value: &[u8]) {
+            push_varint(bytes, (number << 3) | 2);
+            push_varint(bytes, value.len() as u64);
+            bytes.extend_from_slice(value);
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        fn signed_crx(archive: &[u8]) -> (Vec<u8>, ChromiumManifestKeyDigest) {
+            let random = SystemRandom::new();
+            let pkcs8 =
+                EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+            let pair =
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &random)
+                    .unwrap();
+            let mut public_key = vec![0x30, 0x59, 0x30, 0x13];
+            public_key.extend_from_slice(P256_ALGORITHM_IDENTIFIER);
+            public_key.extend_from_slice(&[0x03, 0x42, 0x00]);
+            public_key.extend_from_slice(pair.public_key().as_ref());
+            let key_digest =
+                ChromiumManifestKeyDigest::from_bytes(Sha256::digest(&public_key).into());
+
+            let mut signed_header = Vec::new();
+            push_bytes_field(&mut signed_header, 1, &key_digest.bytes()[..16]);
+            let mut message = b"CRX3 SignedData\0".to_vec();
+            message.extend_from_slice(&(signed_header.len() as u32).to_le_bytes());
+            message.extend_from_slice(&signed_header);
+            message.extend_from_slice(archive);
+            let signature = pair.sign(&random, &message).unwrap();
+
+            let mut proof = Vec::new();
+            push_bytes_field(&mut proof, 1, &public_key);
+            push_bytes_field(&mut proof, 2, signature.as_ref());
+            let mut header = Vec::new();
+            push_bytes_field(&mut header, 3, &proof);
+            push_bytes_field(&mut header, 10_000, &signed_header);
+            let mut crx = b"Cr24".to_vec();
+            crx.extend_from_slice(&3_u32.to_le_bytes());
+            crx.extend_from_slice(&(header.len() as u32).to_le_bytes());
+            crx.extend_from_slice(&header);
+            crx.extend_from_slice(archive);
+            (crx, key_digest)
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        fn acquired_catalog(
+            archive: &[u8],
+            index: &CanonicalExtensionTreeIndex,
+            key_digest: ChromiumManifestKeyDigest,
+            tree_bytes: u64,
+            tree_sha256: [u8; 32],
+        ) -> ExtensionReleaseCatalog {
+            let bytes = format!(
+                concat!(
+                    r#"{{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"{}","admission_policy_sha256":"{}","packages":[{{"package_key":"{}","revision":1,"payload":{{"kind":"acquired_zip","length":{},"sha256":"{}"}},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_index_length":{},"tree_file_count":{},"tree_bytes":{},"chromium":{{"manifest_key_sha256":"{}"}},"provenance":{{"source_url":"https://example.com/releases/v1/extension.crx","upstream_version":"1","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MIT","attribution":"Example","redistribution":"Reviewed unmodified upstream release","legal_notice":{{"target":"licenses/example.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}]}}"#,
+                ),
+                lower_hex([1; 32]),
+                lower_hex([2; 32]),
+                lower_hex([4; 32]),
+                archive.len(),
+                lower_hex(Sha256::digest(archive).into()),
+                lower_hex(index.manifest_sha256().bytes()),
+                lower_hex(tree_sha256),
+                lower_hex(index.index_sha256().bytes()),
+                index.index_bytes(),
+                index.files().len(),
+                tree_bytes,
+                lower_hex(key_digest.bytes()),
+                lower_hex([8; 32]),
+            );
+            ExtensionReleaseCatalog::parse_canonical(bytes.as_bytes()).unwrap()
+        }
+
         #[test]
         fn nested_stage_is_verified_before_publish_and_freshly_verified_after_publish() {
             let (_parent, _namespace, trees) = private_trees();
@@ -828,6 +1262,139 @@ mod tests {
             drop(proof);
             drop(published);
             assert!(cleanup_tree_stage(&trees, &object_name).unwrap());
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        #[test]
+        fn acquired_archive_streams_once_then_reverifies_the_closed_private_tree() {
+            let (_parent, _namespace, trees) = private_trees();
+            let fixture = FixtureTree::standard();
+            let archive = acquired_zip(&[
+                ("assets/icons/icon.txt", ICON),
+                ("manifest.json", MANIFEST),
+                ("scripts/content.js", SCRIPT),
+            ]);
+            let payload = ExtensionPackagePayloadIdentity::acquired_zip(
+                archive.len() as u64,
+                ExtensionArchiveDigest::from_bytes(Sha256::digest(&archive).into()),
+            )
+            .unwrap();
+            let (crx, key_digest) = signed_crx(&archive);
+            let catalog = acquired_catalog(
+                &archive,
+                &fixture.index,
+                key_digest,
+                fixture.index.total_bytes(),
+                fixture.index.tree_sha256().bytes(),
+            );
+            let package = catalog
+                .package(ExtensionPackageKey::from_bytes([4; 32]))
+                .unwrap();
+            let mut acquired =
+                AcquiredExtensionArchive::authenticate_release_package_crx3(&crx, package).unwrap();
+            assert_eq!(acquired.payload_identity(), payload);
+
+            let stage_name = PrivateComponent::new("acquired.stage").unwrap();
+            let object_name = PrivateComponent::new("acquired.object").unwrap();
+            let acquired_stage = build_authenticated_acquired_tree_stage(
+                &trees,
+                &stage_name,
+                package,
+                &mut acquired,
+            )
+            .unwrap();
+            let (stage, receipt, manifest) = acquired_stage.into_parts();
+            assert_eq!(receipt.payload_identity(), payload);
+            assert_eq!(receipt.index(), &fixture.index);
+            assert_eq!(manifest.as_ref(), MANIFEST);
+            assert_eq!(stage._inventory.file_count, fixture.index.files().len());
+            assert_eq!(stage._inventory.total_bytes, fixture.index.total_bytes());
+
+            let published = stage
+                .publish_same_parent_noreplace(&trees, &object_name)
+                .unwrap();
+            let verified = verify_sealed_tree(&published, receipt.index()).unwrap();
+            assert_eq!(verified.tree_sha256(), fixture.index.tree_sha256());
+            assert_eq!(verified.file_count(), fixture.index.files().len());
+            assert_eq!(verified.total_bytes(), fixture.index.total_bytes());
+            drop(verified);
+            drop(published);
+            assert!(cleanup_tree_stage(&trees, &object_name).unwrap());
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        #[test]
+        fn acquired_catalog_mismatch_never_mints_a_stage_or_publication_proof() {
+            let (_parent, _namespace, trees) = private_trees();
+            let fixture = FixtureTree::standard();
+            let archive = acquired_zip(&[
+                ("assets/icons/icon.txt", ICON),
+                ("manifest.json", MANIFEST),
+                ("scripts/content.js", SCRIPT),
+            ]);
+            let (crx, key_digest) = signed_crx(&archive);
+
+            let wrong_size_catalog = acquired_catalog(
+                &archive,
+                &fixture.index,
+                key_digest,
+                fixture.index.total_bytes() + 1,
+                fixture.index.tree_sha256().bytes(),
+            );
+            let wrong_size_package = wrong_size_catalog
+                .package(ExtensionPackageKey::from_bytes([4; 32]))
+                .unwrap();
+            let mut acquired = AcquiredExtensionArchive::authenticate_release_package_crx3(
+                &crx,
+                wrong_size_package,
+            )
+            .unwrap();
+            let stage_name = PrivateComponent::new("wrong-size.stage").unwrap();
+            assert!(matches!(
+                build_authenticated_acquired_tree_stage(
+                    &trees,
+                    &stage_name,
+                    wrong_size_package,
+                    &mut acquired,
+                ),
+                Err(TreeWriterError::AcquiredTree(
+                    AcquiredExtensionTreeReceiptError::ReleasePackageMismatch
+                ))
+            ));
+            assert_eq!(
+                trees.open_private_child_any_mode(&stage_name).err(),
+                Some(PrivateFsError::NotFound)
+            );
+
+            let wrong_tree_catalog = acquired_catalog(
+                &archive,
+                &fixture.index,
+                key_digest,
+                fixture.index.total_bytes(),
+                [9; 32],
+            );
+            let wrong_tree_package = wrong_tree_catalog
+                .package(ExtensionPackageKey::from_bytes([4; 32]))
+                .unwrap();
+            let mut acquired = AcquiredExtensionArchive::authenticate_release_package_crx3(
+                &crx,
+                wrong_tree_package,
+            )
+            .unwrap();
+            let stage_name = PrivateComponent::new("wrong-tree.stage").unwrap();
+            assert!(matches!(
+                build_authenticated_acquired_tree_stage(
+                    &trees,
+                    &stage_name,
+                    wrong_tree_package,
+                    &mut acquired,
+                ),
+                Err(TreeWriterError::AcquiredTree(
+                    AcquiredExtensionTreeReceiptError::ReleasePackageMismatch
+                ))
+            ));
+            assert!(cleanup_tree_stage(&trees, &stage_name).unwrap());
+            assert!(!cleanup_tree_stage(&trees, &stage_name).unwrap());
         }
 
         #[test]

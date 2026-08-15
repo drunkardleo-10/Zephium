@@ -1447,6 +1447,10 @@ fn tree_error_is_terminal(error: TreeWriterError) -> bool {
 fn map_tree_error(error: TreeWriterError) -> PackageObjectError {
     match error {
         TreeWriterError::Source(error) => PackageObjectError::Source(error),
+        #[cfg(feature = "acquired-packages")]
+        TreeWriterError::AcquiredArchive(_) => PackageObjectError::ExactMismatch,
+        #[cfg(feature = "acquired-packages")]
+        TreeWriterError::AcquiredTree(_) => PackageObjectError::ExactMismatch,
         TreeWriterError::Filesystem(PrivateFsError::AlreadyExists | PrivateFsError::Unsafe) => {
             PackageObjectError::Collision
         }

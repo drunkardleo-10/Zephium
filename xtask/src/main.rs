@@ -677,6 +677,7 @@ fn ci() {
             "warnings",
         ],
     );
+    run_acquired_extension_repository_gates();
     for (manifest, features) in NATIVE_ADAPTERS {
         run_native_adapter_clippy(manifest, features, "--all-targets");
         run_native_adapter_clippy(manifest, features, "--lib");
@@ -699,6 +700,40 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_extension_product_probe();
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+/// Keeps the archive stack out of the default product graph while making its
+/// opt-in repository seam a mandatory, drift-resistant workspace gate.
+fn run_acquired_extension_repository_gates() {
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-extension-repository",
+                "--features",
+                "acquired-packages",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    run(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "zephium-extension-repository",
+            "--features",
+            "acquired-packages",
+            "--lib",
+        ],
+    );
 }
 
 fn check_macos_extension_compatibility_asset() {

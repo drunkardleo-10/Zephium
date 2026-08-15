@@ -986,12 +986,16 @@ digest/length, file count, and aggregate bytes.
 
 The offline CRX probe materializer consumes this same implementation and
 completes the stream receipt after per-file synchronization, so diagnostic and
-future product definitions of safe extraction cannot drift. This remains
-structural evidence, not release authority, transport, or proof that an
-arbitrary writer durably preserved what it accepted. A product path must next
-stage files in the private repository, re-open and re-hash the closed staged
-tree, admit the authenticated catalog row and manifest, persist the canonical
-index, and publish the package record atomically before install or activation.
+product definitions of safe extraction cannot drift. The repository's opt-in
+`acquired-packages` boundary now streams each authenticated archive file once
+directly into a create-new private tree, retains only the bounded root
+manifest, binds the complete receipt cohort to the release row, bottom-up seals
+the stage, and then independently enumerates and re-hashes every closed file.
+No stream callback or receipt alone is publication authority, and the ordinary
+product graph does not link the archive stack. The remaining product
+transaction must durably own or deterministically discard that prepublication
+stage, admit the acquired manifest, persist the canonical index and legal
+artifact, and publish the package record last before install or activation.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,
