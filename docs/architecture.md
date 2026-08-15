@@ -1403,13 +1403,18 @@ The exact Proton source transformed through that generic boundary produces a
 277-file, 20,126,819-byte tree with tree SHA-256
 `92bc016384e69ab91a1166b3c84a1c6ac0cd9aaf0d83bdbff6949c6f49b5a810`.
 The feature-gated native probe independently pins the source and output
-identities before WebKit: the original background loads without context errors,
-the real popup observes the package-neutral compatibility world and renders,
-and every native object releases. The synthetic login page still shows no
-Proton inline-autofill effect, and WebKit exposes no controller-visible content
-script in that run. Content-script behavior, login, vault, save, autofill, and
-user workflows therefore remain unassessed; this result proves a reusable
-popup adaptation seam, not Proton compatibility.
+identities before WebKit. After publishing the exact native window/tab surface,
+it requires WebKit's public background-load completion, executes the real
+popup, and uses the popup's granted `scripting.executeScript` API to inspect the
+same extension's isolated world in the active tab. That attestation observes
+the package-neutral prelude, mode `native-preserved`, and both native runtime
+identities without exposing a marker to the page world. The popup independently
+observes the package-neutral compatibility world and renders, and every native
+object releases. The synthetic unauthenticated login page still shows no Proton
+inline-autofill effect. The extension's own orchestrator beyond prelude
+initialization, login, vault, save, autofill, and user workflows therefore
+remain unassessed; this result proves reusable background, isolated-content,
+and popup adaptation seams, not Proton compatibility.
 
 A separately indexed, Zephium-owned MV3 fixture now gates the package-neutral
 path without third-party bytes. `cargo xtask ci` materializes its exact source
