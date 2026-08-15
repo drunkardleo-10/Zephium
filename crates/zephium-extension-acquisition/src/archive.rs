@@ -460,6 +460,71 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
         })
     }
 
+    /// Runs a callback with one bounded authenticated archive-file reader.
+    ///
+    /// The reader cannot escape the callback. A receipt is returned only when
+    /// the callback succeeds, consumes the exact expanded length, and the
+    /// subsequent EOF probe completes ZIP decompression and CRC validation.
+    /// This enables a private filesystem to stream directly into a create-new
+    /// file without buffering or decompressing the resource twice.
+    pub fn with_file_reader<T, E>(
+        &mut self,
+        file_index: usize,
+        callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Result<(T, AcquiredExtensionFileReceipt), E>, AcquiredExtensionArchiveReadError>
+    {
+        let Some(plan) = self.files.get(file_index) else {
+            return Err(AcquiredExtensionArchiveReadError::InvalidIndex);
+        };
+        let archive_index = usize::from(plan.archive_index);
+        let expected_path = plan.path.as_str();
+        let expected_length = plan.length;
+        let expected_compressed_length = plan.compressed_length;
+        let expected_crc32 = plan.crc32;
+        let entry = self
+            .archive
+            .by_index(archive_index)
+            .map_err(|_| AcquiredExtensionArchiveReadError::MetadataChanged)?;
+        if entry.name_raw() != expected_path.as_bytes()
+            || !entry.is_file()
+            || entry.is_symlink()
+            || entry.size() != expected_length
+            || entry.compressed_size() != expected_compressed_length
+            || entry.crc32() != expected_crc32
+        {
+            return Err(AcquiredExtensionArchiveReadError::MetadataChanged);
+        }
+
+        let mut verified = DigestingReader::new(entry);
+        let callback_result = callback(&mut verified);
+        let value = match callback_result {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        if verified.read_failed() {
+            return Err(AcquiredExtensionArchiveReadError::CopyFailed);
+        }
+        if verified.length() != expected_length {
+            return Err(AcquiredExtensionArchiveReadError::LengthChanged);
+        }
+        let mut eof_probe = [0_u8; 1];
+        match verified.read(&mut eof_probe) {
+            Ok(0) => {}
+            Ok(_) => return Err(AcquiredExtensionArchiveReadError::LengthChanged),
+            Err(_) => return Err(AcquiredExtensionArchiveReadError::CopyFailed),
+        }
+        let (length, sha256) = verified.finish();
+        Ok(Ok((
+            value,
+            AcquiredExtensionFileReceipt {
+                payload: self.payload,
+                file_index,
+                length,
+                sha256,
+            },
+        )))
+    }
+
     /// Completes one canonical tree from exactly one receipt per planned file.
     ///
     /// Receipts may arrive in any order. This method rejects missing,
@@ -561,6 +626,65 @@ impl std::fmt::Debug for AcquiredExtensionArchive<'_> {
 struct DigestingWriter<'writer, W> {
     destination: &'writer mut W,
     digest: Sha256,
+}
+
+struct DigestingReader<R> {
+    source: R,
+    digest: Sha256,
+    length: u64,
+    read_failed: bool,
+}
+
+impl<R> DigestingReader<R> {
+    fn new(source: R) -> Self {
+        Self {
+            source,
+            digest: Sha256::new(),
+            length: 0,
+            read_failed: false,
+        }
+    }
+
+    const fn length(&self) -> u64 {
+        self.length
+    }
+
+    const fn read_failed(&self) -> bool {
+        self.read_failed
+    }
+
+    fn finish(self) -> (u64, [u8; 32]) {
+        (self.length, self.digest.finalize().into())
+    }
+}
+
+impl<R: Read> Read for DigestingReader<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        match self.source.read(bytes) {
+            Ok(read) if read <= bytes.len() => {
+                let Some(length) = self
+                    .length
+                    .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+                else {
+                    self.read_failed = true;
+                    return Err(std::io::Error::other("acquired file byte count overflow"));
+                };
+                self.length = length;
+                self.digest.update(&bytes[..read]);
+                Ok(read)
+            }
+            Ok(_) => {
+                self.read_failed = true;
+                Err(std::io::Error::other(
+                    "acquired file reader over-reported bytes",
+                ))
+            }
+            Err(error) => {
+                self.read_failed = true;
+                Err(error)
+            }
+        }
+    }
 }
 
 impl<'writer, W> DigestingWriter<'writer, W> {
@@ -1173,6 +1297,48 @@ mod tests {
         let mut observed = Vec::new();
         let _receipt = acquired.copy_file(0, &mut observed).unwrap();
         assert_eq!(observed, body);
+    }
+
+    #[test]
+    fn callback_reader_issues_receipt_only_after_exact_crc_checked_consumption() {
+        let manifest = br#"{"manifest_version":3}"#;
+        let archive = zip_with_method(
+            &[("manifest.json", manifest.as_slice())],
+            CompressionMethod::Deflated,
+        );
+        let (crx, expected_id) = signed_crx(&archive);
+        let mut acquired =
+            AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                .unwrap();
+        let mut observed = Vec::new();
+        let (callback_length, receipt) = acquired
+            .with_file_reader(0, |reader| {
+                reader.read_to_end(&mut observed).map(|_| observed.len())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback_length, manifest.len());
+        assert_eq!(observed, manifest);
+        let tree = acquired.finish_tree([receipt]).unwrap();
+        assert_eq!(
+            tree.index().manifest_sha256().bytes(),
+            <[u8; 32]>::from(Sha256::digest(manifest))
+        );
+
+        let partial = acquired.with_file_reader(0, |reader| {
+            let mut first = [0_u8; 1];
+            reader.read_exact(&mut first).unwrap();
+            Ok::<_, ()>(())
+        });
+        assert_eq!(
+            partial.unwrap_err(),
+            AcquiredExtensionArchiveReadError::LengthChanged
+        );
+
+        let refused = acquired
+            .with_file_reader(0, |_reader| Err::<(), _>("destination refused"))
+            .unwrap();
+        assert_eq!(refused, Err("destination refused"));
     }
 
     #[test]
