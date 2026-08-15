@@ -15,6 +15,11 @@
 
 #[cfg(all(zephium_internal_repository_e2e, not(debug_assertions)))]
 compile_error!("the internal repository E2E authority is forbidden in optimized builds");
+#[cfg(all(
+    zephium_internal_acquired_repository_e2e,
+    not(zephium_internal_repository_e2e)
+))]
+compile_error!("the acquired repository E2E authority requires the base internal authority");
 
 mod admission;
 mod catalog_cache;
@@ -33,6 +38,10 @@ mod recovery;
     any(target_os = "macos", target_os = "linux")
 ))]
 #[path = "../../zephium-extension-authority/src/repository_e2e_fixture.rs"]
+#[allow(
+    dead_code,
+    reason = "the path-included fixture exposes authority-only pins alongside repository bytes"
+)]
 mod repository_e2e_fixture;
 mod settlement;
 mod state;

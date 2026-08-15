@@ -16,12 +16,16 @@ use zephium_extension_package::{
 use crate::inventory::digest_catalog_inventory;
 #[cfg(zephium_internal_repository_e2e)]
 use crate::repository_e2e_fixture::{
-    ACTIVE_CATALOG_BYTES, ACTIVE_CATALOG_LENGTH, ACTIVE_CATALOG_SHA256_HEX,
     ADMISSION_POLICY_DIGEST_BYTES, CATALOG_INVENTORY_SHA256_HEX, LEGAL_NOTICE_BYTES,
     LEGAL_NOTICE_LENGTH, LEGAL_NOTICE_SHA256_HEX, LICENSE_EXPRESSION, MANIFEST_BYTES,
-    MANIFEST_LENGTH, MANIFEST_SHA256_HEX, ROLLBACK_CATALOG_BYTES, ROLLBACK_CATALOG_LENGTH,
-    ROLLBACK_CATALOG_SHA256_HEX, TREE_INDEX_BYTES, TREE_INDEX_LENGTH, TREE_INDEX_SHA256_HEX,
-    TREE_SHA256_HEX,
+    MANIFEST_LENGTH, MANIFEST_SHA256_HEX, PRODUCT_ACTIVE_CATALOG_BYTES,
+    PRODUCT_ACTIVE_CATALOG_INVENTORY_SHA256_HEX, PRODUCT_ACTIVE_CATALOG_LENGTH,
+    PRODUCT_ACTIVE_CATALOG_SHA256_HEX, PRODUCT_ACTIVE_MANIFEST_BYTES,
+    PRODUCT_ACTIVE_MANIFEST_LENGTH, PRODUCT_ACTIVE_MANIFEST_SHA256_HEX,
+    PRODUCT_ACTIVE_TREE_INDEX_BYTES, PRODUCT_ACTIVE_TREE_INDEX_LENGTH,
+    PRODUCT_ACTIVE_TREE_INDEX_SHA256_HEX, PRODUCT_ACTIVE_TREE_SHA256_HEX, ROLLBACK_CATALOG_BYTES,
+    ROLLBACK_CATALOG_LENGTH, ROLLBACK_CATALOG_SHA256_HEX, TREE_INDEX_BYTES, TREE_INDEX_LENGTH,
+    TREE_INDEX_SHA256_HEX, TREE_SHA256_HEX,
 };
 use crate::{
     BundledCatalogAdmissionError, BundledCatalogCheckpoint, BundledCatalogDisposition,
@@ -856,16 +860,49 @@ fn sealed_product_bundled_catalog_generations(
 fn sealed_product_bundled_catalog_generations(
 ) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
     let active = repository_e2e_generation(
-        ACTIVE_CATALOG_BYTES,
-        ACTIVE_CATALOG_LENGTH,
-        ACTIVE_CATALOG_SHA256_HEX,
+        PRODUCT_ACTIVE_CATALOG_BYTES,
+        PRODUCT_ACTIVE_CATALOG_LENGTH,
+        PRODUCT_ACTIVE_CATALOG_SHA256_HEX,
+        ProductFixtureArtifacts {
+            manifest_bytes: PRODUCT_ACTIVE_MANIFEST_BYTES,
+            manifest_length: PRODUCT_ACTIVE_MANIFEST_LENGTH,
+            manifest_sha256_hex: PRODUCT_ACTIVE_MANIFEST_SHA256_HEX,
+            tree_index_bytes: PRODUCT_ACTIVE_TREE_INDEX_BYTES,
+            tree_index_length: PRODUCT_ACTIVE_TREE_INDEX_LENGTH,
+            tree_index_sha256_hex: PRODUCT_ACTIVE_TREE_INDEX_SHA256_HEX,
+            tree_sha256_hex: PRODUCT_ACTIVE_TREE_SHA256_HEX,
+            catalog_inventory_sha256_hex: PRODUCT_ACTIVE_CATALOG_INVENTORY_SHA256_HEX,
+        },
     )?;
     let rollback = repository_e2e_generation(
         ROLLBACK_CATALOG_BYTES,
         ROLLBACK_CATALOG_LENGTH,
         ROLLBACK_CATALOG_SHA256_HEX,
+        ProductFixtureArtifacts {
+            manifest_bytes: MANIFEST_BYTES,
+            manifest_length: MANIFEST_LENGTH,
+            manifest_sha256_hex: MANIFEST_SHA256_HEX,
+            tree_index_bytes: TREE_INDEX_BYTES,
+            tree_index_length: TREE_INDEX_LENGTH,
+            tree_index_sha256_hex: TREE_INDEX_SHA256_HEX,
+            tree_sha256_hex: TREE_SHA256_HEX,
+            catalog_inventory_sha256_hex: CATALOG_INVENTORY_SHA256_HEX,
+        },
     )?;
     Ok(Some((active, vec![rollback].into_boxed_slice())))
+}
+
+#[cfg(zephium_internal_repository_e2e)]
+#[derive(Clone, Copy)]
+struct ProductFixtureArtifacts {
+    manifest_bytes: &'static [u8],
+    manifest_length: usize,
+    manifest_sha256_hex: &'static str,
+    tree_index_bytes: &'static [u8],
+    tree_index_length: usize,
+    tree_index_sha256_hex: &'static str,
+    tree_sha256_hex: &'static str,
+    catalog_inventory_sha256_hex: &'static str,
 }
 
 #[cfg(zephium_internal_repository_e2e)]
@@ -873,13 +910,18 @@ fn repository_e2e_generation(
     bytes: &[u8],
     expected_length: usize,
     expected_sha256_hex: &str,
+    artifacts: ProductFixtureArtifacts,
 ) -> Result<SealedBundledCatalogGeneration, BundledCatalogAdmissionError> {
     if !repository_e2e_exact_bytes_match(bytes, expected_length, expected_sha256_hex)
-        || !repository_e2e_exact_bytes_match(MANIFEST_BYTES, MANIFEST_LENGTH, MANIFEST_SHA256_HEX)
         || !repository_e2e_exact_bytes_match(
-            TREE_INDEX_BYTES,
-            TREE_INDEX_LENGTH,
-            TREE_INDEX_SHA256_HEX,
+            artifacts.manifest_bytes,
+            artifacts.manifest_length,
+            artifacts.manifest_sha256_hex,
+        )
+        || !repository_e2e_exact_bytes_match(
+            artifacts.tree_index_bytes,
+            artifacts.tree_index_length,
+            artifacts.tree_index_sha256_hex,
         )
         || !repository_e2e_exact_bytes_match(
             LEGAL_NOTICE_BYTES,
@@ -891,7 +933,7 @@ fn repository_e2e_generation(
     }
     let catalog = ExtensionReleaseCatalog::parse_canonical(bytes)
         .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
-    let tree_index = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES)
+    let tree_index = CanonicalExtensionTreeIndex::parse_canonical(artifacts.tree_index_bytes)
         .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
     let Some(package) = catalog.packages().first() else {
         return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
@@ -900,9 +942,18 @@ fn repository_e2e_generation(
         .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
     if catalog.packages().len() != 1
         || package.bind_tree_index(&tree_index).is_err()
-        || !repository_e2e_digest_matches(tree_index.manifest_sha256().bytes(), MANIFEST_SHA256_HEX)
-        || !repository_e2e_digest_matches(tree_index.index_sha256().bytes(), TREE_INDEX_SHA256_HEX)
-        || !repository_e2e_digest_matches(tree_index.tree_sha256().bytes(), TREE_SHA256_HEX)
+        || !repository_e2e_digest_matches(
+            tree_index.manifest_sha256().bytes(),
+            artifacts.manifest_sha256_hex,
+        )
+        || !repository_e2e_digest_matches(
+            tree_index.index_sha256().bytes(),
+            artifacts.tree_index_sha256_hex,
+        )
+        || !repository_e2e_digest_matches(
+            tree_index.tree_sha256().bytes(),
+            artifacts.tree_sha256_hex,
+        )
         || usize::try_from(package.provenance().legal_notice().length()).ok()
             != Some(LEGAL_NOTICE_LENGTH)
         || !repository_e2e_digest_matches(
@@ -911,7 +962,7 @@ fn repository_e2e_generation(
         )
         || !repository_e2e_digest_matches(
             anchor.inventory_digest.bytes(),
-            CATALOG_INVENTORY_SHA256_HEX,
+            artifacts.catalog_inventory_sha256_hex,
         )
     {
         return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);

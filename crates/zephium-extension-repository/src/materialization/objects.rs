@@ -496,6 +496,7 @@ pub(crate) fn publish_or_reuse_acquired_active_package<S: AcquiredReleaseLegalSo
     prepared: PreparedAcquiredActivePackage,
     tree_stage: Option<AuthenticatedTreeStage>,
     legal_source: &mut S,
+    fault: ObjectPublicationFaultPoint,
 ) -> Result<VerifiedAcquiredActivePackageClosure, PackageObjectError> {
     let view = PreparedPackageView {
         package_source: prepared.package_source(),
@@ -510,7 +511,7 @@ pub(crate) fn publish_or_reuse_acquired_active_package<S: AcquiredReleaseLegalSo
         view,
         tree_stage,
         legal_source,
-        ObjectPublicationFaultPoint::None,
+        fault,
     )?;
     Ok(VerifiedAcquiredActivePackageClosure(
         VerifiedPackageClosure {

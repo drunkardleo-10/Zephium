@@ -30,6 +30,7 @@ const BLOCKER_FEATURE_SETS: [&str; 5] = [
     "runtime-exact,webkit",
 ];
 const INTERNAL_REPOSITORY_CFG: &str = "zephium_internal_repository_e2e";
+const INTERNAL_ACQUIRED_REPOSITORY_CFG: &str = "zephium_internal_acquired_repository_e2e";
 const INTERNAL_AUTHORITY_SHIPPING_REJECTION: &str =
     "the internal repository E2E authority may not link into Zephium application code";
 
@@ -877,9 +878,26 @@ fn run_internal_extension_authority_gates() {
         "zephium-extension-authority",
         "--lib",
     ]);
+    for target in ["--all-targets", "--lib"] {
+        run_with_internal_acquired_repository_cfg(&[
+            "clippy",
+            "--locked",
+            "-p",
+            "zephium-extension-authority",
+            "-p",
+            "zephium-extension-repository",
+            "--features",
+            "zephium-extension-repository/acquired-packages",
+            target,
+            "--",
+            "-D",
+            "warnings",
+        ]);
+    }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         run_internal_repository_e2e_tests();
+        run_internal_acquired_repository_e2e_tests();
         run_internal_extension_service_e2e_tests();
     }
     #[cfg(target_os = "windows")]
@@ -898,23 +916,51 @@ fn run_with_internal_repository_cfg(args: &[&str]) {
     }
 }
 
+fn run_with_internal_acquired_repository_cfg(args: &[&str]) {
+    eprintln!(
+        "> [internal acquired repository authority] cargo {}",
+        args.join(" ")
+    );
+    let status = internal_acquired_repository_command(args)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to spawn cargo: {error}"));
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+}
+
 fn internal_repository_command(args: &[&str]) -> Command {
+    internal_repository_command_with_cfgs(args, &[INTERNAL_REPOSITORY_CFG])
+}
+
+fn internal_acquired_repository_command(args: &[&str]) -> Command {
+    internal_repository_command_with_cfgs(
+        args,
+        &[INTERNAL_REPOSITORY_CFG, INTERNAL_ACQUIRED_REPOSITORY_CFG],
+    )
+}
+
+fn internal_repository_command_with_cfgs(args: &[&str], cfgs: &[&str]) -> Command {
     let mut command = Command::new("cargo");
     command.args(args);
     if let Some(mut encoded) = std::env::var_os("CARGO_ENCODED_RUSTFLAGS") {
-        if !encoded.is_empty() {
-            encoded.push("\u{1f}");
+        for cfg in cfgs {
+            if !encoded.is_empty() {
+                encoded.push("\u{1f}");
+            }
+            encoded.push("--cfg\u{1f}");
+            encoded.push(cfg);
         }
-        encoded.push("--cfg\u{1f}");
-        encoded.push(INTERNAL_REPOSITORY_CFG);
         command.env("CARGO_ENCODED_RUSTFLAGS", encoded);
     } else {
         let mut flags = std::env::var_os("RUSTFLAGS").unwrap_or_default();
-        if !flags.is_empty() {
-            flags.push(" ");
+        for cfg in cfgs {
+            if !flags.is_empty() {
+                flags.push(" ");
+            }
+            flags.push("--cfg ");
+            flags.push(cfg);
         }
-        flags.push("--cfg ");
-        flags.push(INTERNAL_REPOSITORY_CFG);
         command.env("RUSTFLAGS", flags);
     }
     command
@@ -942,18 +988,28 @@ fn rustflags_enable_internal_repository_cfg<'flag>(
     for raw in flags {
         let flag = raw.trim_matches(['\'', '"']);
         if expects_cfg_value {
-            if flag == INTERNAL_REPOSITORY_CFG {
+            if is_internal_repository_cfg(flag) {
                 return true;
             }
             expects_cfg_value = false;
         }
         if flag == "--cfg" {
             expects_cfg_value = true;
-        } else if flag.strip_prefix("--cfg=") == Some(INTERNAL_REPOSITORY_CFG) {
+        } else if flag
+            .strip_prefix("--cfg=")
+            .is_some_and(is_internal_repository_cfg)
+        {
             return true;
         }
     }
     false
+}
+
+fn is_internal_repository_cfg(value: &str) -> bool {
+    matches!(
+        value,
+        INTERNAL_REPOSITORY_CFG | INTERNAL_ACQUIRED_REPOSITORY_CFG
+    )
 }
 
 fn verify_internal_authority_cannot_link_into_shipping_code() {
@@ -1067,6 +1123,54 @@ fn run_internal_repository_e2e_tests() {
     for command in commands {
         run_with_internal_repository_cfg(&command);
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_internal_acquired_repository_e2e_tests() {
+    const FILTER: &str = "writer::acquired_repository_e2e_tests::";
+    const EXPECTED_TESTS: usize = 3;
+    let list_args = [
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-repository",
+        "--features",
+        "acquired-packages",
+        "--lib",
+        "--",
+        "--list",
+    ];
+    let output = internal_acquired_repository_command(&list_args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to list acquired repository E2E tests: {error}"));
+    if !output.status.success() {
+        eprintln!("acquired repository E2E test inventory failed to compile");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        exit(output.status.code().unwrap_or(1));
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with(FILTER) && line.ends_with(": test"))
+        .count();
+    if count != EXPECTED_TESTS {
+        eprintln!(
+            "acquired repository E2E selection contains {count} tests, expected {EXPECTED_TESTS}"
+        );
+        exit(1);
+    }
+    run_with_internal_acquired_repository_cfg(&[
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-repository",
+        "--features",
+        "acquired-packages",
+        "--lib",
+        FILTER,
+        "--",
+        "--test-threads=1",
+    ]);
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1746,11 +1850,15 @@ mod tests {
             "--cfg=zephium_internal_repository_e2e"
         ]));
         assert!(rustflags_enable_internal_repository_cfg([
+            "--cfg=zephium_internal_acquired_repository_e2e"
+        ]));
+        assert!(rustflags_enable_internal_repository_cfg([
             "--cfg",
             "'zephium_internal_repository_e2e'",
         ]));
         assert!(!rustflags_enable_internal_repository_cfg([
             "--check-cfg=cfg(zephium_internal_repository_e2e)",
+            "--check-cfg=cfg(zephium_internal_acquired_repository_e2e)",
             "--cfg",
             "another_cfg",
         ]));

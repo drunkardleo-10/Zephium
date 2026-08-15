@@ -69,6 +69,15 @@ pub(crate) use names::{
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) use objects::publish_intent_package_record_marker_for_e2e;
+#[cfg(any(
+    feature = "acquired-packages",
+    all(
+        test,
+        zephium_internal_repository_e2e,
+        any(target_os = "macos", target_os = "linux")
+    )
+))]
+pub(crate) use objects::ObjectPublicationFaultPoint;
 #[cfg(feature = "acquired-packages")]
 pub(crate) use objects::{
     preflight_acquired_package_object_capacity, publish_or_reuse_acquired_active_package,
@@ -177,8 +186,7 @@ pub(crate) use transaction::{
 ))]
 pub(crate) use objects::{
     completed_package_verification_count, publish_or_reuse_active_package_at_fault,
-    reset_completed_package_verification_count, ObjectPublicationFaultPoint,
-    VerifiedActivePackageClosure,
+    reset_completed_package_verification_count, VerifiedActivePackageClosure,
 };
 #[cfg(all(
     test,

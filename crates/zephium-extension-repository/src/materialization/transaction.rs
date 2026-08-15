@@ -1337,7 +1337,7 @@ fn require_exact_acquisition_stage(
     expected_tree: Digest32,
 ) -> Result<(), MaterializationTransitionError> {
     if runtime._build_stage.is_some()
-        || runtime._acquisition_stage.is_none()
+        || runtime._acquisition_stage.is_some()
         || !runtime._record_stages.is_empty()
     {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
@@ -2055,13 +2055,10 @@ mod tests {
         #[cfg(feature = "acquired-packages")]
         #[test]
         fn acquired_begin_transition_preserves_only_its_exact_stage() {
-            use std::sync::Arc;
-
             use crate::materialization::objects::preflight_acquired_package_object_capacity;
             use crate::materialization::records::StoredPayloadIdentity;
-            use crate::materialization::runtime::MaterializationTreeCapability;
 
-            let (harness, mut runtime) = NativeHarness::new();
+            let (harness, runtime) = NativeHarness::new();
             let mut record = package_record_fixture(49);
             record.package.payload = StoredPayloadIdentity::AcquiredZip {
                 length: 19,
@@ -2072,10 +2069,8 @@ mod tests {
                 ._trees
                 .create_new_private_child(&stage_name)
                 .unwrap();
-            let sealed = stage.seal().unwrap();
-            runtime._acquisition_stage = Some(MaterializationTreeCapability::Sealed {
-                _directory: Arc::new(sealed),
-            });
+            drop(stage.seal().unwrap());
+            assert!(runtime._acquisition_stage.is_none());
             let capacity =
                 preflight_acquired_package_object_capacity(&runtime, &record, true).unwrap();
 

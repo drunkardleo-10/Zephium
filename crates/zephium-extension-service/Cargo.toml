@@ -20,4 +20,5 @@ zephium-extension-package = { path = "../zephium-extension-package", version = "
 [lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = [
     "cfg(zephium_internal_repository_e2e)",
+    "cfg(zephium_internal_acquired_repository_e2e)",
 ] }

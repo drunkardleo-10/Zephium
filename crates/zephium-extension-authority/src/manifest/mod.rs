@@ -36,8 +36,8 @@ use zephium_extension_package::{
 use crate::product::AdmittedCatalogData;
 #[cfg(zephium_internal_repository_e2e)]
 use crate::repository_e2e_fixture::{
-    ACTIVE_CATALOG_BYTES, MANIFEST_BYTES, PACKAGE_KEY_BYTES, ROLLBACK_CATALOG_BYTES,
-    TREE_INDEX_BYTES,
+    MANIFEST_BYTES, PACKAGE_KEY_BYTES, PRODUCT_ACTIVE_CATALOG_BYTES, PRODUCT_ACTIVE_MANIFEST_BYTES,
+    PRODUCT_ACTIVE_TREE_INDEX_BYTES, ROLLBACK_CATALOG_BYTES, TREE_INDEX_BYTES,
 };
 use crate::{
     AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
@@ -1139,11 +1139,15 @@ fn sealed_product_manifest_provisioning(
     let mut profiles = Vec::with_capacity(targets.len() * 2);
     for target in targets {
         profiles.push(repository_e2e_manifest_profile(
-            ACTIVE_CATALOG_BYTES,
+            PRODUCT_ACTIVE_CATALOG_BYTES,
+            PRODUCT_ACTIVE_TREE_INDEX_BYTES,
+            PRODUCT_ACTIVE_MANIFEST_BYTES,
             *target,
         )?);
         profiles.push(repository_e2e_manifest_profile(
             ROLLBACK_CATALOG_BYTES,
+            TREE_INDEX_BYTES,
+            MANIFEST_BYTES,
             *target,
         )?);
     }
@@ -1192,11 +1196,13 @@ impl ExtensionManifestCompatibilityPolicy for RepositoryE2eCompatibilityPolicy {
 #[cfg(zephium_internal_repository_e2e)]
 fn repository_e2e_manifest_profile(
     catalog_bytes: &[u8],
+    tree_index_bytes: &[u8],
+    manifest_bytes: &[u8],
     runtime_target: ProductExtensionRuntimeTarget,
 ) -> Result<SealedManifestProfile, ProductExtensionManifestAuthorityError> {
     let catalog = ExtensionReleaseCatalog::parse_canonical(catalog_bytes)
         .map_err(invalid_repository_e2e_configuration)?;
-    let tree = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES)
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(tree_index_bytes)
         .map_err(invalid_repository_e2e_configuration)?;
     let package_key = ExtensionPackageKey::from_bytes(PACKAGE_KEY_BYTES);
     if catalog.packages().len() != 1 || catalog.packages()[0].identity().key() != package_key {
@@ -1214,7 +1220,7 @@ fn repository_e2e_manifest_profile(
     let binding = package
         .bind_tree_index(&tree)
         .map_err(invalid_repository_e2e_configuration)?;
-    let admitted = admit_extension_manifest(binding, MANIFEST_BYTES, &fixture_policy)
+    let admitted = admit_extension_manifest(binding, manifest_bytes, &fixture_policy)
         .map_err(invalid_repository_e2e_configuration)?;
     let rows = admitted
         .descriptor()

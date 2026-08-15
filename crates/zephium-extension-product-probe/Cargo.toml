@@ -19,6 +19,7 @@ required-features = ["macos-native"]
 [lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = [
     "cfg(zephium_internal_repository_e2e)",
+    "cfg(zephium_internal_acquired_repository_e2e)",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

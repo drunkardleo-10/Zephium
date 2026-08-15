@@ -24,6 +24,11 @@
 #[cfg(all(zephium_internal_repository_e2e, not(debug_assertions)))]
 compile_error!("the internal repository E2E authority is forbidden in optimized builds");
 #[cfg(all(
+    zephium_internal_acquired_repository_e2e,
+    not(zephium_internal_repository_e2e)
+))]
+compile_error!("the acquired repository E2E authority requires the base internal authority");
+#[cfg(all(
     zephium_internal_repository_e2e,
     not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
 ))]

@@ -1017,6 +1017,19 @@ accepts no host path, and grants no install, profile, activation, or native
 controller authority. The ordinary build remains archive-free unless the
 `acquired-packages` feature is explicitly enabled.
 
+The CI-only acquired-package gate replaces the product-sealed active fixture
+under a second debug-only compiler configuration; it does not add caller-owned
+admission or shipping catalog bytes. A self-authored MV3 archive is signed at
+test time by a fixed test-only developer key and traverses the public catalog,
+CRX authentication, extraction, manifest admission, repository publication,
+and recovery path. The gate requires exact in-process and post-reopen replay,
+clean recovery from a legal-source failure after its callback, and
+marker-committed crash completion with neither CRX bytes nor a legal callback.
+Its inventory is counted explicitly by `cargo xtask ci`; the acquired
+configuration requires the base internal authority, and that combined
+authority is rejected from optimized builds and application linkage. The
+ordinary authority fixture remains independently exercised.
+
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,
 native messaging in the initial target, and an open catalog. Unsupported or

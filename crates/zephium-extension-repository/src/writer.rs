@@ -208,6 +208,17 @@ pub enum AcquiredPackageMaterializationError {
     InterruptedBuildSettlement(#[source] BundledPackageBuildSettlementError),
 }
 
+#[cfg(feature = "acquired-packages")]
+struct AcquiredPackageMaterializationRequest<'a, S: AcquiredReleaseLegalSource> {
+    catalog: &'a AdmittedAcquiredCatalog,
+    exact_catalog_bytes: &'a [u8],
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    crx3_bytes: &'a [u8],
+    legal_source: &'a mut S,
+    fault: crate::materialization::ObjectPublicationFaultPoint,
+}
+
 impl ExtensionRepository {
     /// Materializes one exact package from the ordinary active product catalog.
     ///
@@ -293,6 +304,31 @@ impl ExtensionRepository {
         crx3_bytes: &[u8],
         legal_source: &mut S,
     ) -> Result<AcquiredPackageMaterializationOutcome, AcquiredPackageMaterializationError> {
+        self.materialize_active_acquired_package_request(AcquiredPackageMaterializationRequest {
+            catalog,
+            exact_catalog_bytes,
+            runtime_target,
+            package_key,
+            crx3_bytes,
+            legal_source,
+            fault: crate::materialization::ObjectPublicationFaultPoint::None,
+        })
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn materialize_active_acquired_package_request<S: AcquiredReleaseLegalSource>(
+        &mut self,
+        request: AcquiredPackageMaterializationRequest<'_, S>,
+    ) -> Result<AcquiredPackageMaterializationOutcome, AcquiredPackageMaterializationError> {
+        let AcquiredPackageMaterializationRequest {
+            catalog,
+            exact_catalog_bytes,
+            runtime_target,
+            package_key,
+            crx3_bytes,
+            legal_source,
+            fault,
+        } = request;
         let runtime = self.runtime.clone();
         let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.require_writer_open()
@@ -393,7 +429,7 @@ impl ExtensionRepository {
             }
         };
 
-        self.drive_acquired_materialization(prepared, tree_stage, legal_source)
+        self.drive_acquired_materialization(prepared, tree_stage, legal_source, fault)
     }
 
     /// Materializes one exact package from an explicitly approved rollback
@@ -459,6 +495,7 @@ impl ExtensionRepository {
         prepared: crate::materialization::PreparedAcquiredActivePackage,
         mut tree_stage: Option<AuthenticatedTreeStage>,
         legal_source: &mut S,
+        fault: crate::materialization::ObjectPublicationFaultPoint,
     ) -> Result<AcquiredPackageMaterializationOutcome, AcquiredPackageMaterializationError> {
         loop {
             let stage_present = tree_stage.is_some();
@@ -518,6 +555,7 @@ impl ExtensionRepository {
                         prepared,
                         tree_stage.take(),
                         legal_source,
+                        fault,
                     ) {
                         Ok(closure) => closure,
                         Err(error) if publication_error_requires_sealing(error) => {
@@ -1211,3 +1249,13 @@ pub(crate) const fn filesystem_error_requires_sealing(error: PrivateFsError) -> 
 ))]
 #[path = "writer/tests.rs"]
 mod repository_e2e_tests;
+
+#[cfg(all(
+    test,
+    feature = "acquired-packages",
+    zephium_internal_repository_e2e,
+    zephium_internal_acquired_repository_e2e,
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "writer/acquired_tests.rs"]
+mod acquired_repository_e2e_tests;
