@@ -19,7 +19,7 @@ fn grant_selection(file_access: bool, private_access: bool) -> ExtensionInitialG
 }
 
 use super::host::PublicationMode;
-use super::support::{deadline, ActorAuthorityHarness};
+use super::support::{deadline, fixture_display_name, ActorAuthorityHarness};
 use crate::{
     ExtensionServiceProfileRetirementOutcome, ExtensionServiceRuntimeActivationOutcome,
     ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
@@ -184,7 +184,7 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
         panic!("one installed extension expected");
     };
     assert!(management.candidates().is_empty());
-    assert_eq!(entry.name(), "Fixture");
+    assert_eq!(entry.name(), fixture_display_name());
     assert_eq!(entry.version(), "1.0.0");
     assert_eq!(
         entry.runtime(),
@@ -454,7 +454,7 @@ fn actor_installs_authenticated_candidate_atomically_then_activates_it() {
     let [candidate] = management.candidates() else {
         panic!("one authenticated install candidate expected");
     };
-    assert_eq!(candidate.name(), "Fixture");
+    assert_eq!(candidate.name(), fixture_display_name());
     assert_eq!(candidate.version(), "1.0.0");
     assert!(!candidate.supports_file_access());
     assert!(candidate

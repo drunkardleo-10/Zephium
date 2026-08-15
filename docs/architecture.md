@@ -884,6 +884,12 @@ same separate typed ingress. This adds no catalog, download, or startup work to
 ordinary builds: production sealed provisioning remains empty, arbitrary
 caller-parsed catalogs remain non-authoritative, and an acquired witness grants
 no network, archive, repository, profile, or native-runtime authority.
+Consumers that accept either active representation use `AdmittedActiveCatalog`:
+the authority checks length and digest, parses canonical metadata, binds policy,
+and classifies the homogeneous payload inventory exactly once, then returns the
+original nominal witness as a closed enum variant. Mixed bundled/acquired
+inventories fail admission. This dispatch does not create a representation-
+neutral materializer or permit fallback from one payload parser to another.
 
 The extension repository's materialization schema v3 retains the subordinate
 side of that cross-store join. Every durable package pin records the complete
@@ -1022,13 +1028,20 @@ under a second debug-only compiler configuration; it does not add caller-owned
 admission or shipping catalog bytes. A self-authored MV3 archive is signed at
 test time by a fixed test-only developer key and traverses the public catalog,
 CRX authentication, extraction, manifest admission, repository publication,
-and recovery path. The gate requires exact in-process and post-reopen replay,
-clean recovery from a legal-source failure after its callback, and
-marker-committed crash completion with neither CRX bytes nor a legal callback.
-Its inventory is counted explicitly by `cargo xtask ci`; the acquired
-configuration requires the base internal authority, and that combined
-authority is rejected from optimized builds and application linkage. The
-ordinary authority fixture remains independently exercised.
+selection, package lease, resource read, and recovery path. The repository gate
+requires exact in-process and post-reopen replay, clean recovery from a
+legal-source failure after its callback, marker-committed crash completion with
+neither CRX bytes nor a legal callback, source-free candidate promotion, and
+fresh post-reopen install-candidate and lease authentication. A second gate
+runs the same 15 real Store/repository service scenarios used by the bundled
+fixture against the acquired representation: hydration, runtime planning,
+activation/publication, grant rebind, management and installation, retirement,
+reconciliation, profile cleanup, and shutdown. Both inventories are counted
+explicitly by `cargo xtask ci`; the acquired configuration requires the base
+internal authority, and that combined authority is rejected from optimized
+builds and application linkage. The ordinary authority fixture remains
+independently exercised. `acquired-packages` remains opt-in, so the archive
+stack is absent from the ordinary inert product graph.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,

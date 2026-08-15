@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+acquired-packages = ["zephium-extension-repository/acquired-packages"]
+
 [dependencies]
 zephium-core.workspace = true
 zephium-extension-authority.workspace = true
@@ -13,6 +16,8 @@ zephium-private-fs.workspace = true
 zephium-store.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+ring.workspace = true
 sha2 = "=0.10.9"
 tempfile.workspace = true
 zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }

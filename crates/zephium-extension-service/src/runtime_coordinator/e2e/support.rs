@@ -5,6 +5,14 @@ use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+#[cfg(zephium_internal_acquired_repository_e2e)]
+use base64::engine::general_purpose::STANDARD;
+#[cfg(zephium_internal_acquired_repository_e2e)]
+use base64::Engine as _;
+#[cfg(zephium_internal_acquired_repository_e2e)]
+use ring::rand::SystemRandom;
+#[cfg(zephium_internal_acquired_repository_e2e)]
+use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
@@ -25,10 +33,18 @@ use zephium_core::ports::store::{
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedProfile, SessionState};
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, BundledPackageAuthority, ProductExtensionManifestAuthority,
-    ProductExtensionRuntimeTarget,
+    AdmittedActiveCatalog, AdmittedBundledCatalog, BundledPackageAuthority,
+    ProductExtensionManifestAuthority, ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::CanonicalExtensionTreeIndex;
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+use zephium_extension_repository::{
+    AcquiredPackageMaterializationOutcome, AcquiredReleaseLegalResource,
+    AcquiredReleaseLegalSource, AcquiredReleaseLegalSourceError,
+};
 use zephium_extension_repository::{
     BundledCatalogSetIdentity, BundledCatalogSetPromotionOutcome, BundledCatalogSetStageOutcome,
     BundledPackageMaterializationOutcome, BundledPackageRuntimeSelection, BundledReleaseByteSource,
@@ -61,6 +77,13 @@ pub(super) fn deadline() -> Instant {
     Instant::now()
         .checked_add(TEST_TIMEOUT)
         .expect("test deadline must fit the monotonic clock")
+}
+
+pub(super) const fn fixture_display_name() -> &'static str {
+    #[cfg(zephium_internal_acquired_repository_e2e)]
+    return "Acquired Fixture";
+    #[cfg(not(zephium_internal_acquired_repository_e2e))]
+    "Fixture"
 }
 
 pub(super) struct RealAuthorityHarness {
@@ -536,25 +559,38 @@ fn assert_repository_absent(repository: &mut ServiceRepository, profiles: &[Prof
     }
 }
 
-fn admitted_active_catalog() -> AdmittedBundledCatalog {
+fn admitted_active_catalog() -> AdmittedActiveCatalog {
     BundledPackageAuthority::product()
         .unwrap()
-        .admit_catalog(fixture::ACTIVE_CATALOG_BYTES)
+        .admit_active_catalog(fixture::PRODUCT_ACTIVE_CATALOG_BYTES)
         .unwrap()
 }
 
-fn admitted_manifest(active: &AdmittedBundledCatalog) -> Arc<ExtensionManifestDescriptor> {
-    let tree = CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
-    let manifest = ProductExtensionManifestAuthority::product()
-        .unwrap()
-        .admit_manifest(
-            active,
-            runtime_target(),
-            package_key(),
-            &tree,
-            fixture::MANIFEST_BYTES,
-        )
-        .unwrap();
+fn admitted_manifest(active: &AdmittedActiveCatalog) -> Arc<ExtensionManifestDescriptor> {
+    let tree =
+        CanonicalExtensionTreeIndex::parse_canonical(fixture::PRODUCT_ACTIVE_TREE_INDEX_BYTES)
+            .unwrap();
+    let authority = ProductExtensionManifestAuthority::product().unwrap();
+    let manifest = match active {
+        AdmittedActiveCatalog::Bundled(active) => authority
+            .admit_manifest(
+                active,
+                runtime_target(),
+                package_key(),
+                &tree,
+                fixture::PRODUCT_ACTIVE_MANIFEST_BYTES,
+            )
+            .unwrap(),
+        AdmittedActiveCatalog::Acquired(active) => authority
+            .admit_acquired_manifest(
+                active,
+                runtime_target(),
+                package_key(),
+                &tree,
+                fixture::PRODUCT_ACTIVE_MANIFEST_BYTES,
+            )
+            .unwrap(),
+    };
     Arc::new(manifest.descriptor().clone())
 }
 
@@ -665,13 +701,34 @@ fn grant_mutation(
 
 fn establish_active(
     repository: &mut ExtensionRepository,
+    active: &AdmittedActiveCatalog,
+) -> BundledCatalogSetIdentity {
+    match active {
+        AdmittedActiveCatalog::Bundled(active) => establish_bundled_active(repository, active),
+        #[cfg(all(
+            feature = "acquired-packages",
+            zephium_internal_acquired_repository_e2e
+        ))]
+        AdmittedActiveCatalog::Acquired(active) => establish_acquired_active(repository, active),
+        #[cfg(not(all(
+            feature = "acquired-packages",
+            zephium_internal_acquired_repository_e2e
+        )))]
+        AdmittedActiveCatalog::Acquired(_) => {
+            panic!("acquired fixture requires the acquired-packages service feature")
+        }
+    }
+}
+
+fn establish_bundled_active(
+    repository: &mut ExtensionRepository,
     active: &AdmittedBundledCatalog,
 ) -> BundledCatalogSetIdentity {
     let mut materialize = FixtureSource::active(active);
     assert!(matches!(
         repository.materialize_active_bundled_package(
             active,
-            fixture::ACTIVE_CATALOG_BYTES,
+            fixture::PRODUCT_ACTIVE_CATALOG_BYTES,
             runtime_target(),
             package_key(),
             &mut materialize,
@@ -683,7 +740,7 @@ fn establish_active(
     let identity = match repository
         .stage_active_bundled_catalog_set(
             active,
-            fixture::ACTIVE_CATALOG_BYTES,
+            fixture::PRODUCT_ACTIVE_CATALOG_BYTES,
             &selection(),
             &mut stage,
         )
@@ -697,7 +754,7 @@ fn establish_active(
     assert!(matches!(
         repository.promote_active_bundled_catalog_set(
             active,
-            fixture::ACTIVE_CATALOG_BYTES,
+            fixture::PRODUCT_ACTIVE_CATALOG_BYTES,
             &selection(),
             identity,
             &mut promote,
@@ -706,6 +763,174 @@ fn establish_active(
             | Ok(BundledCatalogSetPromotionOutcome::IdempotentCurrent(_))
     ));
     identity
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+fn establish_acquired_active(
+    repository: &mut ExtensionRepository,
+    active: &zephium_extension_authority::AdmittedAcquiredCatalog,
+) -> BundledCatalogSetIdentity {
+    let crx = signed_fixture_crx();
+    let mut legal = AcquiredFixtureLegalSource;
+    assert!(matches!(
+        repository.materialize_active_acquired_package(
+            active,
+            fixture::PRODUCT_ACTIVE_CATALOG_BYTES,
+            runtime_target(),
+            package_key(),
+            &crx,
+            &mut legal,
+        ),
+        Ok(AcquiredPackageMaterializationOutcome::Materialized)
+            | Ok(AcquiredPackageMaterializationOutcome::IdempotentReplay)
+    ));
+    let identity = match repository
+        .stage_active_acquired_catalog_set(
+            active,
+            fixture::PRODUCT_ACTIVE_CATALOG_BYTES,
+            &selection(),
+        )
+        .unwrap()
+    {
+        BundledCatalogSetStageOutcome::Staged(identity)
+        | BundledCatalogSetStageOutcome::IdempotentCandidate(identity) => identity,
+        other => panic!("unexpected acquired active catalog stage outcome: {other:?}"),
+    };
+    assert!(matches!(
+        repository.promote_active_acquired_catalog_set(
+            active,
+            fixture::PRODUCT_ACTIVE_CATALOG_BYTES,
+            &selection(),
+            identity,
+        ),
+        Ok(BundledCatalogSetPromotionOutcome::Promoted(_))
+            | Ok(BundledCatalogSetPromotionOutcome::IdempotentCurrent(_))
+    ));
+    identity
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+struct AcquiredFixtureLegalSource;
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+impl AcquiredReleaseLegalSource for AcquiredFixtureLegalSource {
+    fn with_legal_notice<T, E, F>(
+        &mut self,
+        resource: AcquiredReleaseLegalResource<'_>,
+        callback: F,
+    ) -> Result<Result<T, E>, AcquiredReleaseLegalSourceError>
+    where
+        F: FnOnce(&mut dyn Read) -> Result<T, E>,
+    {
+        assert_eq!(resource.package().package_key(), package_key());
+        assert_eq!(resource.target().as_str(), "licenses/fixture.txt");
+        assert_eq!(
+            resource.expected_length(),
+            fixture::LEGAL_NOTICE_LENGTH as u64
+        );
+        assert_eq!(
+            resource.expected_sha256(),
+            <[u8; 32]>::from(Sha256::digest(fixture::LEGAL_NOTICE_BYTES))
+        );
+        Ok(callback(&mut Cursor::new(fixture::LEGAL_NOTICE_BYTES)))
+    }
+}
+
+#[cfg(zephium_internal_acquired_repository_e2e)]
+const TEST_PKCS8_HEX: &str = "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420b292efbe9e5900abfc3bc4b37d42a907458782dde3880b8ae8ad11a020d21fefa14403420004b990fbfbf5bd1faa12b8ba853391b296c278b19458b07c3e449f94001c0b546c3fb016528ca59b3099fab07e0042b704734bbd924c4480db7834b7fa352ac011";
+#[cfg(zephium_internal_acquired_repository_e2e)]
+const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
+    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+    0x03, 0x01, 0x07,
+];
+
+#[cfg(zephium_internal_acquired_repository_e2e)]
+fn decode_hex(bytes: &str) -> Vec<u8> {
+    bytes
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let nibble = |byte| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => panic!("test key contains non-lowercase-hex data"),
+            };
+            (nibble(pair[0]) << 4) | nibble(pair[1])
+        })
+        .collect()
+}
+
+#[cfg(zephium_internal_acquired_repository_e2e)]
+fn push_varint(bytes: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
+}
+
+#[cfg(zephium_internal_acquired_repository_e2e)]
+fn push_bytes_field(bytes: &mut Vec<u8>, number: u64, value: &[u8]) {
+    push_varint(bytes, (number << 3) | 2);
+    push_varint(bytes, value.len() as u64);
+    bytes.extend_from_slice(value);
+}
+
+#[cfg(zephium_internal_acquired_repository_e2e)]
+fn signed_fixture_crx() -> Vec<u8> {
+    let archive = STANDARD.decode(fixture::ACQUIRED_ARCHIVE_BASE64).unwrap();
+    let random = SystemRandom::new();
+    let pkcs8 = decode_hex(TEST_PKCS8_HEX);
+    let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &pkcs8, &random).unwrap();
+    let mut public_key = vec![0x30, 0x59, 0x30, 0x13];
+    public_key.extend_from_slice(P256_ALGORITHM_IDENTIFIER);
+    public_key.extend_from_slice(&[0x03, 0x42, 0x00]);
+    public_key.extend_from_slice(pair.public_key().as_ref());
+    let developer_digest: [u8; 32] = Sha256::digest(&public_key).into();
+    assert_eq!(
+        developer_digest,
+        [
+            0x2f, 0xb5, 0x3e, 0xb5, 0x06, 0xd3, 0xe4, 0x30, 0xa6, 0x18, 0xf1, 0x1c, 0x31, 0xc7,
+            0x5b, 0xf4, 0x53, 0x3e, 0xe3, 0x4a, 0x2a, 0x3b, 0x4f, 0x98, 0xbf, 0xe7, 0x96, 0xdd,
+            0x56, 0xb8, 0x67, 0x3f,
+        ]
+    );
+
+    let mut signed_header = Vec::new();
+    push_bytes_field(&mut signed_header, 1, &developer_digest[..16]);
+    let mut message = b"CRX3 SignedData\0".to_vec();
+    message.extend_from_slice(&(signed_header.len() as u32).to_le_bytes());
+    message.extend_from_slice(&signed_header);
+    message.extend_from_slice(&archive);
+    let signature = pair.sign(&random, &message).unwrap();
+
+    let mut proof = Vec::new();
+    push_bytes_field(&mut proof, 1, &public_key);
+    push_bytes_field(&mut proof, 2, signature.as_ref());
+    let mut header = Vec::new();
+    push_bytes_field(&mut header, 3, &proof);
+    push_bytes_field(&mut header, 10_000, &signed_header);
+    let mut crx = b"Cr24".to_vec();
+    crx.extend_from_slice(&3_u32.to_le_bytes());
+    crx.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    crx.extend_from_slice(&header);
+    crx.extend_from_slice(&archive);
+    crx
 }
 
 struct FixtureSource;

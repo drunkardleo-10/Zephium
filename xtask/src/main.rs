@@ -886,8 +886,10 @@ fn run_internal_extension_authority_gates() {
             "zephium-extension-authority",
             "-p",
             "zephium-extension-repository",
+            "-p",
+            "zephium-extension-service",
             "--features",
-            "zephium-extension-repository/acquired-packages",
+            "zephium-extension-service/acquired-packages",
             target,
             "--",
             "-D",
@@ -899,6 +901,7 @@ fn run_internal_extension_authority_gates() {
         run_internal_repository_e2e_tests();
         run_internal_acquired_repository_e2e_tests();
         run_internal_extension_service_e2e_tests();
+        run_internal_acquired_extension_service_e2e_tests();
     }
     #[cfg(target_os = "windows")]
     eprintln!(
@@ -1128,7 +1131,7 @@ fn run_internal_repository_e2e_tests() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_acquired_repository_e2e_tests() {
     const FILTER: &str = "writer::acquired_repository_e2e_tests::";
-    const EXPECTED_TESTS: usize = 3;
+    const EXPECTED_TESTS: usize = 4;
     let list_args = [
         "test",
         "--locked",
@@ -1164,6 +1167,54 @@ fn run_internal_acquired_repository_e2e_tests() {
         "--locked",
         "-p",
         "zephium-extension-repository",
+        "--features",
+        "acquired-packages",
+        "--lib",
+        FILTER,
+        "--",
+        "--test-threads=1",
+    ]);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_internal_acquired_extension_service_e2e_tests() {
+    const FILTER: &str = "runtime_coordinator::e2e::";
+    const EXPECTED_TESTS: usize = 15;
+    let list_args = [
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-service",
+        "--features",
+        "acquired-packages",
+        "--lib",
+        "--",
+        "--list",
+    ];
+    let output = internal_acquired_repository_command(&list_args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to list acquired service E2E tests: {error}"));
+    if !output.status.success() {
+        eprintln!("acquired extension-service E2E inventory failed to compile");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        exit(output.status.code().unwrap_or(1));
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with(FILTER) && line.ends_with(": test"))
+        .count();
+    if count != EXPECTED_TESTS {
+        eprintln!(
+            "acquired extension-service E2E selection contains {count} tests, expected {EXPECTED_TESTS}"
+        );
+        exit(1);
+    }
+    run_with_internal_acquired_repository_cfg(&[
+        "test",
+        "--locked",
+        "-p",
+        "zephium-extension-service",
         "--features",
         "acquired-packages",
         "--lib",
