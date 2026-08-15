@@ -73,12 +73,19 @@ fixed_component!(checkpoint_stage, "recovery-checkpoint.stage");
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TreeNameKind {
     Object,
+    /// Disposable prepublication stage used while an acquired archive derives
+    /// the canonical tree evidence needed by the durable build protocol.
+    Acquisition,
     Stage(u64),
     Retired(u64),
 }
 
 pub(crate) fn tree_object(digest: Digest32) -> PrivateComponent {
     component(&format!("{}.object", digest.to_hex())).expect("tree object name is valid")
+}
+
+pub(crate) fn tree_acquisition_stage(digest: Digest32) -> PrivateComponent {
+    component(&format!("{}.acquiring", digest.to_hex())).expect("acquired tree stage name is valid")
 }
 
 pub(crate) fn tree_stage(
@@ -101,6 +108,11 @@ pub(crate) fn parse_tree_name(value: &str) -> Option<(Digest32, TreeNameKind)> {
     if let Some(digest) = value.strip_suffix(".object") {
         let digest = Digest32::from_lower_hex(digest)?;
         return (tree_object(digest).as_str() == value).then_some((digest, TreeNameKind::Object));
+    }
+    if let Some(digest) = value.strip_suffix(".acquiring") {
+        let digest = Digest32::from_lower_hex(digest)?;
+        return (tree_acquisition_stage(digest).as_str() == value)
+            .then_some((digest, TreeNameKind::Acquisition));
     }
     let (digest, suffix) = value.split_once('.')?;
     let digest = Digest32::from_lower_hex(digest)?;
@@ -300,6 +312,10 @@ mod tests {
         assert_eq!(
             parse_tree_name(tree_stage(digest, 9).unwrap().as_str()),
             Some((digest, TreeNameKind::Stage(9)))
+        );
+        assert_eq!(
+            parse_tree_name(tree_acquisition_stage(digest).as_str()),
+            Some((digest, TreeNameKind::Acquisition))
         );
         assert_eq!(
             parse_tree_name(tree_retired(digest, 10).unwrap().as_str()),

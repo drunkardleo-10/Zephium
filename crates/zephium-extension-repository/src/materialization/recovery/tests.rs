@@ -2323,6 +2323,99 @@ fn two_prepared_journals_and_tree_slot_aliases_are_ambiguous() {
     drop(stage.seal().unwrap());
     drop(handles);
     assert!(harness.open_with_fault(FaultPoint::None).is_err());
+
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let digest = Digest32::from_bytes([9; 32]);
+    let object = handles
+        .trees
+        .create_new_private_child(&names::tree_object(digest))
+        .unwrap();
+    drop(object.seal().unwrap());
+    handles
+        .trees
+        .create_new_private_child(&names::tree_acquisition_stage(digest))
+        .unwrap();
+    drop(handles);
+    assert!(harness.open_with_fault(FaultPoint::None).is_err());
+}
+
+#[test]
+fn crash_left_acquisition_stage_is_discarded_before_state_recovery() {
+    for (sealed, durable_intent) in [(false, false), (true, false), (false, true), (true, true)] {
+        let harness = Harness::new();
+        drop(harness.open());
+        let handles = harness.handles();
+        let package = package_record_fixture(89);
+        if durable_intent {
+            let state = MaterializationState {
+                generation: 1,
+                build_intent: Some(MaterializationBuildIntent {
+                    schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+                    generation: 1,
+                    package_record_id: package.record_id().unwrap(),
+                    package_record: package.clone(),
+                }),
+                ..MaterializationState::default()
+            };
+            replace_settled_state(&handles, &state);
+        }
+
+        let name = names::tree_acquisition_stage(package.tree_index.tree_sha256);
+        let stage = handles.trees.create_new_private_child(&name).unwrap();
+        let child_name = PrivateComponent::new("manifest.json").unwrap();
+        stage
+            .write_new_synced(&child_name, b"partial", ByteLimit::new(16).unwrap())
+            .unwrap();
+        stage.seal_verified_regular(&child_name).unwrap().unwrap();
+        if sealed {
+            drop(stage.seal().unwrap());
+        } else {
+            drop(stage);
+        }
+        drop(handles);
+
+        let (_, runtime) = harness.open();
+        assert_eq!(runtime._build_intent.is_some(), durable_intent);
+        assert!(runtime._build_stage.is_none());
+        assert_eq!(
+            runtime._trees.open_private_child_any_mode(&name).err(),
+            Some(zephium_private_fs::PrivateFsError::NotFound)
+        );
+    }
+}
+
+#[test]
+fn multiple_acquisition_stages_fail_closed_before_any_cleanup() {
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let first = names::tree_acquisition_stage(Digest32::from_bytes([41; 32]));
+    let second = names::tree_acquisition_stage(Digest32::from_bytes([42; 32]));
+    handles.trees.create_new_private_child(&first).unwrap();
+    handles.trees.create_new_private_child(&second).unwrap();
+    drop(handles);
+
+    assert!(matches!(
+        harness.open_with_fault(FaultPoint::None),
+        Err(ExtensionRepositoryError::RecoveryAmbiguous)
+    ));
+    let handles = harness.handles();
+    assert!(handles.trees.open_private_child_any_mode(&first).is_ok());
+    assert!(handles.trees.open_private_child_any_mode(&second).is_ok());
+}
+
+#[test]
+fn pristine_probe_is_read_only_and_never_discards_an_acquisition_stage() {
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let name = names::tree_acquisition_stage(Digest32::from_bytes([43; 32]));
+    handles.trees.create_new_private_child(&name).unwrap();
+
+    assert!(!is_pristine_for_outer_initialization(handles._namespace.directory(), true,).unwrap());
+    assert!(handles.trees.open_private_child_any_mode(&name).is_ok());
 }
 
 #[test]
@@ -2489,6 +2582,7 @@ fn missing_initial_controls_never_demote_data_bearing_inventory() {
         "package_record",
         "retired_tree",
         "tree_stage",
+        "acquisition_stage",
         "record_stage",
         "journal_stage",
     ] {
@@ -2518,6 +2612,12 @@ fn missing_initial_controls_never_demote_data_bearing_inventory() {
                 handles
                     .trees
                     .create_new_private_child(&names::tree_stage(digest, 1).unwrap())
+                    .unwrap();
+            }
+            "acquisition_stage" => {
+                handles
+                    .trees
+                    .create_new_private_child(&names::tree_acquisition_stage(digest))
                     .unwrap();
             }
             "record_stage" => {

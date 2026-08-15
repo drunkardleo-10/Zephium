@@ -483,6 +483,7 @@ fn inspect_tree_stages(
                 }
             }
             TreeNameKind::Stage(_) => return Err(CleanupError::ExactMismatch),
+            TreeNameKind::Acquisition => return Err(CleanupError::ExactMismatch),
             TreeNameKind::Object | TreeNameKind::Retired(_) => {
                 inventory.retained.insert(entry);
             }

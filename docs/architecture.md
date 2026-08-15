@@ -992,10 +992,16 @@ directly into a create-new private tree, retains only the bounded root
 manifest, binds the complete receipt cohort to the release row, bottom-up seals
 the stage, and then independently enumerates and re-hashes every closed file.
 No stream callback or receipt alone is publication authority, and the ordinary
-product graph does not link the archive stack. The remaining product
-transaction must durably own or deterministically discard that prepublication
-stage, admit the acquired manifest, persist the canonical index and legal
-artifact, and publish the package record last before install or activation.
+product graph does not link the archive stack. The prepublication tree uses one
+canonical `.acquiring` name distinct from both content objects and durable
+build stages. It is never a state or journal root: after proving both repository
+controls exist, open drops its recovered capability and removes that exact
+bounded tree before state recovery. Missing controls, multiple acquisition
+stages, or an object/stage digest alias fail closed before cleanup. A crash may
+therefore discard work but can never resume partial bytes as authority or
+manufacture a pristine repository. The remaining product transaction must
+admit the acquired manifest, persist the canonical index and legal artifact,
+and publish the package record last before install or activation.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,

@@ -34,6 +34,7 @@ use super::storage::{
     map_initialization_fs, read_required_control, read_required_sealed_record,
     remove_required_control, verify_required_sealed_record, write_checkpoint,
 };
+use super::tree_writer::cleanup_tree_stage;
 use crate::catalog_cache::{
     CachedProductCatalogAdmission, CachedProductCatalogAuthentication, ProductCatalogAdmissionCache,
 };
@@ -270,7 +271,17 @@ fn open_or_recover_with_policy(
     )?;
     shape.has_journals = true;
 
-    let tree_inventory = inspect_trees(&trees)?;
+    let mut tree_inventory = inspect_trees(&trees)?;
+    if tree_inventory.acquisition.is_some() {
+        // An acquired archive can create this disposable stage only after the
+        // repository controls exist. Never erase data to manufacture a
+        // pristine initialization frontier when either durable control is
+        // absent.
+        if !shape.has_state || !shape.has_checkpoint {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+        discard_acquisition_stage(&trees, &mut tree_inventory)?;
+    }
     let mut record_inventory = inspect_records(&records)?;
     let mut journal_inventory = inspect_journals(&journals)?;
     let empty_initialization_inventory =
@@ -447,8 +458,10 @@ fn open_or_recover_with_policy(
     let TreeInventory {
         objects,
         stage,
+        acquisition,
         retired,
     } = tree_inventory;
+    debug_assert!(acquisition.is_none());
     // Stable handles are long-lived only for state-reachable final trees and
     // the one resumable build stage. Retired and dormant objects were opened
     // safely above, but GC reopens their exact verified names on demand rather
@@ -873,6 +886,7 @@ fn require_regular(
 struct TreeInventory {
     objects: BTreeMap<Digest32, Arc<SealedPrivateDirectory>>,
     stage: Option<(Digest32, u64, MaterializationTreeCapability)>,
+    acquisition: Option<(Digest32, PrivateComponent, MaterializationTreeCapability)>,
     retired: BTreeMap<(Digest32, u64), MaterializationTreeCapability>,
 }
 
@@ -883,6 +897,7 @@ fn inspect_trees(trees: &PrivateDirectory) -> Result<TreeInventory, ExtensionRep
     let mut observed_ids = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut stage = None;
+    let mut acquisition = None;
     let mut retired = BTreeMap::new();
     for entry in entries {
         let (digest, kind) = names::parse_tree_name(entry.as_str())
@@ -903,6 +918,13 @@ fn inspect_trees(trees: &PrivateDirectory) -> Result<TreeInventory, ExtensionRep
             TreeNameKind::Retired(generation) => {
                 retired.insert((digest, generation), open_tree_capability(trees, &entry)?);
             }
+            TreeNameKind::Acquisition => {
+                if acquisition.is_some() {
+                    return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+                }
+                let capability = open_tree_capability(trees, &entry)?;
+                acquisition = Some((digest, entry, capability));
+            }
             TreeNameKind::Stage(generation) => {
                 if stage.is_some() {
                     return Err(ExtensionRepositoryError::RecoveryAmbiguous);
@@ -914,14 +936,37 @@ fn inspect_trees(trees: &PrivateDirectory) -> Result<TreeInventory, ExtensionRep
     }
     if objects.len() > names::MAX_FINAL_PACKAGE_RECORDS
         || retired.len() > names::MAX_RETIRED_TREE_RECORDS
+        || stage.is_some() && acquisition.is_some()
     {
         return Err(ExtensionRepositoryError::RecoveryAmbiguous);
     }
     Ok(TreeInventory {
         objects,
         stage,
+        acquisition,
         retired,
     })
+}
+
+/// Removes one crash-left acquired stage that no durable state can reference.
+///
+/// The stage is always prepublication. A successful same-parent no-replace
+/// publication consumes this name, while the durable build protocol begins
+/// only after the stage has produced exact package metadata. Recovery can
+/// therefore discard the name unconditionally once both repository controls
+/// prove this is not an initialization frontier.
+fn discard_acquisition_stage(
+    trees: &PrivateDirectory,
+    inventory: &mut TreeInventory,
+) -> Result<(), ExtensionRepositoryError> {
+    let Some((_digest, name, capability)) = inventory.acquisition.take() else {
+        return Ok(());
+    };
+    drop(capability);
+    match cleanup_tree_stage(trees, &name) {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(ExtensionRepositoryError::RecoveryAmbiguous),
+    }
 }
 
 fn open_tree_capability(
@@ -1068,6 +1113,7 @@ impl EmptyInitializationInventory {
         let TreeInventory {
             objects,
             stage,
+            acquisition,
             retired,
         } = trees;
         let RecordInventory {
@@ -1083,6 +1129,7 @@ impl EmptyInitializationInventory {
         } = journals;
         (objects.is_empty()
             && stage.is_none()
+            && acquisition.is_none()
             && retired.is_empty()
             && packages.is_empty()
             && catalog_sets.is_empty()

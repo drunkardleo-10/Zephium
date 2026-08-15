@@ -1096,6 +1096,7 @@ fn inspect_tree_capacity(
                 object_count = checked_increment(object_count)?;
                 target_object |= digest == target;
             }
+            TreeNameKind::Acquisition => return Err(PackageObjectError::BuildStateMismatch),
             TreeNameKind::Stage(_) => return Err(PackageObjectError::BuildStateMismatch),
             TreeNameKind::Retired(_) if digest == target => {
                 return Err(PackageObjectError::Collision)
