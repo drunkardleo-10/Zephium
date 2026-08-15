@@ -16,6 +16,8 @@ use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 use crate::startup::ExtensionRepositoryRoot;
 
+#[cfg(feature = "acquired-packages")]
+mod provisioning;
 mod runtime_transactions;
 
 #[allow(unused_imports)]

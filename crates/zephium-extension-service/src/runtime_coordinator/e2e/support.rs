@@ -24,6 +24,14 @@ use zephium_core::extensions::{
     ExtensionPackageKey, ExtensionRuntimeEligibility,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningRequest,
+    ExtensionAcquiredRuntimeSelection,
+};
 use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionGrantMutationOutcome, ExtensionGrantWrite,
     ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationOutcome,
@@ -317,6 +325,137 @@ pub(super) struct ActorAuthorityHarness {
     worker: ExtensionServiceWorkerIdentity,
     store: Arc<SqliteStore>,
     temporary: RepositoryTemporary,
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+pub(super) struct AcquiredProvisioningActorHarness {
+    pub(super) profile: ProfileId,
+    pub(super) package: ExtensionPackageIdentity,
+    pub(super) probe: Arc<HostProbe>,
+    worker: ExtensionServiceWorkerIdentity,
+    store: Arc<SqliteStore>,
+    temporary: RepositoryTemporary,
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+impl AcquiredProvisioningActorHarness {
+    pub(super) fn launch() -> (Self, ExtensionServiceOwner) {
+        let temporary = RepositoryTemporary::new();
+        let active = admitted_active_catalog();
+        let manifest = admitted_manifest(&active);
+        let store = Arc::new(SqliteStore::open(temporary.path()).unwrap());
+        let [profile] = provision_profiles(store.as_ref(), 1).try_into().unwrap();
+        let authority = store.claim_extension_service_store_authority().unwrap();
+        let repository_root =
+            ExtensionRepositoryRoot::from_app_data_directory(temporary.path()).unwrap();
+        let (host_factory, probe) = scripted_host_factory(PublicationMode::Immediate);
+        let owner = ExtensionServiceOwner::launch(
+            ExtensionServiceLaunchInput::new(authority, repository_root, host_factory),
+            deadline(),
+        )
+        .unwrap();
+        let worker = owner.handle().worker_identity();
+        let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) =
+            owner.wait_for_startup_until(deadline())
+        else {
+            panic!("unprovisioned acquired actor startup did not settle ready");
+        };
+        assert_eq!(evidence.worker(), worker);
+        assert_eq!(evidence.active_runtime_count(), 0);
+        assert!(evidence.active_profiles().is_empty());
+        (
+            Self {
+                profile,
+                package: manifest.package().clone(),
+                probe,
+                worker,
+                store,
+                temporary,
+            },
+            owner,
+        )
+    }
+
+    pub(super) fn install_catalog(&self) -> zephium_core::extensions::ExtensionInstallCatalog {
+        let (reply, outcome) = mpsc::sync_channel(1);
+        assert!(self.store.load_extension_install_catalog(
+            self.profile,
+            Box::new(move |result| {
+                let _ = reply.send(result);
+            }),
+        ));
+        match outcome.recv_timeout(TEST_TIMEOUT).unwrap() {
+            ExtensionInstallCatalogLoadOutcome::Loaded(catalog) => catalog,
+            other => panic!("acquired provisioning Store catalog failed: {other:?}"),
+        }
+    }
+
+    pub(super) fn finish(
+        self,
+        evidence: ExtensionServiceShutdownEvidence,
+        expected_catalog: zephium_core::extensions::ExtensionCatalogSetDigest,
+    ) {
+        assert_eq!(evidence.worker(), self.worker);
+        assert_eq!(self.probe.registry_obligation_count(), 0);
+        assert_eq!(self.probe.live_reservation_count(), 0);
+        let repository_root =
+            ExtensionRepositoryRoot::from_app_data_directory(self.temporary.path()).unwrap();
+        let mut repository = ServiceRepository::new(repository_root);
+        repository.open().unwrap();
+        let candidates = repository.authenticate_install_candidates().unwrap();
+        assert_eq!(
+            zephium_core::extensions::ExtensionCatalogSetDigest::from_bytes(
+                candidates.current_catalog_set().identity().bytes()
+            ),
+            expected_catalog
+        );
+        assert_repository_absent(&mut repository, &[self.profile]);
+        drop(repository);
+        assert_eq!(
+            self.store.shutdown_until(deadline()),
+            StoreShutdownOutcome::Clean
+        );
+        drop(self.store);
+        drop(self.probe);
+        self.temporary.close_and_assert_removed();
+    }
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+pub(super) fn acquired_package_provisioning_request() -> ExtensionAcquiredPackageProvisioningRequest
+{
+    ExtensionAcquiredPackageProvisioningRequest::new(
+        fixture::PRODUCT_ACTIVE_CATALOG_BYTES.to_vec(),
+        package_key(),
+        runtime_backend(),
+        signed_fixture_crx(),
+        fixture::LEGAL_NOTICE_BYTES.to_vec(),
+    )
+    .unwrap()
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+pub(super) fn acquired_catalog_activation_request() -> ExtensionAcquiredCatalogActivationRequest {
+    ExtensionAcquiredCatalogActivationRequest::new(
+        fixture::PRODUCT_ACTIVE_CATALOG_BYTES.to_vec(),
+        vec![ExtensionAcquiredRuntimeSelection::new(
+            package_key(),
+            runtime_backend(),
+        )],
+    )
+    .unwrap()
 }
 
 impl ActorAuthorityHarness {
@@ -979,6 +1118,19 @@ const fn runtime_target() -> ProductExtensionRuntimeTarget {
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
     #[allow(unreachable_code)]
     ProductExtensionRuntimeTarget::MacosCompatibility
+}
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+const fn runtime_backend() -> zephium_core::extensions::ExtensionRuntimeBackendTarget {
+    #[cfg(target_os = "macos")]
+    return zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative;
+    #[cfg(target_os = "linux")]
+    return zephium_core::extensions::ExtensionRuntimeBackendTarget::LinuxCompatibility;
+    #[allow(unreachable_code)]
+    zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosCompatibility
 }
 
 fn package_key() -> ExtensionPackageKey {

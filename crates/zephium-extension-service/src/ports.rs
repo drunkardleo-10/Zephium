@@ -3,6 +3,9 @@ use std::time::{Duration, Instant};
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
+    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
+    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
     ExtensionInitialGrantSelection, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
     ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
@@ -91,6 +94,72 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
             observed
         };
         project_lifecycle_startup_outcome(observed)
+    }
+
+    fn provision_acquired_package_until(
+        &mut self,
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: Instant,
+    ) -> ExtensionAcquiredPackageProvisioningOutcome {
+        #[cfg(feature = "acquired-packages")]
+        {
+            ExtensionServiceOwner::provision_acquired_package_until(self, request, deadline)
+        }
+        #[cfg(not(feature = "acquired-packages"))]
+        {
+            drop((request, deadline));
+            ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+        }
+    }
+
+    fn begin_provision_acquired_package(
+        &mut self,
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: Instant,
+        done: ExtensionAcquiredPackageProvisioningCallback,
+    ) -> ExtensionManagementAdmission {
+        #[cfg(feature = "acquired-packages")]
+        {
+            ExtensionServiceOwner::begin_provision_acquired_package(self, request, deadline, done)
+        }
+        #[cfg(not(feature = "acquired-packages"))]
+        {
+            drop((request, deadline, done));
+            ExtensionManagementAdmission::Unavailable
+        }
+    }
+
+    fn activate_acquired_catalog_until(
+        &mut self,
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: Instant,
+    ) -> ExtensionAcquiredCatalogActivationOutcome {
+        #[cfg(feature = "acquired-packages")]
+        {
+            ExtensionServiceOwner::activate_acquired_catalog_until(self, request, deadline)
+        }
+        #[cfg(not(feature = "acquired-packages"))]
+        {
+            drop((request, deadline));
+            ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+        }
+    }
+
+    fn begin_activate_acquired_catalog(
+        &mut self,
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: Instant,
+        done: ExtensionAcquiredCatalogActivationCallback,
+    ) -> ExtensionManagementAdmission {
+        #[cfg(feature = "acquired-packages")]
+        {
+            ExtensionServiceOwner::begin_activate_acquired_catalog(self, request, deadline, done)
+        }
+        #[cfg(not(feature = "acquired-packages"))]
+        {
+            drop((request, deadline, done));
+            ExtensionManagementAdmission::Unavailable
+        }
     }
 
     fn with_profile_retired_until(

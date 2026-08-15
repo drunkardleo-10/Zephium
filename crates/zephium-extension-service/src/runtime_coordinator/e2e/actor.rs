@@ -2,6 +2,13 @@ use zephium_core::extensions::{
     ApiPermissionName, ExtensionCatalogSetDigest, ExtensionRuntimeGeneration,
 };
 use zephium_core::injection::MatchPattern;
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationOutcome, ExtensionAcquiredPackageProvisioningOutcome,
+};
 use zephium_core::ports::extensions::{
     ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
     ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
@@ -19,12 +26,130 @@ fn grant_selection(file_access: bool, private_access: bool) -> ExtensionInitialG
 }
 
 use super::host::PublicationMode;
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+use super::support::{
+    acquired_catalog_activation_request, acquired_package_provisioning_request,
+    AcquiredProvisioningActorHarness,
+};
 use super::support::{deadline, fixture_display_name, ActorAuthorityHarness};
 use crate::{
     ExtensionServiceProfileRetirementOutcome, ExtensionServiceRuntimeActivationOutcome,
     ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
     ExtensionServiceStartupUnavailableReason, ExtensionServiceStartupWait,
 };
+
+#[cfg(all(
+    feature = "acquired-packages",
+    zephium_internal_acquired_repository_e2e
+))]
+#[test]
+fn actor_provisions_acquired_package_from_empty_repository_then_installs_and_runs_it() {
+    let (harness, mut owner) = AcquiredProvisioningActorHarness::launch();
+    assert!(harness.install_catalog().installs().is_empty());
+
+    assert_eq!(
+        ExtensionServiceLifecycle::provision_acquired_package_until(
+            &mut owner,
+            acquired_package_provisioning_request(),
+            deadline(),
+        ),
+        ExtensionAcquiredPackageProvisioningOutcome::Materialized
+    );
+    assert_eq!(
+        ExtensionServiceLifecycle::provision_acquired_package_until(
+            &mut owner,
+            acquired_package_provisioning_request(),
+            deadline(),
+        ),
+        ExtensionAcquiredPackageProvisioningOutcome::AlreadyMaterialized
+    );
+
+    let activated = ExtensionServiceLifecycle::activate_acquired_catalog_until(
+        &mut owner,
+        acquired_catalog_activation_request(),
+        deadline(),
+    );
+    let ExtensionAcquiredCatalogActivationOutcome::Activated(catalog_set) = activated else {
+        panic!("acquired catalog did not activate: {activated:?}");
+    };
+    assert_eq!(
+        ExtensionServiceLifecycle::activate_acquired_catalog_until(
+            &mut owner,
+            acquired_catalog_activation_request(),
+            deadline(),
+        ),
+        ExtensionAcquiredCatalogActivationOutcome::AlreadyActive(catalog_set)
+    );
+
+    let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_load_management_catalog(
+            &mut owner,
+            harness.profile,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = catalog_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementCatalogAdmission::Accepted
+    );
+    let ExtensionManagementCatalogOutcome::Loaded(management) = catalog_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap()
+    else {
+        panic!("provisioned acquired catalog did not reach management UI");
+    };
+    assert!(management.entries().is_empty());
+    let [candidate] = management.candidates() else {
+        panic!("one acquired install candidate expected");
+    };
+    assert_eq!(candidate.selector().catalog_set(), catalog_set);
+    assert_eq!(candidate.selector().package(), &harness.package);
+
+    let installed = ExtensionServiceLifecycle::install_until(
+        &mut owner,
+        candidate.selector().clone(),
+        grant_selection(false, false),
+        deadline(),
+    );
+    let ExtensionInstallOutcome::Installed {
+        install,
+        runtime: ExtensionInstalledRuntimeState::Active(ExtensionRuntimeGeneration::INITIAL),
+    } = installed.outcome()
+    else {
+        panic!("provisioned acquired candidate did not install and run: {installed:?}");
+    };
+    assert_eq!(
+        installed
+            .active_profiles()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [harness.profile]
+    );
+    assert_eq!(
+        harness
+            .install_catalog()
+            .get(*install)
+            .expect("acquired install must be durable")
+            .package(),
+        &harness.package
+    );
+    assert_eq!(harness.probe.bind_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 1);
+
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("acquired provisioning actor did not prove clean shutdown");
+    };
+    assert_eq!(evidence.accepted_commands(), 6);
+    assert_eq!(evidence.completed_commands(), 6);
+    harness.finish(evidence, catalog_set);
+}
 
 #[test]
 fn actor_hydration_retry_resumes_without_reentering_cleanup() {

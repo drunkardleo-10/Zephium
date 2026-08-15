@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
 use zephium_core::ids::ProfileId;
+#[cfg(feature = "acquired-packages")]
+use zephium_core::ports::extensions::MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES;
+#[cfg(feature = "acquired-packages")]
+use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
+    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
+    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
+};
 use zephium_core::ports::extensions::{
     ExtensionActiveProfiles, ExtensionInitialGrantSelection, ExtensionInstallCallback,
     ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
@@ -82,6 +90,8 @@ const THREAD_FINISH_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_PENDING_RUNTIME_GRANT_REQUESTS: usize = 8;
 const MAX_PENDING_RUNTIME_GRANT_RETAINED_BYTES: usize =
     2 * MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES;
+#[cfg(feature = "acquired-packages")]
+const MAX_PENDING_ACQUIRED_PROVISIONING_REQUESTS: usize = 1;
 
 #[cfg(test)]
 struct TestDropProbe(Arc<AtomicBool>);
@@ -153,10 +163,88 @@ impl Drop for RuntimeGrantRequestPermit {
     }
 }
 
+#[cfg(feature = "acquired-packages")]
+#[derive(Debug, Default, Eq, PartialEq)]
+struct AcquiredProvisioningAdmission {
+    count: usize,
+    retained_bytes: usize,
+}
+
+#[cfg(feature = "acquired-packages")]
+struct AcquiredProvisioningPermit {
+    admission: Arc<Mutex<AcquiredProvisioningAdmission>>,
+    retained_bytes: usize,
+}
+
+#[cfg(feature = "acquired-packages")]
+impl AcquiredProvisioningPermit {
+    fn try_acquire(
+        admission: &Arc<Mutex<AcquiredProvisioningAdmission>>,
+        retained_bytes: usize,
+    ) -> Option<Self> {
+        if retained_bytes > MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES {
+            return None;
+        }
+        let mut state = match admission.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        let next_count = state.count.checked_add(1)?;
+        let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
+        if next_count > MAX_PENDING_ACQUIRED_PROVISIONING_REQUESTS
+            || next_bytes > MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES
+        {
+            return None;
+        }
+        state.count = next_count;
+        state.retained_bytes = next_bytes;
+        drop(state);
+        Some(Self {
+            admission: Arc::clone(admission),
+            retained_bytes,
+        })
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+impl Drop for AcquiredProvisioningPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (Some(count), Some(retained_bytes)) = (
+            state.count.checked_sub(1),
+            state.retained_bytes.checked_sub(self.retained_bytes),
+        ) else {
+            state.count = usize::MAX;
+            state.retained_bytes = usize::MAX;
+            return;
+        };
+        state.count = count;
+        state.retained_bytes = retained_bytes;
+    }
+}
+
 enum WorkerCommand {
     RetryStartup {
         attempt: StartupAttempt,
         deadline: Instant,
+    },
+    #[cfg(feature = "acquired-packages")]
+    ProvisionAcquiredPackage {
+        request: Box<ExtensionAcquiredPackageProvisioningRequest>,
+        deadline: Instant,
+        _permit: AcquiredProvisioningPermit,
+        settlement: ProvisioningSettlementSink<ExtensionAcquiredPackageProvisioningOutcome>,
+    },
+    #[cfg(feature = "acquired-packages")]
+    ActivateAcquiredCatalog {
+        request: Box<ExtensionAcquiredCatalogActivationRequest>,
+        deadline: Instant,
+        _permit: AcquiredProvisioningPermit,
+        settlement: ProvisioningSettlementSink<ExtensionAcquiredCatalogActivationOutcome>,
     },
     RetireProfile {
         profile: ProfileId,
@@ -223,6 +311,58 @@ enum ManagementSettlementSink<T> {
         done: Option<Box<dyn FnOnce(ExtensionManagementSettlement<T>) + Send>>,
         worker_lost: fn() -> ExtensionManagementSettlement<T>,
     },
+}
+
+#[cfg(feature = "acquired-packages")]
+enum ProvisioningSettlementSink<T> {
+    Waiting(mpsc::SyncSender<T>),
+    Callback {
+        done: Option<Box<dyn FnOnce(T) + Send>>,
+        worker_lost: fn() -> T,
+    },
+}
+
+#[cfg(feature = "acquired-packages")]
+impl<T> ProvisioningSettlementSink<T> {
+    fn callback(done: Box<dyn FnOnce(T) + Send>, worker_lost: fn() -> T) -> Self {
+        Self::Callback {
+            done: Some(done),
+            worker_lost,
+        }
+    }
+
+    fn settle(mut self, outcome: T) {
+        match &mut self {
+            Self::Waiting(waiting) => {
+                let _ = waiting.try_send(outcome);
+            }
+            Self::Callback { done, .. } => {
+                if let Some(done) = done.take() {
+                    let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+                }
+            }
+        }
+    }
+
+    fn cancel(mut self) {
+        if let Self::Callback { done, .. } = &mut self {
+            drop(done.take());
+        }
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+impl<T> Drop for ProvisioningSettlementSink<T> {
+    fn drop(&mut self) {
+        let Self::Callback { done, worker_lost } = self else {
+            return;
+        };
+        let Some(done) = done.take() else {
+            return;
+        };
+        let outcome = worker_lost();
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+    }
 }
 
 struct ManagementCatalogSettlementSink {
@@ -317,6 +457,25 @@ fn install_worker_lost() -> ExtensionManagementSettlement<ExtensionInstallOutcom
 
 fn runtime_grant_worker_lost() -> ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome> {
     ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::FailedClosed, None)
+}
+
+#[cfg(feature = "acquired-packages")]
+fn acquired_package_worker_lost() -> ExtensionAcquiredPackageProvisioningOutcome {
+    ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+}
+
+#[cfg(feature = "acquired-packages")]
+fn acquired_catalog_worker_lost() -> ExtensionAcquiredCatalogActivationOutcome {
+    ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+}
+
+#[cfg(feature = "acquired-packages")]
+fn cancel_unadmitted_provisioning(command: WorkerCommand) {
+    match command {
+        WorkerCommand::ProvisionAcquiredPackage { settlement, .. } => settlement.cancel(),
+        WorkerCommand::ActivateAcquiredCatalog { settlement, .. } => settlement.cancel(),
+        _ => debug_assert!(false, "provisioning admission returned a different command"),
+    }
 }
 
 fn cancel_unadmitted_management(command: WorkerCommand) {
@@ -460,6 +619,8 @@ pub struct ExtensionServiceOwner {
     startup: Arc<SharedStartupOutcome>,
     cancellation: Arc<WorkerCancellation>,
     runtime_grant_admission: Arc<Mutex<RuntimeGrantRequestAdmission>>,
+    #[cfg(feature = "acquired-packages")]
+    acquired_provisioning_admission: Arc<Mutex<AcquiredProvisioningAdmission>>,
     completion: Receiver<ExtensionServiceShutdownEvidence>,
     thread: Option<JoinHandle<()>>,
     _not_sync: PhantomData<Cell<()>>,
@@ -577,6 +738,9 @@ impl ExtensionServiceOwner {
         let startup = Arc::new(SharedStartupOutcome::new(initial_attempt));
         let cancellation = Arc::new(WorkerCancellation::new());
         let runtime_grant_admission = Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default()));
+        #[cfg(feature = "acquired-packages")]
+        let acquired_provisioning_admission =
+            Arc::new(Mutex::new(AcquiredProvisioningAdmission::default()));
         let (completion_tx, completion) = mpsc::sync_channel(1);
         let worker_mailbox = Arc::clone(&mailbox);
         let worker_status = Arc::clone(&status);
@@ -701,6 +865,8 @@ impl ExtensionServiceOwner {
             startup,
             cancellation,
             runtime_grant_admission,
+            #[cfg(feature = "acquired-packages")]
+            acquired_provisioning_admission,
             completion,
             thread: Some(thread),
             _not_sync: PhantomData,
@@ -712,6 +878,190 @@ impl ExtensionServiceOwner {
         ExtensionServiceHandle {
             worker: self.worker,
             status: Arc::clone(&self.status),
+        }
+    }
+
+    /// Admits at most one move-owned acquired package into the serialized
+    /// repository worker. Accepted work is never cancelled by observation
+    /// timeout; an exact retry resolves [`ExtensionAcquiredPackageProvisioningOutcome::OutcomeUnknown`].
+    #[cfg(feature = "acquired-packages")]
+    #[must_use = "acquired package provisioning settlement must be checked"]
+    pub fn provision_acquired_package_until(
+        &mut self,
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: Instant,
+    ) -> ExtensionAcquiredPackageProvisioningOutcome {
+        if Instant::now() >= deadline {
+            return ExtensionAcquiredPackageProvisioningOutcome::Unavailable;
+        }
+        let Some(permit) = AcquiredProvisioningPermit::try_acquire(
+            &self.acquired_provisioning_admission,
+            request.retained_bytes(),
+        ) else {
+            return ExtensionAcquiredPackageProvisioningOutcome::Unavailable;
+        };
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::ProvisionAcquiredPackage {
+            request: Box::new(request),
+            deadline,
+            _permit: permit,
+            settlement: ProvisioningSettlementSink::Waiting(settlement),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionAcquiredPackageProvisioningOutcome::OutcomeUnknown
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => ExtensionAcquiredPackageProvisioningOutcome::Unavailable,
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+            }
+        }
+    }
+
+    /// Non-blocking acquired-package provisioning ingress.
+    #[cfg(feature = "acquired-packages")]
+    #[must_use = "provisioning admission determines callback ownership"]
+    pub fn begin_provision_acquired_package(
+        &mut self,
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: Instant,
+        done: ExtensionAcquiredPackageProvisioningCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let Some(permit) = AcquiredProvisioningPermit::try_acquire(
+            &self.acquired_provisioning_admission,
+            request.retained_bytes(),
+        ) else {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        };
+        let command = WorkerCommand::ProvisionAcquiredPackage {
+            request: Box::new(request),
+            deadline,
+            _permit: permit,
+            settlement: ProvisioningSettlementSink::callback(done, acquired_package_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_provisioning(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_provisioning(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_provisioning(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Source-free verifies and activates one complete acquired catalog.
+    #[cfg(feature = "acquired-packages")]
+    #[must_use = "acquired catalog activation settlement must be checked"]
+    pub fn activate_acquired_catalog_until(
+        &mut self,
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: Instant,
+    ) -> ExtensionAcquiredCatalogActivationOutcome {
+        if Instant::now() >= deadline {
+            return ExtensionAcquiredCatalogActivationOutcome::Unavailable;
+        }
+        let Some(permit) = AcquiredProvisioningPermit::try_acquire(
+            &self.acquired_provisioning_admission,
+            request.retained_bytes(),
+        ) else {
+            return ExtensionAcquiredCatalogActivationOutcome::Unavailable;
+        };
+        let (settlement, observation) = mpsc::sync_channel(1);
+        let command = WorkerCommand::ActivateAcquiredCatalog {
+            request: Box::new(request),
+            deadline,
+            _permit: permit,
+            settlement: ProvisioningSettlementSink::Waiting(settlement),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => {
+                match receive_runtime_command_until(&observation, deadline) {
+                    Ok(outcome) => outcome,
+                    Err(RuntimeCommandObservationFailure::DeadlineReached) => {
+                        ExtensionAcquiredCatalogActivationOutcome::OutcomeUnknown
+                    }
+                    Err(RuntimeCommandObservationFailure::WorkerUnavailable) => {
+                        ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+                    }
+                }
+            }
+            NormalAdmission::Full(_) => ExtensionAcquiredCatalogActivationOutcome::Unavailable,
+            NormalAdmission::Sealed(_) | NormalAdmission::Closed(_) => {
+                ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+            }
+            NormalAdmission::CounterExhausted(_) => {
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+            }
+        }
+    }
+
+    /// Non-blocking complete acquired-catalog activation ingress.
+    #[cfg(feature = "acquired-packages")]
+    #[must_use = "catalog activation admission determines callback ownership"]
+    pub fn begin_activate_acquired_catalog(
+        &mut self,
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: Instant,
+        done: ExtensionAcquiredCatalogActivationCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let Some(permit) = AcquiredProvisioningPermit::try_acquire(
+            &self.acquired_provisioning_admission,
+            request.retained_bytes(),
+        ) else {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        };
+        let command = WorkerCommand::ActivateAcquiredCatalog {
+            request: Box::new(request),
+            deadline,
+            _permit: permit,
+            settlement: ProvisioningSettlementSink::callback(done, acquired_catalog_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_provisioning(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_provisioning(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_provisioning(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
         }
     }
 
@@ -1964,6 +2314,46 @@ impl WorkerState {
                     return false;
                 }
             }
+            #[cfg(feature = "acquired-packages")]
+            WorkerCommand::ProvisionAcquiredPackage {
+                request,
+                deadline,
+                _permit,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_acquired_package_provisioning(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    *request,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
+            #[cfg(feature = "acquired-packages")]
+            WorkerCommand::ActivateAcquiredCatalog {
+                request,
+                deadline,
+                _permit,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_acquired_catalog_activation(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    *request,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             WorkerCommand::RetireProfile {
                 profile,
                 deadline,
@@ -2147,6 +2537,125 @@ impl WorkerState {
             .checked_add(1)
             .expect("mailbox admission proves the completion counter bound");
         true
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn complete_acquired_package_provisioning(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: Instant,
+    ) -> (ExtensionAcquiredPackageProvisioningOutcome, bool) {
+        if cancellation.is_requested() || Instant::now() >= deadline {
+            return (
+                ExtensionAcquiredPackageProvisioningOutcome::Unavailable,
+                true,
+            );
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => {}
+            RuntimeIngressReadiness::NotReady => {
+                return (
+                    ExtensionAcquiredPackageProvisioningOutcome::Unavailable,
+                    true,
+                );
+            }
+            RuntimeIngressReadiness::StartupFailed(_) => {
+                return (
+                    ExtensionAcquiredPackageProvisioningOutcome::FailedClosed,
+                    true,
+                );
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                status.publish(ExtensionServicePhase::Failed);
+                return (
+                    ExtensionAcquiredPackageProvisioningOutcome::FailedClosed,
+                    false,
+                );
+            }
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionAcquiredPackageProvisioningOutcome::FailedClosed,
+                false,
+            );
+        };
+        let outcome = startup.repository.provision_acquired_package(request);
+        if matches!(
+            outcome,
+            ExtensionAcquiredPackageProvisioningOutcome::OutcomeUnknown
+                | ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+        ) {
+            status.publish(ExtensionServicePhase::Failed);
+        }
+        (outcome, true)
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn complete_acquired_catalog_activation(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: Instant,
+    ) -> (ExtensionAcquiredCatalogActivationOutcome, bool) {
+        if cancellation.is_requested() || Instant::now() >= deadline {
+            return (ExtensionAcquiredCatalogActivationOutcome::Unavailable, true);
+        }
+        if self.management_write_state != ManagementWriteState::Healthy {
+            return match self.management_write_state {
+                ManagementWriteState::OutcomeUnknown => (
+                    ExtensionAcquiredCatalogActivationOutcome::OutcomeUnknown,
+                    true,
+                ),
+                ManagementWriteState::FailedClosed => (
+                    ExtensionAcquiredCatalogActivationOutcome::FailedClosed,
+                    true,
+                ),
+                ManagementWriteState::Healthy => unreachable!("state checked above"),
+            };
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => {}
+            RuntimeIngressReadiness::NotReady => {
+                return (ExtensionAcquiredCatalogActivationOutcome::Unavailable, true);
+            }
+            RuntimeIngressReadiness::StartupFailed(_) => {
+                return (
+                    ExtensionAcquiredCatalogActivationOutcome::FailedClosed,
+                    true,
+                );
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                status.publish(ExtensionServicePhase::Failed);
+                return (
+                    ExtensionAcquiredCatalogActivationOutcome::FailedClosed,
+                    false,
+                );
+            }
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionAcquiredCatalogActivationOutcome::FailedClosed,
+                false,
+            );
+        };
+        let outcome = startup.repository.activate_acquired_catalog(request);
+        if matches!(
+            outcome,
+            ExtensionAcquiredCatalogActivationOutcome::OutcomeUnknown
+                | ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+        ) {
+            status.publish(ExtensionServicePhase::Failed);
+        }
+        (outcome, true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3152,6 +3661,86 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "acquired-packages")]
+    fn acquired_provisioning_request(seed: u8) -> ExtensionAcquiredPackageProvisioningRequest {
+        ExtensionAcquiredPackageProvisioningRequest::new(
+            vec![seed],
+            zephium_core::extensions::ExtensionPackageKey::from_bytes([seed; 32]),
+            zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative,
+            vec![seed.wrapping_add(1)],
+            vec![seed.wrapping_add(2)],
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    #[test]
+    fn acquired_provisioning_admission_retains_exactly_one_move_owned_request() {
+        let admission = Arc::new(Mutex::new(AcquiredProvisioningAdmission::default()));
+        let first_request = acquired_provisioning_request(1);
+        let first_retained_bytes = first_request.retained_bytes();
+        let first = AcquiredProvisioningPermit::try_acquire(&admission, first_retained_bytes)
+            .expect("first bounded request must own the provisioning slot");
+
+        assert!(AcquiredProvisioningPermit::try_acquire(&admission, 1).is_none());
+        assert_eq!(
+            *admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            AcquiredProvisioningAdmission {
+                count: 1,
+                retained_bytes: first_retained_bytes,
+            }
+        );
+
+        drop(first);
+        let second = AcquiredProvisioningPermit::try_acquire(
+            &admission,
+            MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
+        )
+        .expect("dropping the first command must release its exact slot and byte charge");
+        assert!(AcquiredProvisioningPermit::try_acquire(
+            &admission,
+            MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES + 1,
+        )
+        .is_none());
+        drop(second);
+        assert_eq!(
+            *admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            AcquiredProvisioningAdmission::default()
+        );
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    #[test]
+    fn unadmitted_acquired_provisioning_releases_slot_without_invoking_callback() {
+        let admission = Arc::new(Mutex::new(AcquiredProvisioningAdmission::default()));
+        let request = acquired_provisioning_request(5);
+        let permit = AcquiredProvisioningPermit::try_acquire(&admission, request.retained_bytes())
+            .expect("bounded acquired request must be admitted");
+        let invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked = Arc::clone(&invoked);
+        cancel_unadmitted_provisioning(WorkerCommand::ProvisionAcquiredPackage {
+            request: Box::new(request),
+            deadline: Instant::now() + Duration::from_secs(1),
+            _permit: permit,
+            settlement: ProvisioningSettlementSink::callback(
+                Box::new(move |_| callback_invoked.store(true, Ordering::Release)),
+                acquired_package_worker_lost,
+            ),
+        });
+
+        assert!(!invoked.load(Ordering::Acquire));
+        assert_eq!(
+            *admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            AcquiredProvisioningAdmission::default()
+        );
+    }
+
     #[test]
     fn dropped_admitted_management_catalog_callback_fails_closed_once() {
         let (completed, observation) = mpsc::sync_channel(1);
@@ -3265,6 +3854,10 @@ mod tests {
             startup,
             cancellation: Arc::new(WorkerCancellation::new()),
             runtime_grant_admission: Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default())),
+            #[cfg(feature = "acquired-packages")]
+            acquired_provisioning_admission: Arc::new(Mutex::new(
+                AcquiredProvisioningAdmission::default(),
+            )),
             completion,
             thread: None,
             _not_sync: PhantomData,

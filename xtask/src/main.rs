@@ -1179,7 +1179,7 @@ fn run_internal_acquired_repository_e2e_tests() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_acquired_extension_service_e2e_tests() {
     const FILTER: &str = "runtime_coordinator::e2e::";
-    const EXPECTED_TESTS: usize = 15;
+    const EXPECTED_TESTS: usize = 16;
     let list_args = [
         "test",
         "--locked",

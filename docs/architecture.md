@@ -787,8 +787,15 @@ startup/crash reconciliation against a bounded native fake, while the live
 WebKit probe proves the platform adapter. The authenticated product probe now
 joins package authority, native ownership, controller activation, the
 Shell-owned window/tab delegate, and real content-script execution. Production
-provisioning remains deliberately empty; ordinary release builds therefore
-expose no extension runtime. Authenticated catalog management and install UX,
+provisioning remains deliberately empty, so ordinary release builds expose no
+extension runtime. The opt-in acquired-package service does now own a bounded
+provisioning ingress: one move-owned, path-free request may be retained at a
+time; its actual vector capacities are charged against the shared ceiling; and
+the worker reauthenticates the sealed catalog, CRX, manifest, legal artifact,
+and complete extracted tree before publication. Complete catalog activation is
+separate and source-free. No product transport or catalog coordinator calls
+that ingress yet, and enabling the crate feature alone supplies neither package
+bytes nor network authority. Authenticated catalog management and install UX,
 native action projection, and transient popup hosting are implemented; the
 install review always includes required API/host authority, defaults every
 optional declaration to denied, and can return only bounded indexes into the
@@ -802,11 +809,14 @@ collapse into browser-owned feature categories; compatible rows cannot carry
 limitations and degraded rows cannot omit them. The install review renders the
 complete cohort before consent, while installed rows show a bounded summary;
 neither surface receives native error strings or invents compatibility from a
-package name. Dynamic optional-grant requests are still denied by the native
-default and have no user prompt. The
-remaining release gaps include that runtime permission broker, the complete
-permission and API matrix, quotas, release-build resource evidence, and
-endurance. Older admitted
+package name. Dynamic optional-grant requests now traverse one bounded native
+prompt per admitted runtime, a Shell-owned consent projection, an exact
+generation-bound service mutation, and native settlement; absent, stale,
+over-capacity, or unavailable paths deny rather than grant. This extension
+grant broker is distinct from page-origin permission events, whose general
+Shell policy remains unfinished. Remaining release gaps include the product
+acquisition coordinator, the complete permission and API matrix, quotas,
+release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
@@ -818,9 +828,10 @@ probe is excluded from normal product builds and has no page-world fallback;
 its lifecycle, removal, navigation, resource, debugger-coexistence, and live
 performance gates remain open.
 
-This work needs new foundations rather than merely consuming existing ports:
-a profile-scoped permission broker, per-install extension scheme and
-unprivileged extension-UI trust zone, capability-scoped messaging, a bounded
+The remaining compatibility work needs additional foundations rather than
+merely consuming existing ports: the page-origin permission policy, per-install
+extension scheme and unprivileged extension-UI trust zone, capability-scoped
+messaging, a bounded
 compatibility MV3 event-runtime state machine inside
 `MAX_NATIVE_VIEW_RESOURCES = 48`, a separate Windows-native admission/resource
 policy, storage quotas, and authenticated immutable package activation.
@@ -860,7 +871,8 @@ successful settlements carry the complete active-profile routing cohort from
 the same serialized worker turn. Shell therefore never guesses whether a
 sibling runtime still keeps a profile active, and cloneable status handles
 remain observation-only.
-The macOS native adapter is enabled, but sealed product provisioning remains
+The macOS native adapter is enabled and the acquired service ingress exists
+behind an opt-in feature, but sealed product transport/provisioning remains
 empty and the Windows/Linux adapters remain unavailable, so this coordinator
 is not a release-enablement claim. Reconstruction also rejects
 unreachable clock histories: operation and incarnation high-water
@@ -935,11 +947,13 @@ Every package-record final discovered during recovery must be rooted by either
 the exact sole build intent or the completed ledger; unrooted commit markers
 are ambiguous durable state, not inert garbage.
 The physical recovery inventory currently permits at most eight sealed
-catalog-set finals, but materialization does not yet have a production garbage
-collector. Repeated distinct selections can therefore exhaust that bound.
-Bounded closure GC, ordered after interrupted-build settlement and preserving
-every candidate/current/previous and owner-pin root, remains a release blocker;
-the current ceiling is not a claim of indefinite operation.
+catalog-set finals. The repository now implements bounded, pin-rooted,
+crash-recoverable closure garbage collection ordered after interrupted-build
+settlement and preserving every candidate/current/previous and owner-pin root.
+The serialized service does not yet schedule that collector, so repeated
+distinct product selections can still exhaust the inventory. A low-frequency,
+deadline-bounded service maintenance ingress remains a release blocker; the
+current ceiling is not a claim of indefinite operation.
 Core package-pin bindings are structural joins, not proof that a Store row is
 still current. Fresh acquisition consumes its move-only binding into the live
 repository lease; the lease exposes eligibility only by borrow and destroys
@@ -966,7 +980,8 @@ invalidates those inexact install/grant rows. They must be reinstalled through
 the exact package authority and their old identities can never be reused.
 
 `zephium-extension-acquisition` owns the first acquired-package boundary and is
-not linked into the ordinary inert product path by any runtime crate. It accepts
+linked into the service only by the opt-in `acquired-packages` feature, never by
+the ordinary inert product graph. It accepts
 only CRX3 bytes whose signed developer key derives the product-expected
 Chromium id and whose inner ZIP byte length and SHA-256 exactly match an
 `AcquiredZip` catalog identity. The production-shaped release-row constructor
@@ -1024,8 +1039,8 @@ controller authority. The ordinary build remains archive-free unless the
 `acquired-packages` feature is explicitly enabled.
 
 The CI-only acquired-package gate replaces the product-sealed active fixture
-under a second debug-only compiler configuration; it does not add caller-owned
-admission or shipping catalog bytes. A self-authored MV3 archive is signed at
+under a second debug-only compiler configuration; it does not add shipping
+catalog bytes or product transport authority. A self-authored MV3 archive is signed at
 test time by a fixed test-only developer key and traverses the public catalog,
 CRX authentication, extraction, manifest admission, repository publication,
 selection, package lease, resource read, and recovery path. The repository gate
@@ -1033,10 +1048,13 @@ requires exact in-process and post-reopen replay, clean recovery from a
 legal-source failure after its callback, marker-committed crash completion with
 neither CRX bytes nor a legal callback, source-free candidate promotion, and
 fresh post-reopen install-candidate and lease authentication. A second gate
-runs the same 15 real Store/repository service scenarios used by the bundled
-fixture against the acquired representation: hydration, runtime planning,
-activation/publication, grant rebind, management and installation, retirement,
-reconciliation, profile cleanup, and shutdown. Both inventories are counted
+runs 16 real Store/repository service scenarios against the acquired
+representation. One starts from an empty repository and traverses the bounded
+service ingress, exact replay, source-free catalog activation, management
+candidate, install, runtime publication, shutdown, and post-reopen audit. The
+remaining scenarios cover hydration, runtime planning, activation/publication,
+grant rebind, management, retirement, reconciliation, profile cleanup, and
+shutdown. Both inventories are counted
 explicitly by `cargo xtask ci`; the acquired configuration requires the base
 internal authority, and that combined authority is rejected from optimized
 builds and application linkage. The ordinary authority fixture remains

@@ -9,6 +9,8 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 
 #[path = "extensions/management.rs"]
 mod management;
+#[path = "extensions/provisioning.rs"]
+mod provisioning;
 #[path = "extensions/runtime_grants.rs"]
 mod runtime_grants;
 
@@ -18,6 +20,14 @@ pub use management::{
     ExtensionManagementProjectionError, ExtensionManagementRuntimeState,
     MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
     MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
+};
+pub use provisioning::{
+    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
+    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
+    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
+    ExtensionAcquiredProvisioningRequestError, ExtensionAcquiredRuntimeSelection,
+    MAX_EXTENSION_ACQUIRED_CATALOG_BYTES, MAX_EXTENSION_ACQUIRED_CRX_BYTES,
+    MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES, MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
 };
 pub use runtime_grants::{
     ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptError,
@@ -596,6 +606,55 @@ pub trait ExtensionServiceLifecycle: Send {
     /// [`ExtensionServiceStartupOutcome::Ready`] permits extension-sensitive
     /// application bootstrap.
     fn settle_startup_until(&mut self, deadline: Instant) -> ExtensionServiceStartupOutcome;
+
+    /// Authenticates and durably materializes one exact package from the
+    /// product-sealed acquired catalog.
+    ///
+    /// This is a transport boundary, not open-store installation: the
+    /// implementation must reauthenticate the exact catalog, CRX developer
+    /// identity, archive payload, manifest policy, legal notice, and complete
+    /// extracted tree before publishing any package object. The default fails
+    /// closed and consumes the move-only bytes without retaining them.
+    fn provision_acquired_package_until(
+        &mut self,
+        _request: ExtensionAcquiredPackageProvisioningRequest,
+        _deadline: Instant,
+    ) -> ExtensionAcquiredPackageProvisioningOutcome {
+        ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
+    }
+
+    /// Non-blocking acquired-package provisioning form used by transport
+    /// coordinators. `Accepted` transfers both payload and callback ownership.
+    fn begin_provision_acquired_package(
+        &mut self,
+        _request: ExtensionAcquiredPackageProvisioningRequest,
+        _deadline: Instant,
+        done: ExtensionAcquiredPackageProvisioningCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Source-free verifies and atomically activates one complete acquired
+    /// catalog selection after every package has been materialized.
+    fn activate_acquired_catalog_until(
+        &mut self,
+        _request: ExtensionAcquiredCatalogActivationRequest,
+        _deadline: Instant,
+    ) -> ExtensionAcquiredCatalogActivationOutcome {
+        ExtensionAcquiredCatalogActivationOutcome::FailedClosed
+    }
+
+    /// Non-blocking complete-catalog activation form.
+    fn begin_activate_acquired_catalog(
+        &mut self,
+        _request: ExtensionAcquiredCatalogActivationRequest,
+        _deadline: Instant,
+        done: ExtensionAcquiredCatalogActivationCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
 
     /// Activates one exact regular/private runtime through the service's
     /// authenticated, serialized authority transaction.
