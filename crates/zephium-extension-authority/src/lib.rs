@@ -60,9 +60,10 @@ pub use manifest::{
     MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION,
 };
 pub use product::{
-    AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
-    BundledPackageAuthority, BundledProductAuthorityStatus, ProductBundledCatalogGenerationRole,
-    MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES, MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES,
+    AdmittedAcquiredCatalog, AdmittedActiveCatalog, AdmittedBundledCatalog,
+    AdmittedRollbackBundledCatalog, BundledPackageAuthority, BundledProductAuthorityStatus,
+    ProductBundledCatalogGenerationRole, MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES,
+    MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES,
     MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES,
     MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
     MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS,

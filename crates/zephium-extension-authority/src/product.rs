@@ -148,6 +148,29 @@ impl BundledPackageAuthority {
             .map(|data| AdmittedBundledCatalog { data })
     }
 
+    /// Authenticates an exact active catalog and preserves its payload class.
+    ///
+    /// Unlike probing [`Self::admit_catalog`] and
+    /// [`Self::admit_acquired_catalog`] in sequence, this operation checks the
+    /// sealed length and digest and parses the canonical catalog exactly once.
+    /// The returned enum retains the nominal witness boundary: callers must
+    /// still handle bundled trees and acquired CRX packages through their
+    /// distinct materializers.
+    pub fn admit_active_catalog(
+        &self,
+        catalog_bytes: &[u8],
+    ) -> Result<AdmittedActiveCatalog, BundledCatalogAdmissionError> {
+        let (data, payload_class) = self.active.admit_classified(catalog_bytes)?;
+        Ok(match payload_class {
+            CatalogPayloadClass::BundledTree => {
+                AdmittedActiveCatalog::Bundled(AdmittedBundledCatalog { data })
+            }
+            CatalogPayloadClass::AcquiredZip => {
+                AdmittedActiveCatalog::Acquired(AdmittedAcquiredCatalog { data })
+            }
+        })
+    }
+
     /// Authenticates one exact active catalog of acquired CRX3 packages.
     ///
     /// This uses the same product-sealed active generation and license policy
@@ -483,6 +506,49 @@ pub struct AdmittedAcquiredCatalog {
     data: AdmittedCatalogData,
 }
 
+/// Authenticated metadata for one active catalog, classified by payload kind.
+///
+/// This is a closed dispatch witness, not a shared materialization capability.
+/// Its variants deliberately retain the nominal bundled-tree and acquired-CRX
+/// witness types so one representation cannot be passed to the other's byte
+/// source or materializer.
+///
+/// ```compile_fail
+/// use zephium_extension_authority::AdmittedActiveCatalog;
+/// fn require_clone<T: Clone>() {}
+/// fn duplicate() {
+///     require_clone::<AdmittedActiveCatalog>();
+/// }
+/// ```
+#[derive(Debug)]
+#[must_use = "admitted active metadata must be handled or deliberately discarded"]
+pub enum AdmittedActiveCatalog {
+    /// An active catalog whose packages are product-bundled canonical trees.
+    Bundled(AdmittedBundledCatalog),
+    /// An active catalog whose packages are acquired authenticated CRX files.
+    Acquired(AdmittedAcquiredCatalog),
+}
+
+const _: () = assert!(size_of::<AdmittedActiveCatalog>() <= ADMITTED_CATALOG_ACCOUNTING_OVERHEAD);
+
+impl AdmittedActiveCatalog {
+    /// Returns authenticated, structurally parsed catalog metadata.
+    pub const fn catalog(&self) -> &ExtensionReleaseCatalog {
+        match self {
+            Self::Bundled(catalog) => catalog.catalog(),
+            Self::Acquired(catalog) => catalog.catalog(),
+        }
+    }
+
+    /// Returns the exact structural generation projection for durable metadata.
+    pub const fn generation_anchor(&self) -> BundledCatalogGenerationAnchor {
+        match self {
+            Self::Bundled(catalog) => catalog.generation_anchor(),
+            Self::Acquired(catalog) => catalog.generation_anchor(),
+        }
+    }
+}
+
 const _: () =
     assert!(std::mem::size_of::<AdmittedAcquiredCatalog>() <= ADMITTED_CATALOG_ACCOUNTING_OVERHEAD);
 
@@ -780,11 +846,38 @@ impl SealedBundledCatalogGeneration {
         self.admit_prehashed(catalog_bytes, observed_digest, payload_class)
     }
 
+    fn admit_classified(
+        &self,
+        catalog_bytes: &[u8],
+    ) -> Result<(AdmittedCatalogData, CatalogPayloadClass), BundledCatalogAdmissionError> {
+        if catalog_bytes.len() != self.anchor.catalog_length {
+            return Err(BundledCatalogAdmissionError::CatalogLengthMismatch);
+        }
+        let observed_digest =
+            ExtensionReleaseCatalogDigest::from_bytes(Sha256::digest(catalog_bytes).into());
+        let data = self.admit_common_prehashed(catalog_bytes, observed_digest)?;
+        let payload_class = classify_catalog_payload(&data.catalog)
+            .ok_or(BundledCatalogAdmissionError::UnsupportedPayload)?;
+        Ok((data, payload_class))
+    }
+
     fn admit_prehashed(
         &self,
         catalog_bytes: &[u8],
         observed_digest: ExtensionReleaseCatalogDigest,
         payload_class: CatalogPayloadClass,
+    ) -> Result<AdmittedCatalogData, BundledCatalogAdmissionError> {
+        let data = self.admit_common_prehashed(catalog_bytes, observed_digest)?;
+        if !catalog_payload_matches(&data.catalog, payload_class) {
+            return Err(BundledCatalogAdmissionError::UnsupportedPayload);
+        }
+        Ok(data)
+    }
+
+    fn admit_common_prehashed(
+        &self,
+        catalog_bytes: &[u8],
+        observed_digest: ExtensionReleaseCatalogDigest,
     ) -> Result<AdmittedCatalogData, BundledCatalogAdmissionError> {
         if observed_digest != self.anchor.catalog_digest {
             return Err(BundledCatalogAdmissionError::CatalogDigestMismatch);
@@ -803,23 +896,6 @@ impl SealedBundledCatalogGeneration {
         catalog
             .bind_admission_policy(&self.policy)
             .map_err(BundledCatalogAdmissionError::Catalog)?;
-        let payloads_match = catalog
-            .packages()
-            .iter()
-            .all(|package| match payload_class {
-                CatalogPayloadClass::BundledTree => {
-                    package.payload() == ExtensionPackagePayloadIdentity::BundledTree
-                }
-                CatalogPayloadClass::AcquiredZip => {
-                    matches!(
-                        package.payload(),
-                        ExtensionPackagePayloadIdentity::AcquiredZip { .. }
-                    ) && package.chromium().is_some()
-                }
-            });
-        if !payloads_match {
-            return Err(BundledCatalogAdmissionError::UnsupportedPayload);
-        }
         let inventory_digest = digest_catalog_inventory(&catalog)
             .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
         if inventory_digest != self.anchor.inventory_digest {
@@ -840,6 +916,41 @@ impl SealedBundledCatalogGeneration {
             retained_bytes,
         })
     }
+}
+
+fn catalog_payload_matches(
+    catalog: &ExtensionReleaseCatalog,
+    payload_class: CatalogPayloadClass,
+) -> bool {
+    catalog
+        .packages()
+        .iter()
+        .all(|package| match payload_class {
+            CatalogPayloadClass::BundledTree => {
+                package.payload() == ExtensionPackagePayloadIdentity::BundledTree
+            }
+            CatalogPayloadClass::AcquiredZip => {
+                matches!(
+                    package.payload(),
+                    ExtensionPackagePayloadIdentity::AcquiredZip { .. }
+                ) && package.chromium().is_some()
+            }
+        })
+}
+
+fn classify_catalog_payload(catalog: &ExtensionReleaseCatalog) -> Option<CatalogPayloadClass> {
+    // Empty catalogs have no acquired bytes and retain the historical bundled
+    // classification. Durable catalog sets require at least one selected
+    // package, but keeping this deterministic also preserves existing catalog
+    // admission behavior for metadata-only empty generations.
+    let Some(first) = catalog.packages().first() else {
+        return Some(CatalogPayloadClass::BundledTree);
+    };
+    let payload_class = match first.payload() {
+        ExtensionPackagePayloadIdentity::BundledTree => CatalogPayloadClass::BundledTree,
+        ExtensionPackagePayloadIdentity::AcquiredZip { .. } => CatalogPayloadClass::AcquiredZip,
+    };
+    catalog_payload_matches(catalog, payload_class).then_some(payload_class)
 }
 
 // Deliberately absent until exact approved package, license, corresponding
@@ -1416,7 +1527,12 @@ mod tests {
     #[test]
     fn exact_fixture_is_admitted_as_metadata_only() {
         let bytes = catalog_bytes();
-        let admitted = authority_for(&bytes).admit_catalog(&bytes).unwrap();
+        let authority = authority_for(&bytes);
+        assert!(matches!(
+            authority.admit_active_catalog(&bytes).unwrap(),
+            AdmittedActiveCatalog::Bundled(_)
+        ));
+        let admitted = authority.admit_catalog(&bytes).unwrap();
         assert_eq!(admitted.catalog().packages().len(), 1);
         assert_eq!(admitted.authority().bytes(), [AUTHORITY_BYTE; 32]);
         assert_eq!(admitted.revision().get(), 1);
@@ -1533,6 +1649,10 @@ mod tests {
             acquired.disposition_against(None),
             BundledCatalogDisposition::Candidate
         );
+        assert!(matches!(
+            authority.admit_active_catalog(&bytes).unwrap(),
+            AdmittedActiveCatalog::Acquired(_)
+        ));
 
         let bundled_bytes = catalog_bytes();
         assert_eq!(
@@ -1557,6 +1677,33 @@ mod tests {
         assert_eq!(
             authority_for(&missing_chromium)
                 .admit_acquired_catalog(&missing_chromium)
+                .unwrap_err(),
+            BundledCatalogAdmissionError::UnsupportedPayload
+        );
+    }
+
+    #[test]
+    fn active_catalog_classification_rejects_mixed_payload_representations() {
+        let acquired = package_json(
+            8,
+            &format!(
+                r#"{{"kind":"acquired_zip","length":4,"sha256":"{}"}}"#,
+                hex(10)
+            ),
+        )
+        .replace(
+            r#""chromium":null"#,
+            &format!(r#""chromium":{{"manifest_key_sha256":"{}"}}"#, hex(11)),
+        );
+        let bytes = catalog_bytes_with(
+            AUTHORITY_BYTE,
+            1,
+            POLICY_BYTE,
+            &[package_json(7, r#"{"kind":"bundled_tree"}"#), acquired],
+        );
+        assert_eq!(
+            authority_for(&bytes)
+                .admit_active_catalog(&bytes)
                 .unwrap_err(),
             BundledCatalogAdmissionError::UnsupportedPayload
         );
