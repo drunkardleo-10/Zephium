@@ -19,16 +19,23 @@ use zephium_extension_package::{
 };
 
 use super::names::{package_record, tree_index_object, tree_object};
+#[cfg(feature = "acquired-packages")]
+use super::objects::{
+    preflight_acquired_package_object_capacity, verify_interrupted_acquired_active_package,
+    VerifiedAcquiredActivePackageClosure,
+};
 use super::objects::{
     preflight_package_object_capacity, verify_interrupted_active_package,
     verify_interrupted_rollback_package, PackageObjectError, PackageObjectIntentDisposition,
     VerifiedActivePackageClosure, VerifiedRollbackPackageClosure,
 };
+#[cfg(feature = "acquired-packages")]
+use super::prepare::prepare_acquired_active_package_from_preparsed;
 use super::prepare::{
     open_product_manifest_authority, prepare_active_package_from_preparsed,
     prepare_rollback_package_from_preparsed, PreparationError,
 };
-use super::records::{PackageRecord, MAX_PACKAGE_RECORD_BYTES};
+use super::records::{PackageRecord, StoredPayloadIdentity, MAX_PACKAGE_RECORD_BYTES};
 use super::runtime::MaterializationRuntime;
 use super::storage::read_required_sealed_record;
 use super::tree_reader::{with_verified_tree_resource, TreeResourceError};
@@ -39,6 +46,9 @@ use crate::ExtensionRepositoryError;
 pub(crate) enum VerifiedInterruptedPackageClosure {
     /// Ordinary active-generation completion authority.
     Active(VerifiedActivePackageClosure),
+    /// Active-generation acquired-package completion authority.
+    #[cfg(feature = "acquired-packages")]
+    AcquiredActive(VerifiedAcquiredActivePackageClosure),
     /// Explicit rollback-generation completion authority.
     Rollback(VerifiedRollbackPackageClosure),
 }
@@ -161,6 +171,45 @@ pub(crate) fn authenticate_interrupted_package(
     let manifest_authority = open_product_manifest_authority()
         .map_err(InterruptedPackageAuthenticationError::Preparation)?;
     let package_key = ExtensionPackageKey::from_bytes(marker.package.package_key.bytes());
+    #[cfg(feature = "acquired-packages")]
+    if matches!(
+        marker.package.payload,
+        StoredPayloadIdentity::AcquiredZip { .. }
+    ) {
+        if role != ProductBundledCatalogGenerationRole::Active {
+            return Err(InterruptedPackageAuthenticationError::DurableMismatch);
+        }
+        let catalog = authority
+            .admit_acquired_catalog(exact_catalog_bytes)
+            .map_err(InterruptedPackageAuthenticationError::CatalogAdmission)?;
+        if catalog.generation_anchor() != generation {
+            return Err(InterruptedPackageAuthenticationError::DurableMismatch);
+        }
+        let capacity = preflight_acquired_package_object_capacity(runtime, &marker, false)
+            .map_err(InterruptedPackageAuthenticationError::Object)?;
+        if capacity.intent_disposition() != PackageObjectIntentDisposition::AlreadyCommitted {
+            return Err(InterruptedPackageAuthenticationError::DurableMismatch);
+        }
+        let prepared = prepare_acquired_active_package_from_preparsed(
+            &catalog,
+            &manifest_authority,
+            marker.manifest.runtime_target.product_target(),
+            package_key,
+            index,
+            index_bytes.into_boxed_slice(),
+            manifest_bytes.into_boxed_slice(),
+        )
+        .map_err(InterruptedPackageAuthenticationError::Preparation)?;
+        if prepared.record() != &marker {
+            return Err(InterruptedPackageAuthenticationError::DurableMismatch);
+        }
+        return verify_interrupted_acquired_active_package(runtime, capacity, prepared)
+            .map(VerifiedInterruptedPackageClosure::AcquiredActive)
+            .map_err(InterruptedPackageAuthenticationError::Object);
+    }
+    if marker.package.payload != StoredPayloadIdentity::BundledTree {
+        return Err(InterruptedPackageAuthenticationError::DurableMismatch);
+    }
     let capacity = preflight_package_object_capacity(runtime, &marker)
         .map_err(InterruptedPackageAuthenticationError::Object)?;
     if capacity.intent_disposition() != PackageObjectIntentDisposition::AlreadyCommitted {

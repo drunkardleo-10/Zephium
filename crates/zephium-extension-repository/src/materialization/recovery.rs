@@ -280,7 +280,6 @@ fn open_or_recover_with_policy(
         if !shape.has_state || !shape.has_checkpoint {
             return Err(ExtensionRepositoryError::RecoveryAmbiguous);
         }
-        discard_acquisition_stage(&trees, &mut tree_inventory)?;
     }
     let mut record_inventory = inspect_records(&records)?;
     let mut journal_inventory = inspect_journals(&journals)?;
@@ -435,6 +434,7 @@ fn open_or_recover_with_policy(
         disposition,
         fault,
     )?;
+    reconcile_acquisition_stage_after_state(&trees, &state, &mut tree_inventory)?;
     // Enforce commit-marker reachability only after any exact prepared journal
     // has been applied. During completion recovery the current state may still
     // name the build intent while the prepared successor names the completed
@@ -461,7 +461,6 @@ fn open_or_recover_with_policy(
         acquisition,
         retired,
     } = tree_inventory;
-    debug_assert!(acquisition.is_none());
     // Stable handles are long-lived only for state-reachable final trees and
     // the one resumable build stage. Retired and dormant objects were opened
     // safely above, but GC reopens their exact verified names on demand rather
@@ -490,6 +489,7 @@ fn open_or_recover_with_policy(
         _build_intent: build_intent,
         _gc_intent: gc_intent,
         _build_stage: stage.map(|(_, _, stage)| stage),
+        _acquisition_stage: acquisition.map(|(_, _, stage)| stage),
         _retired_tree_ids: retired_tree_ids,
         _record_stages: record_inventory.stages,
     })
@@ -948,13 +948,36 @@ fn inspect_trees(trees: &PrivateDirectory) -> Result<TreeInventory, ExtensionRep
     })
 }
 
-/// Removes one crash-left acquired stage that no durable state can reference.
+/// Settles one acquisition stage against the converged durable state.
 ///
-/// The stage is always prepublication. A successful same-parent no-replace
-/// publication consumes this name, while the durable build protocol begins
-/// only after the stage has produced exact package metadata. Recovery can
-/// therefore discard the name unconditionally once both repository controls
-/// prove this is not an initialization frontier.
+/// A matching acquired-package build intent owns the disposable name long
+/// enough for the in-process publisher to consume it. Process restart remains
+/// source-free: settlement removes the stage before aborting an uncommitted
+/// package. With no intent the stage is unowned and is discarded here; a
+/// mismatched intent fails closed without deleting evidence.
+fn reconcile_acquisition_stage_after_state(
+    trees: &PrivateDirectory,
+    state: &MaterializationState,
+    inventory: &mut TreeInventory,
+) -> Result<(), ExtensionRepositoryError> {
+    let Some((digest, _, _)) = inventory.acquisition.as_ref() else {
+        return Ok(());
+    };
+    match state.build_intent.as_ref() {
+        None => discard_acquisition_stage(trees, inventory),
+        Some(intent)
+            if *digest == intent.package_record.tree_index.tree_sha256
+                && matches!(
+                    intent.package_record.package.payload,
+                    StoredPayloadIdentity::AcquiredZip { .. }
+                ) =>
+        {
+            Ok(())
+        }
+        Some(_) => Err(ExtensionRepositoryError::RecoveryAmbiguous),
+    }
+}
+
 fn discard_acquisition_stage(
     trees: &PrivateDirectory,
     inventory: &mut TreeInventory,
@@ -1608,6 +1631,16 @@ fn validate_build_inventory(
         }
         return Ok(());
     };
+    if let Some((digest, _, _)) = &trees.acquisition {
+        if *digest != intent.package_record.tree_index.tree_sha256
+            || !matches!(
+                intent.package_record.package.payload,
+                StoredPayloadIdentity::AcquiredZip { .. }
+            )
+        {
+            return Err(ExtensionRepositoryError::RecoveryAmbiguous);
+        }
+    }
     if let Some((digest, generation, _)) = &trees.stage {
         if *digest != intent.package_record.tree_index.tree_sha256
             || *generation != intent.generation

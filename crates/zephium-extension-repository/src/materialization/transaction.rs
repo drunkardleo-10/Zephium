@@ -23,6 +23,8 @@ use super::cleanup::{
 use super::cleanup::{AbortablePackageBuild, BuildStagesAbsent, CleanupError};
 use super::gc::{GarbageCollectionAbsenceProof, GarbageCollectionPlan};
 use super::names::{self, RecordNameKind, TreeNameKind};
+#[cfg(feature = "acquired-packages")]
+use super::objects::VerifiedAcquiredActivePackageClosure;
 use super::objects::{
     PackageObjectCapacity, PackageObjectError, VerifiedActivePackageClosure,
     VerifiedRollbackPackageClosure,
@@ -31,6 +33,8 @@ use super::package_lease::VerifiedPackagePinAdmission;
 use super::policy::{
     next_durable_generation, validate_completed_tree_budget, validate_package_anchor_consistency,
 };
+#[cfg(feature = "acquired-packages")]
+use super::prepare::PreparedAcquiredActivePackage;
 use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
 use super::records::{
     CatalogSetRecord, PackageIdentityAnchor, PackageRecord, StoredPayloadIdentity,
@@ -97,6 +101,25 @@ pub(crate) fn begin_active_package_build(
         runtime,
         capacity,
         prepared.record(),
+        TransitionFaultPoint::None,
+    )
+}
+
+/// Durably starts one acquired active-package build while binding the exact
+/// disposable stage shape observed by its capacity proof.
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn begin_acquired_active_package_build(
+    runtime: MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: &PreparedAcquiredActivePackage,
+    acquisition_stage: bool,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    begin_package_build_with_fault_kind(
+        runtime,
+        capacity,
+        prepared.record(),
+        true,
+        acquisition_stage,
         TransitionFaultPoint::None,
     )
 }
@@ -956,13 +979,29 @@ fn begin_package_build_with_fault(
     prepared_record: &PackageRecord,
     fault: TransitionFaultPoint,
 ) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    begin_package_build_with_fault_kind(runtime, capacity, prepared_record, false, false, fault)
+}
+
+fn begin_package_build_with_fault_kind(
+    runtime: MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared_record: &PackageRecord,
+    acquired_package: bool,
+    acquisition_stage: bool,
+    fault: TransitionFaultPoint,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
     validate_runtime(&runtime)?;
-    require_no_object_stages(&runtime)?;
+    if acquisition_stage {
+        require_exact_acquisition_stage(&runtime, prepared_record.tree_index.tree_sha256)?;
+    } else {
+        require_no_object_stages(&runtime)?;
+    }
     if runtime._state.build_intent.is_some() {
         return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
     }
-    let (preflight_generation, records_parent, trees_parent, record) =
-        capacity.into_begin_parts().map_err(map_begin_proof_error)?;
+    let (preflight_generation, records_parent, trees_parent, record) = capacity
+        .into_begin_parts(acquired_package, acquisition_stage)
+        .map_err(map_begin_proof_error)?;
     if runtime._state.generation != preflight_generation
         || runtime._records.identity() != records_parent
         || runtime._trees.identity() != trees_parent
@@ -1035,6 +1074,37 @@ pub(crate) fn complete_active_package(
     closure: VerifiedActivePackageClosure,
 ) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
     complete_active_package_with_fault(runtime, closure, TransitionFaultPoint::None)
+}
+
+/// Completes an acquired active package without erasing its nominal package
+/// representation at the transaction boundary.
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn complete_acquired_active_package(
+    runtime: MaterializationRuntime,
+    closure: VerifiedAcquiredActivePackageClosure,
+) -> Result<MaterializationTransitionCommitted, MaterializationTransitionError> {
+    let (
+        generation,
+        record_id,
+        record,
+        _tree_root,
+        records_parent,
+        trees_parent,
+        stages_absent,
+        _active_authority,
+    ) = closure.into_completion_parts();
+    complete_package_build(
+        runtime,
+        CompletionPlan {
+            intent_generation: generation,
+            record_id,
+            record,
+            records_parent,
+            trees_parent,
+            stages_absent,
+        },
+        TransitionFaultPoint::None,
+    )
 }
 
 pub(crate) fn complete_active_package_with_fault(
@@ -1238,7 +1308,7 @@ fn require_no_object_stages(
     {
         let (_, kind) = names::parse_tree_name(entry.as_str())
             .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
-        if matches!(kind, TreeNameKind::Stage(_)) {
+        if matches!(kind, TreeNameKind::Stage(_) | TreeNameKind::Acquisition) {
             return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
         }
     }
@@ -1256,6 +1326,49 @@ fn require_no_object_stages(
                 | RecordNameKind::TreeIndex { stage: true }
                 | RecordNameKind::Legal { stage: true }
         ) {
+            return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+        }
+    }
+    Ok(())
+}
+
+fn require_exact_acquisition_stage(
+    runtime: &MaterializationRuntime,
+    expected_tree: Digest32,
+) -> Result<(), MaterializationTransitionError> {
+    if runtime._build_stage.is_some()
+        || runtime._acquisition_stage.is_none()
+        || !runtime._record_stages.is_empty()
+    {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    let mut observed = false;
+    for entry in runtime
+        ._trees
+        .list_components(names::MAX_TREE_ENTRIES)
+        .map_err(map_prepublication_fs)?
+    {
+        let (digest, kind) = names::parse_tree_name(entry.as_str())
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        match kind {
+            TreeNameKind::Acquisition if digest == expected_tree && !observed => observed = true,
+            TreeNameKind::Acquisition | TreeNameKind::Stage(_) => {
+                return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+            }
+            TreeNameKind::Object | TreeNameKind::Retired(_) => {}
+        }
+    }
+    if !observed {
+        return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
+    }
+    for entry in runtime
+        ._records
+        .list_components(names::MAX_RECORD_ENTRIES)
+        .map_err(map_prepublication_fs)?
+    {
+        let (_, kind) = names::parse_record_name(entry.as_str())
+            .ok_or_else(|| before_journal(ExtensionRepositoryError::RecoveryAmbiguous))?;
+        if kind.is_stage() {
             return Err(before_journal(ExtensionRepositoryError::RecoveryAmbiguous));
         }
     }
@@ -1937,6 +2050,76 @@ mod tests {
                 assert_recovered_shape(&recovered, &record, generation, intent, disposition);
                 drop(recovered);
             }
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        #[test]
+        fn acquired_begin_transition_preserves_only_its_exact_stage() {
+            use std::sync::Arc;
+
+            use crate::materialization::objects::preflight_acquired_package_object_capacity;
+            use crate::materialization::records::StoredPayloadIdentity;
+            use crate::materialization::runtime::MaterializationTreeCapability;
+
+            let (harness, mut runtime) = NativeHarness::new();
+            let mut record = package_record_fixture(49);
+            record.package.payload = StoredPayloadIdentity::AcquiredZip {
+                length: 19,
+                sha256: Digest32::from_bytes([49; 32]),
+            };
+            let stage_name = names::tree_acquisition_stage(record.tree_index.tree_sha256);
+            let stage = runtime
+                ._trees
+                .create_new_private_child(&stage_name)
+                .unwrap();
+            let sealed = stage.seal().unwrap();
+            runtime._acquisition_stage = Some(MaterializationTreeCapability::Sealed {
+                _directory: Arc::new(sealed),
+            });
+            let capacity =
+                preflight_acquired_package_object_capacity(&runtime, &record, true).unwrap();
+
+            let _ = begin_package_build_with_fault_kind(
+                runtime,
+                capacity,
+                &record,
+                true,
+                true,
+                TransitionFaultPoint::None,
+            )
+            .unwrap();
+
+            let mut recovered = harness.recover();
+            assert_eq!(recovered._state.generation, 1);
+            assert_eq!(
+                recovered._build_intent.as_ref().unwrap().package_record,
+                record
+            );
+            assert!(recovered._build_stage.is_none());
+            assert!(recovered._acquisition_stage.is_some());
+            assert!(recovered
+                ._trees
+                .open_sealed_private_child(&stage_name)
+                .is_ok());
+
+            let PackageBuildCommitMarker::Absent(marker_absent) =
+                inspect_package_build_commit_marker(&recovered).unwrap()
+            else {
+                panic!("acquired fixture unexpectedly contains its commit marker");
+            };
+            let abortable =
+                reconcile_build_stages_for_abort(&mut recovered, marker_absent).unwrap();
+            let _ = abort_package_build(recovered, abortable).unwrap();
+            let settled = harness.recover();
+            assert!(settled._build_intent.is_none());
+            assert!(settled._acquisition_stage.is_none());
+            assert_eq!(
+                settled
+                    ._trees
+                    .open_private_child_any_mode(&stage_name)
+                    .err(),
+                Some(PrivateFsError::NotFound)
+            );
         }
 
         #[test]

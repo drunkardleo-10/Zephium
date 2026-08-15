@@ -14,6 +14,8 @@ use zephium_extension_authority::{
 use zephium_extension_package::ExtensionTreeIndexError;
 use zephium_private_fs::PrivateFsError;
 
+#[cfg(feature = "acquired-packages")]
+use crate::materialization::complete_acquired_active_package;
 #[cfg(all(
     test,
     zephium_internal_repository_e2e,
@@ -204,6 +206,10 @@ impl ExtensionRepository {
                         VerifiedInterruptedPackageClosure::Active(closure) => {
                             complete_active_package(runtime, closure)
                         }
+                        #[cfg(feature = "acquired-packages")]
+                        VerifiedInterruptedPackageClosure::AcquiredActive(closure) => {
+                            complete_acquired_active_package(runtime, closure)
+                        }
                         VerifiedInterruptedPackageClosure::Rollback(closure) => {
                             complete_rollback_package(runtime, closure)
                         }
@@ -369,6 +375,10 @@ fn map_object_error(error: PackageObjectError) -> BundledPackageBuildSettlementE
         | PackageObjectError::Source(_) => {
             BundledPackageBuildSettlementError::DurableObjectMismatch
         }
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => {
+            BundledPackageBuildSettlementError::DurableObjectMismatch
+        }
     }
 }
 
@@ -394,6 +404,10 @@ fn authentication_error_requires_sealing(error: &InterruptedPackageAuthenticatio
         // future violation of that boundary as durable incoherence, never as a
         // retryable adapter failure.
         InterruptedPackageAuthenticationError::Object(PackageObjectError::Source(_)) => true,
+        #[cfg(feature = "acquired-packages")]
+        InterruptedPackageAuthenticationError::Object(PackageObjectError::AcquiredLegalSource(
+            _,
+        )) => true,
         InterruptedPackageAuthenticationError::CatalogAuthority(_)
         | InterruptedPackageAuthenticationError::CatalogAdmission(_)
         | InterruptedPackageAuthenticationError::Repository(_)

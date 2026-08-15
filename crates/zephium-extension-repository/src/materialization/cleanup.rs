@@ -17,6 +17,7 @@ use zephium_private_fs::ByteLimit;
 use zephium_private_fs::{DirectoryIdentity, PrivateComponent, PrivateFsError};
 
 use super::names::{self, RecordObjectKind, TreeNameKind};
+use super::records::StoredPayloadIdentity;
 #[cfg(all(
     test,
     zephium_internal_repository_e2e,
@@ -144,13 +145,17 @@ impl BuildStagesAbsent {
             || intent.generation != self.intent_generation
             || intent.package_record_id != self.package_record_id
             || runtime._build_stage.is_some()
+            || runtime._acquisition_stage.is_some()
             || !runtime._record_stages.is_empty()
         {
             return Err(CleanupError::BuildStateMismatch);
         }
 
         let inventory = inspect_stage_inventory(runtime, intent)?;
-        if inventory.tree.stage.is_some() || !inventory.records.stages.is_empty() {
+        if inventory.tree.stage.is_some()
+            || inventory.tree.acquisition.is_some()
+            || !inventory.records.stages.is_empty()
+        {
             return Err(CleanupError::ExactMismatch);
         }
         Ok(())
@@ -165,11 +170,17 @@ pub(super) fn prove_build_stages_absent(
     runtime: &MaterializationRuntime,
 ) -> Result<BuildStagesAbsent, CleanupError> {
     let intent = IntentStageIdentity::from_runtime(runtime)?;
-    if runtime._build_stage.is_some() || !runtime._record_stages.is_empty() {
+    if runtime._build_stage.is_some()
+        || runtime._acquisition_stage.is_some()
+        || !runtime._record_stages.is_empty()
+    {
         return Err(CleanupError::BuildStateMismatch);
     }
     let inventory = inspect_stage_inventory(runtime, intent)?;
-    if inventory.tree.stage.is_some() || !inventory.records.stages.is_empty() {
+    if inventory.tree.stage.is_some()
+        || inventory.tree.acquisition.is_some()
+        || !inventory.records.stages.is_empty()
+    {
         return Err(CleanupError::ExactMismatch);
     }
     Ok(proof(runtime, intent))
@@ -243,9 +254,17 @@ pub(crate) fn reconcile_build_stages_preserving_intent(
             Ok(false) | Err(_) => return Err(CleanupError::SettlementAmbiguous),
         }
     }
+    drop(runtime._acquisition_stage.take());
+    if let Some(stage_name) = &before.tree.acquisition {
+        match cleanup_tree_stage(&runtime._trees, stage_name) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Err(CleanupError::SettlementAmbiguous),
+        }
+    }
 
     let after = inspect_stage_inventory(runtime, intent)?;
     if after.tree.stage.is_some()
+        || after.tree.acquisition.is_some()
         || !after.records.stages.is_empty()
         || after.tree.retained != before.tree.retained
         || after.records.retained != before.records.retained
@@ -378,6 +397,7 @@ struct IntentStageIdentity {
     tree_id: Digest32,
     tree_index_id: Digest32,
     legal_id: Digest32,
+    acquired_package: bool,
 }
 
 impl IntentStageIdentity {
@@ -401,6 +421,10 @@ impl IntentStageIdentity {
             tree_id: intent.package_record.tree_index.tree_sha256,
             tree_index_id: intent.package_record.tree_index.index_sha256,
             legal_id: intent.package_record.legal.sha256,
+            acquired_package: matches!(
+                intent.package_record.package.payload,
+                StoredPayloadIdentity::AcquiredZip { .. }
+            ),
         })
     }
 
@@ -425,6 +449,7 @@ struct StageInventory {
 #[derive(Default)]
 struct TreeStageInventory {
     stage: Option<PrivateComponent>,
+    acquisition: Option<PrivateComponent>,
     retained: BTreeSet<PrivateComponent>,
 }
 
@@ -483,6 +508,11 @@ fn inspect_tree_stages(
                 }
             }
             TreeNameKind::Stage(_) => return Err(CleanupError::ExactMismatch),
+            TreeNameKind::Acquisition if intent.acquired_package && digest == intent.tree_id => {
+                if inventory.acquisition.replace(entry).is_some() {
+                    return Err(CleanupError::ExactMismatch);
+                }
+            }
             TreeNameKind::Acquisition => return Err(CleanupError::ExactMismatch),
             TreeNameKind::Object | TreeNameKind::Retired(_) => {
                 inventory.retained.insert(entry);
@@ -538,6 +568,7 @@ fn validate_runtime_projection(
         || runtime._records.identity() != inventory.records_identity
         || runtime._trees.identity() != inventory.trees_identity
         || runtime._build_stage.is_some() != inventory.tree.stage.is_some()
+        || runtime._acquisition_stage.is_some() != inventory.tree.acquisition.is_some()
         || runtime._record_stages != inventory.records.stages
     {
         return Err(CleanupError::BuildStateMismatch);
@@ -569,6 +600,7 @@ mod tests {
             tree_id: package.tree_index.tree_sha256,
             tree_index_id: package.tree_index.index_sha256,
             legal_id: package.legal.sha256,
+            acquired_package: false,
         };
 
         assert_eq!(
@@ -738,6 +770,7 @@ mod tests {
             _build_stage: Some(MaterializationTreeCapability::Writable {
                 _directory: tree_stage,
             }),
+            _acquisition_stage: None,
             _retired_tree_ids: BTreeSet::from([(retired_tree_id, generation)]),
             _record_stages: projected_stages,
         };

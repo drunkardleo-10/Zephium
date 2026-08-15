@@ -47,6 +47,10 @@ pub use catalog_selection::{
 };
 pub use error::ExtensionRepositoryError;
 pub use garbage_collection::BundledPackageGarbageCollectionOutcome;
+#[cfg(feature = "acquired-packages")]
+pub use materialization::{
+    AcquiredReleaseLegalResource, AcquiredReleaseLegalSource, AcquiredReleaseLegalSourceError,
+};
 pub use materialization::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
     BundledReleasePackageSourceIdentity, BundledReleaseResource, BundledReleaseResourceKind,
@@ -77,4 +81,6 @@ pub use package_lease::{
     MAX_BUNDLED_RUNTIME_PRE_HOST_REFUSAL_ADDITIONAL_RETAINED_BYTES,
 };
 pub use settlement::{BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome};
+#[cfg(feature = "acquired-packages")]
+pub use writer::{AcquiredPackageMaterializationError, AcquiredPackageMaterializationOutcome};
 pub use writer::{BundledPackageMaterializationError, BundledPackageMaterializationOutcome};

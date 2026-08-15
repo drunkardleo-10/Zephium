@@ -2,6 +2,8 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogCheckpoint,
 };
@@ -121,6 +123,32 @@ impl ExtensionRepository {
         let runtime = self.runtime.clone();
         let operation = runtime.enter().map_err(|error| error.repository_error())?;
         self.record_bundled_catalog_under_gate(&operation, admitted, exact_catalog_bytes)
+    }
+
+    /// Records one product-authenticated catalog whose package payloads are
+    /// acquired CRX3 archives. Metadata follows the same monotonic authority
+    /// floor as bundled catalogs; this operation acquires no package bytes.
+    #[cfg(feature = "acquired-packages")]
+    pub fn record_acquired_catalog(
+        &mut self,
+        admitted: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
+        let runtime = self.runtime.clone();
+        let operation = runtime.enter().map_err(|error| error.repository_error())?;
+        self.record_acquired_catalog_under_gate(&operation, admitted, exact_catalog_bytes)
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    pub(crate) fn record_acquired_catalog_under_gate(
+        &mut self,
+        _operation: &RepositoryOperationGuard<'_>,
+        admitted: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<BundledCatalogRecordOutcome, ExtensionRepositoryError> {
+        let outcome = self.record_view(admitted, exact_catalog_bytes, FaultPoint::None)?;
+        self.writer_seed_active_acquired_catalog(admitted)?;
+        Ok(outcome)
     }
 
     pub(crate) fn record_bundled_catalog_under_gate(
@@ -532,6 +560,16 @@ impl ExtensionRepository {
         self.writer_seed_active_catalog(admitted)
     }
 
+    #[cfg(feature = "acquired-packages")]
+    pub(crate) fn writer_stage_active_acquired_catalog_candidate(
+        &mut self,
+        admitted: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+    ) -> Result<(), ExtensionRepositoryError> {
+        self.stage_catalog_candidate_view(admitted, exact_catalog_bytes)?;
+        self.writer_seed_active_acquired_catalog(admitted)
+    }
+
     fn stage_catalog_candidate_view(
         &mut self,
         admitted: &impl CatalogWitnessView,
@@ -765,6 +803,24 @@ impl ExtensionRepository {
         result.map_err(|error| self.prejournal_error(error))
     }
 
+    #[cfg(feature = "acquired-packages")]
+    fn writer_seed_active_acquired_catalog(
+        &mut self,
+        admitted: &AdmittedAcquiredCatalog,
+    ) -> Result<(), ExtensionRepositoryError> {
+        let digest = Digest32::from_bytes(admitted.catalog_digest().bytes());
+        let identity = self
+            .catalog_object_identities
+            .get(&digest)
+            .copied()
+            .ok_or(ExtensionRepositoryError::StateCorrupt)
+            .map_err(|error| self.prejournal_error(error))?;
+        let result = self
+            .catalog_admission_cache
+            .seed_active_acquired(identity, admitted);
+        result.map_err(|error| self.prejournal_error(error))
+    }
+
     fn writer_seed_rollback_catalog(
         &mut self,
         admitted: &AdmittedRollbackBundledCatalog,
@@ -841,6 +897,17 @@ impl CatalogWitnessView for AdmittedBundledCatalog {
 
     fn checkpoint(&self) -> BundledCatalogCheckpoint {
         AdmittedBundledCatalog::checkpoint(self)
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+impl CatalogWitnessView for AdmittedAcquiredCatalog {
+    fn catalog(&self) -> &ExtensionReleaseCatalog {
+        AdmittedAcquiredCatalog::catalog(self)
+    }
+
+    fn checkpoint(&self) -> BundledCatalogCheckpoint {
+        AdmittedAcquiredCatalog::checkpoint(self)
     }
 }
 

@@ -225,6 +225,10 @@ fn map_object_error(error: PackageObjectError) -> BundledManifestBindingsError {
         PackageObjectError::Collision
         | PackageObjectError::ExactMismatch
         | PackageObjectError::Source(_) => BundledManifestBindingsError::DurableObjectMismatch,
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => {
+            BundledManifestBindingsError::DurableObjectMismatch
+        }
         PackageObjectError::Filesystem(error) => {
             BundledManifestBindingsError::Repository(ExtensionRepositoryError::FileSystem(error))
         }

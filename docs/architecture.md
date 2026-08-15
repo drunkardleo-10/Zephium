@@ -949,8 +949,8 @@ repository transition. These tests use a bounded native fake and do not
 substitute for a live platform adapter.
 
 Durable package identity is representation-exact. A bundled authenticated tree
-is tagged `BundledTree` and carries no synthetic archive evidence; a future
-acquired ZIP is tagged separately and binds both a non-zero bounded byte length
+is tagged `BundledTree` and carries no synthetic archive evidence; an acquired
+ZIP is tagged separately and binds both a non-zero bounded byte length
 and its SHA-256 before materialization. The profile schema stores the same tag
 and nullable/exact ZIP evidence redundantly in install and grant rows, and the
 bounded codecs reject any disagreement. Profile schema v12 is a deliberate
@@ -991,17 +991,31 @@ product definitions of safe extraction cannot drift. The repository's opt-in
 directly into a create-new private tree, retains only the bounded root
 manifest, binds the complete receipt cohort to the release row, bottom-up seals
 the stage, and then independently enumerates and re-hashes every closed file.
+When the declared content-addressed tree already exists, the same archive
+authentication, decompression, CRC, digest, and receipt work runs once with
+non-manifest bytes sent to a zero-retention sink; no duplicate tree is built.
 No stream callback or receipt alone is publication authority, and the ordinary
 product graph does not link the archive stack. The prepublication tree uses one
 canonical `.acquiring` name distinct from both content objects and durable
-build stages. It is never a state or journal root: after proving both repository
-controls exist, open drops its recovered capability and removes that exact
-bounded tree before state recovery. Missing controls, multiple acquisition
-stages, or an object/stage digest alias fail closed before cleanup. A crash may
-therefore discard work but can never resume partial bytes as authority or
-manufacture a pristine repository. The remaining product transaction must
-admit the acquired manifest, persist the canonical index and legal artifact,
-and publish the package record last before install or activation.
+build stages. The outer catalog high-water transition completes before this
+name is created, because that transition reopens the materialization namespace
+and correctly removes every unowned acquisition stage. The subsequent package
+build intent may preserve exactly one acquisition stage only when its digest
+and `AcquiredZip` record match. A source-free restart with no package-record
+commit marker removes that exact stage and aborts the intent; a marker-committed
+restart reconstructs acquired catalog and manifest authority from repository
+objects and completes only after re-verifying the entire final closure. Missing
+controls, multiple stages, a bundled or mismatched intent, or an object/stage
+digest alias fail closed without deleting ambiguous evidence.
+
+Acquired publication consumes the stage with the same-parent no-replace
+primitive, persists the canonical index and authenticated legal artifact, and
+publishes the package record last. Only then may the completed ledger advance.
+The public materializer accepts borrowed CRX bytes and the existing
+capability-limited legal-resource adapter; it performs no network request,
+accepts no host path, and grants no install, profile, activation, or native
+controller authority. The ordinary build remains archive-free unless the
+`acquired-packages` feature is explicitly enabled.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,

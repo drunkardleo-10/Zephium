@@ -2342,7 +2342,7 @@ fn two_prepared_journals_and_tree_slot_aliases_are_ambiguous() {
 }
 
 #[test]
-fn crash_left_acquisition_stage_is_discarded_before_state_recovery() {
+fn unowned_acquisition_stage_is_discarded_but_wrong_intent_fails_closed() {
     for (sealed, durable_intent) in [(false, false), (true, false), (false, true), (true, true)] {
         let harness = Harness::new();
         drop(harness.open());
@@ -2376,14 +2376,62 @@ fn crash_left_acquisition_stage_is_discarded_before_state_recovery() {
         }
         drop(handles);
 
-        let (_, runtime) = harness.open();
-        assert_eq!(runtime._build_intent.is_some(), durable_intent);
-        assert!(runtime._build_stage.is_none());
-        assert_eq!(
-            runtime._trees.open_private_child_any_mode(&name).err(),
-            Some(zephium_private_fs::PrivateFsError::NotFound)
-        );
+        if durable_intent {
+            assert_eq!(
+                harness.open_with_fault(FaultPoint::None).err(),
+                Some(ExtensionRepositoryError::RecoveryAmbiguous)
+            );
+            let handles = harness.handles();
+            assert!(handles.trees.open_private_child_any_mode(&name).is_ok());
+        } else {
+            let (_, runtime) = harness.open();
+            assert!(runtime._build_intent.is_none());
+            assert!(runtime._build_stage.is_none());
+            assert!(runtime._acquisition_stage.is_none());
+            assert_eq!(
+                runtime._trees.open_private_child_any_mode(&name).err(),
+                Some(zephium_private_fs::PrivateFsError::NotFound)
+            );
+        }
     }
+}
+
+#[test]
+fn matching_acquired_intent_preserves_only_its_exact_disposable_stage() {
+    let harness = Harness::new();
+    drop(harness.open());
+    let handles = harness.handles();
+    let mut package = package_record_fixture(90);
+    package.package.payload = StoredPayloadIdentity::AcquiredZip {
+        length: 17,
+        sha256: Digest32::from_bytes([91; 32]),
+    };
+    let state = MaterializationState {
+        generation: 1,
+        build_intent: Some(MaterializationBuildIntent {
+            schema_version: MATERIALIZATION_BUILD_INTENT_SCHEMA_VERSION,
+            generation: 1,
+            package_record_id: package.record_id().unwrap(),
+            package_record: package.clone(),
+        }),
+        ..MaterializationState::default()
+    };
+    replace_settled_state(&handles, &state);
+    let name = names::tree_acquisition_stage(package.tree_index.tree_sha256);
+    let stage = handles.trees.create_new_private_child(&name).unwrap();
+    let child_name = PrivateComponent::new("manifest.json").unwrap();
+    stage
+        .write_new_synced(&child_name, b"partial", ByteLimit::new(16).unwrap())
+        .unwrap();
+    stage.seal_verified_regular(&child_name).unwrap().unwrap();
+    drop(stage.seal().unwrap());
+    drop(handles);
+
+    let (_, runtime) = harness.open();
+    assert!(runtime._build_intent.is_some());
+    assert!(runtime._build_stage.is_none());
+    assert!(runtime._acquisition_stage.is_some());
+    assert!(runtime._trees.open_private_child_any_mode(&name).is_ok());
 }
 
 #[test]

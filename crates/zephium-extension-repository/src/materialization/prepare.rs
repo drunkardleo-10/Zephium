@@ -5,6 +5,10 @@ use std::io::Read;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zephium_core::extensions::{ExtensionPackageKey, ExtensionPackagePayloadIdentity};
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_acquisition::AcquiredExtensionTreeReceipt;
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, ProductAdmittedExtensionManifest,
     ProductAdmittedRollbackExtensionManifest, ProductExtensionManifestAdmissionError,
@@ -38,7 +42,7 @@ pub(crate) enum PreparationError {
     CatalogDigestMismatch,
     #[error("the requested package is absent from the admitted catalog")]
     PackageMissing,
-    #[error("the requested package payload is not a bundled resource tree")]
+    #[error("the requested package payload has the wrong representation")]
     UnsupportedPayload,
     #[error("the selected extension runtime target is unsupported")]
     UnsupportedRuntimeTarget,
@@ -72,6 +76,42 @@ pub(crate) enum PreparationError {
 pub(crate) struct PreparedActivePackage {
     data: PreparedPackageData,
     _manifest: ProductAdmittedExtensionManifest,
+}
+
+/// Exact active acquired-package preflight.
+///
+/// The disposable filesystem stage is deliberately not embedded in this
+/// authority witness. Keeping it separate lets the writer remove the stage on
+/// every clean pre-intent refusal instead of losing the only cleanup handle
+/// inside a failed preparation.
+#[cfg(feature = "acquired-packages")]
+#[must_use = "prepared acquired package authority must be materialized or discarded"]
+pub(crate) struct PreparedAcquiredActivePackage {
+    data: PreparedPackageData,
+    _manifest: ProductAdmittedExtensionManifest,
+}
+
+#[cfg(feature = "acquired-packages")]
+impl PreparedAcquiredActivePackage {
+    pub(super) const fn package_source(&self) -> BundledReleasePackageSourceIdentity {
+        self.data.package_source
+    }
+
+    pub(super) const fn tree_index(&self) -> &CanonicalExtensionTreeIndex {
+        &self.data.tree_index
+    }
+
+    pub(super) fn tree_index_bytes(&self) -> &[u8] {
+        &self.data.tree_index_bytes
+    }
+
+    pub(super) fn manifest_bytes(&self) -> &[u8] {
+        &self.data.manifest_bytes
+    }
+
+    pub(crate) const fn record(&self) -> &PackageRecord {
+        &self.data.record
+    }
 }
 
 impl PreparedActivePackage {
@@ -216,6 +256,7 @@ pub(crate) fn prepare_active_package_from_preparsed(
         catalog.catalog(),
         catalog_source,
         package_key,
+        ExpectedPayloadClass::BundledTree,
         tree_index,
         tree_index_bytes,
         manifest_bytes,
@@ -272,6 +313,129 @@ fn prepare_active_loaded(
     })
 }
 
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn prepare_acquired_active_package(
+    catalog: &AdmittedAcquiredCatalog,
+    exact_catalog_bytes: &[u8],
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    receipt: AcquiredExtensionTreeReceipt,
+    manifest_bytes: Box<[u8]>,
+) -> Result<PreparedAcquiredActivePackage, PreparationError> {
+    verify_catalog_bytes(
+        catalog.catalog_length(),
+        catalog.catalog_digest().bytes(),
+        exact_catalog_bytes,
+    )?;
+    let catalog_source =
+        BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
+            .ok_or(PreparationError::AccountingOverflow)?;
+    let package = catalog
+        .catalog()
+        .package(package_key)
+        .ok_or(PreparationError::PackageMissing)?;
+    let (tree_index_bytes, tree_index) = receipt
+        .into_release_tree_artifacts(package)
+        .map_err(|_| PreparationError::InvalidRecord)?;
+    let loaded = bind_preparsed_package_bytes(
+        catalog.catalog(),
+        catalog_source,
+        package_key,
+        ExpectedPayloadClass::AcquiredZip,
+        tree_index,
+        tree_index_bytes,
+        manifest_bytes,
+    )?;
+    prepare_acquired_loaded(
+        catalog,
+        manifest_authority,
+        runtime_target,
+        package_key,
+        loaded,
+    )
+}
+
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn prepare_acquired_active_package_from_preparsed(
+    catalog: &AdmittedAcquiredCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    tree_index: CanonicalExtensionTreeIndex,
+    tree_index_bytes: Box<[u8]>,
+    manifest_bytes: Box<[u8]>,
+) -> Result<PreparedAcquiredActivePackage, PreparationError> {
+    let catalog_source =
+        BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
+            .ok_or(PreparationError::AccountingOverflow)?;
+    let loaded = bind_preparsed_package_bytes(
+        catalog.catalog(),
+        catalog_source,
+        package_key,
+        ExpectedPayloadClass::AcquiredZip,
+        tree_index,
+        tree_index_bytes,
+        manifest_bytes,
+    )?;
+    prepare_acquired_loaded(
+        catalog,
+        manifest_authority,
+        runtime_target,
+        package_key,
+        loaded,
+    )
+}
+
+#[cfg(feature = "acquired-packages")]
+fn prepare_acquired_loaded(
+    catalog: &AdmittedAcquiredCatalog,
+    manifest_authority: &ProductExtensionManifestAuthority,
+    runtime_target: ProductExtensionRuntimeTarget,
+    package_key: ExtensionPackageKey,
+    loaded: LoadedPackageBytes,
+) -> Result<PreparedAcquiredActivePackage, PreparationError> {
+    let catalog_source = loaded.package_source.catalog();
+    let package = catalog
+        .catalog()
+        .package(package_key)
+        .ok_or(PreparationError::PackageMissing)?;
+    let manifest = manifest_authority
+        .admit_acquired_manifest(
+            catalog,
+            runtime_target,
+            package_key,
+            &loaded.tree_index,
+            &loaded.manifest_bytes,
+        )
+        .map_err(PreparationError::ManifestAdmission)?;
+    validate_active_witness(catalog_source, package, &loaded, runtime_target, &manifest)?;
+    let record = package_record(
+        catalog_source,
+        package,
+        &loaded,
+        manifest.runtime_target(),
+        manifest.compatibility_target().as_str(),
+        manifest.admission_digest().bytes(),
+    )?;
+    let LoadedPackageBytes {
+        package_source,
+        tree_index,
+        tree_index_bytes,
+        manifest_bytes,
+    } = loaded;
+    Ok(PreparedAcquiredActivePackage {
+        data: PreparedPackageData {
+            package_source,
+            tree_index,
+            tree_index_bytes,
+            manifest_bytes,
+            record,
+        },
+        _manifest: manifest,
+    })
+}
+
 pub(crate) fn prepare_rollback_package<S: BundledReleaseByteSource>(
     catalog: &AdmittedRollbackBundledCatalog,
     exact_catalog_bytes: &[u8],
@@ -314,6 +478,7 @@ pub(crate) fn prepare_rollback_package_from_preparsed(
         catalog.catalog(),
         catalog_source,
         package_key,
+        ExpectedPayloadClass::BundledTree,
         tree_index,
         tree_index_bytes,
         manifest_bytes,
@@ -390,7 +555,12 @@ fn load_package_bytes<S: BundledReleaseByteSource>(
     package_key: ExtensionPackageKey,
     source: &mut S,
 ) -> Result<LoadedPackageBytes, PreparationError> {
-    let (package, package_source) = exact_package_source(catalog, catalog_source, package_key)?;
+    let (package, package_source) = exact_package_source(
+        catalog,
+        catalog_source,
+        package_key,
+        ExpectedPayloadClass::BundledTree,
+    )?;
 
     let tree_index_bytes = read_exact_resource(
         source,
@@ -435,6 +605,7 @@ fn bind_preparsed_package_bytes(
     catalog: &ExtensionReleaseCatalog,
     catalog_source: BundledReleaseCatalogSourceIdentity,
     package_key: ExtensionPackageKey,
+    expected_payload: ExpectedPayloadClass,
     tree_index: CanonicalExtensionTreeIndex,
     tree_index_bytes: Box<[u8]>,
     manifest_bytes: Box<[u8]>,
@@ -443,7 +614,8 @@ fn bind_preparsed_package_bytes(
     // bytes once. Rebind the retained bytes, parsed index, admitted catalog,
     // and manifest here without repeating parser work or accepting a public
     // caller-supplied witness.
-    let (package, package_source) = exact_package_source(catalog, catalog_source, package_key)?;
+    let (package, package_source) =
+        exact_package_source(catalog, catalog_source, package_key, expected_payload)?;
     let index_length =
         u64::try_from(tree_index_bytes.len()).map_err(|_| PreparationError::AccountingOverflow)?;
     if index_length == 0
@@ -488,6 +660,7 @@ fn exact_package_source(
     catalog: &ExtensionReleaseCatalog,
     catalog_source: BundledReleaseCatalogSourceIdentity,
     package_key: ExtensionPackageKey,
+    expected_payload: ExpectedPayloadClass,
 ) -> Result<
     (
         &ExtensionReleasePackage,
@@ -498,7 +671,7 @@ fn exact_package_source(
     let package = catalog
         .package(package_key)
         .ok_or(PreparationError::PackageMissing)?;
-    if package.payload() != ExtensionPackagePayloadIdentity::BundledTree {
+    if !expected_payload.matches(package.payload()) {
         return Err(PreparationError::UnsupportedPayload);
     }
     let package_row = digest_package_row(package)
@@ -511,6 +684,24 @@ fn exact_package_source(
     )
     .ok_or(PreparationError::AccountingOverflow)?;
     Ok((package, package_source))
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedPayloadClass {
+    BundledTree,
+    #[cfg(feature = "acquired-packages")]
+    AcquiredZip,
+}
+
+impl ExpectedPayloadClass {
+    const fn matches(self, payload: ExtensionPackagePayloadIdentity) -> bool {
+        match (self, payload) {
+            (Self::BundledTree, ExtensionPackagePayloadIdentity::BundledTree) => true,
+            #[cfg(feature = "acquired-packages")]
+            (Self::AcquiredZip, ExtensionPackagePayloadIdentity::AcquiredZip { .. }) => true,
+            _ => false,
+        }
+    }
 }
 
 fn read_exact_resource<S: BundledReleaseByteSource>(
@@ -654,8 +845,8 @@ fn package_record(
     let manifest_length = u64::try_from(loaded.manifest_bytes.len())
         .map_err(|_| PreparationError::AccountingOverflow)?;
     let manifest_digest = <[u8; 32]>::from(Sha256::digest(&loaded.manifest_bytes));
-    if identity.payload() != ExtensionPackagePayloadIdentity::BundledTree
-        || loaded.package_source.catalog() != catalog
+    let stored_payload = stored_payload(identity.payload());
+    if loaded.package_source.catalog() != catalog
         || loaded.package_source.authority() != identity.authority()
         || loaded.package_source.package_key() != identity.key()
         || loaded.package_source.package_revision() != identity.revision()
@@ -696,7 +887,7 @@ fn package_record(
             authority_id: Digest32::from_bytes(identity.authority().bytes()),
             package_key: Digest32::from_bytes(identity.key().bytes()),
             revision: identity.revision().get(),
-            payload: StoredPayloadIdentity::BundledTree,
+            payload: stored_payload,
             manifest_sha256: Digest32::from_bytes(identity.manifest_sha256().bytes()),
             tree_sha256: Digest32::from_bytes(identity.tree_sha256().bytes()),
             package_row_sha256: Digest32::from_bytes(loaded.package_source.package_row_sha256()),
@@ -731,6 +922,18 @@ fn package_record(
         .validate()
         .map_err(|_| PreparationError::InvalidRecord)?;
     Ok(record)
+}
+
+fn stored_payload(payload: ExtensionPackagePayloadIdentity) -> StoredPayloadIdentity {
+    match payload {
+        ExtensionPackagePayloadIdentity::BundledTree => StoredPayloadIdentity::BundledTree,
+        ExtensionPackagePayloadIdentity::AcquiredZip { length, sha256 } => {
+            StoredPayloadIdentity::AcquiredZip {
+                length: length.get(),
+                sha256: Digest32::from_bytes(sha256.bytes()),
+            }
+        }
+    }
 }
 
 fn stored_runtime_target(

@@ -56,6 +56,8 @@ pub(crate) use cleanup::{
 };
 pub(crate) use gc::{plan_garbage_collection, prove_garbage_collection_absence};
 pub(crate) use interlock::validate_catalog_advance;
+#[cfg(feature = "acquired-packages")]
+pub(crate) use names::tree_acquisition_stage;
 pub(crate) use names::{
     catalog_set_record as gc_catalog_set_record, legal_object as gc_legal_object,
     package_record as gc_package_record, tree_index_object as gc_tree_index_object,
@@ -67,6 +69,11 @@ pub(crate) use names::{
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) use objects::publish_intent_package_record_marker_for_e2e;
+#[cfg(feature = "acquired-packages")]
+pub(crate) use objects::{
+    preflight_acquired_package_object_capacity, publish_or_reuse_acquired_active_package,
+    verify_completed_acquired_active_package,
+};
 pub(crate) use objects::{
     preflight_package_object_capacity, publish_or_reuse_active_package,
     publish_or_reuse_rollback_package, verify_completed_active_package,
@@ -94,6 +101,8 @@ pub(crate) use prepare::{
     open_product_manifest_authority, prepare_active_package, prepare_rollback_package,
     PreparationError, PreparedActivePackage, PreparedRollbackPackage,
 };
+#[cfg(feature = "acquired-packages")]
+pub(crate) use prepare::{prepare_acquired_active_package, PreparedAcquiredActivePackage};
 pub(crate) use profile_audit::{audit_profile_package_pins, DurableProfilePackageAudit};
 pub(crate) use records::{
     CatalogAnchor, MAX_CATALOG_SET_PACKAGES, MAX_CATALOG_SET_RECORD_BYTES, MAX_PACKAGE_RECORD_BYTES,
@@ -105,6 +114,10 @@ pub(crate) use runtime::MaterializationRuntime;
 pub(crate) use settlement::{
     authenticate_interrupted_package, InterruptedPackageAuthenticationError,
     VerifiedInterruptedPackageClosure,
+};
+#[cfg(feature = "acquired-packages")]
+pub use source::{
+    AcquiredReleaseLegalResource, AcquiredReleaseLegalSource, AcquiredReleaseLegalSourceError,
 };
 pub use source::{
     BundledReleaseByteSource, BundledReleaseCatalogSourceIdentity,
@@ -131,10 +144,19 @@ pub(crate) use transaction::{
     rollback_to_previous_catalog_set, stage_active_catalog_set_candidate,
     stage_rollback_catalog_set_candidate, MaterializationTransitionError,
 };
+#[cfg(feature = "acquired-packages")]
+pub(crate) use transaction::{
+    begin_acquired_active_package_build, complete_acquired_active_package,
+};
 pub(crate) use tree_cleanup::{
     remove_tree_directory, remove_tree_directory_bounded, TreeCleanupError,
 };
 pub(crate) use tree_reader::{with_verified_tree_resource, TreeResourceError};
+#[cfg(feature = "acquired-packages")]
+pub(crate) use tree_writer::{
+    build_authenticated_acquired_tree_evidence, build_authenticated_acquired_tree_stage,
+    cleanup_tree_stage as cleanup_acquisition_tree_stage, AuthenticatedTreeStage, TreeWriterError,
+};
 // Kept crate-private so durable owner retention is reachable only through the
 // package-lease layer's authenticated package access and pinning authority.
 // Native activation still requires a service-owned join with separate native

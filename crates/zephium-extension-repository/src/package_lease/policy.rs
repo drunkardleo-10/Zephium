@@ -129,6 +129,10 @@ pub(super) fn map_snapshot_object_error(error: PackageObjectError) -> BundledPac
             BundledPackageLeaseError::DurableObjectMismatch
         }
         PackageObjectError::Source(_) => BundledPackageLeaseError::DurableObjectMismatch,
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => {
+            BundledPackageLeaseError::DurableObjectMismatch
+        }
         PackageObjectError::Filesystem(error) => {
             BundledPackageLeaseError::Repository(ExtensionRepositoryError::FileSystem(error))
         }

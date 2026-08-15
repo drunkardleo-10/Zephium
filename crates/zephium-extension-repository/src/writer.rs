@@ -8,6 +8,10 @@
 
 use thiserror::Error;
 use zephium_core::extensions::ExtensionPackageKey;
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_acquisition::{AcquiredExtensionArchive, AcquiredExtensionArchiveError};
+#[cfg(feature = "acquired-packages")]
+use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
     AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, ProductExtensionManifestAdmissionError,
     ProductExtensionManifestAuthorityError, ProductExtensionRuntimeTarget,
@@ -26,6 +30,17 @@ use crate::materialization::{
     PackageObjectError, PackageObjectIntentDisposition, PreparationError, PreparedActivePackage,
     PreparedRollbackPackage,
 };
+#[cfg(feature = "acquired-packages")]
+use crate::materialization::{
+    begin_acquired_active_package_build, build_authenticated_acquired_tree_evidence,
+    build_authenticated_acquired_tree_stage, cleanup_acquisition_tree_stage,
+    complete_acquired_active_package, preflight_acquired_package_object_capacity,
+    prepare_acquired_active_package, publish_or_reuse_acquired_active_package,
+    tree_acquisition_stage, verify_completed_acquired_active_package, AcquiredReleaseLegalSource,
+    AcquiredReleaseLegalSourceError, AuthenticatedTreeStage, TreeWriterError,
+};
+#[cfg(feature = "acquired-packages")]
+use crate::state::Digest32;
 use crate::{
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome, ExtensionRepository,
     ExtensionRepositoryError,
@@ -114,6 +129,85 @@ pub enum BundledPackageMaterializationError {
     InterruptedBuildSettlement(#[source] BundledPackageBuildSettlementError),
 }
 
+/// Result of exactly materializing one catalog-authenticated acquired package.
+#[cfg(feature = "acquired-packages")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[must_use = "new materialization and exact replay have different durable effects"]
+pub enum AcquiredPackageMaterializationOutcome {
+    /// This operation durably appended the package to the completed ledger.
+    Materialized,
+    /// The exact package was already complete and every final was reverified.
+    IdempotentReplay,
+}
+
+/// Stable, path-free failure while materializing one acquired package.
+#[cfg(feature = "acquired-packages")]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum AcquiredPackageMaterializationError {
+    /// Repository recovery, I/O, or durable transition failed.
+    #[error("acquired extension package repository operation failed: {0}")]
+    Repository(#[from] ExtensionRepositoryError),
+    /// CRX signature, developer identity, ZIP framing, or archive policy failed.
+    #[error("acquired extension package authentication failed: {0}")]
+    Archive(#[source] AcquiredExtensionArchiveError),
+    /// Product manifest authority is unavailable or invalid.
+    #[error("extension manifest product authority is unavailable: {0}")]
+    ManifestAuthority(#[source] ProductExtensionManifestAuthorityError),
+    /// Exact manifest bytes are not admitted for the requested runtime.
+    #[error("extension manifest admission failed: {0}")]
+    ManifestAdmission(#[source] ProductExtensionManifestAdmissionError),
+    /// Exact catalog bytes differ from their admitted capability.
+    #[error("extension catalog bytes do not match their admitted capability")]
+    CatalogBytesMismatch,
+    /// The selected package row is absent.
+    #[error("extension package is absent from the authenticated catalog")]
+    PackageMissing,
+    /// The selected row is not an acquired ZIP payload.
+    #[error("extension package payload is not an acquired archive")]
+    UnsupportedPayload,
+    /// The requested native or compatibility runtime is unsupported.
+    #[error("extension package runtime target is unsupported")]
+    UnsupportedRuntimeTarget,
+    /// The fixed legal-resource adapter refused an exact notice resource.
+    #[error("extension legal resource source failed: {0}")]
+    LegalSource(#[source] AcquiredReleaseLegalSourceError),
+    /// Reading an exact retained resource failed.
+    #[error("reading an exact extension package resource failed")]
+    ResourceRead,
+    /// Exact resource length differs from authenticated metadata.
+    #[error("extension package resource length does not match its identity")]
+    ResourceLengthMismatch,
+    /// Exact resource digest differs from authenticated metadata.
+    #[error("extension package resource digest does not match its identity")]
+    ResourceDigestMismatch,
+    /// Archive output or a staged resource changed before durable closure.
+    #[error("acquired extension package resource integrity changed during materialization")]
+    ResourceIntegrityMismatch,
+    /// The canonical tree index failed semantic validation.
+    #[error("extension tree index is invalid: {0}")]
+    TreeIndex(#[source] ExtensionTreeIndexError),
+    /// The canonical tree index differs from the authenticated package row.
+    #[error("extension tree index does not match the authenticated package")]
+    TreeIndexBinding,
+    /// A bounded logical or physical inventory cannot admit the package.
+    #[error("extension package materialization capacity is exhausted")]
+    CapacityExhausted,
+    /// Exact preparation accounting exceeded a fixed production bound.
+    #[error("extension package materialization accounting overflowed")]
+    AccountingOverflow,
+    /// Prepared authority projections disagreed before durable mutation.
+    #[error("extension package preparation produced an inconsistent identity")]
+    PreparationInvariant,
+    /// A durable final was missing, collided, or differed from its identity.
+    #[error("extension package durable object closure is not exact")]
+    DurableObjectMismatch,
+    /// A prior interrupted package build could not settle source-free.
+    #[error("interrupted extension package build settlement failed: {0}")]
+    InterruptedBuildSettlement(#[source] BundledPackageBuildSettlementError),
+}
+
 impl ExtensionRepository {
     /// Materializes one exact package from the ordinary active product catalog.
     ///
@@ -181,6 +275,127 @@ impl ExtensionRepository {
         self.drive_active_materialization(prepared, source)
     }
 
+    /// Materializes one exact CRX3 package from an authenticated active
+    /// acquired catalog.
+    ///
+    /// The method performs no network access and accepts no filesystem path.
+    /// The borrowed CRX bytes are signature checked, catalog-bound, bounded,
+    /// streamed once into either a private tree stage or zero-retention sinks,
+    /// and admitted before any package intent becomes durable. Only the legal
+    /// notice uses the fixed release-resource callback.
+    #[cfg(feature = "acquired-packages")]
+    pub fn materialize_active_acquired_package<S: AcquiredReleaseLegalSource>(
+        &mut self,
+        catalog: &AdmittedAcquiredCatalog,
+        exact_catalog_bytes: &[u8],
+        runtime_target: ProductExtensionRuntimeTarget,
+        package_key: ExtensionPackageKey,
+        crx3_bytes: &[u8],
+        legal_source: &mut S,
+    ) -> Result<AcquiredPackageMaterializationOutcome, AcquiredPackageMaterializationError> {
+        let runtime = self.runtime.clone();
+        let operation = runtime.enter().map_err(|error| error.repository_error())?;
+        self.require_writer_open()
+            .map_err(map_bundled_to_acquired_error)?;
+        self.writer_require_gc_idle()?;
+        let interrupted_record = self
+            .writer_materialization()?
+            ._build_intent
+            .as_ref()
+            .map(|intent| intent.package_record.clone());
+        let settlement = self
+            .settle_interrupted_bundled_package_build_under_gate()
+            .map_err(AcquiredPackageMaterializationError::InterruptedBuildSettlement)?;
+        if settlement == BundledPackageBuildSettlementOutcome::Completed
+            && interrupted_record.as_ref().is_some_and(|record| {
+                record.catalog.generation_anchor().ok() == Some(catalog.generation_anchor())
+                    && record.package.package_key.bytes() == package_key.bytes()
+                    && record.manifest.runtime_target.product_target() == runtime_target
+            })
+        {
+            // Recovery re-admitted repository-owned authority and completed
+            // this exact closure without the CRX or legal source. Rebind the
+            // caller's independent admitted catalog and exact bytes before
+            // returning so an equivocated retry cannot inherit that result.
+            self.writer_stage_active_acquired_catalog_candidate(catalog, exact_catalog_bytes)?;
+            let _catalog_record =
+                self.record_acquired_catalog_under_gate(&operation, catalog, exact_catalog_bytes)?;
+            return Ok(AcquiredPackageMaterializationOutcome::Materialized);
+        }
+
+        // The outer catalog transition reopens the inner materialization
+        // namespace. Advance it before creating an unowned acquisition stage,
+        // otherwise correct restart cleanup would discard that stage.
+        self.writer_stage_active_acquired_catalog_candidate(catalog, exact_catalog_bytes)?;
+        let _catalog_record =
+            self.record_acquired_catalog_under_gate(&operation, catalog, exact_catalog_bytes)?;
+
+        let package = catalog
+            .catalog()
+            .package(package_key)
+            .ok_or(AcquiredPackageMaterializationError::PackageMissing)?;
+        let mut archive =
+            AcquiredExtensionArchive::authenticate_release_package_crx3(crx3_bytes, package)
+                .map_err(AcquiredPackageMaterializationError::Archive)?;
+        let tree_id = Digest32::from_bytes(package.identity().tree_sha256().bytes());
+        let tree_exists = self
+            .writer_materialization()?
+            ._tree_object_ids
+            .contains(&tree_id);
+        let stage_name = tree_acquisition_stage(tree_id);
+
+        let evidence = if tree_exists {
+            build_authenticated_acquired_tree_evidence(package, &mut archive).map(|evidence| {
+                let (receipt, manifest) = evidence.into_parts();
+                (None, receipt, manifest)
+            })
+        } else {
+            build_authenticated_acquired_tree_stage(
+                &self.writer_materialization()?._trees,
+                &stage_name,
+                package,
+                &mut archive,
+            )
+            .map(|evidence| {
+                let (stage, receipt, manifest) = evidence.into_parts();
+                (Some(stage), receipt, manifest)
+            })
+        };
+        let (mut tree_stage, receipt, manifest_bytes) = match evidence {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                self.settle_failed_preintent_acquisition_stage(&stage_name, !tree_exists, error)?;
+                return Err(map_acquired_tree_error(error));
+            }
+        };
+
+        let manifest_authority = match open_product_manifest_authority() {
+            Ok(authority) => authority,
+            Err(error) => {
+                self.remove_owned_preintent_acquisition_stage(&stage_name, tree_stage.take())?;
+                return Err(map_acquired_preparation_error(error));
+            }
+        };
+        let prepared = prepare_acquired_active_package(
+            catalog,
+            exact_catalog_bytes,
+            &manifest_authority,
+            runtime_target,
+            package_key,
+            receipt,
+            manifest_bytes,
+        );
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.remove_owned_preintent_acquisition_stage(&stage_name, tree_stage.take())?;
+                return Err(map_acquired_preparation_error(error));
+            }
+        };
+
+        self.drive_acquired_materialization(prepared, tree_stage, legal_source)
+    }
+
     /// Materializes one exact package from an explicitly approved rollback
     /// catalog without lowering or otherwise mutating the outer high-water.
     ///
@@ -236,6 +451,172 @@ impl ExtensionRepository {
         self.writer_ensure_rollback_catalog(catalog, exact_catalog_bytes)?;
 
         self.drive_rollback_materialization(prepared, source)
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn drive_acquired_materialization<S: AcquiredReleaseLegalSource>(
+        &mut self,
+        prepared: crate::materialization::PreparedAcquiredActivePackage,
+        mut tree_stage: Option<AuthenticatedTreeStage>,
+        legal_source: &mut S,
+    ) -> Result<AcquiredPackageMaterializationOutcome, AcquiredPackageMaterializationError> {
+        loop {
+            let stage_present = tree_stage.is_some();
+            let (capacity, had_intent) = {
+                let runtime = self.writer_materialization()?;
+                (
+                    preflight_acquired_package_object_capacity(
+                        runtime,
+                        prepared.record(),
+                        stage_present,
+                    ),
+                    runtime._build_intent.is_some(),
+                )
+            };
+            let capacity = match capacity {
+                Ok(capacity) => capacity,
+                Err(error) => {
+                    if !had_intent && tree_stage.is_some() {
+                        if preflight_error_requires_sealing(error, false) {
+                            drop(tree_stage.take());
+                            self.writer_seal();
+                        } else {
+                            let stage_name =
+                                tree_acquisition_stage(prepared.record().tree_index.tree_sha256);
+                            self.remove_owned_preintent_acquisition_stage(
+                                &stage_name,
+                                tree_stage.take(),
+                            )?;
+                        }
+                    } else if preflight_error_requires_sealing(error, had_intent) {
+                        self.writer_seal();
+                    }
+                    return Err(map_acquired_object_error(error));
+                }
+            };
+
+            match capacity.intent_disposition() {
+                PackageObjectIntentDisposition::RequiresCommit => {
+                    let runtime = self.writer_take_materialization()?;
+                    let transition = begin_acquired_active_package_build(
+                        runtime,
+                        capacity,
+                        &prepared,
+                        stage_present,
+                    );
+                    if transition.is_err() {
+                        drop(tree_stage.take());
+                    }
+                    self.finish_transition(transition)
+                        .map_err(map_bundled_to_acquired_error)?;
+                }
+                PackageObjectIntentDisposition::AlreadyCommitted => {
+                    let mut runtime = self.writer_take_materialization()?;
+                    let closure = match publish_or_reuse_acquired_active_package(
+                        &mut runtime,
+                        capacity,
+                        prepared,
+                        tree_stage.take(),
+                        legal_source,
+                    ) {
+                        Ok(closure) => closure,
+                        Err(error) if publication_error_requires_sealing(error) => {
+                            drop(runtime);
+                            self.writer_seal();
+                            return Err(map_acquired_object_error(error));
+                        }
+                        Err(error) => {
+                            let public = map_acquired_publication_error(error);
+                            if self
+                                .settle_after_clean_publication_failure(runtime)
+                                .map_err(map_bundled_to_acquired_error)?
+                            {
+                                return Ok(AcquiredPackageMaterializationOutcome::Materialized);
+                            }
+                            return Err(public);
+                        }
+                    };
+                    self.finish_transition(complete_acquired_active_package(runtime, closure))
+                        .map_err(map_bundled_to_acquired_error)?;
+                    return Ok(AcquiredPackageMaterializationOutcome::Materialized);
+                }
+                PackageObjectIntentDisposition::CompletedReplay => {
+                    let verified = {
+                        let runtime = self.writer_materialization()?;
+                        verify_completed_acquired_active_package(runtime, capacity, prepared)
+                    };
+                    match verified {
+                        Ok(verified) => {
+                            let (
+                                _record_id,
+                                _record,
+                                _tree_root,
+                                _records_parent,
+                                _trees_parent,
+                                _active_authority,
+                            ) = verified.into_parts();
+                            return Ok(AcquiredPackageMaterializationOutcome::IdempotentReplay);
+                        }
+                        Err(error) if completed_error_requires_sealing(error) => {
+                            self.writer_seal();
+                            return Err(map_acquired_object_error(error));
+                        }
+                        Err(error) => return Err(map_acquired_object_error(error)),
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn settle_failed_preintent_acquisition_stage(
+        &mut self,
+        stage_name: &zephium_private_fs::PrivateComponent,
+        stage_was_attempted: bool,
+        error: TreeWriterError,
+    ) -> Result<(), AcquiredPackageMaterializationError> {
+        if !stage_was_attempted {
+            return Ok(());
+        }
+        if matches!(
+            error,
+            TreeWriterError::TransitionAmbiguous
+                | TreeWriterError::Filesystem(
+                    PrivateFsError::AlreadyExists
+                        | PrivateFsError::IdentityAmbiguous
+                        | PrivateFsError::SettlementUnknown
+                        | PrivateFsError::Quarantined
+                )
+        ) {
+            self.writer_seal();
+            return Err(ExtensionRepositoryError::SettlementAmbiguous.into());
+        }
+        match cleanup_acquisition_tree_stage(&self.writer_materialization()?._trees, stage_name) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                self.writer_seal();
+                Err(ExtensionRepositoryError::SettlementAmbiguous.into())
+            }
+        }
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    fn remove_owned_preintent_acquisition_stage(
+        &mut self,
+        stage_name: &zephium_private_fs::PrivateComponent,
+        stage: Option<AuthenticatedTreeStage>,
+    ) -> Result<(), AcquiredPackageMaterializationError> {
+        let Some(stage) = stage else {
+            return Ok(());
+        };
+        drop(stage);
+        match cleanup_acquisition_tree_stage(&self.writer_materialization()?._trees, stage_name) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => {
+                self.writer_seal();
+                Err(ExtensionRepositoryError::SettlementAmbiguous.into())
+            }
+        }
     }
 
     fn drive_active_materialization<S: BundledReleaseByteSource>(
@@ -546,6 +927,163 @@ pub(crate) fn map_preparation_error(error: PreparationError) -> BundledPackageMa
     }
 }
 
+#[cfg(feature = "acquired-packages")]
+fn map_acquired_preparation_error(error: PreparationError) -> AcquiredPackageMaterializationError {
+    match error {
+        PreparationError::CatalogLengthMismatch | PreparationError::CatalogDigestMismatch => {
+            AcquiredPackageMaterializationError::CatalogBytesMismatch
+        }
+        PreparationError::PackageMissing => AcquiredPackageMaterializationError::PackageMissing,
+        PreparationError::UnsupportedPayload => {
+            AcquiredPackageMaterializationError::UnsupportedPayload
+        }
+        PreparationError::UnsupportedRuntimeTarget => {
+            AcquiredPackageMaterializationError::UnsupportedRuntimeTarget
+        }
+        PreparationError::ManifestAuthority(error) => {
+            AcquiredPackageMaterializationError::ManifestAuthority(error)
+        }
+        PreparationError::ManifestAdmission(error) => {
+            AcquiredPackageMaterializationError::ManifestAdmission(error)
+        }
+        PreparationError::Source(_) => AcquiredPackageMaterializationError::PreparationInvariant,
+        PreparationError::Read => AcquiredPackageMaterializationError::ResourceRead,
+        PreparationError::ResourceLengthMismatch => {
+            AcquiredPackageMaterializationError::ResourceLengthMismatch
+        }
+        PreparationError::ResourceDigestMismatch => {
+            AcquiredPackageMaterializationError::ResourceDigestMismatch
+        }
+        PreparationError::TreeIndex(error) => AcquiredPackageMaterializationError::TreeIndex(error),
+        PreparationError::TreeIndexBinding => AcquiredPackageMaterializationError::TreeIndexBinding,
+        PreparationError::AccountingOverflow => {
+            AcquiredPackageMaterializationError::AccountingOverflow
+        }
+        PreparationError::InvalidRecord => {
+            AcquiredPackageMaterializationError::PreparationInvariant
+        }
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+fn map_acquired_tree_error(error: TreeWriterError) -> AcquiredPackageMaterializationError {
+    match error {
+        TreeWriterError::AcquiredArchive(_)
+        | TreeWriterError::AcquiredTree(_)
+        | TreeWriterError::ExactMismatch => {
+            AcquiredPackageMaterializationError::ResourceIntegrityMismatch
+        }
+        TreeWriterError::Source(_) => AcquiredPackageMaterializationError::PreparationInvariant,
+        TreeWriterError::Filesystem(error) => AcquiredPackageMaterializationError::Repository(
+            ExtensionRepositoryError::FileSystem(error),
+        ),
+        TreeWriterError::TransitionAmbiguous => AcquiredPackageMaterializationError::Repository(
+            ExtensionRepositoryError::SettlementAmbiguous,
+        ),
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+fn map_acquired_object_error(error: PackageObjectError) -> AcquiredPackageMaterializationError {
+    match error {
+        PackageObjectError::CapacityExhausted => {
+            AcquiredPackageMaterializationError::CapacityExhausted
+        }
+        PackageObjectError::GenerationExhausted => {
+            ExtensionRepositoryError::GenerationExhausted.into()
+        }
+        PackageObjectError::AcquiredLegalSource(error) => {
+            AcquiredPackageMaterializationError::LegalSource(error)
+        }
+        PackageObjectError::Source(_) => AcquiredPackageMaterializationError::PreparationInvariant,
+        PackageObjectError::Filesystem(error) => ExtensionRepositoryError::FileSystem(error).into(),
+        PackageObjectError::SettlementAmbiguous => {
+            ExtensionRepositoryError::SettlementAmbiguous.into()
+        }
+        PackageObjectError::BuildStateMismatch => {
+            ExtensionRepositoryError::RecoveryAmbiguous.into()
+        }
+        PackageObjectError::Collision | PackageObjectError::ExactMismatch => {
+            AcquiredPackageMaterializationError::DurableObjectMismatch
+        }
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+fn map_acquired_publication_error(
+    error: PackageObjectError,
+) -> AcquiredPackageMaterializationError {
+    match error {
+        PackageObjectError::ExactMismatch => {
+            AcquiredPackageMaterializationError::ResourceIntegrityMismatch
+        }
+        other => map_acquired_object_error(other),
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+fn map_bundled_to_acquired_error(
+    error: BundledPackageMaterializationError,
+) -> AcquiredPackageMaterializationError {
+    match error {
+        BundledPackageMaterializationError::Repository(error) => error.into(),
+        BundledPackageMaterializationError::ManifestAuthority(error) => {
+            AcquiredPackageMaterializationError::ManifestAuthority(error)
+        }
+        BundledPackageMaterializationError::ManifestAdmission(error) => {
+            AcquiredPackageMaterializationError::ManifestAdmission(error)
+        }
+        BundledPackageMaterializationError::CatalogBytesMismatch => {
+            AcquiredPackageMaterializationError::CatalogBytesMismatch
+        }
+        BundledPackageMaterializationError::PackageMissing => {
+            AcquiredPackageMaterializationError::PackageMissing
+        }
+        BundledPackageMaterializationError::UnsupportedPayload => {
+            AcquiredPackageMaterializationError::UnsupportedPayload
+        }
+        BundledPackageMaterializationError::UnsupportedRuntimeTarget => {
+            AcquiredPackageMaterializationError::UnsupportedRuntimeTarget
+        }
+        BundledPackageMaterializationError::Source(_) => {
+            AcquiredPackageMaterializationError::PreparationInvariant
+        }
+        BundledPackageMaterializationError::ResourceRead => {
+            AcquiredPackageMaterializationError::ResourceRead
+        }
+        BundledPackageMaterializationError::ResourceLengthMismatch => {
+            AcquiredPackageMaterializationError::ResourceLengthMismatch
+        }
+        BundledPackageMaterializationError::ResourceDigestMismatch => {
+            AcquiredPackageMaterializationError::ResourceDigestMismatch
+        }
+        BundledPackageMaterializationError::ResourceIntegrityMismatch => {
+            AcquiredPackageMaterializationError::ResourceIntegrityMismatch
+        }
+        BundledPackageMaterializationError::TreeIndex(error) => {
+            AcquiredPackageMaterializationError::TreeIndex(error)
+        }
+        BundledPackageMaterializationError::TreeIndexBinding => {
+            AcquiredPackageMaterializationError::TreeIndexBinding
+        }
+        BundledPackageMaterializationError::CapacityExhausted => {
+            AcquiredPackageMaterializationError::CapacityExhausted
+        }
+        BundledPackageMaterializationError::AccountingOverflow => {
+            AcquiredPackageMaterializationError::AccountingOverflow
+        }
+        BundledPackageMaterializationError::PreparationInvariant => {
+            AcquiredPackageMaterializationError::PreparationInvariant
+        }
+        BundledPackageMaterializationError::DurableObjectMismatch => {
+            AcquiredPackageMaterializationError::DurableObjectMismatch
+        }
+        BundledPackageMaterializationError::InterruptedBuildSettlement(error) => {
+            AcquiredPackageMaterializationError::InterruptedBuildSettlement(error)
+        }
+    }
+}
+
 pub(crate) fn map_object_error(error: PackageObjectError) -> BundledPackageMaterializationError {
     match error {
         PackageObjectError::CapacityExhausted => {
@@ -555,6 +1093,10 @@ pub(crate) fn map_object_error(error: PackageObjectError) -> BundledPackageMater
             ExtensionRepositoryError::GenerationExhausted.into()
         }
         PackageObjectError::Source(error) => BundledPackageMaterializationError::Source(error),
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => {
+            BundledPackageMaterializationError::DurableObjectMismatch
+        }
         PackageObjectError::Filesystem(error) => ExtensionRepositoryError::FileSystem(error).into(),
         PackageObjectError::SettlementAmbiguous => {
             ExtensionRepositoryError::SettlementAmbiguous.into()
@@ -599,6 +1141,8 @@ pub(crate) const fn preflight_error_requires_sealing(
         PackageObjectError::GenerationExhausted => had_intent,
         PackageObjectError::Filesystem(error) => filesystem_error_requires_sealing(error),
         PackageObjectError::CapacityExhausted | PackageObjectError::Source(_) => false,
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => false,
     }
 }
 
@@ -611,6 +1155,8 @@ pub(crate) const fn publication_error_requires_sealing(error: PackageObjectError
         | PackageObjectError::SettlementAmbiguous => true,
         PackageObjectError::Filesystem(error) => filesystem_error_requires_sealing(error),
         PackageObjectError::ExactMismatch | PackageObjectError::Source(_) => false,
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => false,
     }
 }
 
@@ -618,6 +1164,8 @@ pub(crate) const fn completed_error_requires_sealing(error: PackageObjectError) 
     match error {
         PackageObjectError::Filesystem(error) => filesystem_error_requires_sealing(error),
         PackageObjectError::Source(_) => false,
+        #[cfg(feature = "acquired-packages")]
+        PackageObjectError::AcquiredLegalSource(_) => false,
         PackageObjectError::BuildStateMismatch
         | PackageObjectError::CapacityExhausted
         | PackageObjectError::GenerationExhausted

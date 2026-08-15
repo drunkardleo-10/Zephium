@@ -334,6 +334,102 @@ impl<'resource> BundledReleaseResource<'resource> {
     }
 }
 
+/// One catalog/package-bound request for an acquired package's exact legal
+/// notice bytes.
+///
+/// This nominal resource cannot request a tree index or package file. Its
+/// constructor is repository-private, so the provider receives only metadata
+/// derived from an admitted release row and never a host path or URL.
+#[cfg(feature = "acquired-packages")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AcquiredReleaseLegalResource<'resource> {
+    package: BundledReleasePackageSourceIdentity,
+    target: &'resource PortableRelativePath,
+    length: u64,
+    sha256: [u8; 32],
+}
+
+#[cfg(feature = "acquired-packages")]
+impl<'resource> AcquiredReleaseLegalResource<'resource> {
+    pub(crate) const fn new(
+        package: BundledReleasePackageSourceIdentity,
+        target: &'resource PortableRelativePath,
+        length: u64,
+        sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            package,
+            target,
+            length,
+            sha256,
+        }
+    }
+
+    /// Returns the complete catalog-bound acquired package identity.
+    pub const fn package(self) -> BundledReleasePackageSourceIdentity {
+        self.package
+    }
+
+    /// Returns the canonical release-relative logical target.
+    pub const fn target(self) -> &'resource PortableRelativePath {
+        self.target
+    }
+
+    /// Returns the exact expected byte length.
+    pub const fn expected_length(self) -> u64 {
+        self.length
+    }
+
+    /// Returns SHA-256 of the exact expected bytes.
+    pub const fn expected_sha256(self) -> [u8; 32] {
+        self.sha256
+    }
+}
+
+/// Stable, payload-free failure at the acquired legal-resource boundary.
+#[cfg(feature = "acquired-packages")]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum AcquiredReleaseLegalSourceError {
+    /// The exact legal notice is absent from the fixed release source.
+    #[error("acquired extension legal resource is missing")]
+    Missing,
+    /// Platform policy refused an otherwise recognized notice.
+    #[error("acquired extension legal resource access was denied")]
+    AccessDenied,
+    /// Type, ownership, spelling, or source-boundary checks failed.
+    #[error("acquired extension legal resource is unsafe")]
+    Unsafe,
+    /// Stable source identity could not be proved across the callback.
+    #[error("acquired extension legal resource identity became ambiguous")]
+    IdentityAmbiguous,
+    /// The fixed release source or a platform primitive is unavailable.
+    #[error("acquired extension legal resource source is unavailable")]
+    Unavailable,
+    /// Source I/O failed after request validation.
+    #[error("acquired extension legal resource I/O failed")]
+    Io,
+}
+
+/// Synchronous provider of only the exact legal notice named by an acquired
+/// release row.
+///
+/// Implementations must enforce the same pre/post callback identity and EOF
+/// rules as [`BundledReleaseByteSource`]. Repository re-entry from the callback
+/// is forbidden. The narrower nominal request prevents an acquired-package
+/// install adapter from becoming a generic tree or network resource broker.
+#[cfg(feature = "acquired-packages")]
+pub trait AcquiredReleaseLegalSource {
+    /// Runs `callback` with a bounded reader for one exact legal notice.
+    fn with_legal_notice<T, E, F>(
+        &mut self,
+        resource: AcquiredReleaseLegalResource<'_>,
+        callback: F,
+    ) -> Result<Result<T, E>, AcquiredReleaseLegalSourceError>
+    where
+        F: FnOnce(&mut dyn Read) -> Result<T, E>;
+}
+
 /// Stable failure at the bundled release byte-source boundary.
 ///
 /// The error is deliberately payload-free: source adapters must not leak host
@@ -605,6 +701,46 @@ mod tests {
         assert_eq!(source.callback_count, 1);
     }
 
+    #[cfg(feature = "acquired-packages")]
+    #[test]
+    fn acquired_legal_boundary_cannot_express_a_tree_resource() {
+        struct LegalSource {
+            callbacks: usize,
+        }
+
+        impl AcquiredReleaseLegalSource for LegalSource {
+            fn with_legal_notice<T, E, F>(
+                &mut self,
+                resource: AcquiredReleaseLegalResource<'_>,
+                callback: F,
+            ) -> Result<Result<T, E>, AcquiredReleaseLegalSourceError>
+            where
+                F: FnOnce(&mut dyn Read) -> Result<T, E>,
+            {
+                self.callbacks += 1;
+                assert_eq!(resource.target().as_str(), "licenses/fixture.txt");
+                assert_eq!(resource.expected_length(), 1);
+                assert_eq!(resource.expected_sha256(), [11; 32]);
+                let mut reader = Cursor::new(b"L");
+                Ok(callback(&mut reader))
+            }
+        }
+
+        let target = PortableRelativePath::parse("licenses/fixture.txt").unwrap();
+        let resource = AcquiredReleaseLegalResource::new(package(1), &target, 1, [11; 32]);
+        assert_eq!(resource.package(), package(1));
+        let mut source = LegalSource { callbacks: 0 };
+        let result = source
+            .with_legal_notice(resource, |reader| {
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).map(|_| bytes)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, b"L");
+        assert_eq!(source.callbacks, 1);
+    }
+
     #[test]
     fn public_boundary_values_are_copy() {
         fn require_copy<T: Copy>() {}
@@ -614,5 +750,10 @@ mod tests {
         require_copy::<BundledReleaseResourceKind<'static>>();
         require_copy::<BundledReleaseResource<'static>>();
         require_copy::<BundledReleaseSourceError>();
+        #[cfg(feature = "acquired-packages")]
+        {
+            require_copy::<AcquiredReleaseLegalResource<'static>>();
+            require_copy::<AcquiredReleaseLegalSourceError>();
+        }
     }
 }

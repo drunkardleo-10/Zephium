@@ -27,17 +27,25 @@ use super::policy::{
     reserve_two_transition_intent_generation, validate_completed_tree_budget,
     validate_package_anchor_consistency, PackagePolicyError,
 };
+#[cfg(feature = "acquired-packages")]
+use super::prepare::PreparedAcquiredActivePackage;
 use super::prepare::{PreparedActivePackage, PreparedRollbackPackage};
 use super::records::{
     CatalogSetRecord, PackageRecord, StoredPayloadIdentity, MAX_CATALOG_SET_RECORD_BYTES,
     MAX_PACKAGE_RECORD_BYTES,
 };
 use super::runtime::MaterializationRuntime;
+#[cfg(feature = "acquired-packages")]
+use super::source::{
+    AcquiredReleaseLegalResource, AcquiredReleaseLegalSource, AcquiredReleaseLegalSourceError,
+};
 use super::source::{
     BundledReleaseByteSource, BundledReleasePackageSourceIdentity, BundledReleaseResource,
     BundledReleaseSourceError,
 };
 use super::state::{MAX_COMPLETED_PACKAGE_RECORDS, MAX_DURABLE_GENERATION};
+#[cfg(feature = "acquired-packages")]
+use super::tree_writer::AuthenticatedTreeStage;
 use super::tree_writer::{
     build_authenticated_tree_stage, cleanup_tree_stage, verify_sealed_tree,
     AuthenticatedSealedTree, TreeWriterError,
@@ -79,6 +87,10 @@ pub(crate) enum PackageObjectError {
     /// The fixed bundled-resource adapter failed its path-free source boundary.
     #[error("bundled extension package source failed: {0}")]
     Source(BundledReleaseSourceError),
+    /// The acquired package's exact legal-notice provider failed.
+    #[cfg(feature = "acquired-packages")]
+    #[error("acquired extension legal resource source failed: {0}")]
+    AcquiredLegalSource(AcquiredReleaseLegalSourceError),
     /// A private-filesystem operation failed before an ambiguous commit point.
     #[error("extension package object filesystem failed: {0}")]
     Filesystem(PrivateFsError),
@@ -133,6 +145,8 @@ pub(crate) struct PackageObjectCapacity {
     trees_parent: DirectoryIdentity,
     record: PackageRecord,
     missing: MissingPackageObjects,
+    acquired_package: bool,
+    acquisition_stage: bool,
 }
 
 impl PackageObjectCapacity {
@@ -148,10 +162,14 @@ impl PackageObjectCapacity {
     /// bound to the newly durable intent.
     pub(super) fn into_begin_parts(
         self,
+        expected_acquired_package: bool,
+        expected_acquisition_stage: bool,
     ) -> Result<(u64, DirectoryIdentity, DirectoryIdentity, PackageRecord), PackageObjectError>
     {
         if self.disposition != PackageObjectIntentDisposition::RequiresCommit
             || self.expected_intent_generation != self.preflight_state_generation.checked_add(1)
+            || self.acquired_package != expected_acquired_package
+            || self.acquisition_stage != expected_acquisition_stage
         {
             return Err(PackageObjectError::BuildStateMismatch);
         }
@@ -186,6 +204,13 @@ struct VerifiedPackageClosure<Prepared> {
 #[must_use = "a verified active package closure must be consumed by active completion"]
 pub(crate) struct VerifiedActivePackageClosure(VerifiedPackageClosure<PreparedActivePackage>);
 
+/// Nominal active-role completion capability for an acquired package.
+#[cfg(feature = "acquired-packages")]
+#[must_use = "a verified acquired package closure must be consumed by active completion"]
+pub(crate) struct VerifiedAcquiredActivePackageClosure(
+    VerifiedPackageClosure<PreparedAcquiredActivePackage>,
+);
+
 /// Nominal rollback-role completion capability.
 #[must_use = "a verified rollback package closure must be consumed by rollback completion"]
 pub(crate) struct VerifiedRollbackPackageClosure(VerifiedPackageClosure<PreparedRollbackPackage>);
@@ -208,6 +233,13 @@ struct VerifiedCompletedPackage<Prepared> {
 /// Nominal active-role idempotent replay capability.
 #[must_use = "a verified completed active package must be projected or discarded"]
 pub(crate) struct VerifiedCompletedActivePackage(VerifiedCompletedPackage<PreparedActivePackage>);
+
+/// Nominal active-role idempotent replay for an acquired package.
+#[cfg(feature = "acquired-packages")]
+#[must_use = "a verified completed acquired package must be projected or discarded"]
+pub(crate) struct VerifiedCompletedAcquiredActivePackage(
+    VerifiedCompletedPackage<PreparedAcquiredActivePackage>,
+);
 
 /// Nominal rollback-role idempotent replay capability.
 #[must_use = "a verified completed rollback package must be projected or discarded"]
@@ -287,6 +319,11 @@ macro_rules! impl_nominal_verified_closure {
 }
 
 impl_nominal_verified_closure!(VerifiedActivePackageClosure, PreparedActivePackage);
+#[cfg(feature = "acquired-packages")]
+impl_nominal_verified_closure!(
+    VerifiedAcquiredActivePackageClosure,
+    PreparedAcquiredActivePackage
+);
 impl_nominal_verified_closure!(VerifiedRollbackPackageClosure, PreparedRollbackPackage);
 
 macro_rules! impl_nominal_completed_package {
@@ -309,6 +346,11 @@ macro_rules! impl_nominal_completed_package {
 }
 
 impl_nominal_completed_package!(VerifiedCompletedActivePackage, PreparedActivePackage);
+#[cfg(feature = "acquired-packages")]
+impl_nominal_completed_package!(
+    VerifiedCompletedAcquiredActivePackage,
+    PreparedAcquiredActivePackage
+);
 impl_nominal_completed_package!(VerifiedCompletedRollbackPackage, PreparedRollbackPackage);
 
 /// Inventories exact lifecycle names and reserves bounded physical capacity.
@@ -319,6 +361,30 @@ impl_nominal_completed_package!(VerifiedCompletedRollbackPackage, PreparedRollba
 pub(crate) fn preflight_package_object_capacity(
     runtime: &MaterializationRuntime,
     record: &PackageRecord,
+) -> Result<PackageObjectCapacity, PackageObjectError> {
+    preflight_package_object_capacity_inner(runtime, record, false, false)
+}
+
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn preflight_acquired_package_object_capacity(
+    runtime: &MaterializationRuntime,
+    record: &PackageRecord,
+    acquisition_stage: bool,
+) -> Result<PackageObjectCapacity, PackageObjectError> {
+    if !matches!(
+        record.package.payload,
+        StoredPayloadIdentity::AcquiredZip { .. }
+    ) {
+        return Err(PackageObjectError::ExactMismatch);
+    }
+    preflight_package_object_capacity_inner(runtime, record, true, acquisition_stage)
+}
+
+fn preflight_package_object_capacity_inner(
+    runtime: &MaterializationRuntime,
+    record: &PackageRecord,
+    acquired_package: bool,
+    acquisition_stage: bool,
 ) -> Result<PackageObjectCapacity, PackageObjectError> {
     record
         .validate()
@@ -335,7 +401,14 @@ pub(crate) fn preflight_package_object_capacity(
     }
 
     let record_inventory = inspect_record_capacity(&runtime._records)?;
-    let tree_inventory = inspect_tree_capacity(&runtime._trees, record.tree_index.tree_sha256)?;
+    let tree_inventory = inspect_tree_capacity(
+        &runtime._trees,
+        record.tree_index.tree_sha256,
+        acquisition_stage,
+    )?;
+    if tree_inventory.acquisition_stage != acquisition_stage {
+        return Err(PackageObjectError::BuildStateMismatch);
+    }
     let missing = MissingPackageObjects {
         tree: !tree_inventory.target_object,
         tree_index: !record_inventory
@@ -346,7 +419,7 @@ pub(crate) fn preflight_package_object_capacity(
     };
 
     if disposition == PackageObjectIntentDisposition::CompletedReplay
-        && missing != MissingPackageObjects::default()
+        && (missing != MissingPackageObjects::default() || acquisition_stage)
     {
         return Err(PackageObjectError::ExactMismatch);
     }
@@ -365,6 +438,8 @@ pub(crate) fn preflight_package_object_capacity(
         trees_parent: runtime._trees.identity(),
         record: record.clone(),
         missing,
+        acquired_package,
+        acquisition_stage,
     })
 }
 
@@ -411,6 +486,46 @@ fn publish_or_reuse_active_package_with_fault<S: BundledReleaseByteSource>(
     }))
 }
 
+/// Publishes or reuses one acquired active package while consuming at most one
+/// exact pre-intent tree stage. The legal notice remains a product-authenticated
+/// resource and is streamed through the same narrow source contract.
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn publish_or_reuse_acquired_active_package<S: AcquiredReleaseLegalSource>(
+    runtime: &mut MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedAcquiredActivePackage,
+    tree_stage: Option<AuthenticatedTreeStage>,
+    legal_source: &mut S,
+) -> Result<VerifiedAcquiredActivePackageClosure, PackageObjectError> {
+    let view = PreparedPackageView {
+        package_source: prepared.package_source(),
+        tree_index: prepared.tree_index(),
+        tree_index_bytes: prepared.tree_index_bytes(),
+        manifest_bytes: prepared.manifest_bytes(),
+        record: prepared.record(),
+    };
+    let verified = publish_or_reuse_acquired_package(
+        runtime,
+        capacity,
+        view,
+        tree_stage,
+        legal_source,
+        ObjectPublicationFaultPoint::None,
+    )?;
+    Ok(VerifiedAcquiredActivePackageClosure(
+        VerifiedPackageClosure {
+            intent_generation: verified.intent_generation,
+            record_id: verified.record_id,
+            record: verified.record,
+            tree_root: verified.tree_root,
+            records_parent: verified.records_parent,
+            trees_parent: verified.trees_parent,
+            stages_absent: verified.stages_absent,
+            prepared,
+        },
+    ))
+}
+
 /// Publishes or reuses an explicitly authorized rollback package while
 /// retaining the distinct rollback witness.
 pub(crate) fn publish_or_reuse_rollback_package<S: BundledReleaseByteSource>(
@@ -447,7 +562,7 @@ pub(crate) fn verify_interrupted_active_package(
         manifest_bytes: prepared.manifest_bytes(),
         record: prepared.record(),
     };
-    let verified = verify_interrupted_package(runtime, capacity, view)?;
+    let verified = verify_interrupted_package(runtime, capacity, view, false)?;
     Ok(VerifiedActivePackageClosure(VerifiedPackageClosure {
         intent_generation: verified.intent_generation,
         record_id: verified.record_id,
@@ -458,6 +573,36 @@ pub(crate) fn verify_interrupted_active_package(
         stages_absent: verified.stages_absent,
         prepared,
     }))
+}
+
+/// Reauthenticates a marker-committed acquired package entirely from durable
+/// repository objects. No archive bytes or network adapter participate.
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn verify_interrupted_acquired_active_package(
+    runtime: &MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedAcquiredActivePackage,
+) -> Result<VerifiedAcquiredActivePackageClosure, PackageObjectError> {
+    let view = PreparedPackageView {
+        package_source: prepared.package_source(),
+        tree_index: prepared.tree_index(),
+        tree_index_bytes: prepared.tree_index_bytes(),
+        manifest_bytes: prepared.manifest_bytes(),
+        record: prepared.record(),
+    };
+    let verified = verify_interrupted_package(runtime, capacity, view, true)?;
+    Ok(VerifiedAcquiredActivePackageClosure(
+        VerifiedPackageClosure {
+            intent_generation: verified.intent_generation,
+            record_id: verified.record_id,
+            record: verified.record,
+            tree_root: verified.tree_root,
+            records_parent: verified.records_parent,
+            trees_parent: verified.trees_parent,
+            stages_absent: verified.stages_absent,
+            prepared,
+        },
+    ))
 }
 
 /// Reauthenticates a marker-committed rollback build entirely from durable
@@ -474,7 +619,7 @@ pub(crate) fn verify_interrupted_rollback_package(
         manifest_bytes: prepared.manifest_bytes(),
         record: prepared.record(),
     };
-    let verified = verify_interrupted_package(runtime, capacity, view)?;
+    let verified = verify_interrupted_package(runtime, capacity, view, false)?;
     Ok(VerifiedRollbackPackageClosure(VerifiedPackageClosure {
         intent_generation: verified.intent_generation,
         record_id: verified.record_id,
@@ -529,7 +674,7 @@ pub(crate) fn verify_completed_active_package(
         manifest_bytes: prepared.manifest_bytes(),
         record: prepared.record(),
     };
-    let verified = verify_completed_package(runtime, capacity, view)?;
+    let verified = verify_completed_package(runtime, capacity, view, false)?;
     Ok(VerifiedCompletedActivePackage(VerifiedCompletedPackage {
         record_id: verified.record_id,
         record: verified.record,
@@ -538,6 +683,33 @@ pub(crate) fn verify_completed_active_package(
         trees_parent: verified.trees_parent,
         prepared,
     }))
+}
+
+/// Freshly verifies an already-completed acquired active package.
+#[cfg(feature = "acquired-packages")]
+pub(crate) fn verify_completed_acquired_active_package(
+    runtime: &MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedAcquiredActivePackage,
+) -> Result<VerifiedCompletedAcquiredActivePackage, PackageObjectError> {
+    let view = PreparedPackageView {
+        package_source: prepared.package_source(),
+        tree_index: prepared.tree_index(),
+        tree_index_bytes: prepared.tree_index_bytes(),
+        manifest_bytes: prepared.manifest_bytes(),
+        record: prepared.record(),
+    };
+    let verified = verify_completed_package(runtime, capacity, view, true)?;
+    Ok(VerifiedCompletedAcquiredActivePackage(
+        VerifiedCompletedPackage {
+            record_id: verified.record_id,
+            record: verified.record,
+            tree_root: verified.tree_root,
+            records_parent: verified.records_parent,
+            trees_parent: verified.trees_parent,
+            prepared,
+        },
+    ))
 }
 
 /// Freshly verifies an already-completed rollback-authorized package while
@@ -554,7 +726,7 @@ pub(crate) fn verify_completed_rollback_package(
         manifest_bytes: prepared.manifest_bytes(),
         record: prepared.record(),
     };
-    let verified = verify_completed_package(runtime, capacity, view)?;
+    let verified = verify_completed_package(runtime, capacity, view, false)?;
     Ok(VerifiedCompletedRollbackPackage(VerifiedCompletedPackage {
         record_id: verified.record_id,
         record: verified.record,
@@ -714,7 +886,7 @@ fn publish_or_reuse_package<S: BundledReleaseByteSource>(
     source: &mut S,
     fault: ObjectPublicationFaultPoint,
 ) -> Result<VerifiedPackageObjects, PackageObjectError> {
-    validate_capacity_and_intent(runtime, &capacity, &prepared)?;
+    validate_capacity_and_intent(runtime, &capacity, &prepared, false, false)?;
     validate_prepared_package(&prepared)?;
     let intent_generation = capacity
         .expected_intent_generation
@@ -727,6 +899,45 @@ fn publish_or_reuse_package<S: BundledReleaseByteSource>(
     ensure_tree_index_final(runtime, &capacity, &prepared)?;
     fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterTreeIndex)?;
     ensure_legal_final(runtime, &capacity, &prepared, source)?;
+    fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterLegal)?;
+    let package_record_bytes = ensure_package_record_final(runtime, &capacity, &prepared)?;
+    fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterPackageRecord)?;
+
+    let tree_root = verify_complete_final_closure(runtime, &prepared, &package_record_bytes)?;
+    fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterClosureVerification)?;
+    let stages_absent = prove_build_stages_absent(runtime).map_err(map_cleanup_error)?;
+    Ok(VerifiedPackageObjects {
+        intent_generation,
+        record_id: capacity.package_record_id,
+        record: prepared.record.clone(),
+        tree_root,
+        records_parent: capacity.records_parent,
+        trees_parent: capacity.trees_parent,
+        stages_absent,
+    })
+}
+
+#[cfg(feature = "acquired-packages")]
+fn publish_or_reuse_acquired_package<S: AcquiredReleaseLegalSource>(
+    runtime: &mut MaterializationRuntime,
+    capacity: PackageObjectCapacity,
+    prepared: PreparedPackageView<'_>,
+    tree_stage: Option<AuthenticatedTreeStage>,
+    legal_source: &mut S,
+    fault: ObjectPublicationFaultPoint,
+) -> Result<VerifiedPackageObjects, PackageObjectError> {
+    let has_stage = tree_stage.is_some();
+    validate_capacity_and_intent(runtime, &capacity, &prepared, true, has_stage)?;
+    validate_prepared_package(&prepared)?;
+    let intent_generation = capacity
+        .expected_intent_generation
+        .ok_or(PackageObjectError::BuildStateMismatch)?;
+
+    ensure_acquired_tree_final(runtime, &capacity, &prepared, tree_stage)?;
+    fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterTree)?;
+    ensure_tree_index_final(runtime, &capacity, &prepared)?;
+    fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterTreeIndex)?;
+    ensure_acquired_legal_final(runtime, &capacity, &prepared, legal_source)?;
     fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterLegal)?;
     let package_record_bytes = ensure_package_record_final(runtime, &capacity, &prepared)?;
     fail_after_object_publication(fault, ObjectPublicationFaultPoint::AfterPackageRecord)?;
@@ -796,6 +1007,7 @@ fn verify_completed_package(
     runtime: &MaterializationRuntime,
     capacity: PackageObjectCapacity,
     prepared: PreparedPackageView<'_>,
+    acquired_package: bool,
 ) -> Result<VerifiedCompletedObjects, PackageObjectError> {
     #[cfg(all(
         test,
@@ -810,7 +1022,7 @@ fn verify_completed_package(
                 .expect("completed package verification test count must fit usize"),
         );
     });
-    validate_completed_capacity_and_state(runtime, &capacity, &prepared)?;
+    validate_completed_capacity_and_state(runtime, &capacity, &prepared, acquired_package)?;
     validate_prepared_package(&prepared)?;
     let package_record_bytes = canonical_package_record_bytes(&capacity, &prepared)?;
     let tree_root = verify_complete_final_closure(runtime, &prepared, &package_record_bytes)?;
@@ -827,8 +1039,9 @@ fn verify_interrupted_package(
     runtime: &MaterializationRuntime,
     capacity: PackageObjectCapacity,
     prepared: PreparedPackageView<'_>,
+    acquired_package: bool,
 ) -> Result<VerifiedPackageObjects, PackageObjectError> {
-    validate_capacity_and_intent(runtime, &capacity, &prepared)?;
+    validate_capacity_and_intent(runtime, &capacity, &prepared, acquired_package, false)?;
     validate_prepared_package(&prepared)?;
     if capacity.missing != MissingPackageObjects::default() {
         // Publication orders the package record last. Once that marker exists,
@@ -1073,11 +1286,13 @@ struct TreeCapacityInventory {
     entries: usize,
     object_count: usize,
     target_object: bool,
+    acquisition_stage: bool,
 }
 
 fn inspect_tree_capacity(
     trees: &PrivateDirectory,
     target: Digest32,
+    allow_acquisition_stage: bool,
 ) -> Result<TreeCapacityInventory, PackageObjectError> {
     let entries = trees
         .list_components(names::MAX_TREE_ENTRIES)
@@ -1085,6 +1300,7 @@ fn inspect_tree_capacity(
     let mut observed = BTreeSet::new();
     let mut object_count = 0_usize;
     let mut target_object = false;
+    let mut acquisition_stage = false;
     for entry in &entries {
         let (digest, kind) =
             names::parse_tree_name(entry.as_str()).ok_or(PackageObjectError::ExactMismatch)?;
@@ -1095,6 +1311,9 @@ fn inspect_tree_capacity(
             TreeNameKind::Object => {
                 object_count = checked_increment(object_count)?;
                 target_object |= digest == target;
+            }
+            TreeNameKind::Acquisition if allow_acquisition_stage && digest == target => {
+                acquisition_stage = true;
             }
             TreeNameKind::Acquisition => return Err(PackageObjectError::BuildStateMismatch),
             TreeNameKind::Stage(_) => return Err(PackageObjectError::BuildStateMismatch),
@@ -1108,6 +1327,7 @@ fn inspect_tree_capacity(
         entries: entries.len(),
         object_count,
         target_object,
+        acquisition_stage,
     })
 }
 
@@ -1126,7 +1346,10 @@ fn validate_physical_capacity(
         || checked_add(records.entries, missing.regular_count())? > names::MAX_RECORD_ENTRIES
         || checked_add(trees.object_count, usize::from(missing.tree))?
             > names::MAX_FINAL_PACKAGE_RECORDS
-        || checked_add(trees.entries, usize::from(missing.tree))? > names::MAX_TREE_ENTRIES
+        || checked_add(
+            trees.entries,
+            usize::from(missing.tree && !trees.acquisition_stage),
+        )? > names::MAX_TREE_ENTRIES
     {
         return Err(PackageObjectError::CapacityExhausted);
     }
@@ -1137,6 +1360,8 @@ fn validate_capacity_and_intent(
     runtime: &MaterializationRuntime,
     capacity: &PackageObjectCapacity,
     prepared: &PreparedPackageView<'_>,
+    acquired_package: bool,
+    acquisition_stage: bool,
 ) -> Result<(), PackageObjectError> {
     runtime
         ._state
@@ -1153,6 +1378,9 @@ fn validate_capacity_and_intent(
         || prepared.record.tree_index.tree_sha256 != capacity.tree_id
         || prepared.record.tree_index.index_sha256 != capacity.tree_index_id
         || prepared.record.legal.sha256 != capacity.legal_id
+        || capacity.acquired_package != acquired_package
+        || capacity.acquisition_stage != acquisition_stage
+        || runtime._acquisition_stage.is_some() != acquisition_stage
         || !runtime.garbage_collection_is_idle()
         || runtime._state.build_intent != runtime._build_intent
         || runtime._build_stage.is_some()
@@ -1173,7 +1401,10 @@ fn validate_capacity_and_intent(
     }
 
     let records = inspect_record_capacity(&runtime._records)?;
-    let trees = inspect_tree_capacity(&runtime._trees, capacity.tree_id)?;
+    let trees = inspect_tree_capacity(&runtime._trees, capacity.tree_id, acquisition_stage)?;
+    if trees.acquisition_stage != acquisition_stage {
+        return Err(PackageObjectError::BuildStateMismatch);
+    }
     let observed = MissingPackageObjects {
         tree: !trees.target_object,
         tree_index: !records.tree_indexes.contains(&capacity.tree_index_id),
@@ -1190,6 +1421,7 @@ fn validate_completed_capacity_and_state(
     runtime: &MaterializationRuntime,
     capacity: &PackageObjectCapacity,
     prepared: &PreparedPackageView<'_>,
+    acquired_package: bool,
 ) -> Result<(), PackageObjectError> {
     runtime
         ._state
@@ -1206,6 +1438,9 @@ fn validate_completed_capacity_and_state(
         || prepared.record.tree_index.tree_sha256 != capacity.tree_id
         || prepared.record.tree_index.index_sha256 != capacity.tree_index_id
         || prepared.record.legal.sha256 != capacity.legal_id
+        || capacity.acquired_package != acquired_package
+        || capacity.acquisition_stage
+        || runtime._acquisition_stage.is_some()
         || !runtime.garbage_collection_is_idle()
         || runtime._state.build_intent.is_some()
         || runtime._build_intent.is_some()
@@ -1222,7 +1457,7 @@ fn validate_completed_capacity_and_state(
     }
 
     let records = inspect_record_capacity(&runtime._records)?;
-    let trees = inspect_tree_capacity(&runtime._trees, capacity.tree_id)?;
+    let trees = inspect_tree_capacity(&runtime._trees, capacity.tree_id, false)?;
     let observed = MissingPackageObjects {
         tree: !trees.target_object,
         tree_index: !records.tree_indexes.contains(&capacity.tree_index_id),
@@ -1250,8 +1485,7 @@ fn validate_prepared_package(prepared: &PreparedPackageView<'_>) -> Result<(), P
     let index_digest: [u8; 32] = Sha256::digest(prepared.tree_index_bytes).into();
     let manifest_digest: [u8; 32] = Sha256::digest(prepared.manifest_bytes).into();
 
-    if source.payload() != ExtensionPackagePayloadIdentity::BundledTree
-        || record.package.payload != StoredPayloadIdentity::BundledTree
+    if !payload_identity_matches(source.payload(), record.package.payload)
         || catalog.authority().bytes() != record.catalog.authority_id.bytes()
         || catalog.revision().get() != record.catalog.revision
         || catalog.catalog_length() != record.catalog.catalog_length
@@ -1282,6 +1516,23 @@ fn validate_prepared_package(prepared: &PreparedPackageView<'_>) -> Result<(), P
         return Err(PackageObjectError::ExactMismatch);
     }
     Ok(())
+}
+
+fn payload_identity_matches(
+    source: ExtensionPackagePayloadIdentity,
+    stored: StoredPayloadIdentity,
+) -> bool {
+    match (source, stored) {
+        (ExtensionPackagePayloadIdentity::BundledTree, StoredPayloadIdentity::BundledTree) => true,
+        (
+            ExtensionPackagePayloadIdentity::AcquiredZip { length, sha256 },
+            StoredPayloadIdentity::AcquiredZip {
+                length: stored_length,
+                sha256: stored_sha256,
+            },
+        ) => length.get() == stored_length && sha256.bytes() == stored_sha256.bytes(),
+        _ => false,
+    }
 }
 
 fn checked_increment(value: usize) -> Result<usize, PackageObjectError> {
@@ -1354,6 +1605,48 @@ fn ensure_tree_final<S: BundledReleaseByteSource>(
         }
     };
 
+    let root = match stage.publish_same_parent_noreplace(&runtime._trees, &destination) {
+        Ok(root) => root,
+        Err(error) => {
+            return Err(settle_tree_failure(
+                &runtime._trees,
+                &stage_name,
+                error,
+                TreeStageCleanupExpectation::MustExist,
+            ));
+        }
+    };
+    verify_tree_against_record(root, prepared.tree_index, prepared.record)
+        .map_err(map_final_object_error)?;
+    Ok(())
+}
+
+#[cfg(feature = "acquired-packages")]
+fn ensure_acquired_tree_final(
+    runtime: &mut MaterializationRuntime,
+    capacity: &PackageObjectCapacity,
+    prepared: &PreparedPackageView<'_>,
+    tree_stage: Option<AuthenticatedTreeStage>,
+) -> Result<(), PackageObjectError> {
+    let destination = names::tree_object(capacity.tree_id);
+    let existing = open_optional_sealed_tree(&runtime._trees, &destination)?;
+    if existing.is_some() == capacity.missing.tree {
+        return Err(PackageObjectError::Collision);
+    }
+    if let Some(root) = existing {
+        if tree_stage.is_some() || runtime._acquisition_stage.is_some() {
+            return Err(PackageObjectError::BuildStateMismatch);
+        }
+        verify_tree_against_record(root, prepared.tree_index, prepared.record)
+            .map_err(map_final_object_error)?;
+        return Ok(());
+    }
+
+    let stage = tree_stage.ok_or(PackageObjectError::BuildStateMismatch)?;
+    if runtime._acquisition_stage.take().is_none() {
+        return Err(PackageObjectError::BuildStateMismatch);
+    }
+    let stage_name = names::tree_acquisition_stage(capacity.tree_id);
     let root = match stage.publish_same_parent_noreplace(&runtime._trees, &destination) {
         Ok(root) => root,
         Err(error) => {
@@ -1542,6 +1835,81 @@ fn ensure_legal_final<S: BundledReleaseByteSource>(
                 cleanup_regular_stage(&runtime._records, &stage_name)?;
             }
             return Err(PackageObjectError::Source(error));
+        }
+        Ok(Err(error)) => {
+            if stage_written && !object_error_is_terminal(error) {
+                cleanup_regular_stage(&runtime._records, &stage_name)?;
+            }
+            return Err(error);
+        }
+        Ok(Ok(identity)) => identity,
+    };
+
+    settle_regular_stage(
+        &runtime._records,
+        &stage_name,
+        &final_name,
+        identity,
+        expectation,
+    )
+}
+
+#[cfg(feature = "acquired-packages")]
+fn ensure_acquired_legal_final<S: AcquiredReleaseLegalSource>(
+    runtime: &MaterializationRuntime,
+    capacity: &PackageObjectCapacity,
+    prepared: &PreparedPackageView<'_>,
+    source: &mut S,
+) -> Result<(), PackageObjectError> {
+    let stage_name = names::legal_stage(capacity.legal_id);
+    let final_name = names::legal_object(capacity.legal_id);
+    let expectation = RegularExpectation {
+        length: prepared.record.legal.length,
+        sha256: prepared.record.legal.sha256.bytes(),
+        exact_bytes: None,
+    };
+    let existing = verify_optional_sealed_regular(&runtime._records, &final_name, expectation)?;
+    if existing == capacity.missing.legal {
+        return Err(PackageObjectError::Collision);
+    }
+    if existing {
+        return Ok(());
+    }
+
+    let target = PortableRelativePath::parse(&prepared.record.legal.target)
+        .map_err(|_| PackageObjectError::ExactMismatch)?;
+    let resource = AcquiredReleaseLegalResource::new(
+        prepared.package_source,
+        &target,
+        prepared.record.legal.length,
+        prepared.record.legal.sha256.bytes(),
+    );
+    let mut stage_written = false;
+    let nested = with_external_callback(|| {
+        source.with_legal_notice(resource, |reader| {
+            let mut digesting = DigestingReader::new(reader);
+            let identity = runtime
+                ._records
+                .write_new_from_reader(
+                    &stage_name,
+                    &mut digesting,
+                    streaming_length(prepared.record.legal.length)?,
+                )
+                .map_err(map_acquired_legal_streaming_write)?;
+            stage_written = true;
+            let proof = digesting.finish();
+            if proof.length != expectation.length || proof.sha256 != expectation.sha256 {
+                return Err(PackageObjectError::ExactMismatch);
+            }
+            Ok(identity)
+        })
+    });
+    let identity = match nested {
+        Err(error) => {
+            if stage_written {
+                cleanup_regular_stage(&runtime._records, &stage_name)?;
+            }
+            return Err(PackageObjectError::AcquiredLegalSource(error));
         }
         Ok(Err(error)) => {
             if stage_written && !object_error_is_terminal(error) {
@@ -1928,6 +2296,19 @@ fn map_streaming_write(error: StreamingWriteError) -> PackageObjectError {
         StreamingWriteError::Filesystem(error) => map_create_regular_error(error),
         StreamingWriteError::SourceRead => {
             PackageObjectError::Source(BundledReleaseSourceError::Io)
+        }
+        StreamingWriteError::SourceTooShort
+        | StreamingWriteError::SourceTooLong
+        | StreamingWriteError::SinkLengthMismatch => PackageObjectError::ExactMismatch,
+    }
+}
+
+#[cfg(feature = "acquired-packages")]
+fn map_acquired_legal_streaming_write(error: StreamingWriteError) -> PackageObjectError {
+    match error {
+        StreamingWriteError::Filesystem(error) => map_create_regular_error(error),
+        StreamingWriteError::SourceRead => {
+            PackageObjectError::AcquiredLegalSource(AcquiredReleaseLegalSourceError::Io)
         }
         StreamingWriteError::SourceTooShort
         | StreamingWriteError::SourceTooLong

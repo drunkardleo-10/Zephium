@@ -222,6 +222,19 @@ impl AcquiredExtensionTreeReceipt {
         self.retained_bytes
     }
 
+    /// Rebinds and consumes stream evidence into canonical tree artifacts.
+    ///
+    /// The release row is checked immediately before the linear receipt is
+    /// consumed. The returned values carry no catalog, repository,
+    /// installation, or runtime authority on their own.
+    pub fn into_release_tree_artifacts(
+        self,
+        package: &ExtensionReleasePackage,
+    ) -> Result<(Box<[u8]>, CanonicalExtensionTreeIndex), AcquiredExtensionTreeReceiptError> {
+        self.bind_release_package(package)?;
+        Ok((self.index_bytes, self.index))
+    }
+
     /// Cross-validates this receipt with one structurally parsed release row.
     ///
     /// The caller must separately prove that the row belongs to an admitted,

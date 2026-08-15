@@ -31,6 +31,9 @@ pub(crate) struct MaterializationRuntime {
     pub(crate) _build_intent: Option<MaterializationBuildIntent>,
     pub(crate) _gc_intent: Option<MaterializationGarbageCollectionIntent>,
     pub(crate) _build_stage: Option<MaterializationTreeCapability>,
+    /// Disposable acquired tree retained only while an exact acquired-package
+    /// build intent owns its digest. It is never a completed-state root.
+    pub(crate) _acquisition_stage: Option<MaterializationTreeCapability>,
     pub(crate) _retired_tree_ids: BTreeSet<(Digest32, u64)>,
     pub(crate) _record_stages: BTreeMap<RecordObjectKind, (Digest32, PrivateComponent)>,
 }

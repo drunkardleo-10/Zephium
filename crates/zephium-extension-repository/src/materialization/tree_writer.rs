@@ -51,22 +51,33 @@ pub(crate) struct AuthenticatedTreeStage {
 /// already been bound to the release row, while its sealed filesystem tree has
 /// been independently enumerated and re-hashed against the derived index.
 #[cfg(feature = "acquired-packages")]
-#[allow(
-    dead_code,
-    reason = "the opt-in acquired staging gate lands before its durable transaction caller"
-)]
 pub(crate) struct AuthenticatedAcquiredTreeStage {
     tree: AuthenticatedTreeStage,
     receipt: AcquiredExtensionTreeReceipt,
     manifest_bytes: Box<[u8]>,
 }
 
+/// Exact acquired tree evidence for a tree object that already exists.
+///
+/// Archive files are still fully decompressed, CRC checked, and hashed once,
+/// but non-manifest bytes flow into a zero-retention sink. The existing sealed
+/// repository tree must be independently verified against the returned index
+/// before this evidence can participate in a package closure.
+#[cfg(feature = "acquired-packages")]
+pub(crate) struct AuthenticatedAcquiredTreeEvidence {
+    receipt: AcquiredExtensionTreeReceipt,
+    manifest_bytes: Box<[u8]>,
+}
+
+#[cfg(feature = "acquired-packages")]
+impl AuthenticatedAcquiredTreeEvidence {
+    pub(crate) fn into_parts(self) -> (AcquiredExtensionTreeReceipt, Box<[u8]>) {
+        (self.receipt, self.manifest_bytes)
+    }
+}
+
 #[cfg(feature = "acquired-packages")]
 impl AuthenticatedAcquiredTreeStage {
-    #[allow(
-        dead_code,
-        reason = "the opt-in acquired staging gate lands before its durable transaction caller"
-    )]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -139,18 +150,10 @@ pub(crate) enum TreeWriterError {
     Source(BundledReleaseSourceError),
     /// The authenticated archive failed while producing one exact file.
     #[cfg(feature = "acquired-packages")]
-    #[allow(
-        dead_code,
-        reason = "the opt-in acquired staging gate lands before its durable transaction caller"
-    )]
     #[error("acquired extension archive stream failed: {0}")]
     AcquiredArchive(AcquiredExtensionArchiveReadError),
     /// Stream receipts could not complete or bind one exact acquired tree.
     #[cfg(feature = "acquired-packages")]
-    #[allow(
-        dead_code,
-        reason = "the opt-in acquired staging gate lands before its durable transaction caller"
-    )]
     #[error("acquired extension tree receipt failed: {0}")]
     AcquiredTree(AcquiredExtensionTreeReceiptError),
     /// A private-filesystem operation failed while its namespace remained
@@ -216,10 +219,6 @@ pub(crate) fn build_authenticated_tree_stage<S: BundledReleaseByteSource>(
 /// re-hashed, so neither a callback success nor an archive receipt alone can
 /// mint publication authority.
 #[cfg(feature = "acquired-packages")]
-#[allow(
-    dead_code,
-    reason = "the opt-in acquired staging gate lands before its durable transaction caller"
-)]
 pub(crate) fn build_authenticated_acquired_tree_stage(
     trees: &PrivateDirectory,
     stage_name: &PrivateComponent,
@@ -304,11 +303,64 @@ pub(crate) fn build_authenticated_acquired_tree_stage(
     })
 }
 
+/// Derives exact acquired tree evidence without creating a second tree object.
+///
+/// This is the idempotent/content-sharing path used only when recovery has
+/// already authenticated a sealed object with the catalog-declared tree
+/// digest. It keeps resource memory constant except for the bounded manifest.
 #[cfg(feature = "acquired-packages")]
-#[allow(
-    dead_code,
-    reason = "reachable only from the pending acquired staging transaction"
-)]
+pub(crate) fn build_authenticated_acquired_tree_evidence(
+    package: &ExtensionReleasePackage,
+    archive: &mut AcquiredExtensionArchive<'_>,
+) -> Result<AuthenticatedAcquiredTreeEvidence, TreeWriterError> {
+    validate_acquired_build_inputs(package, archive)?;
+    let manifest_length = archive
+        .files()
+        .iter()
+        .find(|file| file.path().as_str() == "manifest.json")
+        .ok_or(TreeWriterError::ExactMismatch)?
+        .length();
+    let manifest_capacity =
+        usize::try_from(manifest_length).map_err(|_| TreeWriterError::ExactMismatch)?;
+    if manifest_capacity == 0 || manifest_capacity > MAX_EXTENSION_MANIFEST_BYTES {
+        return Err(TreeWriterError::ExactMismatch);
+    }
+
+    let mut manifest_bytes = Vec::with_capacity(manifest_capacity);
+    let mut receipts = Vec::with_capacity(archive.files().len());
+    for file_index in 0..archive.files().len() {
+        let retain_manifest = archive
+            .files()
+            .get(file_index)
+            .ok_or(TreeWriterError::ExactMismatch)?
+            .path()
+            .as_str()
+            == "manifest.json";
+        let receipt = if retain_manifest {
+            archive
+                .copy_file(file_index, &mut manifest_bytes)
+                .map_err(TreeWriterError::AcquiredArchive)?
+        } else {
+            archive
+                .copy_file(file_index, &mut io::sink())
+                .map_err(TreeWriterError::AcquiredArchive)?
+        };
+        receipts.push(receipt);
+    }
+    let receipt = archive
+        .finish_tree(receipts)
+        .map_err(TreeWriterError::AcquiredTree)?;
+    receipt
+        .bind_release_package(package)
+        .map_err(TreeWriterError::AcquiredTree)?;
+    verify_retained_acquired_manifest(receipt.index(), &manifest_bytes)?;
+    Ok(AuthenticatedAcquiredTreeEvidence {
+        receipt,
+        manifest_bytes: manifest_bytes.into_boxed_slice(),
+    })
+}
+
+#[cfg(feature = "acquired-packages")]
 fn validate_acquired_build_inputs(
     package: &ExtensionReleasePackage,
     archive: &AcquiredExtensionArchive<'_>,
@@ -330,10 +382,6 @@ fn validate_acquired_build_inputs(
 }
 
 #[cfg(feature = "acquired-packages")]
-#[allow(
-    dead_code,
-    reason = "reachable only from the pending acquired staging transaction"
-)]
 fn verify_retained_acquired_manifest(
     index: &CanonicalExtensionTreeIndex,
     manifest_bytes: &[u8],
@@ -758,10 +806,6 @@ fn map_streaming_write(error: StreamingWriteError) -> TreeWriterError {
 }
 
 #[cfg(feature = "acquired-packages")]
-#[allow(
-    dead_code,
-    reason = "reachable only from the pending acquired staging transaction"
-)]
 fn map_acquired_streaming_write(error: StreamingWriteError) -> TreeWriterError {
     match error {
         StreamingWriteError::Filesystem(error) => map_filesystem(error),
@@ -850,10 +894,6 @@ impl Read for DigestingReader<'_> {
 /// archive-preflighted manifest length. Every other package resource stays
 /// streaming-only and therefore has constant memory cost.
 #[cfg(feature = "acquired-packages")]
-#[allow(
-    dead_code,
-    reason = "reachable only from the pending acquired staging transaction"
-)]
 struct RecordingReader<'reader, 'bytes> {
     inner: &'reader mut dyn Read,
     bytes: &'bytes mut Vec<u8>,
@@ -862,10 +902,6 @@ struct RecordingReader<'reader, 'bytes> {
 
 #[cfg(feature = "acquired-packages")]
 impl<'reader, 'bytes> RecordingReader<'reader, 'bytes> {
-    #[allow(
-        dead_code,
-        reason = "reachable only from the pending acquired staging transaction"
-    )]
     fn new(inner: &'reader mut dyn Read, bytes: &'bytes mut Vec<u8>, maximum: usize) -> Self {
         Self {
             inner,
@@ -1320,6 +1356,37 @@ mod tests {
             drop(verified);
             drop(published);
             assert!(cleanup_tree_stage(&trees, &object_name).unwrap());
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        #[test]
+        fn existing_tree_evidence_authenticates_every_archive_file_without_staging() {
+            let fixture = FixtureTree::standard();
+            let archive = acquired_zip(&[
+                ("assets/icons/icon.txt", ICON),
+                ("manifest.json", MANIFEST),
+                ("scripts/content.js", SCRIPT),
+            ]);
+            let (crx, key_digest) = signed_crx(&archive);
+            let catalog = acquired_catalog(
+                &archive,
+                &fixture.index,
+                key_digest,
+                fixture.index.total_bytes(),
+                fixture.index.tree_sha256().bytes(),
+            );
+            let package = catalog
+                .package(ExtensionPackageKey::from_bytes([4; 32]))
+                .unwrap();
+            let mut acquired =
+                AcquiredExtensionArchive::authenticate_release_package_crx3(&crx, package).unwrap();
+
+            let evidence =
+                build_authenticated_acquired_tree_evidence(package, &mut acquired).unwrap();
+            let (receipt, manifest) = evidence.into_parts();
+            assert_eq!(receipt.index(), &fixture.index);
+            assert_eq!(manifest.as_ref(), MANIFEST);
+            assert_eq!(receipt.payload_identity(), package.payload());
         }
 
         #[cfg(feature = "acquired-packages")]
