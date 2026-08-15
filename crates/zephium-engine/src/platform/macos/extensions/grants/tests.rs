@@ -138,7 +138,7 @@ fn brokered_schema_adds_only_history_and_the_fixed_native_channel_grant() {
     );
     assert_eq!(
         MacosNativeGrantSchema::WkWebExtensionV1.permission_disposition("history"),
-        Err(MacosNativeGrantPlanError::UnsupportedApiPermission)
+        Ok(MacosNativeApiPermissionDisposition::ProductProhibited)
     );
     assert_eq!(
         MacosNativeGrantSchema::WkWebExtensionV1.permission_disposition("nativeMessaging"),
@@ -198,19 +198,21 @@ fn supported_api_table_is_closed_canonical_and_complete() {
 
 #[test]
 fn prohibited_unknown_and_manifest_only_api_tokens_remain_distinct() {
-    let prohibited = regular(&[api("nativeMessaging", OPTIONAL, GRANTED)], &[])
-        .expect_err("effective native messaging is product-prohibited");
-    assert_eq!(
-        prohibited,
-        MacosNativeGrantPlanError::ProhibitedApiPermission
-    );
-    assert!(!format!("{prohibited:?}").contains("nativeMessaging"));
-    assert!(!prohibited.to_string().contains("nativeMessaging"));
-    assert!(compiled_api_permissions(
-        &regular(&[api("nativeMessaging", OPTIONAL, DENIED)], &[])
-            .expect("an unrequested optional prohibited capability is absent")
-    )
-    .is_empty());
+    for name in ["history", "nativeMessaging"] {
+        let prohibited = regular(&[api(name, OPTIONAL, GRANTED)], &[])
+            .expect_err("effective broker-only capability is product-prohibited");
+        assert_eq!(
+            prohibited,
+            MacosNativeGrantPlanError::ProhibitedApiPermission
+        );
+        assert!(!format!("{prohibited:?}").contains(name));
+        assert!(!prohibited.to_string().contains(name));
+        assert!(compiled_api_permissions(
+            &regular(&[api(name, OPTIONAL, DENIED)], &[])
+                .expect("an unrequested optional prohibited capability is absent")
+        )
+        .is_empty());
+    }
 
     for name in [
         "clipboardRead",

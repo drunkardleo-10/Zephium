@@ -494,7 +494,7 @@ impl MacosNativeGrantSchema {
             | "privacy"
             | "sidePanel"
             | "webRequestAuthProvider" => Ok(NotInNativePermissionSet),
-            "nativeMessaging" => Ok(ProductProhibited),
+            "history" | "nativeMessaging" => Ok(ProductProhibited),
             _ => Err(MacosNativeGrantPlanError::UnsupportedApiPermission),
         }
     }
