@@ -1137,9 +1137,11 @@ view, context, controller, and store to release during the same bounded
 teardown gate.
 
 This closes an important admission ambiguity: parser acceptance is not runtime
-support. The current `macos.wkwebextension.v1` grant schema therefore continues
-to reject those five non-representable permissions instead of silently
-dropping them or changing the meaning of an existing schema tag. A distinct
+support. The current `macos.wkwebextension.v1` grant schema therefore rejects
+unknown non-representable permissions. The known broker-only `history` token is
+more precise: an unrequested optional declaration may remain denied, while any
+effective grant is product-prohibited. It is never silently dropped or treated
+as supported. A distinct
 `macos.wkwebextension-brokered.v1` compatibility profile now exists for exact,
 reviewed package adapters. Both profiles use the same durable `MacosNative`
 backend and native owner identity because they own the same WKWebExtension
@@ -1197,11 +1199,18 @@ reads yield to a pending browser-owned history/favicon read, so an admitted
 adapter cannot starve ordinary browser UX.
 
 This is not a generic `chrome.history` implementation or a compatibility claim.
-The native channel primitive has live source-free WebKit evidence, while the
-new authority-to-Store production path currently has unit/component coverage
-only. A source-free live gate through the brokered product profile, followed by
-an exact reviewed adapter and release-build latency/RSS/endurance evidence,
-remains mandatory before any package can depend on this operation.
+The source-free product gate now runs the same sealed fixture in separate
+ordinary and brokered processes. Ordinary authority keeps `history` and
+`nativeMessaging` denied and must observe native-channel rejection. Brokered
+authority grants only that exact pair, then proves authenticated repository and
+service startup, native witness admission, a two-row profile-scoped Store read,
+bounded JSON delivery to extension JavaScript, popup continuity, runtime
+retirement, repository cleanup, and clean Store restart. The gate deliberately
+does not instantiate the product Shell actor: it performs the real Store read on
+a dedicated bounded worker, while Shell settlement, stale-result rejection, and
+four-to-one queue fairness remain component/integration gates. An exact reviewed
+adapter plus packaged release-build latency/RSS/endurance evidence remains
+mandatory before any package can depend on this operation.
 
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|

@@ -1052,10 +1052,17 @@ exact runtime generation and request identity. The ordinary
 mint broker witnesses. Persistent ports and arbitrary native hosts remain
 unsupported.
 
-This boundary has live evidence for WebKit's one-shot principal-bound channel,
-but the complete brokered product-profile path does not yet have a live native
-gate. No extension compatibility claim may rely on it until that gate and
-release-build resource/endurance measurements pass.
+This boundary has a source-free live product gate for both sides of the policy
+split. The ordinary native profile proves that its denied broker-only grants do
+not reach the channel. The distinct brokered profile proves authenticated
+repository selection, durable grants, native controller/context binding, exact
+runtime-witness consumption, a real profile-scoped Store read, bounded JSON
+delivery back to extension JavaScript, runtime retirement, repository cleanup,
+and clean Store restart. The non-shipping gate coordinator uses a dedicated
+bounded reader rather than the product Shell's fair read queue; Shell settlement
+and queue fairness remain independently tested. No extension compatibility
+claim may rely on this operation until an exact reviewed adapter, packaged-app
+coverage, and release-build resource/endurance measurements also pass.
 
 ## Features deliberately not claimed
 
